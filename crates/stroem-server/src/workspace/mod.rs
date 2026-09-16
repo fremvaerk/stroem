@@ -447,6 +447,24 @@ impl WorkspaceManager {
         self.load_errors.insert(name.to_string(), error.to_string());
     }
 
+    /// Test-only: flip an already-registered entry (e.g. from `from_configs`)
+    /// to the "configured but unavailable" state — `has_workspace` stays
+    /// `true`, `get_config` returns `None` — mirroring a workspace whose
+    /// source loaded once but whose last reload failed. Not `#[cfg(test)]`:
+    /// integration test binaries link this crate without `cfg(test)`, so a
+    /// `cfg(test)`-gated helper would be invisible to them.
+    ///
+    /// Panics if `name` has no entry — register it via `from_configs` first.
+    #[doc(hidden)]
+    pub fn mark_unavailable_for_test(&self, name: &str) {
+        let entry = self
+            .entries
+            .get(name)
+            .expect("mark_unavailable_for_test: no entry registered for this name");
+        let mut guard = entry.load_error.write().unwrap_or_else(|e| e.into_inner());
+        *guard = Some("marked unavailable for test".to_string());
+    }
+
     /// Get the workspace config for a given name.
     /// Returns None for workspaces with a load error (empty placeholder config).
     pub async fn get_config(&self, name: &str) -> Option<Arc<WorkspaceConfig>> {

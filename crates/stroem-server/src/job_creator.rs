@@ -1,9 +1,12 @@
 use anyhow::{bail, Context, Result};
 use sqlx::{self, PgPool};
 use std::collections::HashMap;
+use std::sync::Arc;
 use stroem_common::models::job::StepStatus;
 use stroem_common::models::workflow::resolve_step_retry_config;
-use stroem_common::models::workflow::{ActionDef, BackoffStrategy, FlowStep, WorkspaceConfig};
+use stroem_common::models::workflow::{
+    ActionDef, BackoffStrategy, FlowStep, TaskDef, WorkspaceConfig,
+};
 use stroem_common::template::{
     merge_defaults, resolve_connection_inputs, resolve_connection_inputs_scoped, ResolveScope,
 };
@@ -333,55 +336,87 @@ pub(crate) fn create_job_for_task_inner<'a>(
                     .map(|ws| workspaces.has_workspace(ws))
                     .unwrap_or(false);
 
-            let (owned_action, action_workspace, action_revision, action_name) = if is_cross {
-                let ws = owner_ws.unwrap();
-                let owner_cfg = workspaces.get_config(ws).await.ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "action '{}': workspace '{}' is not available",
-                        flow_step.action,
-                        ws
-                    )
-                })?;
-                let a = owner_cfg.actions.get(bare_action).cloned().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "action '{}': workspace '{}' has no action '{}'",
-                        flow_step.action,
-                        ws,
-                        bare_action
-                    )
-                })?;
-                (
-                    a,
-                    Some(ws.to_string()),
-                    workspaces.get_revision(ws),
-                    bare_action.to_string(),
-                )
-            } else {
-                let a = workspace_config
-                    .actions
-                    .get(&flow_step.action)
-                    .cloned()
-                    .ok_or_else(|| {
+            let (owned_action, action_workspace, action_revision, action_name, cross_cfg) =
+                if is_cross {
+                    let ws = owner_ws.unwrap();
+                    let owner_cfg = workspaces.get_config(ws).await.ok_or_else(|| {
                         anyhow::anyhow!(
-                            "Action '{}' not found in workspace '{}'",
+                            "action '{}': workspace '{}' is not available",
                             flow_step.action,
-                            workspace_name
+                            ws
                         )
                     })?;
-                (a, None, None, flow_step.action.clone())
-            };
+                    let a = owner_cfg.actions.get(bare_action).cloned().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "action '{}': workspace '{}' has no action '{}'",
+                            flow_step.action,
+                            ws,
+                            bare_action
+                        )
+                    })?;
+                    (
+                        a,
+                        Some(ws.to_string()),
+                        workspaces.get_revision(ws),
+                        bare_action.to_string(),
+                        Some(owner_cfg),
+                    )
+                } else {
+                    let a = workspace_config
+                        .actions
+                        .get(&flow_step.action)
+                        .cloned()
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "Action '{}' not found in workspace '{}'",
+                                flow_step.action,
+                                workspace_name
+                            )
+                        })?;
+                    (a, None, None, flow_step.action.clone(), None)
+                };
             let action = &owned_action;
 
             // Fail fast (400) on literal connection references the worker would
             // otherwise reject at claim time. Templated values cannot be checked here.
-            precheck_literal_connection_inputs(
-                step_name,
-                flow_step,
-                action,
-                &ws_set,
-                workspace_name,
-                action_workspace.as_deref(),
-            )?;
+            if action.action_type == "task" {
+                let task_ref = action
+                    .task
+                    .as_deref()
+                    .context("type: task action missing task field")?;
+                let base_ws: &str = action_workspace.as_deref().unwrap_or(workspace_name);
+                let base_cfg: &WorkspaceConfig = match cross_cfg.as_deref() {
+                    Some(c) => c,
+                    None => workspace_config,
+                };
+                let resolved = resolve_task_ref(workspaces, base_ws, base_cfg, task_ref).await?;
+                if resolved.workspace == workspace_name && resolved.task_name == task_name {
+                    bail!(
+                        "task '{}' is a self-reference to '{}/{}' (invalid)",
+                        task_ref,
+                        workspace_name,
+                        task_name
+                    );
+                }
+                precheck_task_step_literals(
+                    step_name,
+                    flow_step,
+                    &resolved,
+                    workspaces,
+                    workspace_name,
+                    base_cfg,
+                )
+                .await?;
+            } else {
+                precheck_literal_connection_inputs(
+                    step_name,
+                    flow_step,
+                    action,
+                    &ws_set,
+                    workspace_name,
+                    action_workspace.as_deref(),
+                )?;
+            }
 
             let status = if flow_step.for_each.is_some() {
                 // For-each steps always start pending — expanded at promotion time
@@ -611,6 +646,75 @@ pub(crate) async fn compute_depth(pool: &PgPool, job: &JobRow) -> Result<u32> {
     Ok(depth)
 }
 
+/// Which config a resolved task lives in: the base config the caller already
+/// holds, or another workspace's snapshot.
+#[derive(Debug)]
+pub(crate) enum OwnerConfig {
+    Base,
+    Foreign(Arc<WorkspaceConfig>),
+}
+
+/// A `type: task` reference resolved to its owner (spec § 3.1).
+#[derive(Debug)]
+pub(crate) struct ResolvedTask {
+    pub workspace: String,
+    pub task_name: String,
+    pub task: TaskDef,
+    pub config: OwnerConfig,
+}
+
+impl ResolvedTask {
+    pub(crate) fn config<'a>(&'a self, base: &'a WorkspaceConfig) -> &'a WorkspaceConfig {
+        match &self.config {
+            OwnerConfig::Base => base,
+            OwnerConfig::Foreign(c) => c.as_ref(),
+        }
+    }
+}
+
+/// Resolve `task_ref` relative to `base_ws` (the ACTION's owner): a key of
+/// `base_cfg.tasks` first (local and library-flattened names), else a dotted
+/// `ws.task` against another loaded workspace. Errors are the outermost
+/// message on purpose — `classify_execute_error` keys off them.
+pub(crate) async fn resolve_task_ref(
+    workspaces: &WorkspaceManager,
+    base_ws: &str,
+    base_cfg: &WorkspaceConfig,
+    task_ref: &str,
+) -> Result<ResolvedTask> {
+    if let Some(task) = base_cfg.tasks.get(task_ref) {
+        return Ok(ResolvedTask {
+            workspace: base_ws.to_string(),
+            task_name: task_ref.to_string(),
+            task: task.clone(),
+            config: OwnerConfig::Base,
+        });
+    }
+    if let (Some(ws), name) = stroem_common::template::parse_qualified_ref(task_ref) {
+        if !workspaces.has_workspace(ws) {
+            bail!("task '{}': unknown workspace '{}'", task_ref, ws);
+        }
+        let cfg = workspaces.get_config(ws).await.ok_or_else(|| {
+            anyhow::anyhow!("task '{}': workspace '{}' is not available", task_ref, ws)
+        })?;
+        let task = cfg.tasks.get(name).cloned().ok_or_else(|| {
+            anyhow::anyhow!(
+                "task '{}': workspace '{}' has no task '{}'",
+                task_ref,
+                ws,
+                name
+            )
+        })?;
+        return Ok(ResolvedTask {
+            workspace: ws.to_string(),
+            task_name: name.to_string(),
+            task,
+            config: OwnerConfig::Foreign(cfg),
+        });
+    }
+    bail!("Task '{}' not found in workspace '{}'", task_ref, base_ws)
+}
+
 /// Resolve the flow step's connection-typed inputs that are plain string
 /// literals (no `{{`), using the same scope the claim path will use, so an
 /// author mistake surfaces as a job-creation error instead of a failed step.
@@ -660,6 +764,55 @@ pub(crate) fn precheck_literal_connection_inputs(
                 Some(owner_ws)
             },
         },
+    )
+    .with_context(|| format!("step '{}': failed to resolve connection inputs", step_name))
+    .map(|_| ())
+}
+
+/// Creation-time pre-check for a `type: task` step (spec § 3.2 item 3): the
+/// caller's LITERAL values for the TASK's connection-typed inputs are checked
+/// with the same scope dispatch will use (caller first, task owner if shared),
+/// including the cross-workspace shape rule. `when`-guarded steps are not
+/// pre-checked (the step may never run). The error is wrapped so the
+/// classifier's "resolve connection" phrase answers 400; an unavailable owner
+/// inside the chain still answers 500.
+pub(crate) async fn precheck_task_step_literals(
+    step_name: &str,
+    flow_step: &FlowStep,
+    resolved: &ResolvedTask,
+    workspaces: &WorkspaceManager,
+    caller_ws: &str,
+    base_cfg: &WorkspaceConfig,
+) -> Result<()> {
+    if flow_step.when.is_some() {
+        return Ok(());
+    }
+    let mut literals = serde_json::Map::new();
+    for (field, def) in &resolved.task.input {
+        if stroem_common::template::PRIMITIVE_TYPES.contains(&def.field_type.as_str()) {
+            continue;
+        }
+        match flow_step.input.get(field) {
+            Some(serde_json::Value::String(s)) if s.contains("{{") => {}
+            Some(v) => {
+                literals.insert(field.clone(), v.clone());
+            }
+            None => {}
+        }
+    }
+    if literals.is_empty() {
+        return Ok(());
+    }
+    let t_cfg = resolved.config(base_cfg);
+    let set = WorkspaceSet::load(workspaces, &resolved.workspace, Some(t_cfg)).await;
+    stroem_common::template::resolve_task_input_by_provenance(
+        &serde_json::Value::Object(literals),
+        &serde_json::json!({}),
+        &resolved.task.input,
+        &set,
+        caller_ws,
+        caller_ws,
+        &resolved.workspace,
     )
     .with_context(|| format!("step '{}': failed to resolve connection inputs", step_name))
     .map(|_| ())
@@ -795,5 +948,105 @@ mod tests {
         step.when = Some("input.flag".to_string());
 
         precheck_literal_connection_inputs("s", &step, &action, &set, "caller", None).unwrap();
+    }
+
+    fn cfg_with_task(task: &str) -> WorkspaceConfig {
+        let mut c = WorkspaceConfig::default();
+        c.tasks.insert(
+            task.to_string(),
+            TaskDef {
+                name: None,
+                description: None,
+                mode: "distributed".to_string(),
+                folder: None,
+                input: HashMap::new(),
+                flow: HashMap::new(),
+                timeout: None,
+                retry: None,
+                on_success: vec![],
+                on_error: vec![],
+                on_suspended: vec![],
+                on_cancel: vec![],
+            },
+        );
+        c
+    }
+
+    #[tokio::test]
+    async fn resolve_task_ref_local_hit() {
+        let a = cfg_with_task("deploy");
+        let mgr = WorkspaceManager::from_configs(vec![("A".into(), a.clone(), None)]);
+        let r = resolve_task_ref(&mgr, "A", &a, "deploy").await.unwrap();
+        assert_eq!(r.workspace, "A");
+        assert_eq!(r.task_name, "deploy");
+        assert!(matches!(r.config, OwnerConfig::Base));
+    }
+
+    #[tokio::test]
+    async fn resolve_task_ref_library_flattened_key_wins() {
+        let a = cfg_with_task("common.deploy");
+        let mgr = WorkspaceManager::from_configs(vec![
+            ("A".into(), a.clone(), None),
+            ("common".into(), cfg_with_task("deploy"), None),
+        ]);
+        let r = resolve_task_ref(&mgr, "A", &a, "common.deploy")
+            .await
+            .unwrap();
+        assert_eq!(r.workspace, "A");
+        assert_eq!(r.task_name, "common.deploy");
+    }
+
+    #[tokio::test]
+    async fn resolve_task_ref_qualified_hit() {
+        let a = WorkspaceConfig::default();
+        let mgr = WorkspaceManager::from_configs(vec![
+            ("A".into(), a.clone(), None),
+            ("B".into(), cfg_with_task("deploy"), Some("rev-b".into())),
+        ]);
+        let r = resolve_task_ref(&mgr, "A", &a, "B.deploy").await.unwrap();
+        assert_eq!(r.workspace, "B");
+        assert_eq!(r.task_name, "deploy");
+        assert!(matches!(r.config, OwnerConfig::Foreign(_)));
+        assert!(r.config(&a).tasks.contains_key("deploy"));
+    }
+
+    #[tokio::test]
+    async fn resolve_task_ref_error_phrases() {
+        let a = WorkspaceConfig::default();
+        let mgr = WorkspaceManager::from_configs(vec![
+            ("A".into(), a.clone(), None),
+            ("B".into(), cfg_with_task("deploy"), None),
+            // Registered so `mark_unavailable_for_test` has an entry to flip;
+            // its content is irrelevant once marked unhealthy.
+            ("C".into(), cfg_with_task("deploy"), None),
+        ]);
+        mgr.mark_unavailable_for_test("C");
+
+        let e = resolve_task_ref(&mgr, "A", &a, "Z.deploy")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert_eq!(e, "task 'Z.deploy': unknown workspace 'Z'");
+
+        let e = resolve_task_ref(&mgr, "A", &a, "B.nope")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert_eq!(e, "task 'B.nope': workspace 'B' has no task 'nope'");
+
+        let e = resolve_task_ref(&mgr, "A", &a, "deploy")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert_eq!(e, "Task 'deploy' not found in workspace 'A'");
+
+        // `has_workspace` is true for "C" (an entry exists), but the entry is
+        // unhealthy — the "configured but unavailable" state, distinct from
+        // "Z" above which has no entry at all.
+        let e = resolve_task_ref(&mgr, "A", &a, "C.deploy")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert_eq!(e, "task 'C.deploy': workspace 'C' is not available");
     }
 }
