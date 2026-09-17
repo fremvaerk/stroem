@@ -360,7 +360,7 @@ When the `deploy` task's `cleanup` step becomes ready, the server creates a chil
 
 ### Rules for task actions
 
-- Must have a `task` field referencing an existing task — in the same workspace, or, since 0.17, another workspace by `workspace.task` name (see [Calling tasks in other workspaces](/guides/cross-workspace-references/#calling-tasks-in-other-workspaces))
+- Must have a `task` field referencing an existing task — in the same workspace, or, since 0.16.5, another workspace by `workspace.task` name (see [Calling tasks in other workspaces](/guides/cross-workspace-references/#calling-tasks-in-other-workspaces))
 - Cannot have `script`, `source`, `image`, or `runner` fields
 - No worker tags required — task steps are server-dispatched
 - Self-referencing tasks are rejected at validation time
@@ -375,7 +375,7 @@ When the `deploy` task's `cleanup` step becomes ready, the server creates a chil
 - The parent's orchestrator runs after child completion, promoting downstream steps
 - The job detail's step view lists every child job created for the step (`child_jobs`), newest first
 
-### Behaviour changes in 0.17
+### Behaviour changes in 0.16.5
 
 Cross-workspace `type: task` actions (a `task:` field naming another
 workspace's task, directly or through a cross-workspace `action:` wrapper)

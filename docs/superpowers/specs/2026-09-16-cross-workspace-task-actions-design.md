@@ -1,7 +1,7 @@
 # Cross-Workspace `type: task` Actions — Design
 
 Status: revision 10, reviewed — ready for an implementation plan
-Ships in: 0.17.0 (minor; no migration; documented behaviour corrections, § 7)
+Ships in: 0.16.5 (patch, by owner decision; no migration; documented behaviour corrections, § 7)
 
 Closes the first item under "Deferred" in CLAUDE.md § Cross-Workspace
 References and "Not yet supported" in
