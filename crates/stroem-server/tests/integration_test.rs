@@ -25914,8 +25914,8 @@ fn task_retry_workspace(max_attempts: u32, with_error_hook: bool) -> WorkspaceCo
     workspace
 }
 
-/// Like `task_retry_workspace`, but "flaky" is a `type: task` action naming a
-/// task that does not exist, so the job's only root step fails during
+/// Like `task_retry_workspace`, but "flaky" is a `type: task` action whose step
+/// input cannot render, so the job's only root step fails during
 /// creation-time dispatch (`settlement::dispatch::init` -> `handle_task_steps`)
 /// rather than via a worker completion. Used by the D3 creation-time-failure
 /// retry tests.
@@ -25924,17 +25924,34 @@ fn task_retry_creation_failure_workspace(max_attempts: u32) -> WorkspaceConfig {
 
     let mut workspace = task_retry_workspace(max_attempts, false);
 
+    // The target task must exist: an unresolvable task reference is rejected
+    // at submit (400) and never reaches dispatch.
     let flaky = workspace.actions["flaky"].clone();
+    workspace.actions.insert("noop".to_string(), flaky.clone());
+    let mut target = workspace.tasks["task-retry-task"].clone();
+    target.retry = None;
+    target.flow.get_mut("step1").unwrap().action = "noop".to_string();
+    workspace.tasks.insert("retry-target".to_string(), target);
+
     workspace.actions.insert(
         "flaky".to_string(),
         ActionDef {
             action_type: "task".to_string(),
-            task: Some("does-not-exist".to_string()),
+            task: Some("retry-target".to_string()),
             cmd: None,
             script: None,
             ..flaky
         },
     );
+    workspace
+        .tasks
+        .get_mut("task-retry-task")
+        .unwrap()
+        .flow
+        .get_mut("step1")
+        .unwrap()
+        .input
+        .insert("x".to_string(), json!("{{ input.undefined_var }}"));
 
     workspace
 }
@@ -27426,7 +27443,9 @@ async fn test_creation_settle_honours_continue_on_failure() -> Result<()> {
         "run-missing".to_string(),
         ActionDef {
             action_type: "task".to_string(),
-            task: Some("nonexistent-task".to_string()),
+            // The target exists, so creation passes the task-ref pre-check;
+            // the unrenderable step input below is what fails the dispatch.
+            task: Some("cleanup".to_string()),
             ..greet_action
         },
     );
@@ -27438,7 +27457,7 @@ async fn test_creation_settle_honours_continue_on_failure() -> Result<()> {
         FlowStep {
             action: "run-missing".to_string(),
             depends_on: vec![],
-            input: HashMap::new(),
+            input: HashMap::from([("x".to_string(), json!("{{ input.undefined_var }}"))]),
             continue_on_failure: true,
             continue_when_skipped: false,
             // `when` forces the step through the creation-time promotion
@@ -29186,14 +29205,15 @@ async fn test_parent_dispatch_failure_after_child_settles_still_runs_terminal_ac
 {
     let mut workspace = task_action_test_workspace();
 
-    // type:task action whose target task does not exist → child creation fails
-    // during the PARENT job's own advance (not at initial job creation).
+    // type:task action whose step input cannot render → dispatch fails during
+    // the PARENT job's own advance (not at initial job creation). The target
+    // must exist: an unresolvable task reference is rejected at submit.
     let greet_action = workspace.actions["greet"].clone();
     workspace.actions.insert(
         "run-missing".to_string(),
         ActionDef {
             action_type: "task".to_string(),
-            task: Some("missing".to_string()),
+            task: Some("cleanup".to_string()),
             ..greet_action.clone()
         },
     );
@@ -29223,7 +29243,7 @@ async fn test_parent_dispatch_failure_after_child_settles_still_runs_terminal_ac
         FlowStep {
             action: "run-missing".to_string(),
             depends_on: vec!["first".to_string()],
-            input: HashMap::new(),
+            input: HashMap::from([("x".to_string(), json!("{{ input.undefined_var }}"))]),
             ..base_step
         },
     );
@@ -29309,7 +29329,7 @@ async fn test_parent_dispatch_failure_after_child_settles_still_runs_terminal_ac
             .error_message
             .as_deref()
             .unwrap_or("")
-            .contains("Task 'missing' not found"),
+            .contains("Failed to render input for task step"),
         "{:?}",
         steps["second"].error_message
     );
