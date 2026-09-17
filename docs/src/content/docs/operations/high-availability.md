@@ -39,12 +39,13 @@ For `stroem_job_log_chunk`, Postgres caps `NOTIFY` payloads at ~8 KB. Multi-line
 
 ### Health endpoints
 
-Two endpoints, split by audience:
+Three endpoints, split by audience:
 
-- **`GET /healthz`** (unauthenticated, k8s-probe compatible). Returns 200 if the process is up and the database is reachable, 503 otherwise. Body is minimal — `{"status": "ok" | "unhealthy", "db": "ok" | "error"}` — and contains **no** leader identity or per-task liveness, so unauthenticated scanners can't preferentially target the leader pod for DoS.
-- **`GET /healthz/detail`** (auth required — `Authorization: Bearer <worker_token>`). Returns the full HA diagnostic shape: `status`, `checks.db`, `checks.leader`, `checks.scheduler`, `checks.recovery`, `checks.event_source`. On the leader, scheduler/recovery/event-source liveness is failure-eligible (503 if a guard dropped). On followers, those fields report `"follower"` and the endpoint returns 200.
+- **`GET /livez`** (unauthenticated, **liveness** probe). Answers "should this process be restarted?". Returns 503 when a background loop (scheduler, recovery sweeper, event-source manager) is **stalled** — still running but it has made no progress for too long (scheduler 5 min, event sources 10 min, recovery 30 min or 5× `sweep_interval_secs`) — on any replica, or, on the leader, when a loop ran and then exited. It does **not** check the database: restarting the server does not fix a database outage. Body is `{"status": "ok" | "stalled" | "stopped"}` — no task name and no leader identity.
+- **`GET /healthz`** (unauthenticated, **readiness** probe). Answers "can this replica serve traffic?". Returns 200 if the database is reachable, 503 otherwise. Body is minimal — `{"status": "ok" | "unhealthy", "db": "ok" | "error"}` — and contains **no** leader identity or per-task liveness, so unauthenticated scanners can't preferentially target the leader pod for DoS.
+- **`GET /healthz/detail`** (auth required — `Authorization: Bearer <worker_token>`). Returns the full HA diagnostic shape: `status`, `checks.db`, `checks.leader`, `checks.scheduler`, `checks.recovery`, `checks.event_source`. Each task is `"ok"`, `"stalled"` (503 on any replica), or — when the task is not running — `"stopped"` on the leader (503) and `"follower"` elsewhere (200).
 
-This lets Kubernetes liveness probes pass on follower pods (they're doing real work — serving API/WebSocket traffic) without masking a stuck scheduler on the leader, while keeping cluster topology out of unauthenticated responses.
+The split is deliberate: a hung scheduler gets the pod restarted through `/livez`, but does not take a replica that is still serving API, WebSocket and worker traffic out of the Service. The default Helm values point `livenessProbe` at `/livez` and `readinessProbe` at `/healthz`; if you override the probes, keep them on different endpoints. `/livez` requires a server image that has it: an older server answers unknown paths with the UI's `index.html` (HTTP 200), so a newer chart probing an older pinned image silently has no effective liveness check — keep chart and image versions paired.
 
 ## Required infrastructure
 

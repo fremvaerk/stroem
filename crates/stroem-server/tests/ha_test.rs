@@ -971,6 +971,141 @@ async fn healthz_leader_reports_stopped_when_scheduler_guard_dropped() -> Result
     Ok(())
 }
 
+// ─── Must: /livez — a HUNG or dead background loop restarts the pod ──────────
+
+fn mark_all_tasks_alive(state: &stroem_server::state::AppState) {
+    let bg = &state.background_tasks;
+    for flag in [
+        &bg.scheduler_alive,
+        &bg.recovery_alive,
+        &bg.event_source_alive,
+    ] {
+        flag.store(true, Ordering::Relaxed);
+    }
+    for beat in [&bg.scheduler_beat, &bg.recovery_beat, &bg.event_source_beat] {
+        beat.beat();
+    }
+}
+
+async fn get_json(
+    router: &axum::Router,
+    uri: &str,
+    bearer: bool,
+) -> Result<(StatusCode, serde_json::Value)> {
+    let mut req = Request::builder().uri(uri);
+    if bearer {
+        req = req.header("Authorization", "Bearer test-token-must-be-long-enough-32");
+    }
+    let resp = router.clone().oneshot(req.body(Body::empty())?).await?;
+    let status = resp.status();
+    let body = resp.into_body().collect().await?.to_bytes();
+    Ok((status, serde_json::from_slice(&body)?))
+}
+
+/// Prod 2026-09-16: the scheduler task hung (guard still held) and the probe
+/// stayed green for 9 hours. `/livez` must go 503 so the liveness probe
+/// restarts the pod — without naming the task — while `/healthz` (readiness)
+/// stays 200: the replica can still serve API and worker traffic.
+#[tokio::test(flavor = "multi_thread")]
+async fn livez_fails_when_scheduler_stalled_but_readiness_holds() -> Result<()> {
+    let h = boot().await?;
+    let state = build_state(&h, Uuid::new_v4());
+    mark_all_tasks_alive(&state);
+    state
+        .background_tasks
+        .scheduler_beat
+        .backdate(Duration::from_secs(3600));
+    let router = build_router(state, CancellationToken::new());
+
+    let (status, json) = get_json(&router, "/livez", false).await?;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(json, serde_json::json!({ "status": "stalled" }));
+
+    let (status, json) = get_json(&router, "/healthz", false).await?;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "readiness must not see a stalled loop"
+    );
+    assert_eq!(json["status"], "ok");
+
+    let (status, json) = get_json(&router, "/healthz/detail", true).await?;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(json["checks"]["scheduler"], "stalled");
+    assert_eq!(json["checks"]["recovery"], "ok");
+    Ok(())
+}
+
+/// Followers run the loops too; a hung standby is no standby.
+#[tokio::test(flavor = "multi_thread")]
+async fn livez_fails_for_stalled_loop_on_follower() -> Result<()> {
+    let h = boot().await?;
+    let cancel_leader = CancellationToken::new();
+    let (leader_false, _handle) = LeaderElection::start(h.url.clone(), cancel_leader.clone());
+    cancel_leader.cancel();
+    sleep(Duration::from_millis(300)).await;
+
+    let state = build_state(&h, Uuid::new_v4()).with_leader(leader_false);
+    mark_all_tasks_alive(&state);
+    state
+        .background_tasks
+        .event_source_beat
+        .backdate(Duration::from_secs(3600));
+    let router = build_router(state, CancellationToken::new());
+
+    let (status, _) = get_json(&router, "/livez", false).await?;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    let (_, json) = get_json(&router, "/healthz/detail", true).await?;
+    assert_eq!(json["checks"]["leader"], false);
+    assert_eq!(json["checks"]["event_source"], "stalled");
+    Ok(())
+}
+
+/// Fresh beats, and tasks that were never started (every router-only test,
+/// and the window before `main` spawns them), must not fail liveness.
+#[tokio::test(flavor = "multi_thread")]
+async fn livez_ok_when_tasks_fresh_or_never_started() -> Result<()> {
+    let h = boot().await?;
+
+    let never_started = build_router(build_state(&h, Uuid::new_v4()), CancellationToken::new());
+    let (status, json) = get_json(&never_started, "/livez", false).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json, serde_json::json!({ "status": "ok" }));
+
+    let fresh = build_state(&h, Uuid::new_v4());
+    mark_all_tasks_alive(&fresh);
+    let (status, _) = get_json(
+        &build_router(fresh, CancellationToken::new()),
+        "/livez",
+        false,
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    Ok(())
+}
+
+/// A task that ran and then EXITED (panic, guard dropped) on the leader also
+/// fails liveness — before, only `/healthz/detail` noticed.
+#[tokio::test(flavor = "multi_thread")]
+async fn livez_fails_when_started_task_exited_on_leader() -> Result<()> {
+    let h = boot().await?;
+    let state = build_state(&h, Uuid::new_v4());
+    mark_all_tasks_alive(&state);
+    state
+        .background_tasks
+        .recovery_alive
+        .store(false, Ordering::Relaxed);
+    let router = build_router(state, CancellationToken::new());
+
+    let (status, json) = get_json(&router, "/livez", false).await?;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(json, serde_json::json!({ "status": "stopped" }));
+    let (_, json) = get_json(&router, "/healthz/detail", true).await?;
+    assert_eq!(json["checks"]["recovery"], "stopped");
+    assert_eq!(json["checks"]["scheduler"], "ok");
+    Ok(())
+}
+
 // ─── Must: /healthz/detail — follower with stopped scheduler ─────────────────
 
 /// When this replica is a follower and the scheduler guard is not held,

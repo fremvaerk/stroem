@@ -52,6 +52,8 @@ Git workspaces use `poll_interval_secs` (default: 60) to control how often the s
 
 At startup, and on every reload, all configured workspaces are loaded concurrently rather than one at a time, so a single slow or misbehaving source doesn't delay the others. If a git workspace's clone/fetch fails with an error containing "credential rejected by remote", it means the configured deploy key or token is not authorized for that repository — the server fails that attempt immediately instead of letting it retry for over a minute.
 
+While a workspace is in its load-error state its tasks cannot be run and its files are not served. Cron triggers keep their schedule through the outage — the server treats the workspace's contents as *unknown*, not *removed* — but a fire that lands inside it cannot create a job: it is logged as `Trigger '<ws>/<name>' MISSED: workspace '<ws>' is unavailable`, has no side effects (a `cancel_previous` trigger does not cancel the running job), and is not replayed afterwards. Event-source consumers of the workspace are cancelled at the next reconcile (within about 30 seconds) and recreated once it loads again, which limits how much a consumer reads while jobs cannot be created for its events; events emitted before the cancellation takes effect are rejected and lost.
+
 ## Disabling triggers per server
 
 Set `triggers: false` on a workspace entry to load it without firing any of its triggers on that server. Cron schedules are not scheduled, webhook names are not routed, and event-source consumers are not started (running consumers are cancelled on the next reconcile). Tasks and actions load normally and can still be run manually from the UI, CLI, API, or MCP.

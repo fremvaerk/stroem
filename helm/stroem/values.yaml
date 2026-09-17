@@ -68,10 +68,13 @@ server:
   initContainers: []
   extraContainers: []
   logLevel: info
+  # Liveness = /livez: fails when a background loop (scheduler, recovery,
+  # event sources) hangs or dies, so the pod is restarted. It does not check
+  # the database. Readiness = /healthz: database reachability only.
   livenessProbe:
     enabled: true
     httpGet:
-      path: /healthz
+      path: /livez
       port: http
     initialDelaySeconds: 10
     periodSeconds: 10

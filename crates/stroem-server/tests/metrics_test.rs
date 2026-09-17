@@ -562,6 +562,55 @@ async fn background_task_alive_reflects_atomic_flag() -> Result<()> {
     Ok(())
 }
 
+/// A hung loop keeps `stroem_background_task_alive` at 1; its age gauge is
+/// what an alert can key on (prod 2026-09-16).
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn background_task_last_tick_age_reflects_heartbeat() -> Result<()> {
+    let h = boot().await?;
+    let log_dir = h._temp.path().to_path_buf();
+    let mut config = empty_config(&h.url, &log_dir);
+    config.metrics = Some(MetricsConfig {
+        public: true,
+        ..Default::default()
+    });
+    let log_storage = LogStorage::new(&config.log_storage.local_dir);
+    let state = AppState::new(
+        h.pool.clone(),
+        WorkspaceManager::from_config("default", WorkspaceConfig::new()),
+        config,
+        log_storage,
+        HashMap::new(),
+        None,
+    )
+    .with_event_bus(EventBus::noop());
+    // The incident shape: guard held (alive = 1) while the loop is silent.
+    state
+        .background_tasks
+        .scheduler_alive
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(state.background_tasks.recovery_beat.age().is_none());
+    state
+        .background_tasks
+        .scheduler_beat
+        .backdate(std::time::Duration::from_secs(120));
+    let router =
+        build_router(state, CancellationToken::new()).layer(Extension(global_test_handle()));
+
+    let body = scrape(&router).await?;
+    let age = body
+        .lines()
+        .find(|l| {
+            l.starts_with(stroem_server::metrics::STROEM_BACKGROUND_TASK_LAST_TICK_AGE_SECONDS)
+                && l.contains(r#"task="scheduler""#)
+        })
+        .and_then(|l| l.rsplit(' ').next())
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or_else(|| panic!("missing scheduler last-tick age in:\n{body}"));
+    assert!((120.0..130.0).contains(&age), "age was {age}");
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn metrics_unauthorized_response_is_text_plain() -> Result<()> {
     let h = boot().await?;

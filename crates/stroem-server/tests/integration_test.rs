@@ -16248,6 +16248,197 @@ async fn test_recovery_worker_reactivation_on_heartbeat() -> Result<()> {
     Ok(())
 }
 
+/// Codex review 2026-09-17: the scheduler keeps the schedule of a workspace
+/// in load error, so a retained trigger reaches `fire_trigger` while no job can
+/// be created. The concurrency policy must not run first — `cancel_previous`
+/// would kill the running job and then fail to replace it, and `skip` would
+/// record a skipped row for a fire that never had a chance.
+#[tokio::test]
+async fn test_trigger_fire_on_unavailable_workspace_has_no_side_effects() -> Result<()> {
+    use stroem_common::models::workflow::{ConcurrencyPolicy, TriggerDef};
+
+    let (state, pool, _tmp, _container) = setup_recovery().await?;
+    let workspace_config = state.get_workspace("default").await.unwrap();
+
+    for (trigger, policy) in [
+        ("nightly-cancel", ConcurrencyPolicy::CancelPrevious),
+        ("nightly-skip", ConcurrencyPolicy::Skip),
+    ] {
+        let source_id = format!("default/{trigger}");
+        let running = create_job_for_task(
+            &pool,
+            &workspace_config,
+            "default",
+            "hello-world",
+            json!({"name": "test"}),
+            "trigger",
+            Some(&source_id),
+            None,
+            None,
+            None,
+            JobDefaults::default(),
+        )
+        .await?;
+
+        // What the scheduler remembers from before the outage...
+        let mut remembered = (*workspace_config).clone();
+        remembered.triggers.insert(
+            trigger.to_string(),
+            TriggerDef::Scheduler {
+                cron: "0 1 * * *".to_string(),
+                task: "hello-world".to_string(),
+                input: HashMap::new(),
+                enabled: true,
+                concurrency: policy,
+                timezone: None,
+                force_refresh: false,
+            },
+        );
+        let remembered = WorkspaceManager::from_config("default", remembered);
+        // ...and what it sees now: `default` cannot be served.
+        let unavailable = WorkspaceManager::from_config("elsewhere", WorkspaceConfig::new());
+
+        stroem_server::scheduler::fire_trigger_once(&state, &unavailable, &remembered, &source_id)
+            .await;
+
+        let job = JobRepo::get(&pool, running).await?.unwrap();
+        assert_ne!(
+            job.status, "cancelled",
+            "{trigger}: running job was cancelled"
+        );
+        let rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM job WHERE source_type = 'trigger' AND source_id = $1",
+        )
+        .bind(&source_id)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(
+            rows, 1,
+            "{trigger}: a fire that cannot run must leave no row behind"
+        );
+    }
+    Ok(())
+}
+
+/// Codex review round 3: the scheduler retains the schedule of a workspace in
+/// load error. If the workspace RECOVERS with that trigger removed or disabled
+/// before the retained fire happens, the remembered definition must not run —
+/// no job, and no `cancel_previous` side effect.
+#[tokio::test]
+async fn test_trigger_fire_revalidates_against_current_config() -> Result<()> {
+    use stroem_common::models::workflow::{ConcurrencyPolicy, TriggerDef};
+
+    let (state, pool, _tmp, _container) = setup_recovery().await?;
+    let workspace_config = state.get_workspace("default").await.unwrap();
+    let trigger = |enabled: bool, task: &str| TriggerDef::Scheduler {
+        cron: "0 1 * * *".to_string(),
+        task: task.to_string(),
+        input: HashMap::new(),
+        enabled,
+        concurrency: ConcurrencyPolicy::CancelPrevious,
+        timezone: None,
+        force_refresh: false,
+    };
+
+    let mut remembered = (*workspace_config).clone();
+    remembered
+        .triggers
+        .insert("nightly".to_string(), trigger(true, "hello-world"));
+    let remembered = WorkspaceManager::from_config("default", remembered);
+
+    // The shared fixture defines its own `nightly` (another cron): that is the
+    // "changed" case. "removed" must really not have it.
+    let changed_cron = (*workspace_config).clone();
+    assert!(changed_cron.triggers.contains_key("nightly"));
+    let mut removed = (*workspace_config).clone();
+    removed.triggers.remove("nightly");
+    let mut disabled = (*workspace_config).clone();
+    disabled
+        .triggers
+        .insert("nightly".to_string(), trigger(false, "hello-world"));
+    // Same schedule identity, different EXECUTION: the remembered
+    // `cancel_previous` must not run against a config that now says `skip`.
+    let mut changed_policy = (*workspace_config).clone();
+    changed_policy.triggers.insert(
+        "nightly".to_string(),
+        TriggerDef::Scheduler {
+            cron: "0 1 * * *".to_string(),
+            task: "hello-world".to_string(),
+            input: HashMap::from([("name".to_string(), json!("new"))]),
+            enabled: true,
+            concurrency: ConcurrencyPolicy::Skip,
+            timezone: None,
+            force_refresh: false,
+        },
+    );
+
+    let running = create_job_for_task(
+        &pool,
+        &workspace_config,
+        "default",
+        "hello-world",
+        json!({"name": "test"}),
+        "trigger",
+        Some("default/nightly"),
+        None,
+        None,
+        None,
+        JobDefaults::default(),
+    )
+    .await?;
+
+    for (label, current) in [
+        ("removed", removed),
+        ("disabled", disabled),
+        ("changed cron", changed_cron),
+        ("changed policy and input", changed_policy),
+    ] {
+        let current = WorkspaceManager::from_config("default", current);
+        stroem_server::scheduler::fire_trigger_once(
+            &state,
+            &current,
+            &remembered,
+            "default/nightly",
+        )
+        .await;
+
+        let job = JobRepo::get(&pool, running).await?.unwrap();
+        assert_ne!(
+            job.status, "cancelled",
+            "{label}: running job was cancelled"
+        );
+        let rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM job WHERE source_type = 'trigger' AND source_id = 'default/nightly'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(
+            rows, 1,
+            "{label}: a trigger that no longer exists must not fire"
+        );
+    }
+
+    // Sanity: the unchanged definition still fires (cancels + creates).
+    stroem_server::scheduler::fire_trigger_once(
+        &state,
+        &remembered,
+        &remembered,
+        "default/nightly",
+    )
+    .await;
+    let rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM job WHERE source_type = 'trigger' AND source_id = 'default/nightly'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(rows, 2);
+    assert_eq!(
+        JobRepo::get(&pool, running).await?.unwrap().status,
+        "cancelled"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_recovery_fails_stale_step() -> Result<()> {
     let (state, pool, _tmp, _container) = setup_recovery().await?;
@@ -16282,7 +16473,11 @@ async fn test_recovery_fails_stale_step() -> Result<()> {
     set_worker_heartbeat_past(&pool, worker_id, 10).await;
 
     // Run recovery sweep
+    assert!(state.background_tasks.recovery_beat.age().is_none());
     stroem_server::recovery::sweep_once(&state).await?;
+    // The sweep beats once per recovered step (not only per loop iteration),
+    // so a long sweep reads as progress to the liveness check.
+    assert!(state.background_tasks.recovery_beat.age().is_some());
 
     // Worker should be inactive
     let worker = WorkerRepo::get(&pool, worker_id).await?.unwrap();
