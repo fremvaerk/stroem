@@ -126,7 +126,7 @@ tasks:
         # Proceeds whether both ran, or one was skipped
 ```
 
-**How it works**: Skipped dependencies count as satisfied. A convergence step runs as long as at least one of its dependencies completed. If **all** dependencies are skipped, the step is skipped too (mid-branch cascade) — unless every one of them sets `continue_when_skipped: true` on itself, see below.
+**How it works**: A dependency that was skipped *by choice* — its own `when` was false, its `for_each` produced nothing, or it was cascade-skipped — counts as satisfied. A convergence step runs as long as at least one of its dependencies completed and none of them was skipped because of an upstream failure (see [skip reasons](#skip-reasons) below). If **all** dependencies are skipped, the step is skipped too (mid-branch cascade) — unless every one of them sets `continue_when_skipped: true` on itself, see below.
 
 ## Running After a Skipped Branch
 
@@ -181,7 +181,11 @@ Every skipped step records why it was skipped. The job detail page shows it as a
 | `cascade` | every dependency was skipped, all of them by choice |
 | `unreachable` | a dependency failed or was cancelled, or a dependency was itself unreachable |
 
-`unreachable` travels down a chain: if `a` fails, `b` is unreachable and so is anything that depends only on `b`. That is what stops a step from running after a failure, even when its skipped dependency carries `continue_when_skipped`.
+`unreachable` travels down a chain: if `a` fails, `b` is unreachable and so is anything that depends on `b` — **including a step whose other dependencies completed**. A merge after three parallel branches does not run when one branch failed upstream, and neither does anything after the merge. That is what stops a step from running after a failure, even when its skipped dependency carries `continue_when_skipped`. If a step should run regardless, set `continue_on_failure: true` on it — the same flag that tolerates a directly failed dependency.
+
+:::note[Changed in 0.16.5]
+Before 0.16.5 an `unreachable` dependency only mattered when *every* dependency was skipped: with at least one completed dependency the step ran, so a healthy branch could carry a pipeline past another branch's failure. A skipped step with no recorded reason (jobs from before 0.16.2, for example one carried into a restart) is treated as `unreachable`.
+:::
 
 ## Root Step Conditions
 
@@ -410,4 +414,4 @@ This workflow:
 2. When verify runs, branches into fast or slow path based on input
 3. Converges at finish — one branch completed, one skipped → finish runs automatically
 
-**When do you still need `continue_on_failure`?** Only when you want a step to run even if its dependency **failed** (error, crash). Skipped dependencies from `when` conditions are handled automatically as long as at least one dependency completes; if all of them are skipped, have those dependencies set [`continue_when_skipped`](#running-after-a-skipped-branch) on themselves instead.
+**When do you still need `continue_on_failure`?** Only when you want a step to run even if its dependency **failed** (error, crash) — or was skipped because something upstream of it failed (`unreachable`). Skipped dependencies from `when` conditions are handled automatically as long as at least one dependency completes; if all of them are skipped, have those dependencies set [`continue_when_skipped`](#running-after-a-skipped-branch) on themselves instead.

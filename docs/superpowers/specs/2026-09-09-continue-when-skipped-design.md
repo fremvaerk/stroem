@@ -1,9 +1,45 @@
 # `continue_when_skipped` and Skip Reasons — Design
 
-Status: revision 3, shipped (0.16.2 shipped revision 2's placement; 0.16.3
-flips it — see "Revision 3" note below)
+Status: revision 4, shipped (0.16.2 shipped revision 2's placement; 0.16.3
+flips it — see "Revision 3"; 0.16.5 reverses the mixed-dependency decision —
+see "Revision 4")
 Ships in: 0.16.2 (patch; carries one documented behaviour change, §2.4);
-placement flip ships in 0.16.3
+placement flip ships in 0.16.3; mixed-dependency taint ships in 0.16.5
+
+## Revision 4 (2026-09-17)
+
+§2.3's closing rule and the matching §13 decision are **reversed**. They
+said a skip reason only matters when every dependency is skipped: "Mixed
+dependencies (at least one `completed`) are promoted exactly as today,
+whatever the reasons on the skipped ones." In production
+(`jobs/recalc-pipeline`, restart job `3d2553df`, 2026-09-17) three parallel
+branches fed a `for_each` merge; one branch's first step was OOM-killed, its
+second step was correctly skipped `unreachable`, and the merge — with two
+completed siblings — was promoted anyway, followed by aggregation, monitoring
+and an external upload, all on data missing that branch. That is precisely
+the laundering §13 rejects one bullet earlier ("'All' would let one benign
+branch launder a failure"), just with a *completed* sibling instead of a
+condition-skipped one.
+
+New rule: a **tainted** skipped dependency — skipped `unreachable`, or with a
+NULL reason (§2.2's reading, unchanged) — counts like a FAILED dependency
+wherever dependencies are judged: the dependent is skipped `unreachable`
+unless it has `continue_on_failure`. `condition`, `empty` and `cascade` skips
+still count as satisfied, so an if/else or a version switch converging on a
+merge keeps working. One predicate, `cascade.rs::dep_tainted`, is read by
+`deps_satisfied` (R2 and the R4 placeholder gate) and
+`any_dep_carries_failure` (R3, R4), so the three rules cannot disagree. The
+all-deps-skipped formula in §2.3 is untouched: its bypass already requires
+`continue_on_failure` when tainted. NULL-reason rows block in the mixed case
+too (decided by the author, 2026-09-17): a restart that carries pre-0.16.2
+skipped rows may refuse to continue where it technically could; a fresh run
+is the answer. Tests: `mixed_completed_and_unreachable_skipped_deps_skip_unreachable`,
+`mixed_completed_and_reasonless_skipped_dep_skips_unreachable`,
+`mixed_completed_and_condition_skipped_deps_still_promote`,
+`cof_dependent_tolerates_an_unreachable_skipped_dep_among_completed_ones`,
+`placeholder_with_completed_and_unreachable_skipped_deps_is_retired_not_expanded`,
+`failure_on_one_branch_stops_the_merge_and_everything_after_it` (the old pin,
+`mixed_completed_and_unreachable_skipped_deps_still_promote`, is gone).
 
 ## Revision 3 (2026-09-10)
 
@@ -103,9 +139,12 @@ Read as: a dependency's own `continue_when_skipped` covers its skip being
 tolerated by choice; the dependent's own `continue_on_failure` covers the
 tainted (failure-adjacent) case. A dependent that must run no matter what
 needs its dependency to carry `continue_when_skipped` AND needs its own
-`continue_on_failure` set. Mixed dependencies (at least one `completed`) are
-promoted exactly as today, whatever the reasons on the skipped ones. That
-rule is not touched.
+`continue_on_failure` set. Mixed dependencies (at least one `completed`):
+**reversed in revision 4** — a tainted skipped dependency now counts like a
+failed one (skip `unreachable` unless the dependent has
+`continue_on_failure`); only by-choice skips are promoted past. (Revisions
+1–3 read: "promoted exactly as today, whatever the reasons on the skipped
+ones. That rule is not touched.")
 
 ### 2.4 `continue_on_failure` becomes failure-only
 
@@ -359,8 +398,10 @@ assert `optional-check` is `skipped` with `skip_reason = condition` and
   "any tainted dependency" (§2.2). "All" would let one benign branch launder
   a failure.
 - **Does `unreachable` on a skipped dependency affect a step that also has a
-  completed dependency?** No. Mixed dependencies promote as today; the reason
-  only matters when every dependency is skipped (§2.3).
+  completed dependency?** ~~No. Mixed dependencies promote as today; the
+  reason only matters when every dependency is skipped (§2.3).~~ **Yes, since
+  revision 4 (0.16.5):** it counts like a failed dependency. The "No" let a
+  completed sibling launder a failure in production on 2026-09-17.
 - **`empty` as its own reason or folded into `condition`?** Its own, for the
   UI label; the cascade treats it exactly like `condition`.
 - **Version.** Patch (0.16.2), per the user, with the behaviour change in

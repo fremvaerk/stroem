@@ -267,8 +267,20 @@ fn synthetic_row(inst: &NewJobStep) -> JobStepRow {
 
 // ── dependency predicates (§4.3) ─────────────────────────────────────
 
+/// A skipped dependency that carries a failure: skipped `unreachable`, or with
+/// no recorded reason (pre-046 rows, older replicas), which is read as
+/// unreachable. A completed sibling must not launder it.
+fn dep_tainted(snap: &Snapshot, dep: &str) -> bool {
+    snap.status(dep) == Some(SKIPPED)
+        && match snap.skip_reason(dep) {
+            None => true,
+            Some(r) => r == SkipReason::Unreachable.as_str(),
+        }
+}
+
 fn deps_satisfied(snap: &Snapshot, fs: &FlowStep) -> bool {
     fs.depends_on.iter().all(|d| match snap.status(d) {
+        Some(SKIPPED) if dep_tainted(snap, d) => fs.continue_on_failure,
         Some(COMPLETED) | Some(SKIPPED) => true,
         Some(FAILED) | Some(CANCELLED) => fs.continue_on_failure,
         _ => false,
@@ -283,14 +295,9 @@ fn all_deps_skipped(snap: &Snapshot, fs: &FlowStep) -> bool {
             .all(|d| snap.status(d) == Some(SKIPPED))
 }
 
-/// Only meaningful when `all_deps_skipped` holds: does any skipped dependency
-/// carry a failure? `None` (pre-046 rows, older replicas) counts as unreachable
-/// (spec §2.2).
+/// Does any skipped dependency carry a failure (spec §2.2)?
 fn tainted(snap: &Snapshot, fs: &FlowStep) -> bool {
-    fs.depends_on.iter().any(|d| match snap.skip_reason(d) {
-        None => true,
-        Some(r) => r == SkipReason::Unreachable.as_str(),
-    })
+    fs.depends_on.iter().any(|d| dep_tainted(snap, d))
 }
 
 /// Spec §2.3 (revision 3, 2026-09-10). Call only when `all_deps_skipped(snap,
@@ -333,10 +340,11 @@ fn all_skipped_decision(
     })
 }
 
-fn any_dep_failed_or_cancelled(snap: &Snapshot, fs: &FlowStep) -> bool {
+/// A dependency failed or was cancelled, or was itself skipped because of one.
+fn any_dep_carries_failure(snap: &Snapshot, fs: &FlowStep) -> bool {
     fs.depends_on
         .iter()
-        .any(|d| matches!(snap.status(d), Some(FAILED) | Some(CANCELLED)))
+        .any(|d| matches!(snap.status(d), Some(FAILED) | Some(CANCELLED)) || dep_tainted(snap, d))
 }
 
 fn is_placeholder(r: &JobStepRow) -> bool {
@@ -489,7 +497,7 @@ fn phase_skip_unreachable(snap: &Snapshot, task: &TaskDef) -> Vec<Change> {
         let Some(fs) = task.flow.get(&r.step_name) else {
             continue;
         };
-        if !fs.continue_on_failure && any_dep_failed_or_cancelled(snap, fs) {
+        if !fs.continue_on_failure && any_dep_carries_failure(snap, fs) {
             out.push(Change::Skip {
                 step: r.step_name.clone(),
                 reason: SkipReason::Unreachable,
@@ -526,7 +534,7 @@ fn phase_placeholders(
             continue;
         }
         if !deps_satisfied(snap, fs) {
-            if any_dep_failed_or_cancelled(snap, fs) && !fs.continue_on_failure {
+            if any_dep_carries_failure(snap, fs) && !fs.continue_on_failure {
                 out.push(Change::Skip {
                     step: r.step_name.clone(),
                     reason: SkipReason::Unreachable,
@@ -2850,24 +2858,129 @@ mod tests {
         assert_eq!(snap.skip_reason("c"), Some("cascade"));
     }
 
+    fn run_default(t: &TaskDef, rows: &[JobStepRow]) -> Plan {
+        run(
+            t,
+            &job(None),
+            rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap()
+    }
+
     #[test]
-    fn mixed_completed_and_unreachable_skipped_deps_still_promote() {
-        // The reason only matters when EVERY dep is skipped (spec §2.3).
+    fn mixed_completed_and_unreachable_skipped_deps_skip_unreachable() {
+        // A healthy sibling must not launder an upstream failure: `b` was skipped
+        // BECAUSE something upstream failed, so `c` is unreachable too.
         let t = task(vec![("a", fs(&[])), ("b", fs(&[])), ("c", fs(&["a", "b"]))]);
         let rows = vec![
             row("a", "completed"),
             row_skipped("b", "unreachable"),
             row("c", "pending"),
         ];
-        let plan = run(
-            &t,
-            &job(None),
-            &rows,
-            Some(&ws()),
-            &crate::render_context::Snapshots::default(),
-        )
-        .unwrap();
+        let plan = run_default(&t, &rows);
+        assert_eq!(names(&plan), ["skip:c"]);
+        assert_eq!(skips(&plan), [s("c", "unreachable")]);
+    }
+
+    #[test]
+    fn mixed_completed_and_reasonless_skipped_dep_skips_unreachable() {
+        // A skip with no recorded reason (pre-046 rows, e.g. carried into a restart)
+        // is read as unreachable, exactly as the all-deps-skipped rule reads it.
+        let t = task(vec![("a", fs(&[])), ("b", fs(&[])), ("c", fs(&["a", "b"]))]);
+        let rows = vec![
+            row("a", "completed"),
+            row("b", "skipped"),
+            row("c", "pending"),
+        ];
+        let plan = run_default(&t, &rows);
+        assert_eq!(skips(&plan), [s("c", "unreachable")]);
+    }
+
+    #[test]
+    fn mixed_completed_and_condition_skipped_deps_still_promote() {
+        // A branch switched off by its own `when` is a choice, not a failure.
+        let t = task(vec![("a", fs(&[])), ("b", fs(&[])), ("c", fs(&["a", "b"]))]);
+        let rows = vec![
+            row("a", "completed"),
+            row_skipped("b", "condition"),
+            row("c", "pending"),
+        ];
+        let plan = run_default(&t, &rows);
         assert_eq!(names(&plan), ["promote:c"]);
+    }
+
+    #[test]
+    fn cof_dependent_tolerates_an_unreachable_skipped_dep_among_completed_ones() {
+        let t = task(vec![
+            ("a", fs(&[])),
+            ("b", fs(&[])),
+            ("c", fs_cof(&["a", "b"])),
+        ]);
+        let rows = vec![
+            row("a", "completed"),
+            row_skipped("b", "unreachable"),
+            row("c", "pending"),
+        ];
+        let plan = run_default(&t, &rows);
+        assert_eq!(names(&plan), ["promote:c"]);
+    }
+
+    #[test]
+    fn placeholder_with_completed_and_unreachable_skipped_deps_is_retired_not_expanded() {
+        let t = task(vec![("a", fs(&[])), ("b", fs(&[])), ("m", fs(&["a", "b"]))]);
+        let rows = vec![
+            row("a", "completed"),
+            row_skipped("b", "unreachable"),
+            placeholder("m", "pending", "[1,2]"),
+        ];
+        let plan = run_default(&t, &rows);
+        assert_eq!(names(&plan), ["skip:m"]);
+        assert_eq!(skips(&plan), [s("m", "unreachable")]);
+    }
+
+    #[test]
+    fn failure_on_one_branch_stops_the_merge_and_everything_after_it() {
+        // Three parallel branches feed a for_each merge; one branch's first step
+        // failed while the other two completed. Nothing downstream of the merge
+        // may run.
+        let t = task(vec![
+            ("pred_master", fs(&[])),
+            ("imp_master", fs(&["pred_master"])),
+            ("imp_beta", fs(&[])),
+            ("imp_stage", fs(&[])),
+            ("merge", fs(&["imp_master", "imp_beta", "imp_stage"])),
+            ("agg", fs(&["merge"])),
+            ("upload", fs(&["agg"])),
+        ]);
+        let rows = vec![
+            row("pred_master", "failed"),
+            row("imp_master", "pending"),
+            row("imp_beta", "completed"),
+            row("imp_stage", "completed"),
+            placeholder("merge", "pending", "[1]"),
+            row("agg", "pending"),
+            row("upload", "pending"),
+        ];
+        let plan = run_default(&t, &rows);
+
+        let mut got = skips(&plan);
+        got.sort();
+        assert_eq!(
+            got,
+            [
+                s("agg", "unreachable"),
+                s("imp_master", "unreachable"),
+                s("merge", "unreachable"),
+                s("upload", "unreachable"),
+            ]
+        );
+        let statuses = final_statuses(&plan, &rows);
+        assert!(
+            !statuses.keys().any(|k| k.starts_with("merge[")),
+            "the merge placeholder must not expand: {statuses:?}"
+        );
     }
 
     #[test]

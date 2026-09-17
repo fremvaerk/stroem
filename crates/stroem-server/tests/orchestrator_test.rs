@@ -372,6 +372,74 @@ async fn test_failed_step_skips_dependents() -> Result<()> {
     Ok(())
 }
 
+// ─── Test 3b: a failed branch stops a merge that has completed siblings ──────
+
+/// Prod 2026-09-17 (`jobs/recalc-pipeline`): parallel branches feed a merge.
+/// One branch's first step fails, so its second step is skipped `unreachable`.
+/// The merge then has a completed dependency AND an unreachable one — it must
+/// not run, and neither may anything after it.
+#[tokio::test]
+async fn test_failed_branch_stops_merge_with_completed_siblings() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+    let worker_id = register_worker(&pool).await;
+
+    let mut flow = HashMap::new();
+    flow.insert("pred_master".to_string(), flow_step(vec![]));
+    flow.insert("imp_master".to_string(), flow_step(vec!["pred_master"]));
+    flow.insert("imp_beta".to_string(), flow_step(vec![]));
+    flow.insert(
+        "merge".to_string(),
+        flow_step(vec!["imp_master", "imp_beta"]),
+    );
+    flow.insert("upload".to_string(), flow_step(vec!["merge"]));
+    let task = make_task(flow);
+
+    let job_id = create_job(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            step(job_id, "pred_master", "ready"),
+            step(job_id, "imp_master", "pending"),
+            step(job_id, "imp_beta", "ready"),
+            step(job_id, "merge", "pending"),
+            step(job_id, "upload", "pending"),
+        ],
+    )
+    .await?;
+
+    // The healthy branch finishes first; the merge still waits for the other.
+    JobStepRepo::mark_running(&pool, job_id, "imp_beta", worker_id).await?;
+    JobStepRepo::mark_completed(&pool, job_id, "imp_beta", None).await?;
+    after_step(&pool, job_id, &task).await?;
+    assert_eq!(step_statuses(&pool, job_id).await["merge"], "pending");
+
+    JobStepRepo::mark_running(&pool, job_id, "pred_master", worker_id).await?;
+    JobStepRepo::mark_failed(&pool, job_id, "pred_master", "OOMKilled (exit code 137)").await?;
+    after_step(&pool, job_id, &task).await?;
+
+    let rows: Vec<(String, String, Option<String>)> =
+        sqlx::query_as("SELECT step_name, status, skip_reason FROM job_step WHERE job_id = $1")
+            .bind(job_id)
+            .fetch_all(&pool)
+            .await?;
+    let by_name: HashMap<String, (String, Option<String>)> = rows
+        .into_iter()
+        .map(|(name, status, reason)| (name, (status, reason)))
+        .collect();
+    for name in ["imp_master", "merge", "upload"] {
+        assert_eq!(
+            by_name[name],
+            ("skipped".to_string(), Some("unreachable".to_string())),
+            "{name} must be skipped as unreachable: {by_name:?}"
+        );
+    }
+
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "failed");
+
+    Ok(())
+}
+
 // ─── Test 4: continue_on_failure promotes dependent despite failure ───────────
 
 /// `continue_on_failure` is a property of a step B that says "run me even if
