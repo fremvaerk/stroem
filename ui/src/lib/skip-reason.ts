@@ -29,7 +29,7 @@ export function skipExplanation(reason: SkipReason | null): string {
     case "cascade":
       return "Skipped: every dependency was skipped.";
     case "unreachable":
-      return "Skipped: an upstream step failed or was cancelled.";
+      return "Skipped: an upstream step failed or was cancelled, or was skipped with no recorded reason (jobs from before 0.16.2).";
     default:
       return "Skipped.";
   }

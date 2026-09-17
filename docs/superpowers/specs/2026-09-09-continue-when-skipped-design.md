@@ -105,7 +105,7 @@ of:
 | `condition` | the step's own `when` rendered falsy |
 | `empty` | the step's `for_each` produced zero items |
 | `cascade` | all dependencies are skipped and none of them is `unreachable` |
-| `unreachable` | a dependency `failed` or `cancelled` without `continue_on_failure` (R3, R4, R5); **or** all dependencies are skipped and at least one of them is `unreachable` |
+| `unreachable` | a dependency `failed` or `cancelled` without `continue_on_failure` (R3, R4, R5); **or** at least one dependency is skipped `unreachable` (or with a NULL reason) and the step does not bypass it — all-skipped since revision 1, mixed with completed siblings since revision 4 |
 
 The last clause is the propagation rule: a failure-induced skip stays
 "unreachable" all the way down a chain of cascade skips. A skip caused by a

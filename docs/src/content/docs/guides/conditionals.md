@@ -11,7 +11,7 @@ The `when` field provides runtime control flow without explicit step branching:
 
 - **Condition evaluation**: When a step's dependencies are met, the `when` expression is evaluated
 - **Truthy/falsy**: If the result is truthy (non-empty, not "false", not "0"), the step runs. Otherwise it's skipped
-- **Cascade**: If ALL of a step's dependencies are skipped, the step is also skipped (mid-branch cascade), unless every one of those dependencies sets `continue_when_skipped: true` on itself (see [Running After a Skipped Branch](#running-after-a-skipped-branch)). If at least one dependency completed, the step proceeds normally.
+- **Cascade**: If ALL of a step's dependencies are skipped, the step is also skipped (mid-branch cascade), unless every one of those dependencies sets `continue_when_skipped: true` on itself (see [Running After a Skipped Branch](#running-after-a-skipped-branch)). If at least one dependency completed and no other dependency failed, was cancelled, or was skipped as [`unreachable`](#skip-reasons), the step proceeds normally.
 - **Convergence**: When conditional branches merge, convergence steps run automatically — no `continue_on_failure` needed.
 - **Validation**: `when` syntax is validated at YAML parse time (syntax errors are caught early)
 
@@ -181,7 +181,7 @@ Every skipped step records why it was skipped. The job detail page shows it as a
 | `cascade` | every dependency was skipped, all of them by choice |
 | `unreachable` | a dependency failed or was cancelled, or a dependency was itself unreachable |
 
-`unreachable` travels down a chain: if `a` fails, `b` is unreachable and so is anything that depends on `b` — **including a step whose other dependencies completed**. A merge after three parallel branches does not run when one branch failed upstream, and neither does anything after the merge. That is what stops a step from running after a failure, even when its skipped dependency carries `continue_when_skipped`. If a step should run regardless, set `continue_on_failure: true` on it — the same flag that tolerates a directly failed dependency.
+`unreachable` travels down a chain: if `a` fails, `b` is unreachable and so is anything that depends on `b` — **including a step whose other dependencies completed**. A merge after three parallel branches does not run when one branch failed upstream, and neither does anything after the merge. That is what stops a step from running after a failure, even when its skipped dependency carries `continue_when_skipped`. If a step should run regardless, set `continue_on_failure: true` on it — the same flag that tolerates a directly failed dependency. One exception: when *every* dependency of the step is skipped, `continue_on_failure` is not enough on its own — each of those dependencies must also set `continue_when_skipped: true` (see [Running After a Skipped Branch](#running-after-a-skipped-branch)).
 
 :::note[Changed in 0.16.5]
 Before 0.16.5 an `unreachable` dependency only mattered when *every* dependency was skipped: with at least one completed dependency the step ran, so a healthy branch could carry a pipeline past another branch's failure. A skipped step with no recorded reason (jobs from before 0.16.2, for example one carried into a restart) is treated as `unreachable`.
