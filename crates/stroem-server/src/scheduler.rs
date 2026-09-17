@@ -16,6 +16,7 @@ pub(crate) type TriggerKey = String;
 
 /// State tracked for each active trigger. `pub(crate)` so the in-module
 /// tests can construct one directly to exercise per-tick state transitions.
+#[derive(Clone)]
 pub(crate) struct TriggerState {
     pub(crate) cron: Cron,
     pub(crate) cron_expr: String,
@@ -29,6 +30,9 @@ pub(crate) struct TriggerState {
     /// The raw timezone string from config (for hot-reload comparison).
     pub(crate) timezone_str: Option<String>,
     pub(crate) force_refresh: bool,
+    /// The whole `TriggerDef` this state was built from, serialized. A fire
+    /// only goes ahead while the current config still holds an identical one.
+    pub(crate) definition: serde_json::Value,
     pub(crate) last_run: Option<DateTime<Utc>>,
     pub(crate) next_run: Option<DateTime<Utc>>,
 }
@@ -42,6 +46,27 @@ pub(crate) struct TriggerState {
 pub(crate) fn advance_state_after_tick(tstate: &mut TriggerState, now: DateTime<Utc>) {
     tstate.last_run = Some(now);
     tstate.next_run = compute_next_run(&tstate.cron, Some(now), now, tstate.timezone);
+}
+
+/// Longest the loop sleeps in one go, however far away the next trigger is —
+/// keeps `BackgroundTasks::scheduler_beat` fresh for the liveness check.
+pub(crate) const MAX_SLEEP: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Time until the next trigger fires, capped at [`MAX_SLEEP`].
+pub(crate) fn sleep_duration(
+    triggers: &HashMap<TriggerKey, TriggerState>,
+    now: DateTime<Utc>,
+) -> std::time::Duration {
+    triggers
+        .values()
+        .filter_map(|s| s.next_run)
+        .map(|next| {
+            (next - now)
+                .to_std()
+                .unwrap_or(std::time::Duration::from_secs(1))
+        })
+        .min()
+        .map_or(MAX_SLEEP, |d| d.min(MAX_SLEEP))
 }
 
 /// Spawn the scheduler background task.
@@ -64,6 +89,8 @@ async fn run_loop(state: AppState, cancel: CancellationToken) {
     tracing::info!("Scheduler loaded {} trigger(s)", triggers.len());
 
     loop {
+        state.background_tasks.scheduler_beat.beat();
+
         // HA gate: only the leader replica fires triggers. Followers still
         // hot-reload trigger state below so they can take over instantly on
         // failover; they just don't fire.
@@ -91,6 +118,8 @@ async fn run_loop(state: AppState, cancel: CancellationToken) {
         // backfire every cron tick that elapsed during the previous
         // leader's lifetime.
         for key in &to_fire {
+            // One beat per trigger: a long batch of fires is progress, not a stall.
+            state.background_tasks.scheduler_beat.beat();
             if is_leader {
                 let tstate = triggers
                     .get(key)
@@ -105,17 +134,13 @@ async fn run_loop(state: AppState, cancel: CancellationToken) {
         }
 
         // Determine sleep duration: minimum time until next trigger fires
-        let sleep_duration = triggers
-            .values()
-            .filter_map(|s| s.next_run)
-            .map(|next| {
-                let diff = next - Utc::now();
-                diff.to_std().unwrap_or(std::time::Duration::from_secs(1))
-            })
-            .min()
-            .unwrap_or(std::time::Duration::from_secs(60));
+        let sleep_duration = sleep_duration(&triggers, Utc::now());
 
         tracing::debug!("Scheduler sleeping for {:?}", sleep_duration);
+
+        // Beat again AFTER the work: the sleep below must not be charged to a
+        // unit that finished just inside its budget.
+        state.background_tasks.scheduler_beat.beat();
 
         // Sleep until next trigger or cancellation
         tokio::select! {
@@ -149,7 +174,17 @@ async fn load_triggers(
         }
         let config = match workspaces.get_config(ws_name).await {
             Some(c) => c,
-            None => continue,
+            None => {
+                // Unavailable is not "no triggers": keep the last known
+                // schedule until the workspace loads again. A fire that lands
+                // in the outage fails loudly in `fire_trigger`.
+                if let Some(prev) = previous {
+                    for (key, old) in prev.iter().filter(|(_, t)| t.workspace == ws_name) {
+                        triggers.insert(key.clone(), old.clone());
+                    }
+                }
+                continue;
+            }
         };
 
         for (trigger_name, trigger_def) in &config.triggers {
@@ -232,6 +267,7 @@ async fn load_triggers(
                     timezone: tz,
                     timezone_str: tz_str,
                     force_refresh: refresh,
+                    definition: serde_json::to_value(trigger_def).unwrap_or_default(),
                     last_run,
                     next_run,
                 },
@@ -284,6 +320,23 @@ fn compute_next_run(
     }
 }
 
+/// Fire ONE trigger exactly as the loop would — not a full tick: no leader
+/// gate, no due check. Exposed for integration tests (like
+/// `recovery::sweep_once`); panics if `key` is not defined in `remembered`.
+/// `remembered` supplies the trigger definition (what the scheduler loaded
+/// earlier), `workspaces` is what it can see now.
+#[doc(hidden)]
+pub async fn fire_trigger_once(
+    state: &AppState,
+    workspaces: &WorkspaceManager,
+    remembered: &WorkspaceManager,
+    key: &str,
+) {
+    let triggers = load_triggers(remembered, None).await;
+    let tstate = triggers.get(key).expect("trigger defined in `remembered`");
+    fire_trigger(state, workspaces, tstate).await;
+}
+
 /// Fire a trigger by creating a job via the shared job_creator.
 ///
 /// Applies concurrency policy before creating the job:
@@ -310,6 +363,39 @@ async fn fire_trigger(app_state: &AppState, workspaces: &WorkspaceManager, tstat
                 .publish_workspace_reloaded(&tstate.workspace)
                 .await;
         }
+    }
+
+    // Availability BEFORE the concurrency policy: a fire that cannot create
+    // its job must not cancel the previous run or record a skipped row. A
+    // retained trigger of a workspace in load error ends here.
+    let config = match workspaces.get_config(&tstate.workspace).await {
+        Some(c) => c,
+        None => {
+            tracing::error!(
+                "Trigger '{}' MISSED: workspace '{}' is unavailable (load error)",
+                source_id,
+                tstate.workspace
+            );
+            return;
+        }
+    };
+
+    // The `TriggerState` may be older than `config` (retained through an
+    // outage, or loaded before a reload): only fire a trigger the CURRENT
+    // config still defines IDENTICALLY — schedule, task, input, concurrency,
+    // everything. `load_triggers` catches up next pass.
+    let still_defined = config
+        .triggers
+        .get(&tstate.trigger_name)
+        .and_then(|def| serde_json::to_value(def).ok())
+        .is_some_and(|def| def == tstate.definition);
+    if !still_defined {
+        tracing::warn!(
+            "Trigger '{}' not fired: it is no longer defined this way in workspace '{}'",
+            source_id,
+            tstate.workspace
+        );
+        return;
     }
 
     let revision = app_state.workspaces.get_revision(&tstate.workspace);
@@ -403,18 +489,6 @@ async fn fire_trigger(app_state: &AppState, workspaces: &WorkspaceManager, tstat
         tstate.task
     );
 
-    let config = match workspaces.get_config(&tstate.workspace).await {
-        Some(c) => c,
-        None => {
-            tracing::error!(
-                "Workspace '{}' not found when firing trigger '{}'",
-                tstate.workspace,
-                source_id
-            );
-            return;
-        }
-    };
-
     match create_job_for_task_detailed(
         workspaces,
         &app_state.pool,
@@ -457,7 +531,7 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use serde_json::json;
-    use stroem_common::models::workflow::WorkspaceConfig;
+    use stroem_common::models::workflow::{TriggerDef, WorkspaceConfig};
 
     /// Helper: minimal `TriggerState` with the requested cron expression and
     /// a past `next_run`, so the per-tick code path treats it as due.
@@ -478,6 +552,7 @@ mod tests {
             timezone: None,
             timezone_str: None,
             force_refresh: false,
+            definition: serde_json::Value::Null,
             last_run: None,
             next_run: Some(past_next_run),
         }
@@ -522,6 +597,96 @@ mod tests {
             (new_next - now) <= chrono::Duration::seconds(61),
             "next_run for `* * * * *` should fire within the next minute"
         );
+    }
+
+    fn workspace_with_cron_trigger(name: &str, cron: &str) -> WorkspaceConfig {
+        let mut config = WorkspaceConfig::new();
+        config.triggers.insert(
+            name.to_string(),
+            TriggerDef::Scheduler {
+                cron: cron.to_string(),
+                task: "t".to_string(),
+                input: HashMap::new(),
+                enabled: true,
+                concurrency: ConcurrencyPolicy::Allow,
+                timezone: None,
+                force_refresh: false,
+            },
+        );
+        config
+    }
+
+    /// Prod 2026-09-16: a 60 s GitHub blip put the workspace into its
+    /// load-error state and every trigger silently vanished from the
+    /// scheduler. "Workspace unavailable" is not "triggers removed": keep the
+    /// last known schedule (a fire that lands in the outage fails loudly).
+    #[tokio::test]
+    async fn test_load_triggers_keeps_schedule_of_unavailable_workspace() {
+        let mgr = WorkspaceManager::from_config(
+            "default",
+            workspace_with_cron_trigger("nightly", "0 1 * * *"),
+        );
+        let mut triggers = load_triggers(&mgr, None).await;
+        let last_run = Utc::now();
+        triggers.get_mut("default/nightly").unwrap().last_run = Some(last_run);
+
+        mgr.mark_errored_for_test("default", "SSH key credential rejected by remote");
+        assert!(mgr.get_config("default").await.is_none());
+
+        let reloaded = load_triggers(&mgr, Some(&triggers)).await;
+        let kept = reloaded.get("default/nightly").expect("schedule kept");
+        assert_eq!(kept.last_run, Some(last_run));
+        assert_eq!(kept.task, "t");
+    }
+
+    /// A workspace that is unavailable from the start has nothing to keep,
+    /// and a trigger removed from a HEALTHY workspace still disappears.
+    #[tokio::test]
+    async fn test_load_triggers_drops_trigger_removed_from_healthy_workspace() {
+        let with = WorkspaceManager::from_config(
+            "default",
+            workspace_with_cron_trigger("nightly", "0 1 * * *"),
+        );
+        let triggers = load_triggers(&with, None).await;
+        assert_eq!(triggers.len(), 1);
+
+        let without = WorkspaceManager::from_config("default", WorkspaceConfig::new());
+        assert!(load_triggers(&without, Some(&triggers)).await.is_empty());
+
+        without.mark_errored_for_test("default", "boom");
+        assert!(load_triggers(&without, None).await.is_empty());
+    }
+
+    /// The loop must come round at least every `MAX_SLEEP` so its heartbeat
+    /// stays fresh even when the next trigger is hours away.
+    #[test]
+    fn test_sleep_duration_is_capped_for_far_future_trigger() {
+        let now = Utc::now();
+        let mut triggers = HashMap::new();
+        let mut t = due_trigger("0 0 1 1 *", now);
+        t.next_run = Some(now + chrono::Duration::hours(24));
+        triggers.insert("ws/yearly".to_string(), t);
+        assert_eq!(sleep_duration(&triggers, now), MAX_SLEEP);
+    }
+
+    #[test]
+    fn test_sleep_duration_wakes_for_imminent_trigger() {
+        let now = Utc::now();
+        let mut triggers = HashMap::new();
+        let mut t = due_trigger("* * * * *", now);
+        t.next_run = Some(now + chrono::Duration::seconds(5));
+        triggers.insert("ws/soon".to_string(), t);
+        assert_eq!(
+            sleep_duration(&triggers, now),
+            std::time::Duration::from_secs(5)
+        );
+        // Overdue -> 1s, no triggers -> the cap.
+        triggers.get_mut("ws/soon").unwrap().next_run = Some(now - chrono::Duration::seconds(5));
+        assert_eq!(
+            sleep_duration(&triggers, now),
+            std::time::Duration::from_secs(1)
+        );
+        assert_eq!(sleep_duration(&HashMap::new(), now), MAX_SLEEP);
     }
 
     #[test]

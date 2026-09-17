@@ -28,6 +28,8 @@ pub const STROEM_STEPS_READY: &str = "stroem_steps_ready";
 
 /// `gauge` — 1 if a given background task loop is alive, else 0. Label: task.
 pub const STROEM_BACKGROUND_TASK_ALIVE: &str = "stroem_background_task_alive";
+pub const STROEM_BACKGROUND_TASK_LAST_TICK_AGE_SECONDS: &str =
+    "stroem_background_task_last_tick_age_seconds";
 
 /// `histogram` — time to resolve the task+global state snapshots for
 /// rendering (seconds). Label: entry (`claim`, `advance`, `init`).
@@ -98,6 +100,19 @@ pub async fn gather_gauges(state: &AppState) {
         .set(f64::from(bg.recovery_alive.load(Ordering::Relaxed)));
     gauge!(STROEM_BACKGROUND_TASK_ALIVE, "task" => "event_source")
         .set(f64::from(bg.event_source_alive.load(Ordering::Relaxed)));
+
+    // Absent until the loop's first iteration (absence = stale, like the
+    // DB-backed gauges below) — never a fake 0.
+    for (task, beat) in [
+        ("scheduler", &bg.scheduler_beat),
+        ("recovery", &bg.recovery_beat),
+        ("event_source", &bg.event_source_beat),
+    ] {
+        if let Some(age) = beat.age() {
+            gauge!(STROEM_BACKGROUND_TASK_LAST_TICK_AGE_SECONDS, "task" => task)
+                .set(age.as_secs_f64());
+        }
+    }
 
     // --- DB-backed gauges (each bounded by GAUGE_QUERY_TIMEOUT) ---
 
@@ -238,6 +253,7 @@ mod tests {
             STROEM_JOBS_IN_FLIGHT,
             STROEM_STEPS_READY,
             STROEM_BACKGROUND_TASK_ALIVE,
+            STROEM_BACKGROUND_TASK_LAST_TICK_AGE_SECONDS,
         ];
         let unique: std::collections::HashSet<_> = names.iter().collect();
         assert_eq!(unique.len(), names.len(), "metric names must be unique");

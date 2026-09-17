@@ -62,9 +62,11 @@ pub fn build_router(state: AppState, cancel_token: CancellationToken) -> Router 
             .allow_headers(Any),
     };
 
-    // /healthz — unauthenticated, k8s-probe-compatible (no leader/task fields).
+    // /livez — unauthenticated liveness probe (background loops; no DB, no task names).
+    // /healthz — unauthenticated readiness probe (DB only; no leader/task fields).
     // /healthz/detail — worker-token auth required; full HA diagnostics.
     let health_route = Router::new()
+        .route("/livez", get(health::livez))
         .route("/healthz", get(health::healthz))
         .with_state(state.clone());
 

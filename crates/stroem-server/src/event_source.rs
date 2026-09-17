@@ -28,6 +28,8 @@ async fn run_loop(state: AppState, cancel: CancellationToken) {
     tracing::info!("EventSourceManager started");
 
     loop {
+        state.background_tasks.event_source_beat.beat();
+
         // HA gate: only the leader reconciles event sources. The reconciler
         // *is* idempotent and crash-safe (duplicate detection cancels extras
         // on the next cycle), but running it on every replica would still
@@ -36,6 +38,10 @@ async fn run_loop(state: AppState, cancel: CancellationToken) {
         if state.leader.is_leader() {
             reconcile(&state).await;
         }
+
+        // Beat again AFTER the work: the sleep below must not be charged to a
+        // reconcile that finished just inside its budget.
+        state.background_tasks.event_source_beat.beat();
 
         tokio::select! {
             _ = tokio::time::sleep(std::time::Duration::from_secs(RECONCILE_INTERVAL_SECS)) => {}
@@ -137,6 +143,7 @@ async fn reconcile(state: &AppState) {
 
     // --- Step 3: ensure each desired trigger has a current job ---
     for des in &desired {
+        state.background_tasks.event_source_beat.beat();
         let source_id = format!("{}/{}", des.workspace, des.trigger_name);
 
         match active_by_source.get(&source_id) {
@@ -178,6 +185,7 @@ async fn reconcile(state: &AppState) {
                     if i == keep_idx {
                         continue;
                     }
+                    state.background_tasks.event_source_beat.beat();
                     tracing::warn!(
                         "EventSourceManager: cancelling duplicate job {} for '{}'",
                         dup_id,
@@ -224,9 +232,17 @@ async fn reconcile(state: &AppState) {
     }
 
     // --- Step 4: cancel ALL jobs for removed/disabled triggers ---
+    // An UNAVAILABLE workspace (load error) lands here too, deliberately: while
+    // it is unavailable `/worker/event-source/emit` answers 404 and the worker
+    // drops the payload, so a consumer left running would drain its queue into
+    // the void. Cancelling pauses consumption; step 3 recreates the consumer
+    // once the workspace loads again. Keeping it alive needs emit retry /
+    // backpressure on the worker first (TODO.md).
     for (source_id, jobs) in &active_by_source {
+        state.background_tasks.event_source_beat.beat();
         if !desired_source_ids.contains(source_id) {
             for (job_id, _) in jobs {
+                state.background_tasks.event_source_beat.beat();
                 tracing::info!(
                     "EventSourceManager: trigger '{}' removed/disabled, cancelling job {}",
                     source_id,
@@ -247,6 +263,7 @@ async fn reconcile(state: &AppState) {
     // --- Step 5: restart recently completed/failed event source jobs ---
     // `terminal_rows` was already loaded before step 3.
     for row in terminal_rows {
+        state.background_tasks.event_source_beat.beat();
         let source_id = row.source_id.unwrap_or_default();
         if !desired_source_ids.contains(&source_id) {
             // Trigger removed or disabled — do not restart.
@@ -356,6 +373,8 @@ async fn collect_desired(state: &AppState) -> Vec<DesiredEventSource> {
         let secrets_ctx = serde_json::json!({ "secret": config.secrets });
 
         for (trigger_name, trigger_def) in &config.triggers {
+            // Rendering `env` may shell out to `vals`: one beat per source.
+            state.background_tasks.event_source_beat.beat();
             let (task, target_task, input, env, restart_policy, backoff_secs, max_in_flight) =
                 match trigger_def {
                     TriggerDef::EventSource {

@@ -518,6 +518,14 @@ impl WorkspaceManager {
         names.into_iter().collect()
     }
 
+    /// Test-only: put a loaded workspace into its load-error state, as a
+    /// failed reload does.
+    #[cfg(test)]
+    pub fn mark_errored_for_test(&self, name: &str, error: &str) {
+        let entry = self.entries.get(name).expect("workspace entry");
+        *entry.load_error.write().unwrap() = Some(error.to_string());
+    }
+
     /// Check whether a workspace with the given name exists (regardless of health status).
     // TODO: like `names()`, this ignores `load_errors` — a workspace whose
     // *source construction* failed (e.g. `GitSource::new()`) has no `entries`

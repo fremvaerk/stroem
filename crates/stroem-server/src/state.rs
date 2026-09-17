@@ -34,13 +34,69 @@ impl Drop for AliveGuard {
     }
 }
 
+/// When a background loop last made progress.
+///
+/// [`AliveGuard`] only notices a task that EXITED. A task that is alive but
+/// never polled again (prod 2026-09-16: the scheduler went silent for nine
+/// hours with its guard held) is caught by its heartbeat going stale.
+///
+/// Stored as milliseconds on a process-local MONOTONIC clock, so a wall-clock
+/// correction can neither fake a stall nor hide one.
+pub struct Heartbeat(AtomicI64);
+
+const NEVER: i64 = i64::MIN;
+
+fn monotonic_ms() -> i64 {
+    static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    let epoch = *EPOCH.get_or_init(std::time::Instant::now);
+    i64::try_from(epoch.elapsed().as_millis()).unwrap_or(i64::MAX)
+}
+
+impl Default for Heartbeat {
+    fn default() -> Self {
+        Self(AtomicI64::new(NEVER))
+    }
+}
+
+impl Heartbeat {
+    /// Call at the top of every loop iteration AND after each unit of work
+    /// inside a long one, so a slow-but-progressing iteration is not a stall.
+    pub fn beat(&self) {
+        self.0.store(monotonic_ms(), Ordering::Relaxed);
+    }
+
+    /// Time since the last beat, `None` before the first one.
+    pub fn age(&self) -> Option<std::time::Duration> {
+        match self.0.load(Ordering::Relaxed) {
+            NEVER => None,
+            last => Some(std::time::Duration::from_millis(
+                u64::try_from(monotonic_ms().saturating_sub(last)).unwrap_or(0),
+            )),
+        }
+    }
+
+    /// Pretend the last beat happened `by` ago. For tests.
+    #[doc(hidden)]
+    pub fn backdate(&self, by: std::time::Duration) {
+        let by = i64::try_from(by.as_millis()).unwrap_or(i64::MAX);
+        self.0.store(
+            monotonic_ms().saturating_sub(by).max(NEVER + 1),
+            Ordering::Relaxed,
+        );
+    }
+}
+
 /// Tracks liveness of background tasks (scheduler, recovery sweeper, event source manager).
-/// Each flag is `true` while the task is running, `false` after it exits.
+/// Each `*_alive` flag is `true` while the task is running, `false` after it
+/// exits; each `*_beat` is stamped once per loop iteration.
 #[derive(Clone)]
 pub struct BackgroundTasks {
     pub scheduler_alive: Arc<AtomicBool>,
     pub recovery_alive: Arc<AtomicBool>,
     pub event_source_alive: Arc<AtomicBool>,
+    pub scheduler_beat: Arc<Heartbeat>,
+    pub recovery_beat: Arc<Heartbeat>,
+    pub event_source_beat: Arc<Heartbeat>,
 }
 
 impl BackgroundTasks {
@@ -49,6 +105,9 @@ impl BackgroundTasks {
             scheduler_alive: Arc::new(AtomicBool::new(false)),
             recovery_alive: Arc::new(AtomicBool::new(false)),
             event_source_alive: Arc::new(AtomicBool::new(false)),
+            scheduler_beat: Arc::default(),
+            recovery_beat: Arc::default(),
+            event_source_beat: Arc::default(),
         }
     }
 }

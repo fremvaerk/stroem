@@ -28,6 +28,8 @@ async fn run_loop(state: AppState, cancel: CancellationToken) {
     );
 
     loop {
+        state.background_tasks.recovery_beat.beat();
+
         tokio::select! {
             _ = tokio::time::sleep(interval) => {},
             _ = cancel.cancelled() => {
@@ -70,6 +72,7 @@ async fn sweep(state: &AppState) -> Result<()> {
             tracing::warn!("Recovering {} stale step(s)", stale_steps.len());
 
             for step_info in &stale_steps {
+                state.background_tasks.recovery_beat.beat();
                 let worker_label = step_info
                     .worker_id
                     .map(|id| id.to_string())
@@ -117,6 +120,7 @@ async fn sweep(state: &AppState) -> Result<()> {
     // Phase 2: Fail steps that exceeded their timeout
     let timed_out_steps = JobStepRepo::get_timed_out_steps(&state.pool).await?;
     for step_info in &timed_out_steps {
+        state.background_tasks.recovery_beat.beat();
         let error_msg = "Step timed out (server-side enforcement)".to_string();
 
         state
@@ -161,6 +165,7 @@ async fn sweep(state: &AppState) -> Result<()> {
     // Phase 2.5: Fail suspended approval steps that exceeded their timeout
     let timed_out_suspended = JobStepRepo::get_timed_out_suspended_steps(&state.pool).await?;
     for step_info in &timed_out_suspended {
+        state.background_tasks.recovery_beat.beat();
         let error_msg = "Approval timed out";
 
         state
@@ -205,6 +210,7 @@ async fn sweep(state: &AppState) -> Result<()> {
     // Phase 3: Cancel jobs that exceeded their timeout
     let timed_out_jobs = JobRepo::get_timed_out_jobs(&state.pool).await?;
     for job_id in &timed_out_jobs {
+        state.background_tasks.recovery_beat.beat();
         tracing::warn!("Job {} timed out, cancelling", job_id);
 
         state
@@ -220,6 +226,7 @@ async fn sweep(state: &AppState) -> Result<()> {
     let unmatched_timeout = state.config.recovery.unmatched_step_timeout_secs as f64;
     let unmatched = JobStepRepo::get_unmatched_ready_steps(&state.pool, unmatched_timeout).await?;
     for step_info in &unmatched {
+        state.background_tasks.recovery_beat.beat();
         let error_msg = "No active worker with required capability/tags to run this step";
 
         state
@@ -315,6 +322,8 @@ pub async fn retention_cleanup(state: &AppState) {
                     created_at,
                 } in jobs
                 {
+                    // One beat per job: a big retention batch is progress, not a stall.
+                    state.background_tasks.recovery_beat.beat();
                     let meta = JobLogMeta {
                         workspace,
                         task_name,
