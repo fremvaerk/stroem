@@ -577,12 +577,12 @@ async fn fire_single_hook(
             .as_ref()
             .context("type: task action missing task field")?;
 
-        if !workspace_config.tasks.contains_key(task_ref.as_str()) && task_ref.contains('.') {
-            anyhow::bail!(
-                "hook uses action '{}' whose task '{}' is in another workspace; hook actions cannot call tasks across workspaces",
-                hook.action,
-                task_ref
-            );
+        if let Some(msg) = foreign_hook_task_error(
+            &hook.action,
+            task_ref,
+            workspace_config.tasks.contains_key(task_ref.as_str()),
+        ) {
+            anyhow::bail!("{msg}");
         }
 
         let created = crate::job_creator::create_job_for_task_detailed(
@@ -691,6 +691,30 @@ async fn fire_single_hook(
     Ok(())
 }
 
+/// Hook actions are never resolved cross-workspace: a dotted `task:` that is not a
+/// local (or library-flattened) key is refused before any job is created.
+fn foreign_hook_task_error(
+    hook_action: &str,
+    task_ref: &str,
+    is_local_task: bool,
+) -> Option<String> {
+    if is_local_task || !task_ref.contains('.') {
+        return None;
+    }
+    let malformed = stroem_common::template::parse_qualified_ref(task_ref)
+        .0
+        .is_none();
+    Some(if malformed {
+        format!(
+            "hook uses action '{hook_action}' whose task '{task_ref}' is malformed (empty workspace or task name)"
+        )
+    } else {
+        format!(
+            "hook uses action '{hook_action}' whose task '{task_ref}' is in another workspace; hook actions cannot call tasks across workspaces"
+        )
+    })
+}
+
 /// Select which hooks to fire for a job, applying the priority and fallback rules.
 ///
 #[cfg(test)]
@@ -698,6 +722,32 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::collections::HashMap;
+
+    #[test]
+    fn foreign_hook_task_error_distinguishes_foreign_from_malformed() {
+        assert_eq!(foreign_hook_task_error("notify", "cleanup", false), None);
+        assert_eq!(
+            foreign_hook_task_error("notify", "common.cleanup", true),
+            None,
+            "a library-flattened local key is not foreign"
+        );
+
+        let foreign = foreign_hook_task_error("notify", "B.cleanup", false).unwrap();
+        assert!(
+            foreign.contains("is in another workspace")
+                && foreign.contains("cannot call tasks across workspaces"),
+            "{foreign}"
+        );
+
+        for bad in [".cleanup", "B."] {
+            let msg = foreign_hook_task_error("notify", bad, false).unwrap();
+            assert!(
+                msg.contains("is malformed (empty workspace or task name)"),
+                "{bad}: {msg}"
+            );
+            assert!(!msg.contains("another workspace"), "{bad}: {msg}");
+        }
+    }
 
     fn select_hooks_for_job<'a>(
         workspace_config: &'a WorkspaceConfig,

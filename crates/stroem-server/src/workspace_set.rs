@@ -425,7 +425,9 @@ mod tests {
         let bullet = "\u{2022}";
         let text = format!("v={bullet}x{bullet} and mask={REDACTED}");
         let out = redact_secrets_in_str(&text, &secrets(&[&format!("{bullet}x{bullet}"), bullet]));
-        // The mask in the output is never rescanned; the literal value is masked once.
+        // Values are matched against the INPUT only, so the mask this function emits is
+        // never rescanned. A `••••••` already in the input is ordinary text: its bullets
+        // match the `•` secret, merge into one span, and come out as a single mask.
         assert_eq!(out, format!("v={REDACTED} and mask={REDACTED}"));
     }
 

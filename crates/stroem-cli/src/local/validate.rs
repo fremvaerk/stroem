@@ -4,48 +4,71 @@ use stroem_common::models::workflow::WorkspaceConfig;
 use stroem_common::validation::validate_workflow_config;
 use stroem_common::workspace_loader;
 
-/// Pure validation function that returns config and all warnings (load + validation).
-fn validate_workspace(path: &Path) -> Result<(WorkspaceConfig, Vec<String>)> {
-    let (config, mut load_warnings) = workspace_loader::load_workspace(path)
+/// A loaded workspace and the outcome of validating it.
+struct Checked {
+    config: WorkspaceConfig,
+    load_warnings: Vec<String>,
+    /// `None` when the workspace defines nothing to validate.
+    validation: Option<Result<Vec<String>>>,
+}
+
+impl Checked {
+    fn is_empty(&self) -> bool {
+        self.validation.is_none()
+    }
+}
+
+/// Load and validate. Only a LOAD failure is an `Err` here — it keeps its own
+/// context — so the caller can still report the load warnings when validation fails.
+fn check_workspace(path: &Path) -> Result<Checked> {
+    let (config, load_warnings) = workspace_loader::load_workspace(path)
         .with_context(|| format!("Failed to load workspace from {}", path.display()))?;
 
-    if config.actions.is_empty() && config.tasks.is_empty() && config.triggers.is_empty() {
-        return Ok((config, load_warnings));
-    }
+    let empty = config.actions.is_empty() && config.tasks.is_empty() && config.triggers.is_empty();
+    let validation = (!empty).then(|| validate_workflow_config(&config));
 
-    let validation_warnings = validate_workflow_config(&config)?;
-    load_warnings.extend(validation_warnings);
-    Ok((config, load_warnings))
+    Ok(Checked {
+        config,
+        load_warnings,
+        validation,
+    })
 }
 
 pub fn cmd_validate(path: &str) -> Result<()> {
     let path = Path::new(path);
 
-    let (config, warnings) = match validate_workspace(path) {
-        Ok(result) => result,
-        Err(e) => {
-            eprintln!("[FAIL] {:#}", e);
-            anyhow::bail!("Validation failed");
-        }
-    };
+    let checked = check_workspace(path)?;
 
-    for w in &warnings {
+    for w in &checked.load_warnings {
         println!("  WARN: {}", w);
     }
 
-    if config.actions.is_empty() && config.tasks.is_empty() && config.triggers.is_empty() {
+    if checked.is_empty() {
         println!("No workflow definitions found at {}", path.display());
         return Ok(());
     }
 
-    println!(
-        "[OK] Workspace loaded: {} actions, {} tasks, {} triggers",
-        config.actions.len(),
-        config.tasks.len(),
-        config.triggers.len()
-    );
-
-    Ok(())
+    match checked
+        .validation
+        .expect("non-empty workspace is validated")
+    {
+        Ok(warnings) => {
+            for w in &warnings {
+                println!("  WARN: {}", w);
+            }
+            println!(
+                "[OK] Workspace loaded: {} actions, {} tasks, {} triggers",
+                checked.config.actions.len(),
+                checked.config.tasks.len(),
+                checked.config.triggers.len()
+            );
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("[FAIL] {:#}", e);
+            anyhow::bail!("Validation failed");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -204,8 +227,8 @@ actions:
         )
         .unwrap();
 
-        // Validate workspace and collect warnings
-        let (_config, warnings) = validate_workspace(dir.path()).unwrap();
+        let checked = check_workspace(dir.path()).unwrap();
+        let warnings = checked.validation.unwrap().unwrap();
 
         // Verify warning is present with full text including " offline"
         assert!(
@@ -215,5 +238,48 @@ actions:
             "Expected warning about cross-workspace task reference offline, got: {:?}",
             warnings
         );
+        assert!(cmd_validate(dir.path().to_str().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn validate_load_failure_keeps_its_own_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("no-such-workspace");
+
+        let err = cmd_validate(missing.to_str().unwrap()).unwrap_err();
+        let chain = format!("{err:#}");
+
+        assert!(
+            err.to_string().contains("Failed to load workspace from"),
+            "{chain}"
+        );
+        assert!(chain.contains("does not exist"), "{chain}");
+        assert!(!chain.contains("Validation failed"), "{chain}");
+    }
+
+    #[test]
+    fn validate_failure_still_reports_load_warnings() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("broken.yaml"), "not: [valid: yaml: {{{").unwrap();
+        std::fs::write(
+            dir.path().join("tasks.yaml"),
+            "tasks:\n  broken:\n    flow:\n      step1:\n        action: missing_action\n",
+        )
+        .unwrap();
+
+        let checked = check_workspace(dir.path()).unwrap();
+
+        assert!(
+            checked
+                .load_warnings
+                .iter()
+                .any(|w| w.contains("failed to parse YAML")),
+            "{:?}",
+            checked.load_warnings
+        );
+        assert!(checked.validation.unwrap().is_err());
+
+        let err = cmd_validate(dir.path().to_str().unwrap()).unwrap_err();
+        assert_eq!(err.to_string(), "Validation failed");
     }
 }
