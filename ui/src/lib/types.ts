@@ -8,6 +8,10 @@ export interface WorkspaceInfo {
   revision?: string;
   error?: string;
   warnings?: string[];
+  /** "fresh" or "errored" — the server watcher's view of this workspace */
+  availability?: "fresh" | "errored";
+  /** ISO timestamp of the last successful load, absent if never */
+  last_successful_load?: string;
 }
 
 export interface TaskListItem {

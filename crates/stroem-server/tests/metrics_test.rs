@@ -887,3 +887,49 @@ async fn metrics_token_overrides_worker_token() -> Result<()> {
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn workspace_watch_gauges_are_exported() -> Result<()> {
+    let h = boot().await?;
+    let log_dir = h._temp.path().to_path_buf();
+    let mut config = empty_config(&h.url, &log_dir);
+    config.metrics = Some(MetricsConfig {
+        public: true,
+        ..Default::default()
+    });
+    let log_storage = LogStorage::new(&config.log_storage.local_dir);
+    let state = AppState::new(
+        h.pool.clone(),
+        WorkspaceManager::from_config("gauged", WorkspaceConfig::new()),
+        config,
+        log_storage,
+        HashMap::new(),
+        None,
+    )
+    .with_event_bus(EventBus::noop());
+    let router =
+        build_router(state, CancellationToken::new()).layer(Extension(global_test_handle()));
+
+    let body = scrape(&router).await?;
+    let line = |name: &str| {
+        body.lines()
+            .find(|l| l.starts_with(name) && l.contains(r#"workspace="gauged""#))
+            .map(str::to_string)
+    };
+    assert!(
+        line(stroem_server::metrics::STROEM_WORKSPACE_LOAD_OVERDUE)
+            .is_some_and(|l| l.ends_with(" 0")),
+        "overdue gauge missing or non-zero:\n{body}"
+    );
+    assert!(
+        line(stroem_server::metrics::STROEM_WORKSPACE_LAST_SUCCESSFUL_LOAD_AGE_SECONDS).is_some(),
+        "last-successful-load age missing:\n{body}"
+    );
+    assert!(
+        body.lines().any(|l| l
+            .starts_with(stroem_server::metrics::STROEM_WORKSPACE_LOAD_PERMITS_AVAILABLE)
+            && l.ends_with(" 8")),
+        "permits gauge missing or not 8:\n{body}"
+    );
+    Ok(())
+}

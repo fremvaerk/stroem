@@ -51,6 +51,26 @@ the worker token.
 | `stroem_background_task_alive` | `task` | `1` if the named loop is running. Labels: `scheduler`, `recovery`, `event_source` |
 | `stroem_background_task_last_tick_age_seconds` | `task` | Seconds since the named loop's last progress heartbeat (at the top of each iteration, at work-unit boundaries inside it, and before it sleeps). Absent until its first iteration. A loop can be `alive` yet hung — alert on this (e.g. `> 300` for `scheduler`); `/livez` fails on the same condition |
 
+### Workspace refresh
+
+| Name | Type | Labels | Meaning |
+|---|---|---|---|
+| `stroem_workspace_peek_failures_total` | counter | `workspace` | Workspace peeks that failed or timed out. |
+| `stroem_workspace_load_admission_skipped_total` | counter | `workspace`, `reason` (`busy`, `saturated`) | Watcher loads not admitted. |
+| `stroem_workspace_last_successful_load_age_seconds` | gauge | `workspace` | Seconds since a workspace last loaded successfully. |
+| `stroem_workspace_load_overdue` | gauge | `workspace` | `1` while a watcher load has exceeded its budget and still runs. Derived at scrape time, never stored. |
+| `stroem_workspace_load_permits_available` | gauge | — | Free watcher-load permits on THIS replica. `0` also occurs with eight healthy loads in progress; alert only together with overdue > 0. |
+
+**Alerting.** Alert on `stroem_workspace_load_permits_available == 0` **and**
+`stroem_workspace_load_overdue > 0` for the same `replica_id`, sustained for a
+few minutes: every watcher slot on that replica is held by a load stuck in a
+phase that cannot be interrupted, and that replica has stopped refreshing
+workspaces. Neither signal fails `/livez` — a stale-but-serving server is
+healthy; recovering is an operator decision (restart the pod).
+`stroem_workspace_last_successful_load_age_seconds` growing past a few poll
+intervals means refreshes are being skipped — usually the remote is
+unreachable (see `stroem_workspace_peek_failures_total`).
+
 ## Prometheus Scrape Config
 
 ### Default (Bearer auth)

@@ -37,6 +37,16 @@ pub const STROEM_WORKSPACE_PEEK_FAILURES_TOTAL: &str = "stroem_workspace_peek_fa
 pub const STROEM_WORKSPACE_LOAD_ADMISSION_SKIPPED_TOTAL: &str =
     "stroem_workspace_load_admission_skipped_total";
 
+/// `gauge` — seconds since a workspace last loaded successfully. Label: workspace.
+pub const STROEM_WORKSPACE_LAST_SUCCESSFUL_LOAD_AGE_SECONDS: &str =
+    "stroem_workspace_last_successful_load_age_seconds";
+/// `gauge` — 1 while a watcher load has exceeded its budget and still runs.
+/// Derived at scrape time, never stored. Label: workspace.
+pub const STROEM_WORKSPACE_LOAD_OVERDUE: &str = "stroem_workspace_load_overdue";
+/// `gauge` — free watcher-load permits on THIS replica. 0 also occurs with
+/// eight healthy loads in progress; alert only together with overdue > 0.
+pub const STROEM_WORKSPACE_LOAD_PERMITS_AVAILABLE: &str = "stroem_workspace_load_permits_available";
+
 /// `histogram` — time to resolve the task+global state snapshots for
 /// rendering (seconds). Label: entry (`claim`, `advance`, `init`).
 pub const STROEM_SNAPSHOT_RESOLVE_SECONDS: &str = "stroem_snapshot_resolve_seconds";
@@ -119,6 +129,19 @@ pub async fn gather_gauges(state: &AppState) {
                 .set(age.as_secs_f64());
         }
     }
+
+    let now = std::time::Instant::now();
+    for status in state.workspaces.watch_statuses(now) {
+        gauge!(STROEM_WORKSPACE_LOAD_OVERDUE, "workspace" => status.name.clone())
+            .set(f64::from(status.load_overdue));
+        // Absent until the first successful load — never a fake 0.
+        if let Some(age) = status.last_successful_load_age {
+            gauge!(STROEM_WORKSPACE_LAST_SUCCESSFUL_LOAD_AGE_SECONDS, "workspace" => status.name)
+                .set(age.as_secs_f64());
+        }
+    }
+    gauge!(STROEM_WORKSPACE_LOAD_PERMITS_AVAILABLE)
+        .set(state.workspaces.load_permits_available() as f64);
 
     // --- DB-backed gauges (each bounded by GAUGE_QUERY_TIMEOUT) ---
 
@@ -262,6 +285,9 @@ mod tests {
             STROEM_BACKGROUND_TASK_LAST_TICK_AGE_SECONDS,
             STROEM_WORKSPACE_PEEK_FAILURES_TOTAL,
             STROEM_WORKSPACE_LOAD_ADMISSION_SKIPPED_TOTAL,
+            STROEM_WORKSPACE_LAST_SUCCESSFUL_LOAD_AGE_SECONDS,
+            STROEM_WORKSPACE_LOAD_OVERDUE,
+            STROEM_WORKSPACE_LOAD_PERMITS_AVAILABLE,
         ];
         let unique: std::collections::HashSet<_> = names.iter().collect();
         assert_eq!(unique.len(), names.len(), "metric names must be unique");

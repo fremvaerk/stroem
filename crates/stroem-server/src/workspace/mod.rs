@@ -17,6 +17,7 @@ pub use source::{LoadOutcome, Peek, WorkspaceSource};
 
 use anyhow::{Context, Result};
 use availability::{Caller, ReloadSettings};
+use chrono::{DateTime, Utc};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -530,6 +531,12 @@ impl WorkspaceManager {
                 error: p.error.clone(),
                 warnings,
                 triggers_enabled: self.triggers_enabled(name),
+                last_successful_load: p.loaded_at_utc,
+                availability: if entry.availability().is_errored() {
+                    "errored".to_string()
+                } else {
+                    "fresh".to_string()
+                },
             });
         }
         // Source construction failures (e.g. GitSource::new() failed — no source object)
@@ -544,6 +551,8 @@ impl WorkspaceManager {
                 revision: None,
                 error: Some(error.clone()),
                 warnings: Vec::new(),
+                last_successful_load: None,
+                availability: "errored".to_string(),
             });
         }
         infos
@@ -651,6 +660,21 @@ impl WorkspaceManager {
         self.load_permits.available_permits()
     }
 
+    /// Scrape-time freshness of every workspace (spec § 4.8).
+    pub fn watch_statuses(&self, now: Instant) -> Vec<WatchStatus> {
+        self.entries
+            .iter()
+            .map(|(name, entry)| WatchStatus {
+                name: name.clone(),
+                load_overdue: entry.availability().load_overdue(now),
+                last_successful_load_age: entry
+                    .published()
+                    .loaded_at
+                    .map(|t| now.saturating_duration_since(t)),
+            })
+            .collect()
+    }
+
     /// Get library source paths for tarball building.
     /// Returns map of library name → source path.
     pub fn get_library_paths(&self) -> HashMap<String, PathBuf> {
@@ -687,6 +711,14 @@ impl WorkspaceManager {
     }
 }
 
+/// Scrape-time freshness of one workspace (spec § 4.8).
+#[derive(Debug, Clone)]
+pub struct WatchStatus {
+    pub name: String,
+    pub load_overdue: bool,
+    pub last_successful_load_age: Option<Duration>,
+}
+
 /// Info about a workspace for the API
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct WorkspaceInfo {
@@ -703,6 +735,11 @@ pub struct WorkspaceInfo {
     /// `false` when the server config sets `triggers: false` for this
     /// workspace — its triggers are listed but never fired by this server.
     pub triggers_enabled: bool,
+    /// When this workspace last loaded successfully (UTC); absent if never.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_successful_load: Option<DateTime<Utc>>,
+    /// `"fresh"` or `"errored"` — the watcher's view (spec § 4.8).
+    pub availability: String,
 }
 
 #[cfg(test)]
@@ -937,6 +974,8 @@ tasks:
             error: None,
             warnings: Vec::new(),
             triggers_enabled: false,
+            last_successful_load: None,
+            availability: "fresh".to_string(),
         };
         let json = serde_json::to_value(&info).unwrap();
         assert_eq!(json["triggers_enabled"], serde_json::Value::Bool(false));
