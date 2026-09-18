@@ -605,6 +605,38 @@ impl JobRepo {
         Ok(())
     }
 
+    /// `(workspace, revision)` pairs whose workspace tarball the server must
+    /// keep cached:
+    /// 1. every non-terminal job's own revision;
+    /// 2. cross-workspace action revisions (`job_step.action_revision`) of
+    ///    steps in non-terminal jobs — a step claims its OWNER's revision;
+    /// 3. failed top-level jobs still owed a task-level retry — settlement
+    ///    observes the job terminal before the retry job exists, and the
+    ///    retry inherits this revision. Mirrors `terminal::plan`'s retry
+    ///    gate; bounded to one hour so a retry that never got created does
+    ///    not pin a revision forever.
+    pub async fn tarball_keep_revisions(pool: &PgPool) -> Result<Vec<(String, String)>> {
+        let rows = sqlx::query_as::<_, (String, String)>(
+            "SELECT workspace, revision FROM job \
+              WHERE status IN ('pending', 'running') AND revision IS NOT NULL \
+             UNION \
+             SELECT s.action_workspace, s.action_revision FROM job_step s \
+               JOIN job j ON j.job_id = s.job_id \
+              WHERE j.status IN ('pending', 'running') \
+                AND s.action_workspace IS NOT NULL AND s.action_revision IS NOT NULL \
+             UNION \
+             SELECT workspace, revision FROM job \
+              WHERE status = 'failed' AND revision IS NOT NULL \
+                AND parent_job_id IS NULL AND retry_job_id IS NULL \
+                AND max_retries IS NOT NULL AND retry_attempt < max_retries \
+                AND completed_at > NOW() - INTERVAL '1 hour'",
+        )
+        .fetch_all(pool)
+        .await
+        .context("query tarball keep revisions")?;
+        Ok(rows)
+    }
+
     /// Count jobs with optional workspace/status/source_type/search filters (mirrors `list()`)
     pub async fn count(
         pool: &PgPool,

@@ -436,22 +436,16 @@ pub async fn retention_cleanup(state: &AppState) {
 
 /// Clean up stale tarball cache entries.
 ///
-/// Keeps cached tarballs for revisions that have active (non-terminal) jobs,
-/// plus the current revision for each workspace. Everything else is evicted.
+/// Keeps cached tarballs for every revision JobRepo::tarball_keep_revisions
+/// returns, plus each workspace's current revision. Everything else is evicted.
 async fn tarball_cache_cleanup(state: &AppState) {
-    // Query all revisions with active jobs
-    let active_revisions: Vec<(String, String)> = match sqlx::query_as::<_, (String, String)>(
-        "SELECT DISTINCT workspace, revision FROM job \
-         WHERE status IN ('pending', 'running') \
-         AND revision IS NOT NULL",
-    )
-    .fetch_all(&state.pool)
-    .await
-    {
+    // Active jobs, cross-workspace owner revisions of active steps, and
+    // failed jobs still owed a task-level retry (JobRepo::tarball_keep_revisions).
+    let active_revisions = match JobRepo::tarball_keep_revisions(&state.pool).await {
         Ok(rows) => rows,
         Err(e) => {
             tracing::warn!(
-                "Tarball cache cleanup: failed to query active revisions: {:#}",
+                "Tarball cache cleanup: failed to query revisions to keep: {:#}",
                 e
             );
             return;
