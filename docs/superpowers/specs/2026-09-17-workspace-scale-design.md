@@ -11,8 +11,8 @@ Relates to: `docs/internal/TODO.md:1006` (the 2026-09-16 scheduler hang — root
 cause still **unknown**; nothing in this spec claims to fix it)
 
 Triggered by the question "will Strøm work fine with 50 repos?". Line numbers
-cite `main` at `663b9d4`; library line numbers cite the pinned `git2` **0.20.4**
-(`Cargo.lock:2095`), its bundled `libgit2-sys` 0.18.5 (libgit2 1.9.4), and
+cite `main` at `663b9d4`; library line numbers cite the pinned `git2` **0.21.0**
+(`Cargo.lock`), its bundled `libgit2-sys` 0.18.5 (libgit2 1.9.4), and
 `tokio` 1.52.3. Production measurements are reproduced verbatim in
 **Appendix A** with the commands that produced them; every number derived from
 them is labelled **measured** or **hypothesis**.
@@ -315,12 +315,12 @@ actually offer, what Strøm wires today, and what this change guarantees:
 
 | Phase | Available | Wired today | Guarantee after this change |
 |---|---|---|---|
-| TCP connect | `opts::set_server_connect_timeout_in_milliseconds` (`opts.rs:386`) — process-wide, `unsafe`, set before any libgit2 thread; applied at `streams/socket.c:224` | no | bounded per connect attempt |
+| TCP connect | `opts::set_server_connect_timeout_in_milliseconds` (`opts.rs:421`) — process-wide, `unsafe`, set before any libgit2 thread; applied at `streams/socket.c:224` | no | bounded per connect attempt |
 | DNS resolution | nothing | — | **not bounded** |
-| TLS/SSH handshake, ref advertisement, every socket read | `opts::set_server_timeout_in_milliseconds` (`opts.rs:425`); SSH session timeout set at `transports/ssh_libssh2.c:545` | no | each *read* bounded; total time **not** — a slow-drip remote resets it per read |
+| TLS/SSH handshake, ref advertisement, every socket read | `opts::set_server_timeout_in_milliseconds` (`opts.rs:460`); SSH session timeout set at `transports/ssh_libssh2.c:545` | no | each *read* bounded; total time **not** — a slow-drip remote resets it per read |
 | ref-advertisement callback | none — the smart-protocol ref reader never invokes `sideband_progress` | — | covered only by the read timeout |
 | object transfer | `transfer_progress` → `false` aborts; cooperative, fires only *between* reads | no | total deadline, cooperative; a blocked read is bounded by the read timeout |
-| checkout **planning** | `CheckoutBuilder::notify` → `false` cancels; fires only inside `checkout_get_actions` (`checkout.c:2636`), before any file is touched. **Requires `notify_on(..)`** — notification types default to none (`build.rs:474`). `Repository::reset` accepts the builder (`repo.rs:771`) | no — `reset(.., None)` (`git.rs:88`) | cancellable **before** the first write |
+| checkout **planning** | `CheckoutBuilder::notify` → `false` cancels; fires only inside `checkout_get_actions` (`checkout.c:2636`), before any file is touched. **Requires `notify_on(..)`** — notification types default to none (`build.rs:478`). `Repository::reset` accepts the builder (`repo.rs:782`) | no — `reset(.., None)` (`git.rs:88`) | cancellable **before** the first write |
 | checkout **write phase** | none — removals, blob writes and submodule updates (`checkout.c:2651` ff., `:1886`) report progress through a callback that cannot cancel | no | **not interruptible**: once writing starts, the **entire remaining write phase** runs to completion |
 | YAML scan | filesystem I/O; deadline check per file | no | cooperative between files; one blocked read is **not** interruptible |
 | `sops -d` (`sops.rs:14`) | spawn + timed wait + `kill` + reap | no — `.output()` | **bounded** |
