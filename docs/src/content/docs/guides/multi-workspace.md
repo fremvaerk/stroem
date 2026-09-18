@@ -64,6 +64,8 @@ Each workspace has its own watcher loop. Every `poll_interval_secs`, the watcher
 - Watcher start times are spread across the poll interval (a few seconds apart, deterministic per workspace name) so that, with many workspaces on the same interval, their checks don't all land in the same instant. A workspace that failed to load at server startup is the one exception — it retries on the very first tick instead of waiting for its offset.
 - At most 8 reloads run concurrently per server (`MAX_CONCURRENT_WORKSPACE_LOADS`), across all watchers. A reload that arrives while the workspace is already busy loading is skipped, not queued.
 
+For a **folder** workspace, an unreadable file or directory anywhere under the folder (for example, wrong permissions) now fails that workspace's load, and the reason is shown as the workspace's error. Dangling symlinks and symlink loops are tolerated and do not affect the change check. For a **git** workspace, `ref` must be a branch: a tag or any other ref is not found by the change check, so the check always fails and the watcher forces a reload every `peek_failure_threshold` checks.
+
 Reloads triggered from outside the watcher — the API refresh endpoint, a webhook or scheduler trigger's `force_refresh`, or a peer server's reload notification — follow the same reload path but never queue behind a busy load: if a load is already in progress for that workspace, the request is rejected as busy rather than waiting.
 
 See [`workspace_reload`](/getting-started/configuration/#workspace_reload) for the tunable timeouts and thresholds above, and [Metrics](/operations/metrics/) for the `stroem_workspace_*` gauges that make watcher freshness and stalls observable.
