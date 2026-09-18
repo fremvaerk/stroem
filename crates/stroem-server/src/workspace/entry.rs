@@ -48,9 +48,7 @@ pub struct WorkspaceEntry {
     /// Serializes loads on one checkout. Held for a whole load — by the load's
     /// finalizer, until the worker really returns. Nobody waits on it.
     exec: Arc<tokio::sync::Mutex<ReloadState>>,
-    /// Source of `InFlight::op_id` for peeks/loads this entry starts. Wired
-    /// in by Task 9/10's peek dispatch; unread until then.
-    #[allow(dead_code)]
+    /// Source of `InFlight::op_id` for peeks/loads this entry starts.
     op_seq: AtomicU64,
 }
 
@@ -143,16 +141,12 @@ impl WorkspaceEntry {
         Duration::from_secs(self.source.poll_interval_secs().max(1))
     }
 
-    /// Wired in by Task 9/10's peek dispatch (`Event::Tick`/`Event::Peek*`);
-    /// unused until then.
-    #[allow(dead_code)]
+    /// Drives the watcher's peek/load state machine (`Event::Tick`/`Event::Peek*`).
     pub(crate) fn transition(&self, event: Event, policy: &Policy) -> Effect {
         let mut a = self.availability.lock().unwrap_or_else(|e| e.into_inner());
         transition(&mut a, event, policy)
     }
 
-    /// Wired in by Task 9/10's peek dispatch; unused until then.
-    #[allow(dead_code)]
     pub(crate) fn next_op_id(&self) -> u64 {
         self.op_seq.fetch_add(1, Ordering::Relaxed) + 1
     }

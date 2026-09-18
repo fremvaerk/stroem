@@ -107,7 +107,6 @@ pub(crate) fn spawn_load(req: LoadRequest) -> JoinHandle<Result<LoadSuccess>> {
 
 /// Start a peek. The finalizer ALWAYS emits `PeekFinished` (clearing the
 /// in-flight record), even after a panic; only the observer applies outcomes.
-#[allow(dead_code)] // wired by the watcher (Task 12)
 pub(crate) fn spawn_peek(
     entry: Arc<WorkspaceEntry>,
     policy: Policy,
@@ -127,7 +126,6 @@ pub(crate) fn spawn_peek(
 
 /// Deterministic per-workspace watcher start offset in `[0, poll)`, so N
 /// watchers do not tick together (spec § 4.4).
-#[allow(dead_code)] // wired by the watcher (Task 12)
 pub(crate) fn jitter_offset(name: &str, poll: Duration) -> Duration {
     let millis = poll.as_millis() as u64;
     if millis == 0 {

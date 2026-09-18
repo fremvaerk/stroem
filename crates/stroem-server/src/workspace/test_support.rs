@@ -15,19 +15,15 @@ pub(crate) enum TestLoad {
         action: &'static str,
         revision: &'static str,
     },
-    #[allow(dead_code)] // used by the watcher's peek-policy tests (Task 12)
     Err(&'static str),
     Panic,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum TestPeek {
-    #[allow(dead_code)] // used by the watcher's peek-policy tests (Task 12)
     Revision(&'static str),
     Failed,
-    #[allow(dead_code)] // used by the watcher's peek-policy tests (Task 12)
     LocalInvalid,
-    #[allow(dead_code)] // used by the watcher's peek-policy tests (Task 12)
     Hang(Duration),
 }
 
@@ -65,15 +61,12 @@ impl TestSource {
         self.gate = Some(gate);
         self
     }
-    #[allow(dead_code)] // used by the watcher's peek-policy tests (Task 12)
     pub fn set_load(&self, load: TestLoad) {
         *self.load.lock().unwrap_or_else(|e| e.into_inner()) = load;
     }
-    #[allow(dead_code)] // used by the watcher's peek-policy tests (Task 12)
     pub fn set_load_sleep(&self, d: Duration) {
         *self.load_sleep.lock().unwrap_or_else(|e| e.into_inner()) = d;
     }
-    #[allow(dead_code)] // used by the watcher's peek-policy tests (Task 12)
     pub fn set_peek(&self, peek: TestPeek) {
         *self.peek.lock().unwrap_or_else(|e| e.into_inner()) = peek;
     }

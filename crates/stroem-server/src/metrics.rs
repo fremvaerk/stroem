@@ -31,6 +31,12 @@ pub const STROEM_BACKGROUND_TASK_ALIVE: &str = "stroem_background_task_alive";
 pub const STROEM_BACKGROUND_TASK_LAST_TICK_AGE_SECONDS: &str =
     "stroem_background_task_last_tick_age_seconds";
 
+/// `counter` — workspace peeks that failed or timed out. Label: workspace.
+pub const STROEM_WORKSPACE_PEEK_FAILURES_TOTAL: &str = "stroem_workspace_peek_failures_total";
+/// `counter` — watcher loads not admitted. Labels: workspace, reason (`busy`, `saturated`).
+pub const STROEM_WORKSPACE_LOAD_ADMISSION_SKIPPED_TOTAL: &str =
+    "stroem_workspace_load_admission_skipped_total";
+
 /// `histogram` — time to resolve the task+global state snapshots for
 /// rendering (seconds). Label: entry (`claim`, `advance`, `init`).
 pub const STROEM_SNAPSHOT_RESOLVE_SECONDS: &str = "stroem_snapshot_resolve_seconds";
@@ -254,6 +260,8 @@ mod tests {
             STROEM_STEPS_READY,
             STROEM_BACKGROUND_TASK_ALIVE,
             STROEM_BACKGROUND_TASK_LAST_TICK_AGE_SECONDS,
+            STROEM_WORKSPACE_PEEK_FAILURES_TOTAL,
+            STROEM_WORKSPACE_LOAD_ADMISSION_SKIPPED_TOTAL,
         ];
         let unique: std::collections::HashSet<_> = names.iter().collect();
         assert_eq!(unique.len(), names.len(), "metric names must be unique");
