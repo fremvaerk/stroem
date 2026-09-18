@@ -68,14 +68,22 @@ const POLL_INTERVAL: Duration = Duration::from_millis(20);
 /// Run `cmd` to completion, killing and reaping it if `budget` expires.
 ///
 /// stdout/stderr are drained on their own threads so a chatty child cannot
-/// deadlock on a full pipe. After a kill the reader threads are DETACHED, not
-/// joined: a grandchild that inherited the pipes may keep them open.
+/// deadlock on a full pipe. After a kill the whole process group is killed;
+/// reader threads are detached as a last resort for processes that left the
+/// group (setsid daemons).
 pub fn run_with_deadline(
     mut cmd: Command,
     stdin: Option<&[u8]>,
     budget: &LoadBudget,
 ) -> Result<Output> {
     budget.check()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // Own process group, so a deadline kill reaches grandchildren
+        // (sops → gpg, vals → cloud CLIs) that inherited our pipes.
+        cmd.process_group(0);
+    }
     cmd.stdin(if stdin.is_some() {
         Stdio::piped()
     } else {
@@ -105,7 +113,7 @@ pub fn run_with_deadline(
                 break status;
             }
             if budget.expired() {
-                let _ = child.kill();
+                kill_process_tree(&mut child);
                 let _ = child.wait();
                 return Err(DeadlineExceeded.into());
             }
@@ -135,6 +143,20 @@ fn spawn_reader<R: Read + Send + 'static>(pipe: Option<R>) -> Option<JoinHandle<
 
 fn join_reader(handle: Option<JoinHandle<Vec<u8>>>) -> Vec<u8> {
     handle.and_then(|h| h.join().ok()).unwrap_or_default()
+}
+
+/// Kill the child's whole process group (unix), then the child itself.
+fn kill_process_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        let pgid = child.id() as libc::pid_t;
+        // SAFETY: kill(2) with a negative pid signals the process group
+        // created by `process_group(0)`; no memory is touched.
+        unsafe {
+            libc::kill(-pgid, libc::SIGKILL);
+        }
+    }
+    let _ = child.kill();
 }
 
 #[cfg(test)]
@@ -224,5 +246,38 @@ mod tests {
             is_deadline_exceeded(&err),
             "must fail on the deadline, not on spawn: {err:#}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deadline_kill_reaches_grandchildren() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let pid_file = dir.path().join("grandchild.pid");
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg(format!("sleep 30 & echo $! > {}; wait", pid_file.display()));
+        let err = run_with_deadline(cmd, None, &LoadBudget::from_now(Duration::from_millis(300)))
+            .unwrap_err();
+        assert!(is_deadline_exceeded(&err));
+        let pid = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .to_string();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let alive = Command::new("kill")
+                .args(["-0", &pid])
+                .status()
+                .unwrap()
+                .success();
+            if !alive {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "grandchild {pid} survived the deadline kill"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 }

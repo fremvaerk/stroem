@@ -16,6 +16,7 @@ tracing.workspace = true
 croner.workspace = true
 chrono-tz.workspace = true
 url.workspace = true
+libc = "0.2"
 
 [dev-dependencies]
 tempfile.workspace = true
