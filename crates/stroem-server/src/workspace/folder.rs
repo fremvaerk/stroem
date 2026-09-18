@@ -81,8 +81,10 @@ impl FolderSource {
 /// folder is stable local state (stale venvs, editor lock files,
 /// `node_modules/.bin` leftovers) — not a sign the workspace is broken.
 /// Returns the path and a stand-in for its "content" (the link target, or the
-/// literal `"loop"`) to hash instead of failing the whole walk. Every other
-/// walk error returns `None`, which still fails the walk (`Peek::Failed`).
+/// literal `"loop"`) to hash instead of failing the whole walk. Only a real
+/// loop, or a symlink whose target is `NotFound` (dangling), qualifies; every
+/// other walk error — including a permission or I/O error reached through a
+/// symlink — returns `None`, which still fails the walk (`Peek::Failed`).
 fn symlink_walk_error(err: &walkdir::Error) -> Option<(PathBuf, String)> {
     let p = err.path()?;
     if err.loop_ancestor().is_some() {
@@ -91,7 +93,8 @@ fn symlink_walk_error(err: &walkdir::Error) -> Option<(PathBuf, String)> {
     let is_symlink = std::fs::symlink_metadata(p)
         .map(|m| m.file_type().is_symlink())
         .unwrap_or(false);
-    if !is_symlink {
+    let dangling = err.io_error().map(|e| e.kind()) == Some(std::io::ErrorKind::NotFound);
+    if !(is_symlink && dangling) {
         return None;
     }
     let target = std::fs::read_link(p)
@@ -917,6 +920,36 @@ tasks:
         let peek = source.peek_revision(&LoadBudget::unbounded());
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(matches!(peek, Peek::Failed(_)), "{peek:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn folder_peek_on_a_symlink_to_an_unreadable_dir_is_failed() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("w.yaml"), "actions: {}\n").unwrap();
+        // The target lives OUTSIDE the workspace root, so the only way the walk
+        // reaches it is through the symlink. The link points INTO the mode-000
+        // directory, so following it fails with EACCES on the link's own path —
+        // a symlink error that is neither dangling nor a loop. (A link straight
+        // to `secret` already failed: walkdir's path-less loop-check error.)
+        let outside = TempDir::new().unwrap();
+        let secret = outside.path().join("secret");
+        let inner = secret.join("inner");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::write(inner.join("f.yaml"), "actions: {}\n").unwrap();
+        std::os::unix::fs::symlink(&inner, dir.path().join("link")).unwrap();
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_dir(&secret).is_ok() {
+            std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o755)).unwrap();
+            return; // running as root: permissions are not enforced
+        }
+        let source = FolderSource::new(dir.path().to_str().unwrap());
+        let peek = source.peek_revision(&LoadBudget::unbounded());
+        let load = source.load(&LoadBudget::unbounded());
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(matches!(peek, Peek::Failed(_)), "{peek:?}");
+        assert!(load.is_err(), "load must fail too");
     }
 
     #[test]
