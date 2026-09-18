@@ -5,7 +5,7 @@
 //! dispatch loop.
 
 use anyhow::{bail, Context, Result};
-use rmcp::model::{CallToolRequestParams, Content, RawContent};
+use rmcp::model::{CallToolRequestParams, ContentBlock};
 use std::collections::HashMap;
 use stroem_common::models::workflow::McpServerDef;
 
@@ -30,7 +30,7 @@ struct McpToolInfo {
 /// Type-erased trait for MCP service operations we need.
 #[async_trait::async_trait]
 trait McpService: Send + Sync {
-    async fn call_tool(&self, params: CallToolRequestParams) -> Result<Vec<Content>>;
+    async fn call_tool(&self, params: CallToolRequestParams) -> Result<Vec<ContentBlock>>;
     async fn cancel(self: Box<Self>) -> Result<()>;
 }
 
@@ -41,7 +41,7 @@ struct RmcpService {
 
 #[async_trait::async_trait]
 impl McpService for RmcpService {
-    async fn call_tool(&self, params: CallToolRequestParams) -> Result<Vec<Content>> {
+    async fn call_tool(&self, params: CallToolRequestParams) -> Result<Vec<ContentBlock>> {
         let result = self
             .service
             .call_tool(params)
@@ -308,10 +308,7 @@ impl McpClientManager {
 
                 let text = content
                     .iter()
-                    .filter_map(|c| match &c.raw {
-                        RawContent::Text(t) => Some(t.text.as_str()),
-                        _ => None,
-                    })
+                    .filter_map(|c| c.as_text().map(|t| t.text.as_str()))
                     .collect::<Vec<_>>()
                     .join("\n");
 
@@ -354,15 +351,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl McpService for MockMcpService {
-        async fn call_tool(&self, _params: CallToolRequestParams) -> Result<Vec<Content>> {
-            use rmcp::model::RawTextContent;
-            Ok(vec![Content {
-                raw: RawContent::Text(RawTextContent {
-                    text: self.response_text.clone(),
-                    meta: None,
-                }),
-                annotations: None,
-            }])
+        async fn call_tool(&self, _params: CallToolRequestParams) -> Result<Vec<ContentBlock>> {
+            Ok(vec![ContentBlock::text(self.response_text.clone())])
         }
 
         async fn cancel(self: Box<Self>) -> Result<()> {

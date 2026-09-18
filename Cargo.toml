@@ -82,7 +82,7 @@ dashmap = "6"
 bytes = "1"
 
 # MCP server.
-rmcp = { version = "1.5", default-features = false, features = ["server", "client", "macros", "transport-streamable-http-server", "transport-child-process", "transport-streamable-http-client-reqwest"] }
+rmcp = { version = "3.4", default-features = false, features = ["server", "client", "macros", "transport-streamable-http-server", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 schemars = "1"
 http = "1"
 

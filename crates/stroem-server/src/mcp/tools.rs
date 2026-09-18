@@ -221,7 +221,7 @@ fn normalize_task_input(
 ///
 /// Size is bounded upstream by `MCP_ARTIFACT_MAX_BYTES`, so base64 expansion of
 /// the returned payload stays proportional to that cap.
-fn artifact_content(content_type: &str, bytes: &[u8], uri: String) -> rmcp::model::Content {
+fn artifact_content(content_type: &str, bytes: &[u8], uri: String) -> rmcp::model::ContentBlock {
     use base64::Engine;
 
     let ct = content_type
@@ -232,20 +232,20 @@ fn artifact_content(content_type: &str, bytes: &[u8], uri: String) -> rmcp::mode
         .to_lowercase();
 
     if MCP_TEXT_PREFIXES.iter().any(|p| ct.starts_with(p)) {
-        return rmcp::model::Content::text(String::from_utf8_lossy(bytes).into_owned());
+        return rmcp::model::ContentBlock::text(String::from_utf8_lossy(bytes).into_owned());
     }
 
     let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
 
     if ct.starts_with("image/") {
-        rmcp::model::Content::image(b64, ct)
+        rmcp::model::ContentBlock::image(b64, ct)
     } else {
         let mime = if ct.is_empty() {
             "application/octet-stream".to_string()
         } else {
             ct
         };
-        rmcp::model::Content::resource(rmcp::model::ResourceContents::BlobResourceContents {
+        rmcp::model::ContentBlock::resource(rmcp::model::ResourceContents::BlobResourceContents {
             uri,
             mime_type: Some(mime),
             blob: b64,
@@ -304,13 +304,13 @@ async fn check_job_acl(
 }
 
 fn text_result(text: impl Into<String>) -> CallToolResult {
-    CallToolResult::success(vec![rmcp::model::Content::text(text)])
+    CallToolResult::success(vec![rmcp::model::ContentBlock::text(text)])
 }
 
 fn json_result(value: &impl Serialize) -> CallToolResult {
     let text = serde_json::to_string_pretty(value)
         .unwrap_or_else(|e| serde_json::json!({"error": e.to_string()}).to_string());
-    CallToolResult::success(vec![rmcp::model::Content::text(text)])
+    CallToolResult::success(vec![rmcp::model::ContentBlock::text(text)])
 }
 
 // ---------------------------------------------------------------------------

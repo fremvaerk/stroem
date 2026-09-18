@@ -1,7 +1,7 @@
 use super::auth::McpAuthContext;
 use crate::state::AppState;
 use rmcp::handler::server::tool::ToolRouter;
-use rmcp::model::{Implementation, ServerCapabilities, ServerInfo, ToolsCapability};
+use rmcp::model::{Implementation, ServerCapabilities, ServerConfig, ToolsCapability};
 use rmcp::{tool_handler, ServerHandler};
 use std::sync::Arc;
 
@@ -31,7 +31,7 @@ impl StromMcpHandler {
 
 #[tool_handler]
 impl ServerHandler for StromMcpHandler {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         let mut caps = ServerCapabilities::default();
         caps.tools = Some(ToolsCapability::default());
 
@@ -39,7 +39,7 @@ impl ServerHandler for StromMcpHandler {
         impl_info.name = "stroem".into();
         impl_info.version = env!("CARGO_PKG_VERSION").into();
 
-        let mut info = ServerInfo::default();
+        let mut info = ServerConfig::default();
         info.capabilities = caps;
         info.server_info = impl_info;
         info.instructions = Some(
