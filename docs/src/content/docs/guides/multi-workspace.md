@@ -54,6 +54,20 @@ At startup, and on every reload, all configured workspaces are loaded concurrent
 
 While a workspace is in its load-error state its tasks cannot be run and its files are not served. Cron triggers keep their schedule through the outage — the server treats the workspace's contents as *unknown*, not *removed* — but a fire that lands inside it cannot create a job: it is logged as `Trigger '<ws>/<name>' MISSED: workspace '<ws>' is unavailable`, has no side effects (a `cancel_previous` trigger does not cancel the running job), and is not replayed afterwards. Event-source consumers of the workspace are cancelled at the next reconcile (within about 30 seconds) and recreated once it loads again, which limits how much a consumer reads while jobs cannot be created for its events; events emitted before the cancellation takes effect are rejected and lost.
 
+## How workspaces are refreshed
+
+Each workspace has its own watcher loop. Every `poll_interval_secs`, the watcher checks its source for a new revision — a git workspace runs `ls-remote`, a folder workspace hashes directory content — without downloading anything yet.
+
+- If the check finds a new revision, the watcher reloads the workspace (git: fetch + checkout; folder: re-read).
+- If the check **fails** (network error, auth failure, timeout), the watcher skips this tick and keeps serving the last successfully loaded config — it does not fall back to a full reload on every failure. After `peek_failure_threshold` consecutive failed checks, the watcher forces one reload anyway, so a source that never reports a clean check still gets a chance to recover.
+- If a reload itself fails, the workspace becomes unavailable (its tasks cannot run and its files are not served — see [Git source](#git-source) above) and the watcher retries on a backoff that doubles each failed attempt up to `max_backoff_secs`, rather than retrying every tick.
+- Watcher start times are spread across the poll interval (a few seconds apart, deterministic per workspace name) so that, with many workspaces on the same interval, their checks don't all land in the same instant. A workspace that failed to load at server startup is the one exception — it retries on the very first tick instead of waiting for its offset.
+- At most 8 reloads run concurrently per server (`MAX_CONCURRENT_WORKSPACE_LOADS`), across all watchers. A reload that arrives while the workspace is already busy loading is skipped, not queued.
+
+Reloads triggered from outside the watcher — the API refresh endpoint, a webhook or scheduler trigger's `force_refresh`, or a peer server's reload notification — follow the same reload path but never queue behind a busy load: if a load is already in progress for that workspace, the request is rejected as busy rather than waiting.
+
+See [`workspace_reload`](/getting-started/configuration/#workspace_reload) for the tunable timeouts and thresholds above, and [Metrics](/operations/metrics/) for the `stroem_workspace_*` gauges that make watcher freshness and stalls observable.
+
 ## Disabling triggers per server
 
 Set `triggers: false` on a workspace entry to load it without firing any of its triggers on that server. Cron schedules are not scheduled, webhook names are not routed, and event-source consumers are not started (running consumers are cancelled on the next reconcile). Tasks and actions load normally and can still be run manually from the UI, CLI, API, or MCP.

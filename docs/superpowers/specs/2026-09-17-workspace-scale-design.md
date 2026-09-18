@@ -1,8 +1,6 @@
 # Workspace Scale (50+ Repos) — Design
 
-Status: revision 6 — **§ 4 APPROVED WITH NITS** (Codex round 6, 2026-09-18;
-nit applied, Appendix B), as scoped by § 4.10; §§ 3, 6, 7 are problem statements
-and are **not** approved
+Status: revision 6 — § 4 APPROVED WITH NITS (Codex round 6) and IMPLEMENTED on `feat/workspace-scale-peek-policy` (plan `docs/superpowers/plans/2026-09-18-workspace-scale-peek-policy.md`); §§ 3, 6, 7 are problem statements and are **not** approved
 Ships in: unscheduled
 Coordinates with: `2026-09-16-task-step-lifecycle-hardening-design.md` — § 4.7's
 availability transitions overlap that spec's "re-advance jobs after workspace
