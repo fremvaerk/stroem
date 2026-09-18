@@ -1,7 +1,9 @@
 //! Per-workspace watcher (spec § 4). One tick = at most one peek and at most
 //! one admitted load; the loop never waits on a mutex or a permit.
 
-use super::availability::{Caller, Effect, Event, PeekObservation, Policy, ReloadSettings};
+use super::availability::{
+    instant_after, Caller, Effect, Event, PeekObservation, Policy, ReloadSettings,
+};
 use super::entry::WorkspaceEntry;
 use super::library::ResolvedLibrary;
 use super::lifecycle::{jitter_offset, spawn_load, spawn_peek, LoadRequest, ReloadNotifier};
@@ -90,7 +92,7 @@ async fn peek_once(ctx: &WatcherCtx, policy: &Policy) -> Effect {
     let entry = &ctx.entry;
     let op_id = entry.next_op_id();
     let started_at = Instant::now();
-    let deadline = started_at + ctx.settings.peek_timeout;
+    let deadline = instant_after(started_at, ctx.settings.peek_timeout);
     entry.transition(
         Event::PeekStarted {
             op_id,
@@ -164,7 +166,7 @@ pub(crate) async fn attempt_watcher_load(ctx: &WatcherCtx, policy: &Policy) {
     };
     let op_id = entry.next_op_id();
     let started_at = Instant::now();
-    let deadline = started_at + ctx.settings.load_timeout;
+    let deadline = instant_after(started_at, ctx.settings.load_timeout);
     entry.transition(
         Event::LoadStarted {
             op_id,

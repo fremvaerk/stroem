@@ -428,6 +428,10 @@ pub struct WorkspaceReloadConfig {
     pub git_read_timeout_ms: u32,
 }
 
+/// Upper bound (24 h) on `workspace_reload.{peek,load}_timeout_secs` and
+/// `max_backoff_secs`, enforced by [`ServerConfig::validate`].
+pub const MAX_WORKSPACE_RELOAD_SECS: u64 = 86_400;
+
 fn default_peek_failure_threshold() -> u32 {
     5
 }
@@ -692,6 +696,19 @@ impl ServerConfig {
         }
         if r.peek_timeout_secs == 0 || r.load_timeout_secs == 0 || r.max_backoff_secs == 0 {
             anyhow::bail!("workspace_reload timeouts and max_backoff_secs must be at least 1");
+        }
+        // Bounded so every `Instant + Duration` derived from them is
+        // representable (spec § 4.5).
+        for (field, value) in [
+            ("peek_timeout_secs", r.peek_timeout_secs),
+            ("load_timeout_secs", r.load_timeout_secs),
+            ("max_backoff_secs", r.max_backoff_secs),
+        ] {
+            if value > MAX_WORKSPACE_RELOAD_SECS {
+                anyhow::bail!(
+                    "workspace_reload.{field} must be at most {MAX_WORKSPACE_RELOAD_SECS} (24h), got {value}"
+                );
+            }
         }
         let c_int_max = i32::MAX as u32;
         if r.git_connect_timeout_ms == 0
@@ -2800,10 +2817,20 @@ worker_token: "0123456789abcdef0123456789abcdef"
             |c| c.workspace_reload.max_backoff_secs = 0,
             |c| c.workspace_reload.git_connect_timeout_ms = 0,
             |c| c.workspace_reload.git_read_timeout_ms = u32::MAX,
+            |c| c.workspace_reload.peek_timeout_secs = 86_401,
+            |c| c.workspace_reload.load_timeout_secs = 86_401,
+            |c| c.workspace_reload.max_backoff_secs = 86_401,
+            |c| c.workspace_reload.load_timeout_secs = u64::MAX,
         ] {
             let mut c = base.clone();
             mutate(&mut c);
             assert!(c.validate().is_err());
         }
+        // The cap itself is accepted.
+        let mut c = base.clone();
+        c.workspace_reload.peek_timeout_secs = 86_400;
+        c.workspace_reload.load_timeout_secs = 86_400;
+        c.workspace_reload.max_backoff_secs = 86_400;
+        assert!(c.validate().is_ok(), "{:?}", c.validate());
     }
 }

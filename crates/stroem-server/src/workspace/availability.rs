@@ -176,6 +176,18 @@ impl Availability {
     }
 }
 
+/// Stand-in for a delay too large to add to an `Instant`: 24 h, the same cap
+/// config validation puts on `workspace_reload` timeouts and backoff.
+pub(crate) const OVERFLOW_FALLBACK: Duration = Duration::from_secs(86_400);
+
+/// `t + d`, saturating to `t + OVERFLOW_FALLBACK` when `d` is unrepresentable
+/// (an absurd git `poll_interval_secs`, which config does not cap).
+pub(crate) fn instant_after(t: Instant, d: Duration) -> Instant {
+    t.checked_add(d)
+        .or_else(|| t.checked_add(OVERFLOW_FALLBACK))
+        .unwrap_or(t)
+}
+
 /// The single writer of an [`Availability`].
 pub fn transition(a: &mut Availability, event: Event, policy: &Policy) -> Effect {
     match event {
@@ -273,13 +285,13 @@ pub fn transition(a: &mut Availability, event: Event, policy: &Policy) -> Effect
                 },
                 (false, Freshness::Fresh { .. }, _) => Freshness::Errored {
                     backoff: policy.poll_interval,
-                    next_attempt: completed_at + policy.poll_interval,
+                    next_attempt: instant_after(completed_at, policy.poll_interval),
                 },
                 (false, Freshness::Errored { backoff, .. }, Caller::Watcher) => {
                     let next = backoff.saturating_mul(2).min(policy.max_backoff);
                     Freshness::Errored {
                         backoff: next,
-                        next_attempt: completed_at + next,
+                        next_attempt: instant_after(completed_at, next),
                     }
                 }
                 (false, errored @ Freshness::Errored { .. }, Caller::External) => errored,
@@ -680,6 +692,30 @@ mod tests {
         let mut a = before;
         transition(&mut a, done(Caller::External, false, now), &policy());
         assert_eq!(a, before);
+    }
+
+    #[test]
+    fn instant_after_saturates_instead_of_panicking() {
+        let now = Instant::now();
+        assert_eq!(instant_after(now, POLL), now + POLL);
+        assert_eq!(instant_after(now, Duration::MAX), now + OVERFLOW_FALLBACK);
+    }
+
+    /// Git `poll_interval_secs` is not capped by config validation, so the
+    /// completion rows must not panic on an absurd poll interval.
+    #[test]
+    fn failure_with_an_absurd_poll_interval_does_not_panic() {
+        let now = Instant::now();
+        let p = Policy {
+            poll_interval: Duration::MAX,
+            max_backoff: Duration::MAX,
+            ..policy()
+        };
+        let mut a = fresh(0);
+        transition(&mut a, done(Caller::Watcher, false, now), &p);
+        assert!(a.is_errored());
+        transition(&mut a, done(Caller::Watcher, false, now), &p);
+        assert!(a.is_errored());
     }
 
     #[test]
