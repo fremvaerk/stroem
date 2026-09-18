@@ -198,20 +198,27 @@ impl WorkspaceManager {
                 let result = tokio::task::spawn_blocking(move || loader.load(&budget))
                     .await
                     .unwrap_or_else(|e| Err(anyhow::anyhow!("workspace load task panicked: {e}")));
-                (source, result)
+                // This workspace's own completion time, not the end of startup.
+                let completed_at = Instant::now();
+                (source, result, completed_at)
             });
             task_names.insert(abort_handle.id(), name);
         }
 
-        type LoadedWorkspace = (String, Arc<dyn WorkspaceSource>, Result<LoadOutcome>);
+        type LoadedWorkspace = (
+            String,
+            Arc<dyn WorkspaceSource>,
+            Result<LoadOutcome>,
+            Instant,
+        );
         let mut loaded: Vec<LoadedWorkspace> = Vec::with_capacity(task_names.len());
         while let Some(joined) = join_set.join_next_with_id().await {
             match joined {
-                Ok((id, (source, result))) => {
+                Ok((id, (source, result, completed_at))) => {
                     let name = task_names
                         .remove(&id)
                         .unwrap_or_else(|| "<unknown>".to_string());
-                    loaded.push((name, source, result));
+                    loaded.push((name, source, result, completed_at));
                 }
                 Err(join_err) => {
                     // A panicked load task must not take the server down.
@@ -227,33 +234,23 @@ impl WorkspaceManager {
             }
         }
 
-        for (name, source, result) in loaded {
-            let entry = match result {
-                Ok(LoadOutcome {
-                    mut config,
-                    warnings,
-                    revision,
-                }) => {
-                    for lib in resolved_libraries.values() {
-                        merge_library_into_workspace(&mut config, lib);
-                    }
-                    if !warnings.is_empty() {
-                        tracing::warn!(
-                            "Workspace '{}': {} file(s) skipped due to errors",
-                            name,
-                            warnings.len()
-                        );
-                    }
-                    WorkspaceEntry::loaded(name.clone(), source, config, warnings, revision)
-                }
-                Err(e) => {
-                    let err_msg = format!("{:#}", e);
-                    tracing::error!("Failed to load workspace '{}': {}", name, err_msg);
-                    let poll = Duration::from_secs(source.poll_interval_secs().max(1));
-                    let policy = settings.policy(poll);
-                    WorkspaceEntry::startup_failed(name.clone(), source, err_msg, &policy)
-                }
-            };
+        // Every result goes through the single writer (spec § 4.5 (9)). A
+        // failure lands in Errored with `next_attempt = completed_at`, so the
+        // watcher retries on its first, un-jittered tick.
+        for (name, source, result, completed_at) in loaded {
+            if let Err(e) = &result {
+                tracing::error!("Failed to load workspace '{}': {:#}", name, e);
+            }
+            let entry = WorkspaceEntry::pending(name.clone(), source);
+            let policy = settings.policy(entry.poll_interval());
+            let _ = entry.apply_load_result(
+                Caller::Startup,
+                None,
+                result,
+                &resolved_libraries,
+                &policy,
+                completed_at,
+            );
             entries.insert(name, Arc::new(entry));
         }
 

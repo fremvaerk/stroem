@@ -539,12 +539,16 @@ mod tests {
         let s = settings();
         let poll = Duration::from_secs(source.poll_interval_secs().max(1));
         let policy = s.policy(poll);
-        let entry = Arc::new(WorkspaceEntry::startup_failed(
-            "ws".to_string(),
-            source.clone(),
-            "boom".to_string(),
+        let entry = WorkspaceEntry::pending("ws".to_string(), source.clone());
+        let _ = entry.apply_load_result(
+            Caller::Startup,
+            None,
+            Err(anyhow::anyhow!("boom")),
+            &HashMap::new(),
             &policy,
-        ));
+            Instant::now(),
+        );
+        let entry = Arc::new(entry);
         let ctx = WatcherCtx {
             entry: entry.clone(),
             libs: Arc::new(HashMap::new()),

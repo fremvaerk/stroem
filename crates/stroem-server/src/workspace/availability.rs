@@ -13,7 +13,7 @@ pub enum Caller {
     Watcher,
     /// API refresh, peer reload notification, scheduler/webhook `force_refresh`.
     External,
-    /// `WorkspaceManager::new`.
+    /// `WorkspaceManager::new_with_reload`'s initial load of each workspace.
     Startup,
 }
 
@@ -160,18 +160,6 @@ impl Availability {
         Self {
             freshness: Freshness::Fresh {
                 consecutive_peek_failures: 0,
-            },
-            load_in_flight: None,
-            peek_in_flight: None,
-        }
-    }
-
-    /// Startup load failed: retry on the first watcher tick (spec § 4.4).
-    pub fn startup_failed(now: Instant, policy: &Policy) -> Self {
-        Self {
-            freshness: Freshness::Errored {
-                backoff: policy.poll_interval,
-                next_attempt: now,
             },
             load_in_flight: None,
             peek_in_flight: None,
@@ -642,20 +630,23 @@ mod tests {
 
     #[test]
     fn startup_failure_retries_on_the_first_tick() {
-        let now = Instant::now();
-        let mut a = Availability::startup_failed(now, &policy());
-        assert_eq!(
-            transition(&mut a, Event::Tick { now }, &policy()),
-            Effect::AttemptLoad
+        let completed_at = Instant::now();
+        let mut a = Availability::fresh();
+        transition(
+            &mut a,
+            done(Caller::Startup, false, completed_at),
+            &policy(),
         );
-        let mut b = fresh(0);
-        transition(&mut b, done(Caller::Startup, false, now), &policy());
         assert_eq!(
-            b.freshness,
+            a.freshness,
             Freshness::Errored {
                 backoff: POLL,
-                next_attempt: now
+                next_attempt: completed_at
             }
+        );
+        assert_eq!(
+            transition(&mut a, Event::Tick { now: completed_at }, &policy()),
+            Effect::AttemptLoad
         );
     }
 

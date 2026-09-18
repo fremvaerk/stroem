@@ -60,47 +60,30 @@ impl WorkspaceEntry {
         config: WorkspaceConfig,
         revision: Option<String>,
     ) -> Self {
-        Self::loaded(name.into(), source, config, Vec::new(), revision)
-    }
-
-    pub(crate) fn loaded(
-        name: String,
-        source: Arc<dyn WorkspaceSource>,
-        config: WorkspaceConfig,
-        warnings: Vec<String>,
-        revision: Option<String>,
-    ) -> Self {
         let published = Published {
             config: Arc::new(config),
             revision,
-            warnings,
+            warnings: Vec::new(),
             error: None,
             loaded_at: Some(Instant::now()),
             loaded_at_utc: Some(Utc::now()),
         };
-        Self::build(name, source, published, Availability::fresh())
+        Self::build(name.into(), source, published, Availability::fresh())
     }
 
-    pub(crate) fn startup_failed(
-        name: String,
-        source: Arc<dyn WorkspaceSource>,
-        error: String,
-        policy: &Policy,
-    ) -> Self {
+    /// An entry whose first load has not completed yet: serves nothing. Startup
+    /// builds one per workspace and finalizes it through
+    /// [`Self::apply_load_result`] with `Caller::Startup` (spec § 4.5 (9)).
+    pub(crate) fn pending(name: String, source: Arc<dyn WorkspaceSource>) -> Self {
         let published = Published {
             config: Arc::new(WorkspaceConfig::new()),
             revision: None,
             warnings: Vec::new(),
-            error: Some(error),
+            error: Some("workspace has not completed its first load".into()),
             loaded_at: None,
             loaded_at_utc: None,
         };
-        Self::build(
-            name,
-            source,
-            published,
-            Availability::startup_failed(Instant::now(), policy),
-        )
+        Self::build(name, source, published, Availability::fresh())
     }
 
     fn build(
@@ -152,9 +135,12 @@ impl WorkspaceEntry {
     }
 
     /// The ONLY writer of the published snapshot and of load-completion
-    /// availability (spec § 4.4). Every load path calls it — watcher,
-    /// external callers, startup. A failed load publishes nothing new: the
-    /// previous config and revision stay, hidden behind `error`.
+    /// availability (spec § 4.4). Every load path calls it — the watcher,
+    /// external callers (API refresh, peer notification, `force_refresh`) and
+    /// startup (`WorkspaceManager::new_with_reload`, on a [`Self::pending`]
+    /// entry, with each workspace's own completion time). A failed load
+    /// publishes nothing new: the previous config and revision stay, hidden
+    /// behind `error`.
     pub(crate) fn apply_load_result(
         &self,
         caller: Caller,
@@ -235,5 +221,57 @@ impl std::fmt::Debug for WorkspaceEntry {
             s.field("load_error", err);
         }
         s.finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workspace::availability::{Freshness, ReloadSettings};
+    use crate::workspace::test_support::{config_with, TestLoad, TestPeek, TestSource};
+
+    fn source() -> Arc<dyn WorkspaceSource> {
+        Arc::new(TestSource::new(TestLoad::Err("unused"), TestPeek::Failed))
+    }
+
+    /// Spec § 4.5 (9): startup finalizes each workspace through the single
+    /// writer, stamped with ITS OWN completion time — not the end of startup.
+    #[test]
+    fn startup_load_timestamps_each_workspace_at_its_own_completion() {
+        let entry = WorkspaceEntry::pending("ws".to_string(), source());
+        assert!(!entry.is_healthy(), "a pending entry serves nothing");
+        let policy = ReloadSettings::default().policy(entry.poll_interval());
+        let t0 = Instant::now() - Duration::from_secs(5);
+        let ok = LoadOutcome {
+            config: config_with("a"),
+            warnings: Vec::new(),
+            revision: Some("rev-a".to_string()),
+        };
+        let res =
+            entry.apply_load_result(Caller::Startup, None, Ok(ok), &HashMap::new(), &policy, t0);
+        assert!(res.is_ok());
+        let published = entry.published();
+        assert_eq!(published.loaded_at, Some(t0));
+        assert_eq!(published.revision.as_deref(), Some("rev-a"));
+        assert!(entry.is_healthy());
+        assert!(!entry.availability().is_errored());
+
+        let failed = WorkspaceEntry::pending("ws2".to_string(), source());
+        let t1 = Instant::now() - Duration::from_secs(3);
+        let res = failed.apply_load_result(
+            Caller::Startup,
+            None,
+            Err(anyhow::anyhow!("boom")),
+            &HashMap::new(),
+            &policy,
+            t1,
+        );
+        assert!(res.is_err());
+        assert!(!failed.is_healthy());
+        assert_eq!(failed.published().error.as_deref(), Some("boom"));
+        match failed.availability().freshness {
+            Freshness::Errored { next_attempt, .. } => assert_eq!(next_attempt, t1),
+            other => panic!("expected Errored, got {other:?}"),
+        }
     }
 }
