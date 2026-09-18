@@ -1,3 +1,4 @@
+pub mod budget;
 pub mod constants;
 pub mod dag;
 pub mod duration;
