@@ -357,7 +357,7 @@ impl WorkspaceSource for GitSource {
 /// before any thread uses libgit2.
 pub fn configure_global_timeouts(connect_ms: u32, read_ms: u32) -> Result<()> {
     // SAFETY: libgit2 requires global options to be set before other threads
-    // use it. `main` calls this before `WorkspaceManager::new`, the first
+    // use it. `main` calls this before `WorkspaceManager::new_with_reload`, the first
     // libgit2 user; values are validated to fit a C int by `ServerConfig::validate`.
     unsafe {
         git2::opts::set_server_connect_timeout_in_milliseconds(connect_ms as i32)

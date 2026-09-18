@@ -116,7 +116,7 @@ impl WorkspaceEntry {
         *self.availability.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    pub fn exec(&self) -> Arc<tokio::sync::Mutex<ReloadState>> {
+    pub(crate) fn exec(&self) -> Arc<tokio::sync::Mutex<ReloadState>> {
         Arc::clone(&self.exec)
     }
 
@@ -150,23 +150,15 @@ impl WorkspaceEntry {
         policy: &Policy,
         completed_at: Instant,
     ) -> Result<LoadSuccess> {
-        // Lock order: availability, then published. Readers take only the
-        // published read lock, so this cannot deadlock.
-        let mut availability = self.availability.lock().unwrap_or_else(|e| e.into_inner());
-        let mut published = self.published.write().unwrap_or_else(|e| e.into_inner());
-        let event = Event::LoadCompleted {
-            op_id,
-            caller,
-            ok: result.is_ok(),
-            completed_at,
-        };
-        transition(&mut availability, event, policy);
-        match result {
-            Ok(LoadOutcome {
-                mut config,
-                warnings,
-                revision,
-            }) => {
+        // Everything that does not touch shared state happens BEFORE the locks,
+        // so the critical section is only `transition` + the `Arc` swap
+        // (spec § 4.4 "one short critical section").
+        let result = result.map(
+            |LoadOutcome {
+                 mut config,
+                 warnings,
+                 revision,
+             }| {
                 for lib in libs.values() {
                     merge_library_into_workspace(&mut config, lib);
                 }
@@ -177,14 +169,33 @@ impl WorkspaceEntry {
                         warnings.len()
                     );
                 }
+                (Arc::new(config), warnings, revision)
+            },
+        );
+        let error = result.as_ref().err().map(|e| format!("{e:#}"));
+        let loaded_at_utc = Utc::now();
+        let event = Event::LoadCompleted {
+            op_id,
+            caller,
+            ok: result.is_ok(),
+            completed_at,
+        };
+
+        // Lock order: availability, then published. Readers take only the
+        // published read lock, so this cannot deadlock.
+        let mut availability = self.availability.lock().unwrap_or_else(|e| e.into_inner());
+        let mut published = self.published.write().unwrap_or_else(|e| e.into_inner());
+        transition(&mut availability, event, policy);
+        match result {
+            Ok((config, warnings, revision)) => {
                 let revision_changed = published.revision != revision;
                 *published = Arc::new(Published {
-                    config: Arc::new(config),
+                    config,
                     revision,
                     warnings,
                     error: None,
                     loaded_at: Some(completed_at),
-                    loaded_at_utc: Some(Utc::now()),
+                    loaded_at_utc: Some(loaded_at_utc),
                 });
                 Ok(LoadSuccess { revision_changed })
             }
@@ -194,7 +205,7 @@ impl WorkspaceEntry {
                     config: Arc::clone(&previous.config),
                     revision: previous.revision.clone(),
                     warnings: Vec::new(),
-                    error: Some(format!("{e:#}")),
+                    error,
                     loaded_at: previous.loaded_at,
                     loaded_at_utc: previous.loaded_at_utc,
                 });

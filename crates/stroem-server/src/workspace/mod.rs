@@ -356,10 +356,9 @@ impl WorkspaceManager {
         self.load_errors.insert(name.to_string(), error.to_string());
     }
 
-    /// Look up an entry by name (`pub(crate)` — the manager is the only
-    /// public surface outside the module). `start_watchers` iterates
-    /// `entries.values()` directly, so this remains unit-test-only.
-    #[allow(dead_code)]
+    /// Look up an entry by name. `start_watchers` iterates `entries.values()`
+    /// directly, so this is unit-test-only.
+    #[cfg(test)]
     pub(crate) fn entry(&self, name: &str) -> Option<Arc<WorkspaceEntry>> {
         self.entries.get(name).cloned()
     }
