@@ -11265,16 +11265,19 @@ async fn setup_multi_workspace_with(
 
     // Helper in-memory source
     struct InMemSource(WorkspaceConfig);
-    #[async_trait::async_trait]
     impl stroem_server::workspace::WorkspaceSource for InMemSource {
-        async fn load(&self) -> Result<(WorkspaceConfig, Vec<String>)> {
-            Ok((self.0.clone(), Vec::new()))
+        fn load(
+            &self,
+            _budget: &stroem_common::budget::LoadBudget,
+        ) -> Result<stroem_server::workspace::LoadOutcome> {
+            Ok(stroem_server::workspace::LoadOutcome {
+                config: self.0.clone(),
+                warnings: Vec::new(),
+                revision: Some("test-rev".to_string()),
+            })
         }
         fn path(&self) -> &std::path::Path {
             std::path::Path::new("/dev/null")
-        }
-        fn revision(&self) -> Option<String> {
-            Some("test-rev".to_string())
         }
     }
 
@@ -11578,16 +11581,19 @@ async fn setup_with_auth_and_acl() -> Result<(
     use stroem_server::workspace::WorkspaceEntry;
 
     struct InMemSource(WorkspaceConfig);
-    #[async_trait::async_trait]
     impl stroem_server::workspace::WorkspaceSource for InMemSource {
-        async fn load(&self) -> Result<(WorkspaceConfig, Vec<String>)> {
-            Ok((self.0.clone(), Vec::new()))
+        fn load(
+            &self,
+            _budget: &stroem_common::budget::LoadBudget,
+        ) -> Result<stroem_server::workspace::LoadOutcome> {
+            Ok(stroem_server::workspace::LoadOutcome {
+                config: self.0.clone(),
+                warnings: Vec::new(),
+                revision: Some("test-rev".to_string()),
+            })
         }
         fn path(&self) -> &std::path::Path {
             std::path::Path::new("/dev/null")
-        }
-        fn revision(&self) -> Option<String> {
-            Some("test-rev".to_string())
         }
     }
 
@@ -21495,16 +21501,19 @@ async fn test_scheduler_triggered_job_stores_revision() -> Result<()> {
     const EXPECTED_REVISION: &str = "sched-rev-deadbeef";
 
     struct InMemSourceWithRev(WorkspaceConfig);
-    #[async_trait::async_trait]
     impl stroem_server::workspace::WorkspaceSource for InMemSourceWithRev {
-        async fn load(&self) -> Result<(WorkspaceConfig, Vec<String>)> {
-            Ok((self.0.clone(), Vec::new()))
+        fn load(
+            &self,
+            _budget: &stroem_common::budget::LoadBudget,
+        ) -> Result<stroem_server::workspace::LoadOutcome> {
+            Ok(stroem_server::workspace::LoadOutcome {
+                config: self.0.clone(),
+                warnings: Vec::new(),
+                revision: Some(EXPECTED_REVISION.to_string()),
+            })
         }
         fn path(&self) -> &std::path::Path {
             std::path::Path::new("/dev/null")
-        }
-        fn revision(&self) -> Option<String> {
-            Some(EXPECTED_REVISION.to_string())
         }
     }
 
@@ -21705,16 +21714,19 @@ async fn test_healthz_returns_structured_json() -> Result<()> {
 /// touching the filesystem.
 struct FixedRevisionSource(WorkspaceConfig);
 
-#[async_trait::async_trait]
 impl stroem_server::workspace::WorkspaceSource for FixedRevisionSource {
-    async fn load(&self) -> Result<(WorkspaceConfig, Vec<String>)> {
-        Ok((self.0.clone(), Vec::new()))
+    fn load(
+        &self,
+        _budget: &stroem_common::budget::LoadBudget,
+    ) -> Result<stroem_server::workspace::LoadOutcome> {
+        Ok(stroem_server::workspace::LoadOutcome {
+            config: self.0.clone(),
+            warnings: Vec::new(),
+            revision: Some("test-rev".to_string()),
+        })
     }
     fn path(&self) -> &std::path::Path {
         std::path::Path::new("/dev/null")
-    }
-    fn revision(&self) -> Option<String> {
-        Some("test-rev".to_string())
     }
 }
 

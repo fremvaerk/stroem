@@ -1,8 +1,8 @@
 //! The workspace source contract (spec § 4.3).
 
 use anyhow::Result;
-use async_trait::async_trait;
 use std::path::Path;
+use stroem_common::budget::LoadBudget;
 use stroem_common::models::workflow::WorkspaceConfig;
 
 /// A successful load. Loading mutates no PUBLISHED state — only
@@ -14,25 +14,31 @@ pub struct LoadOutcome {
     pub revision: Option<String>,
 }
 
-/// Trait for workspace sources (folder, git, etc.)
-#[async_trait]
+/// Result of a cheap change check (spec § 4.3).
+#[derive(Debug)]
+pub enum Peek {
+    /// Remote/tree answered authoritatively; compare to the PUBLISHED revision.
+    Revision(String),
+    /// This source cannot peek; the caller must do a full load.
+    Unsupported,
+    /// Could not determine the current state — skip, keep the loaded config.
+    Failed(anyhow::Error),
+    /// Local state is unusable — only a full load can fix it.
+    LocalInvalid(anyhow::Error),
+}
+
+/// A workspace source. Both `load` and `peek_revision` BLOCK — always call
+/// them through `tokio::task::spawn_blocking`, never on a runtime thread.
 pub trait WorkspaceSource: Send + Sync {
-    /// Load/reload workspace configuration from this source.
-    /// Returns the config paired with per-file warnings for files that were
-    /// skipped due to read or parse errors.
-    async fn load(&self) -> Result<(WorkspaceConfig, Vec<String>)>;
-    /// Filesystem path where the workspace files reside
+    /// Load the workspace. Mutates no published state (spec § 4.6).
+    fn load(&self, budget: &LoadBudget) -> Result<LoadOutcome>;
+    /// Filesystem path where the workspace files reside.
     fn path(&self) -> &Path;
-    /// Current revision identifier (content hash for folder, git OID for git)
-    fn revision(&self) -> Option<String>;
-    /// Compute the current revision without a full load.
-    /// Used by the watcher to cheaply detect changes before doing expensive YAML parsing.
-    /// Default implementation returns `None` (forces a full reload every cycle).
-    fn peek_revision(&self) -> Option<String> {
-        None
+    /// Cheap change check. Default: cannot peek.
+    fn peek_revision(&self, _budget: &LoadBudget) -> Peek {
+        Peek::Unsupported
     }
     /// Polling interval in seconds for the background watcher.
-    /// Default is 30 seconds. Git sources override with their configured value.
     fn poll_interval_secs(&self) -> u64 {
         30
     }

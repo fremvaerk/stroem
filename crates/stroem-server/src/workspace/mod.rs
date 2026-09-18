@@ -8,15 +8,15 @@ pub mod source;
 pub use entry::{LoadSuccess, Published, ReloadState, WorkspaceEntry};
 pub use folder::load_folder_workspace;
 pub use library::{merge_library_into_workspace, LibraryResolver, ResolvedLibrary};
-pub use source::{LoadOutcome, WorkspaceSource};
+pub use source::{LoadOutcome, Peek, WorkspaceSource};
 
 use anyhow::{Context, Result};
-use async_trait::async_trait;
 use availability::{Caller, ReloadSettings};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use stroem_common::budget::LoadBudget;
 use stroem_common::models::workflow::WorkspaceConfig;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
@@ -25,9 +25,7 @@ use tokio_util::sync::CancellationToken;
 use crate::config::{GitAuthConfig, LibraryDef, WorkspaceSourceDef};
 
 /// Upper bound on how many workspace sources `WorkspaceManager::new` loads at
-/// once. Git sources block a whole worker thread each (see the comment in
-/// `new()`), so this also caps how many worker threads a large workspace
-/// fleet can occupy at startup.
+/// once.
 const MAX_CONCURRENT_WORKSPACE_LOADS: usize = 8;
 
 /// Outcome of `WorkspaceManager::reload_for_api`. Distinguishes the three
@@ -61,29 +59,24 @@ impl std::error::Error for ReloadApiError {}
 
 /// In-memory workspace source for testing
 struct InMemorySource {
-    config: tokio::sync::RwLock<WorkspaceConfig>,
+    config: WorkspaceConfig,
     /// Optional pinned revision. `None` mirrors the historic behaviour of
     /// `from_config`; `from_configs` can supply an explicit revision so tests
     /// exercising cross-workspace pinning observe a concrete value.
     revision: Option<String>,
 }
 
-#[async_trait]
 impl WorkspaceSource for InMemorySource {
-    async fn load(&self) -> Result<(WorkspaceConfig, Vec<String>)> {
-        Ok((self.config.read().await.clone(), Vec::new()))
+    fn load(&self, _budget: &LoadBudget) -> Result<LoadOutcome> {
+        Ok(LoadOutcome {
+            config: self.config.clone(),
+            warnings: Vec::new(),
+            revision: self.revision.clone(),
+        })
     }
 
     fn path(&self) -> &Path {
         Path::new("/dev/null")
-    }
-
-    fn revision(&self) -> Option<String> {
-        self.revision.clone()
-    }
-
-    fn peek_revision(&self) -> Option<String> {
-        None
     }
 }
 
@@ -177,17 +170,8 @@ impl WorkspaceManager {
         }
 
         // Load every workspace concurrently. `tokio::spawn` (via `JoinSet`)
-        // is required here rather than `join_all` over the loading futures:
-        // `GitSource::load` wraps its blocking libgit2 clone/fetch in
-        // `tokio::task::block_in_place`, which hands the *current* worker
-        // thread over to blocking work for the duration of the call — it
-        // does not yield that thread back to the runtime for other tasks to
-        // use. Polling several such futures on one task (as `join_all`
-        // would) still runs them one at a time; only separate spawned tasks,
-        // each occupying its own worker thread, actually run the blocking
-        // git operations in parallel. Without this, a single slow or
-        // misbehaving remote would still stall every other workspace's
-        // startup, exactly as it did before this change.
+        // Each load runs on the blocking pool (spawn_blocking), so no runtime
+        // worker thread is ever occupied by git or YAML work (spec § 4.5 (0)).
         let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_WORKSPACE_LOADS));
         let mut join_set = JoinSet::new();
         let mut task_names: HashMap<tokio::task::Id, String> =
@@ -199,17 +183,17 @@ impl WorkspaceManager {
                     .acquire_owned()
                     .await
                     .expect("semaphore is never closed");
-                let result = source.load().await;
+                let budget = LoadBudget::from_now(settings.load_timeout);
+                let loader = source.clone();
+                let result = tokio::task::spawn_blocking(move || loader.load(&budget))
+                    .await
+                    .unwrap_or_else(|e| Err(anyhow::anyhow!("workspace load task panicked: {e}")));
                 (source, result)
             });
             task_names.insert(abort_handle.id(), name);
         }
 
-        type LoadedWorkspace = (
-            String,
-            Arc<dyn WorkspaceSource>,
-            Result<(WorkspaceConfig, Vec<String>)>,
-        );
+        type LoadedWorkspace = (String, Arc<dyn WorkspaceSource>, Result<LoadOutcome>);
         let mut loaded: Vec<LoadedWorkspace> = Vec::with_capacity(task_names.len());
         while let Some(joined) = join_set.join_next_with_id().await {
             match joined {
@@ -235,7 +219,11 @@ impl WorkspaceManager {
 
         for (name, source, result) in loaded {
             let entry = match result {
-                Ok((mut config, warnings)) => {
+                Ok(LoadOutcome {
+                    mut config,
+                    warnings,
+                    revision,
+                }) => {
                     for lib in resolved_libraries.values() {
                         merge_library_into_workspace(&mut config, lib);
                     }
@@ -246,7 +234,6 @@ impl WorkspaceManager {
                             warnings.len()
                         );
                     }
-                    let revision = source.revision();
                     WorkspaceEntry::loaded(name.clone(), source, config, warnings, revision)
                 }
                 Err(e) => {
@@ -290,7 +277,7 @@ impl WorkspaceManager {
     /// The workspace is registered under the given name with a temp path.
     pub fn from_config(name: &str, config: WorkspaceConfig) -> Self {
         let source = Arc::new(InMemorySource {
-            config: tokio::sync::RwLock::new(config.clone()),
+            config: config.clone(),
             revision: None,
         });
         let mut entries = HashMap::new();
@@ -319,7 +306,7 @@ impl WorkspaceManager {
         let mut entries = HashMap::new();
         for (name, config, revision) in configs {
             let source = Arc::new(InMemorySource {
-                config: tokio::sync::RwLock::new(config.clone()),
+                config: config.clone(),
                 revision: revision.clone(),
             });
             entries.insert(
@@ -605,15 +592,11 @@ impl WorkspaceManager {
 
     /// Reload implementation. Caller must hold `entry.exec()`.
     async fn do_reload(&self, name: &str, entry: &WorkspaceEntry) -> Result<()> {
-        let result = entry
-            .source
-            .load()
+        let source = entry.source.clone();
+        let budget = LoadBudget::from_now(self.settings.load_timeout);
+        let result = tokio::task::spawn_blocking(move || source.load(&budget))
             .await
-            .map(|(config, warnings)| LoadOutcome {
-                config,
-                warnings,
-                revision: entry.source.revision(),
-            });
+            .unwrap_or_else(|e| Err(anyhow::anyhow!("workspace load task panicked: {e}")));
         let policy = self.settings.policy(entry.poll_interval());
         entry
             .apply_load_result(
@@ -703,13 +686,17 @@ impl WorkspaceManager {
                         // For git sources this does a lightweight ls-remote
                         // (blocking network call, so wrap in spawn_blocking).
                         let source_clone = entry.source.clone();
-                        let current_revision =
-                            tokio::task::spawn_blocking(move || source_clone.peek_revision())
-                                .await
-                                .unwrap_or_else(|e| {
-                                    tracing::error!("peek_revision task failed: {:#}", e);
-                                    None
-                                });
+                        let current_revision = tokio::task::spawn_blocking(move || {
+                            match source_clone.peek_revision(&LoadBudget::unbounded()) {
+                                Peek::Revision(r) => Some(r),
+                                _ => None,
+                            }
+                        })
+                        .await
+                        .unwrap_or_else(|e| {
+                            tracing::error!("peek_revision task failed: {:#}", e);
+                            None
+                        });
                         if current_revision == last_revision && current_revision.is_some() {
                             continue;
                         }
@@ -719,11 +706,12 @@ impl WorkspaceManager {
 
                     // Revision changed (or source doesn't support peek, or errored) — do full reload
                     let source = entry.source.clone();
-                    let result = source.load().await.map(|(config, warnings)| LoadOutcome {
-                        config,
-                        warnings,
-                        revision: source.revision(),
-                    });
+                    let budget = LoadBudget::from_now(settings.load_timeout);
+                    let result = tokio::task::spawn_blocking(move || source.load(&budget))
+                        .await
+                        .unwrap_or_else(|e| {
+                            Err(anyhow::anyhow!("workspace load task panicked: {e}"))
+                        });
                     let policy = settings.policy(entry.poll_interval());
                     match entry.apply_load_result(
                         Caller::Watcher,
@@ -1949,7 +1937,7 @@ tasks:
         .unwrap();
 
         let source = folder::FolderSource::new(temp.path().to_str().unwrap());
-        let (config, _) = source.load().await.unwrap();
+        let config = source.load(&LoadBudget::unbounded()).unwrap().config;
 
         // Verify both files were merged
         assert_eq!(config.actions.len(), 2);

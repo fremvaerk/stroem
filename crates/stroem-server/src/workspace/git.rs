@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
-use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock};
-use stroem_common::models::workflow::WorkspaceConfig;
+use std::sync::Arc;
+use stroem_common::budget::{DeadlineExceeded, LoadBudget};
 
+use super::source::{LoadOutcome, Peek};
 use super::WorkspaceSource;
 use crate::config::GitAuthConfig;
 
@@ -14,7 +14,6 @@ pub struct GitSource {
     git_ref: String,
     auth: Option<GitAuthConfig>,
     clone_dir: PathBuf,
-    revision: RwLock<Option<String>>,
     poll_interval_secs: u64,
 }
 
@@ -36,7 +35,6 @@ impl GitSource {
             git_ref: git_ref.to_string(),
             auth,
             clone_dir,
-            revision: RwLock::new(None),
             poll_interval_secs,
         })
     }
@@ -53,13 +51,13 @@ impl GitSource {
             git_ref: git_ref.to_string(),
             auth,
             clone_dir,
-            revision: RwLock::new(None),
             poll_interval_secs: 60,
         }
     }
 
     /// Clone or fetch the repository and return the HEAD OID
-    fn clone_or_fetch(&self) -> Result<String> {
+    fn clone_or_fetch(&self, budget: &LoadBudget) -> Result<String> {
+        budget.check()?;
         if self.clone_dir.exists() {
             // Open existing repo and fetch
             let repo = git2::Repository::open(&self.clone_dir)
@@ -68,12 +66,12 @@ impl GitSource {
             let mut remote = repo.find_remote("origin").context("No remote 'origin'")?;
 
             let mut fetch_options = git2::FetchOptions::new();
-            let callbacks = Self::build_remote_callbacks(&self.auth);
+            let callbacks = Self::build_remote_callbacks(&self.auth, budget);
             fetch_options.remote_callbacks(callbacks);
 
             remote
                 .fetch(&[&self.git_ref], Some(&mut fetch_options), None)
-                .context("Failed to fetch from origin")?;
+                .map_err(|e| git_error(e, budget, "Failed to fetch from origin"))?;
 
             // Get the fetched ref
             let fetch_head = repo
@@ -85,8 +83,9 @@ impl GitSource {
 
             // Reset working directory to fetched ref
             let object = repo.find_object(oid, None)?;
-            repo.reset(&object, git2::ResetType::Hard, None)
-                .context("Failed to reset to fetched ref")?;
+            let mut checkout = checkout_builder(budget);
+            repo.reset(&object, git2::ResetType::Hard, Some(&mut checkout))
+                .map_err(|e| git_error(e, budget, "Failed to reset to fetched ref"))?;
 
             Ok(oid.to_string())
         } else {
@@ -96,14 +95,15 @@ impl GitSource {
             let mut builder = git2::build::RepoBuilder::new();
 
             let mut fetch_options = git2::FetchOptions::new();
-            let callbacks = Self::build_remote_callbacks(&self.auth);
+            let callbacks = Self::build_remote_callbacks(&self.auth, budget);
             fetch_options.remote_callbacks(callbacks);
             builder.fetch_options(fetch_options);
+            builder.with_checkout(checkout_builder(budget));
             builder.branch(&self.git_ref);
 
             let repo = builder
                 .clone(&self.url, &self.clone_dir)
-                .context("Failed to clone git repository")?;
+                .map_err(|e| git_error(e, budget, "Failed to clone git repository"))?;
 
             let head = repo.head().context("Failed to get HEAD")?;
             let oid = head.target().context("HEAD has no target")?;
@@ -112,11 +112,20 @@ impl GitSource {
         }
     }
 
-    fn build_remote_callbacks(auth: &Option<GitAuthConfig>) -> git2::RemoteCallbacks<'_> {
+    fn build_remote_callbacks<'a>(
+        auth: &'a Option<GitAuthConfig>,
+        budget: &LoadBudget,
+    ) -> git2::RemoteCallbacks<'a> {
         let mut callbacks = git2::RemoteCallbacks::new();
 
         // Accept SSH host keys (the container has no known_hosts file)
         callbacks.certificate_check(|_cert, _host| Ok(git2::CertificateCheckStatus::CertificateOk));
+
+        // Cooperative total deadline for object transfer (spec § 4.5). Fires
+        // only between reads; a blocked read is bounded by the global libgit2
+        // server timeout instead.
+        let budget = *budget;
+        callbacks.transfer_progress(move |_| !budget.expired());
 
         if let Some(auth) = auth {
             match auth.auth_type.as_str() {
@@ -180,6 +189,32 @@ impl GitSource {
     }
 }
 
+/// Checkout options whose `notify` callback cancels during checkout PLANNING
+/// (`checkout_get_actions`) once `budget` expires. libgit2 cannot cancel the
+/// write phase that follows — see spec § 4.5. `notify_on` is required:
+/// notification types default to none.
+fn checkout_builder(budget: &LoadBudget) -> git2::build::CheckoutBuilder<'static> {
+    let budget = *budget;
+    let mut checkout = git2::build::CheckoutBuilder::new();
+    checkout.notify_on(
+        git2::CheckoutNotificationType::UPDATED
+            | git2::CheckoutNotificationType::CONFLICT
+            | git2::CheckoutNotificationType::DIRTY,
+    );
+    checkout.notify(move |_, _, _, _, _| !budget.expired());
+    checkout
+}
+
+/// A libgit2 error, reported as `DeadlineExceeded` when our own callbacks
+/// aborted it because the budget ran out.
+fn git_error(err: git2::Error, budget: &LoadBudget, msg: &'static str) -> anyhow::Error {
+    if budget.expired() {
+        anyhow::Error::new(DeadlineExceeded).context(format!("{msg}: {err}"))
+    } else {
+        anyhow::Error::new(err).context(msg)
+    }
+}
+
 /// Outcome of [`credential_decision`]: either hand over a real credential, or
 /// (for SSH URLs with no embedded username) first answer libgit2's
 /// username-only probe.
@@ -227,42 +262,58 @@ fn credential_decision(
     }
 }
 
-#[async_trait]
 impl WorkspaceSource for GitSource {
-    async fn load(&self) -> Result<(WorkspaceConfig, Vec<String>)> {
-        let oid = tokio::task::block_in_place(|| self.clone_or_fetch())
+    fn load(&self, budget: &LoadBudget) -> Result<LoadOutcome> {
+        let oid = self
+            .clone_or_fetch(budget)
             .context("Git clone/fetch failed")?;
-
-        if let Ok(mut rev) = self.revision.write() {
-            *rev = Some(oid);
-        }
-
-        super::load_folder_workspace(self.clone_dir.to_str().unwrap_or("")).await
+        let (config, warnings) =
+            super::folder::load_folder_workspace_with(&self.clone_dir, budget)?;
+        Ok(LoadOutcome {
+            config,
+            warnings,
+            revision: Some(oid),
+        })
     }
 
     fn path(&self) -> &Path {
         &self.clone_dir
     }
 
-    fn revision(&self) -> Option<String> {
-        self.revision.read().ok().and_then(|r| r.clone())
-    }
-
-    fn peek_revision(&self) -> Option<String> {
+    fn peek_revision(&self, budget: &LoadBudget) -> Peek {
         if !self.clone_dir.exists() {
-            return None; // Not cloned yet — force initial load
+            return Peek::LocalInvalid(anyhow::anyhow!(
+                "clone directory {} does not exist",
+                self.clone_dir.display()
+            ));
         }
-        let repo = git2::Repository::open(&self.clone_dir).ok()?;
-        let mut remote = repo.find_remote("origin").ok()?;
-        let callbacks = Self::build_remote_callbacks(&self.auth);
-        let connection = remote
-            .connect_auth(git2::Direction::Fetch, Some(callbacks), None)
-            .ok()?;
-        let refs = connection.list().ok()?;
+        let repo = match git2::Repository::open(&self.clone_dir) {
+            Ok(r) => r,
+            Err(e) => return Peek::LocalInvalid(anyhow::Error::new(e).context("open local clone")),
+        };
+        let mut remote = match repo.find_remote("origin") {
+            Ok(r) => r,
+            Err(e) => {
+                return Peek::LocalInvalid(anyhow::Error::new(e).context("find remote 'origin'"))
+            }
+        };
+        if budget.expired() {
+            return Peek::Failed(DeadlineExceeded.into());
+        }
+        let callbacks = Self::build_remote_callbacks(&self.auth, budget);
+        let connection = match remote.connect_auth(git2::Direction::Fetch, Some(callbacks), None) {
+            Ok(c) => c,
+            Err(e) => return Peek::Failed(anyhow::Error::new(e).context("connect to origin")),
+        };
+        let refs = match connection.list() {
+            Ok(r) => r,
+            Err(e) => return Peek::Failed(anyhow::Error::new(e).context("list remote refs")),
+        };
         let target = format!("refs/heads/{}", self.git_ref);
-        refs.iter()
-            .find(|r| r.name() == target)
-            .map(|r| r.oid().to_string())
+        match refs.iter().find(|r| r.name() == target) {
+            Some(r) => Peek::Revision(r.oid().to_string()),
+            None => Peek::Failed(anyhow::anyhow!("{target} is not advertised by origin")),
+        }
     }
 
     fn poll_interval_secs(&self) -> u64 {
@@ -273,6 +324,7 @@ impl WorkspaceSource for GitSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use stroem_common::budget::{is_deadline_exceeded, LoadBudget};
     use tempfile::TempDir;
 
     /// Network test (ignored by default): a private GitHub repository cloned
@@ -285,9 +337,9 @@ mod tests {
     ///   STROEM_TEST_SSH_KEY_PATH=/path/to/unauthorized_key \
     ///   STROEM_TEST_SSH_REPO=git@github.com:org/private-repo.git \
     ///   cargo test -p stroem-server --lib test_rejected_ssh_key_fails_fast -- --ignored --nocapture
-    #[tokio::test(flavor = "multi_thread")]
+    #[test]
     #[ignore = "needs network access and an SSH key that the remote rejects"]
-    async fn test_rejected_ssh_key_fails_fast() {
+    fn test_rejected_ssh_key_fails_fast() {
         let key_path = match std::env::var("STROEM_TEST_SSH_KEY_PATH") {
             Ok(p) => p,
             Err(_) => {
@@ -309,7 +361,7 @@ mod tests {
             GitSource::with_clone_dir(&url, "main", Some(auth), clone_dir.path().join("repo"));
 
         let started = std::time::Instant::now();
-        let result = source.load().await;
+        let result = source.load(&LoadBudget::unbounded());
         let elapsed = started.elapsed();
         eprintln!(
             "load() finished in {:?}: {:?}",
@@ -397,8 +449,8 @@ mod tests {
         .unwrap()
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_clone_local_repo_loads_config() {
+    #[test]
+    fn test_clone_local_repo_loads_config() {
         let (_bare_dir, url) = create_bare_repo(&[(
             "deploy.yaml",
             "actions:\n  greet:\n    type: script\n    script: echo hello\ntasks:\n  hello:\n    flow:\n      step1:\n        action: greet\n",
@@ -407,15 +459,15 @@ mod tests {
         let clone_dir = TempDir::new().unwrap();
         let source = GitSource::with_clone_dir(&url, "main", None, clone_dir.path().join("repo"));
 
-        let (config, _) = source.load().await.unwrap();
+        let config = source.load(&LoadBudget::unbounded()).unwrap().config;
         assert_eq!(config.actions.len(), 1);
         assert!(config.actions.contains_key("greet"));
         assert_eq!(config.tasks.len(), 1);
         assert!(config.tasks.contains_key("hello"));
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_clone_sets_revision_to_git_oid() {
+    #[test]
+    fn test_clone_sets_revision_to_git_oid() {
         let (_bare_dir, url) = create_bare_repo(&[(
             "test.yaml",
             "actions:\n  a:\n    type: script\n    script: echo hi\n",
@@ -424,10 +476,8 @@ mod tests {
         let clone_dir = TempDir::new().unwrap();
         let source = GitSource::with_clone_dir(&url, "main", None, clone_dir.path().join("repo"));
 
-        assert!(source.revision().is_none());
-        source.load().await.unwrap();
-
-        let rev = source.revision().unwrap();
+        let out = source.load(&LoadBudget::unbounded()).unwrap();
+        let rev = out.revision.unwrap();
         assert_eq!(rev.len(), 40, "Git SHA-1 should be 40 hex chars");
         assert!(
             rev.chars().all(|c| c.is_ascii_hexdigit()),
@@ -436,8 +486,8 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_fetch_detects_new_commit() {
+    #[test]
+    fn test_fetch_detects_new_commit() {
         let (bare_dir, url) = create_bare_repo(&[(
             "test.yaml",
             "actions:\n  a:\n    type: script\n    script: echo v1\n",
@@ -446,8 +496,11 @@ mod tests {
         let clone_dir = TempDir::new().unwrap();
         let source = GitSource::with_clone_dir(&url, "main", None, clone_dir.path().join("repo"));
 
-        source.load().await.unwrap();
-        let rev1 = source.revision().unwrap();
+        let rev1 = source
+            .load(&LoadBudget::unbounded())
+            .unwrap()
+            .revision
+            .unwrap();
 
         // Push a new commit to the bare repo
         add_commit(
@@ -460,14 +513,17 @@ mod tests {
             "update",
         );
 
-        source.load().await.unwrap();
-        let rev2 = source.revision().unwrap();
+        let rev2 = source
+            .load(&LoadBudget::unbounded())
+            .unwrap()
+            .revision
+            .unwrap();
 
         assert_ne!(rev1, rev2, "Revision should change after new commit");
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_reload_no_changes_same_revision() {
+    #[test]
+    fn test_reload_no_changes_same_revision() {
         let (_bare_dir, url) = create_bare_repo(&[(
             "test.yaml",
             "actions:\n  a:\n    type: script\n    script: echo stable\n",
@@ -476,17 +532,22 @@ mod tests {
         let clone_dir = TempDir::new().unwrap();
         let source = GitSource::with_clone_dir(&url, "main", None, clone_dir.path().join("repo"));
 
-        source.load().await.unwrap();
-        let rev1 = source.revision().unwrap();
-
-        source.load().await.unwrap();
-        let rev2 = source.revision().unwrap();
+        let rev1 = source
+            .load(&LoadBudget::unbounded())
+            .unwrap()
+            .revision
+            .unwrap();
+        let rev2 = source
+            .load(&LoadBudget::unbounded())
+            .unwrap()
+            .revision
+            .unwrap();
 
         assert_eq!(rev1, rev2, "Revision should not change without new commits");
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_config_updates_after_commit() {
+    #[test]
+    fn test_config_updates_after_commit() {
         let (bare_dir, url) = create_bare_repo(&[(
             "test.yaml",
             "actions:\n  greet:\n    type: script\n    script: echo hello\ntasks:\n  t1:\n    flow:\n      s1:\n        action: greet\n",
@@ -495,7 +556,7 @@ mod tests {
         let clone_dir = TempDir::new().unwrap();
         let source = GitSource::with_clone_dir(&url, "main", None, clone_dir.path().join("repo"));
 
-        let (config1, _) = source.load().await.unwrap();
+        let config1 = source.load(&LoadBudget::unbounded()).unwrap().config;
         assert_eq!(config1.actions.len(), 1);
 
         // Add a second action
@@ -509,14 +570,14 @@ mod tests {
             "add build action",
         );
 
-        let (config2, _) = source.load().await.unwrap();
+        let config2 = source.load(&LoadBudget::unbounded()).unwrap().config;
         assert_eq!(config2.actions.len(), 2);
         assert!(config2.actions.contains_key("greet"));
         assert!(config2.actions.contains_key("build"));
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_clone_specific_branch() {
+    #[test]
+    fn test_clone_specific_branch() {
         let (bare_dir, url) = create_bare_repo(&[(
             "test.yaml",
             "actions:\n  main_action:\n    type: script\n    script: echo main\n",
@@ -552,7 +613,7 @@ mod tests {
         let source =
             GitSource::with_clone_dir(&url, "develop", None, clone_dir.path().join("repo"));
 
-        let (config, _) = source.load().await.unwrap();
+        let config = source.load(&LoadBudget::unbounded()).unwrap().config;
         assert!(
             config.actions.contains_key("dev_action"),
             "Should have develop branch action"
@@ -563,8 +624,8 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_clone_creates_working_directory() {
+    #[test]
+    fn test_clone_creates_working_directory() {
         let (_bare_dir, url) = create_bare_repo(&[(
             "deploy.yaml",
             "actions:\n  a:\n    type: script\n    script: echo hi\n",
@@ -575,7 +636,7 @@ mod tests {
         assert!(!repo_dir.exists());
 
         let source = GitSource::with_clone_dir(&url, "main", None, repo_dir.clone());
-        source.load().await.unwrap();
+        source.load(&LoadBudget::unbounded()).unwrap();
 
         assert!(repo_dir.exists(), "Clone dir should exist after load");
         assert!(
@@ -584,8 +645,8 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_multiple_yaml_files_merged() {
+    #[test]
+    fn test_multiple_yaml_files_merged() {
         let (_bare_dir, url) = create_bare_repo(&[
             (
                 "actions.yaml",
@@ -600,7 +661,7 @@ mod tests {
         let clone_dir = TempDir::new().unwrap();
         let source = GitSource::with_clone_dir(&url, "main", None, clone_dir.path().join("repo"));
 
-        let (config, _) = source.load().await.unwrap();
+        let config = source.load(&LoadBudget::unbounded()).unwrap().config;
         assert_eq!(config.actions.len(), 2, "Both actions should be merged");
         assert!(config.actions.contains_key("greet"));
         assert!(config.actions.contains_key("build"));
@@ -651,20 +712,6 @@ mod tests {
     }
 
     #[test]
-    fn test_revision_before_load_returns_none() {
-        let source = GitSource::new(
-            "test-workspace",
-            "https://github.com/example/repo.git",
-            "main",
-            None,
-            60,
-        )
-        .unwrap();
-
-        assert_eq!(source.revision(), None);
-    }
-
-    #[test]
     fn test_path_returns_clone_dir() {
         let source = GitSource::new(
             "test-workspace",
@@ -699,7 +746,7 @@ mod tests {
 
         // Should not panic
         let auth = Some(auth);
-        let _callbacks = GitSource::build_remote_callbacks(&auth);
+        let _callbacks = GitSource::build_remote_callbacks(&auth, &LoadBudget::unbounded());
     }
 
     #[test]
@@ -714,7 +761,7 @@ mod tests {
 
         // Should not panic
         let auth = Some(auth);
-        let _callbacks = GitSource::build_remote_callbacks(&auth);
+        let _callbacks = GitSource::build_remote_callbacks(&auth, &LoadBudget::unbounded());
     }
 
     #[test]
@@ -729,7 +776,7 @@ mod tests {
 
         // Should not panic (no-op for unknown types)
         let auth = Some(auth);
-        let _callbacks = GitSource::build_remote_callbacks(&auth);
+        let _callbacks = GitSource::build_remote_callbacks(&auth, &LoadBudget::unbounded());
     }
 
     #[test]
@@ -747,7 +794,7 @@ mod tests {
 
         // Should not panic — uses ssh_key_from_memory
         let auth = Some(auth);
-        let _callbacks = GitSource::build_remote_callbacks(&auth);
+        let _callbacks = GitSource::build_remote_callbacks(&auth, &LoadBudget::unbounded());
     }
 
     #[test]
@@ -762,7 +809,7 @@ mod tests {
 
         // Should not panic, falls back to agent
         let auth = Some(auth);
-        let _callbacks = GitSource::build_remote_callbacks(&auth);
+        let _callbacks = GitSource::build_remote_callbacks(&auth, &LoadBudget::unbounded());
     }
 
     #[test]
@@ -777,7 +824,7 @@ mod tests {
 
         // Should not panic, defaults to empty string for token
         let auth = Some(auth);
-        let _callbacks = GitSource::build_remote_callbacks(&auth);
+        let _callbacks = GitSource::build_remote_callbacks(&auth, &LoadBudget::unbounded());
     }
 
     #[test]
@@ -792,7 +839,7 @@ mod tests {
 
         // Should not panic, defaults username to "x-access-token"
         let auth = Some(auth);
-        let _callbacks = GitSource::build_remote_callbacks(&auth);
+        let _callbacks = GitSource::build_remote_callbacks(&auth, &LoadBudget::unbounded());
     }
 
     #[test]
@@ -808,7 +855,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = source.clone_or_fetch();
+        let result = source.clone_or_fetch(&LoadBudget::unbounded());
         assert!(result.is_err());
 
         let err_msg = result.unwrap_err().to_string();
@@ -870,7 +917,7 @@ mod tests {
     }
 
     #[test]
-    fn test_peek_revision_before_clone_returns_none() {
+    fn test_peek_revision_before_clone_returns_local_invalid() {
         let clone_dir = TempDir::new().unwrap();
         // Point to a subdirectory that doesn't exist yet
         let source = GitSource::with_clone_dir(
@@ -880,14 +927,14 @@ mod tests {
             clone_dir.path().join("not-cloned"),
         );
 
-        assert!(
-            source.peek_revision().is_none(),
-            "peek_revision should return None when clone dir doesn't exist"
-        );
+        assert!(matches!(
+            source.peek_revision(&LoadBudget::unbounded()),
+            Peek::LocalInvalid(_)
+        ));
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_peek_revision_matches_revision_after_load() {
+    #[test]
+    fn test_peek_revision_matches_revision_after_load() {
         let (_bare_dir, url) = create_bare_repo(&[(
             "test.yaml",
             "actions:\n  a:\n    type: script\n    script: echo hi\n",
@@ -896,9 +943,15 @@ mod tests {
         let clone_dir = TempDir::new().unwrap();
         let source = GitSource::with_clone_dir(&url, "main", None, clone_dir.path().join("repo"));
 
-        source.load().await.unwrap();
-        let stored_revision = source.revision().unwrap();
-        let peeked_revision = source.peek_revision().unwrap();
+        let stored_revision = source
+            .load(&LoadBudget::unbounded())
+            .unwrap()
+            .revision
+            .unwrap();
+        let peeked_revision = match source.peek_revision(&LoadBudget::unbounded()) {
+            Peek::Revision(r) => r,
+            other => panic!("expected Revision, got {other:?}"),
+        };
 
         assert_eq!(
             stored_revision, peeked_revision,
@@ -906,8 +959,8 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_peek_revision_detects_new_commit() {
+    #[test]
+    fn test_peek_revision_detects_new_commit() {
         let (bare_dir, url) = create_bare_repo(&[(
             "test.yaml",
             "actions:\n  a:\n    type: script\n    script: echo v1\n",
@@ -916,8 +969,11 @@ mod tests {
         let clone_dir = TempDir::new().unwrap();
         let source = GitSource::with_clone_dir(&url, "main", None, clone_dir.path().join("repo"));
 
-        source.load().await.unwrap();
-        let stored_revision = source.revision().unwrap();
+        let stored_revision = source
+            .load(&LoadBudget::unbounded())
+            .unwrap()
+            .revision
+            .unwrap();
 
         // Push a new commit to the bare repo
         add_commit(
@@ -930,7 +986,10 @@ mod tests {
             "update",
         );
 
-        let peeked_revision = source.peek_revision().unwrap();
+        let peeked_revision = match source.peek_revision(&LoadBudget::unbounded()) {
+            Peek::Revision(r) => r,
+            other => panic!("expected Revision, got {other:?}"),
+        };
         assert_ne!(
             stored_revision, peeked_revision,
             "peek_revision should detect new remote commit"
@@ -1046,8 +1105,8 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_local_bare_repo_clone_has_no_auth_callback_installed() {
+    #[test]
+    fn test_local_bare_repo_clone_has_no_auth_callback_installed() {
         // Regression guard: local file:// clones (used throughout this test
         // module) pass `auth: None`, so `build_remote_callbacks` must not
         // install a `credentials` callback at all — confirming the fail-fast
@@ -1063,7 +1122,7 @@ mod tests {
 
         // Would fail if a credentials callback were installed and invoked
         // unexpectedly for a no-auth local clone.
-        source.load().await.unwrap();
+        source.load(&LoadBudget::unbounded()).unwrap();
     }
 
     /// git2 0.21 made ssh/https opt-in (`default = []`). Production remotes
@@ -1073,5 +1132,118 @@ mod tests {
         let version = git2::Version::get();
         assert!(version.ssh(), "libgit2 built without SSH transport");
         assert!(version.https(), "libgit2 built without HTTPS transport");
+    }
+
+    // ─── Task 9: Peek classification and git deadlines ─────────────────
+
+    const YAML_V1: &str = "actions:\n  a:\n    type: script\n    script: echo v1\n";
+    const YAML_V2: &str = "actions:\n  a:\n    type: script\n    script: echo v2\n";
+
+    fn unbounded() -> LoadBudget {
+        LoadBudget::unbounded()
+    }
+
+    #[test]
+    fn load_runs_outside_any_tokio_runtime() {
+        // block_in_place would panic here: loading must be plain blocking code.
+        let (_bare, url) = create_bare_repo(&[("test.yaml", YAML_V1)]);
+        let dir = TempDir::new().unwrap();
+        let source = GitSource::with_clone_dir(&url, "main", None, dir.path().join("repo"));
+        let out = source.load(&unbounded()).unwrap();
+        assert_eq!(out.revision.as_deref().map(str::len), Some(40));
+        assert_eq!(out.config.actions.len(), 1);
+    }
+
+    #[test]
+    fn peek_classifies_a_missing_clone_as_local_invalid() {
+        let dir = TempDir::new().unwrap();
+        let source =
+            GitSource::with_clone_dir("file:///nowhere", "main", None, dir.path().join("repo"));
+        assert!(matches!(
+            source.peek_revision(&unbounded()),
+            Peek::LocalInvalid(_)
+        ));
+    }
+
+    #[test]
+    fn peek_classifies_a_corrupt_checkout_as_local_invalid() {
+        let dir = TempDir::new().unwrap();
+        let clone = dir.path().join("repo");
+        std::fs::create_dir_all(&clone).unwrap();
+        std::fs::write(clone.join("not-a-repo"), "x").unwrap();
+        let source = GitSource::with_clone_dir("file:///nowhere", "main", None, clone);
+        assert!(matches!(
+            source.peek_revision(&unbounded()),
+            Peek::LocalInvalid(_)
+        ));
+    }
+
+    #[test]
+    fn peek_classifies_a_missing_origin_as_local_invalid() {
+        let (_bare, url) = create_bare_repo(&[("test.yaml", YAML_V1)]);
+        let dir = TempDir::new().unwrap();
+        let clone = dir.path().join("repo");
+        let source = GitSource::with_clone_dir(&url, "main", None, clone.clone());
+        source.load(&unbounded()).unwrap();
+        git2::Repository::open(&clone)
+            .unwrap()
+            .remote_delete("origin")
+            .unwrap();
+        assert!(matches!(
+            source.peek_revision(&unbounded()),
+            Peek::LocalInvalid(_)
+        ));
+    }
+
+    #[test]
+    fn peek_classifies_an_unreachable_remote_as_failed() {
+        let (bare, url) = create_bare_repo(&[("test.yaml", YAML_V1)]);
+        let dir = TempDir::new().unwrap();
+        let source = GitSource::with_clone_dir(&url, "main", None, dir.path().join("repo"));
+        source.load(&unbounded()).unwrap();
+        drop(bare); // the remote disappears
+        assert!(matches!(
+            source.peek_revision(&unbounded()),
+            Peek::Failed(_)
+        ));
+    }
+
+    #[test]
+    fn peek_classifies_a_missing_branch_as_failed() {
+        let (_bare, url) = create_bare_repo(&[("test.yaml", YAML_V1)]);
+        let dir = TempDir::new().unwrap();
+        let clone = dir.path().join("repo");
+        GitSource::with_clone_dir(&url, "main", None, clone.clone())
+            .load(&unbounded())
+            .unwrap();
+        let other = GitSource::with_clone_dir(&url, "no-such-branch", None, clone);
+        assert!(matches!(other.peek_revision(&unbounded()), Peek::Failed(_)));
+    }
+
+    #[test]
+    fn peek_revision_matches_the_loaded_revision() {
+        let (_bare, url) = create_bare_repo(&[("test.yaml", YAML_V1)]);
+        let dir = TempDir::new().unwrap();
+        let source = GitSource::with_clone_dir(&url, "main", None, dir.path().join("repo"));
+        let loaded = source.load(&unbounded()).unwrap().revision.unwrap();
+        match source.peek_revision(&unbounded()) {
+            Peek::Revision(r) => assert_eq!(r, loaded),
+            other => panic!("expected Revision, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn expired_budget_fails_before_touching_the_checkout() {
+        let (bare, url) = create_bare_repo(&[("test.yaml", YAML_V1)]);
+        let dir = TempDir::new().unwrap();
+        let clone = dir.path().join("repo");
+        let source = GitSource::with_clone_dir(&url, "main", None, clone.clone());
+        source.load(&unbounded()).unwrap();
+        add_commit(bare.path(), "main", &[("test.yaml", YAML_V2)], "v2");
+        let expired = LoadBudget::until(std::time::Instant::now());
+        let err = source.load(&expired).unwrap_err();
+        assert!(is_deadline_exceeded(&err), "{err:#}");
+        let on_disk = std::fs::read_to_string(clone.join("test.yaml")).unwrap();
+        assert!(on_disk.contains("echo v1"), "checkout must be untouched");
     }
 }
