@@ -89,13 +89,15 @@ server:
     periodSeconds: 5
     timeoutSeconds: 5
     failureThreshold: 3
-  startupProbe: {}
-  #  enabled: true
-  #  httpGet:
-  #    path: /healthz
-  #    port: http
-  #  failureThreshold: 30
-  #  periodSeconds: 2
+  # Workspace loading blocks the listener at boot (docs/operations/sizing.md):
+  # allow up to 5 minutes before liveness/readiness take over.
+  startupProbe:
+    enabled: true
+    httpGet:
+      path: /healthz
+      port: http
+    failureThreshold: 30
+    periodSeconds: 10
   logStorage:
     persistence:
       enabled: false
@@ -153,7 +155,15 @@ server:
   # Extra volumes and mounts (e.g., for SSH deploy keys)
   extraVolumes: []
   extraVolumeMounts: []
-  resources: {}
+  # Sized for ~50 git workspaces (docs/operations/sizing.md). A CPU limit
+  # below 1 core used to leave the tokio runtime with ONE worker thread.
+  resources:
+    requests:
+      cpu: "1"
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 2Gi
 
 worker:
   # Worker-specific startup script. Runs after the shared startupScript
