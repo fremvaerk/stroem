@@ -55,14 +55,40 @@ impl GitSource {
         }
     }
 
-    /// Clone or fetch the repository and return the HEAD OID
+    /// Clone or fetch the repository and return the HEAD OID.
+    ///
+    /// Reuses `clone_dir` only if it both exists AND opens as a valid git
+    /// repository — an aborted clone (e.g. a deadline that fired mid-clone)
+    /// can leave the directory present but empty or partial, and libgit2
+    /// never re-clones into a directory it thinks is already a checkout. A
+    /// directory that fails to open is removed and re-cloned instead of
+    /// wedging the workspace in a permanently-broken state.
     fn clone_or_fetch(&self, budget: &LoadBudget) -> Result<String> {
         budget.check()?;
-        if self.clone_dir.exists() {
-            // Open existing repo and fetch
-            let repo = git2::Repository::open(&self.clone_dir)
-                .context("Failed to open existing git clone")?;
 
+        let existing_repo = if self.clone_dir.exists() {
+            match git2::Repository::open(&self.clone_dir) {
+                Ok(repo) => Some(repo),
+                Err(e) => {
+                    tracing::warn!(
+                        "Workspace clone dir {} is not a usable repository ({e}); re-cloning",
+                        self.clone_dir.display()
+                    );
+                    std::fs::remove_dir_all(&self.clone_dir).with_context(|| {
+                        format!(
+                            "Failed to remove unusable clone directory {}",
+                            self.clone_dir.display()
+                        )
+                    })?;
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        if let Some(repo) = existing_repo {
+            // Fetch into the existing checkout.
             let mut remote = repo.find_remote("origin").context("No remote 'origin'")?;
 
             let mut fetch_options = git2::FetchOptions::new();
@@ -101,9 +127,12 @@ impl GitSource {
             builder.with_checkout(checkout_builder(budget));
             builder.branch(&self.git_ref);
 
-            let repo = builder
-                .clone(&self.url, &self.clone_dir)
-                .map_err(|e| git_error(e, budget, "Failed to clone git repository"))?;
+            let repo = builder.clone(&self.url, &self.clone_dir).map_err(|e| {
+                // A partial/aborted clone leaves `clone_dir` behind; the next
+                // load must re-clone rather than treat it as a valid checkout.
+                let _ = std::fs::remove_dir_all(&self.clone_dir);
+                git_error(e, budget, "Failed to clone git repository")
+            })?;
 
             let head = repo.head().context("Failed to get HEAD")?;
             let oid = head.target().context("HEAD has no target")?;
@@ -205,8 +234,10 @@ fn checkout_builder(budget: &LoadBudget) -> git2::build::CheckoutBuilder<'static
     checkout
 }
 
-/// A libgit2 error, reported as `DeadlineExceeded` when our own callbacks
-/// aborted it because the budget ran out.
+/// A libgit2 error, reported as `DeadlineExceeded` whenever the budget has
+/// already expired by the time libgit2 errors (usually because our own
+/// callbacks aborted it) — the original libgit2 message is kept in the
+/// context either way.
 fn git_error(err: git2::Error, budget: &LoadBudget, msg: &'static str) -> anyhow::Error {
     if budget.expired() {
         anyhow::Error::new(DeadlineExceeded).context(format!("{msg}: {err}"))
@@ -1245,5 +1276,34 @@ mod tests {
         assert!(is_deadline_exceeded(&err), "{err:#}");
         let on_disk = std::fs::read_to_string(clone.join("test.yaml")).unwrap();
         assert!(on_disk.contains("echo v1"), "checkout must be untouched");
+    }
+
+    #[test]
+    fn an_empty_clone_dir_is_recloned() {
+        let (_bare, url) = create_bare_repo(&[("test.yaml", YAML_V1)]);
+        let dir = TempDir::new().unwrap();
+        let clone = dir.path().join("repo");
+        // Simulate an aborted clone: the directory exists (libgit2 created it)
+        // but has nothing in it — not a usable git repository.
+        std::fs::create_dir_all(&clone).unwrap();
+        let source = GitSource::with_clone_dir(&url, "main", None, clone);
+
+        let out = source.load(&unbounded()).unwrap();
+        assert!(out.revision.is_some());
+        assert_eq!(out.config.actions.len(), 1);
+    }
+
+    #[test]
+    fn a_corrupt_clone_dir_is_recloned() {
+        let (_bare, url) = create_bare_repo(&[("test.yaml", YAML_V1)]);
+        let dir = TempDir::new().unwrap();
+        let clone = dir.path().join("repo");
+        std::fs::create_dir_all(&clone).unwrap();
+        std::fs::write(clone.join("junk"), "not a repo").unwrap();
+        let source = GitSource::with_clone_dir(&url, "main", None, clone);
+
+        let out = source.load(&unbounded()).unwrap();
+        assert!(out.revision.is_some());
+        assert_eq!(out.config.actions.len(), 1);
     }
 }

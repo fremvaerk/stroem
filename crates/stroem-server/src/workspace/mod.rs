@@ -2513,9 +2513,9 @@ tasks:
     }
 
     /// `WorkspaceManager::new` must load workspaces concurrently: two git
-    /// sources (backed by local bare repos, exercising the real
-    /// `block_in_place` clone path) plus a folder source pointing at a
-    /// non-existent path all load correctly, and none blocks the others.
+    /// sources (backed by local bare repos, exercising the real blocking
+    /// clone path) plus a folder source pointing at a non-existent path all
+    /// load correctly, and none blocks the others.
     #[tokio::test(flavor = "multi_thread")]
     async fn test_new_loads_git_and_folder_workspaces_concurrently() {
         let (_bare1, url1) = create_bare_repo_for_test(&[(

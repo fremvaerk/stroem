@@ -38,9 +38,22 @@ impl FolderSource {
             }
             let entry = match entry {
                 Ok(e) => e,
-                Err(e) => {
-                    return Peek::Failed(anyhow::Error::new(e).context("walk workspace folder"))
-                }
+                Err(e) => match symlink_walk_error(&e) {
+                    Some((p, target)) => {
+                        // A dangling symlink or a symlink loop is stable local
+                        // state (stale venvs, editor lock files, node_modules/.bin
+                        // leftovers) — not a sign the workspace is broken. Hash
+                        // the link's relative path plus its target (or "loop")
+                        // instead of failing the whole walk.
+                        let relative = p.strip_prefix(path).unwrap_or(&p).to_string_lossy();
+                        hasher.update(relative.as_bytes());
+                        hasher.update(target.as_bytes());
+                        continue;
+                    }
+                    None => {
+                        return Peek::Failed(anyhow::Error::new(e).context("walk workspace folder"))
+                    }
+                },
             };
             if !entry.file_type().is_file() {
                 continue;
@@ -62,6 +75,29 @@ impl FolderSource {
         }
         Peek::Revision(hex::encode(hasher.finalize()))
     }
+}
+
+/// A dangling symlink or a symlink loop found while walking the workspace
+/// folder is stable local state (stale venvs, editor lock files,
+/// `node_modules/.bin` leftovers) — not a sign the workspace is broken.
+/// Returns the path and a stand-in for its "content" (the link target, or the
+/// literal `"loop"`) to hash instead of failing the whole walk. Every other
+/// walk error returns `None`, which still fails the walk (`Peek::Failed`).
+fn symlink_walk_error(err: &walkdir::Error) -> Option<(PathBuf, String)> {
+    let p = err.path()?;
+    if err.loop_ancestor().is_some() {
+        return Some((p.to_path_buf(), "loop".to_string()));
+    }
+    let is_symlink = std::fs::symlink_metadata(p)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false);
+    if !is_symlink {
+        return None;
+    }
+    let target = std::fs::read_link(p)
+        .map(|t| t.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    Some((p.to_path_buf(), target))
 }
 
 impl WorkspaceSource for FolderSource {
@@ -897,5 +933,54 @@ tasks:
             Peek::Revision(r) => assert_eq!(r, loaded),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn folder_with_a_dangling_symlink_loads_and_peeks_stably() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("w.yaml"), "actions: {}\n").unwrap();
+        std::os::unix::fs::symlink("/nonexistent/target", dir.path().join(".#lock")).unwrap();
+
+        let source = FolderSource::new(dir.path().to_str().unwrap());
+        let loaded = source
+            .load(&LoadBudget::unbounded())
+            .unwrap()
+            .revision
+            .unwrap();
+
+        let peeked = match source.peek_revision(&LoadBudget::unbounded()) {
+            Peek::Revision(r) => r,
+            other => panic!("expected Revision, got {other:?}"),
+        };
+        assert_eq!(
+            peeked, loaded,
+            "a dangling symlink must not move the revision"
+        );
+
+        // Stable across repeated peeks too.
+        let peeked_again = match source.peek_revision(&LoadBudget::unbounded()) {
+            Peek::Revision(r) => r,
+            other => panic!("expected Revision, got {other:?}"),
+        };
+        assert_eq!(peeked_again, loaded);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn folder_with_a_symlink_loop_loads() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("w.yaml"), "actions: {}\n").unwrap();
+        // A link to its own parent directory — following it loops forever.
+        std::os::unix::fs::symlink(dir.path(), dir.path().join("loop")).unwrap();
+
+        let source = FolderSource::new(dir.path().to_str().unwrap());
+        let out = source.load(&LoadBudget::unbounded()).unwrap();
+        assert!(out.revision.is_some());
+
+        assert!(matches!(
+            source.peek_revision(&LoadBudget::unbounded()),
+            Peek::Revision(_)
+        ));
     }
 }
