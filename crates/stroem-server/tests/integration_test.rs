@@ -11260,10 +11260,8 @@ async fn setup_multi_workspace_with(
     let ws_ops = test_workspace_ops();
 
     // Build workspace manager with two workspaces using from_entries
-    use std::path::PathBuf;
     use std::sync::Arc;
     use stroem_server::workspace::WorkspaceEntry;
-    use tokio::sync::RwLock;
 
     // Helper in-memory source
     struct InMemSource(WorkspaceConfig);
@@ -11288,27 +11286,16 @@ async fn setup_multi_workspace_with(
     let mut entries = HashMap::new();
     entries.insert(
         "default".to_string(),
-        WorkspaceEntry {
-            config: Arc::new(RwLock::new(Arc::new(ws_default))),
-            source: src_default,
-            name: "default".to_string(),
-            source_path: PathBuf::from("/dev/null"),
-            load_error: Arc::new(std::sync::RwLock::new(None)),
-            load_warnings: Arc::new(std::sync::RwLock::new(Vec::new())),
-            reload_state: WorkspaceEntry::default_reload_state(),
-        },
+        WorkspaceEntry::new(
+            "default",
+            src_default,
+            ws_default,
+            Some("test-rev".to_string()),
+        ),
     );
     entries.insert(
         "ops".to_string(),
-        WorkspaceEntry {
-            config: Arc::new(RwLock::new(Arc::new(ws_ops))),
-            source: src_ops,
-            name: "ops".to_string(),
-            source_path: PathBuf::from("/dev/null"),
-            load_error: Arc::new(std::sync::RwLock::new(None)),
-            load_warnings: Arc::new(std::sync::RwLock::new(Vec::new())),
-            reload_state: WorkspaceEntry::default_reload_state(),
-        },
+        WorkspaceEntry::new("ops", src_ops, ws_ops, Some("test-rev".to_string())),
     );
 
     let mut mgr = WorkspaceManager::from_entries(entries);
@@ -11587,10 +11574,8 @@ async fn setup_with_auth_and_acl() -> Result<(
     .await?;
 
     // Build manager with two workspaces using in-memory sources.
-    use std::path::PathBuf;
     use std::sync::Arc;
     use stroem_server::workspace::WorkspaceEntry;
-    use tokio::sync::RwLock;
 
     struct InMemSource(WorkspaceConfig);
     #[async_trait::async_trait]
@@ -11616,27 +11601,16 @@ async fn setup_with_auth_and_acl() -> Result<(
     let mut entries = HashMap::new();
     entries.insert(
         "default".to_string(),
-        WorkspaceEntry {
-            config: Arc::new(RwLock::new(Arc::new(ws_default))),
-            source: src_default,
-            name: "default".to_string(),
-            source_path: PathBuf::from("/dev/null"),
-            load_error: Arc::new(std::sync::RwLock::new(None)),
-            load_warnings: Arc::new(std::sync::RwLock::new(Vec::new())),
-            reload_state: WorkspaceEntry::default_reload_state(),
-        },
+        WorkspaceEntry::new(
+            "default",
+            src_default,
+            ws_default,
+            Some("test-rev".to_string()),
+        ),
     );
     entries.insert(
         "ops".to_string(),
-        WorkspaceEntry {
-            config: Arc::new(RwLock::new(Arc::new(ws_ops))),
-            source: src_ops,
-            name: "ops".to_string(),
-            source_path: PathBuf::from("/dev/null"),
-            load_error: Arc::new(std::sync::RwLock::new(None)),
-            load_warnings: Arc::new(std::sync::RwLock::new(Vec::new())),
-            reload_state: WorkspaceEntry::default_reload_state(),
-        },
+        WorkspaceEntry::new("ops", src_ops, ws_ops, Some("test-rev".to_string())),
     );
 
     let mgr = WorkspaceManager::from_entries(entries);
@@ -21534,10 +21508,8 @@ async fn test_scheduler_triggered_job_stores_revision() -> Result<()> {
         }
     }
 
-    use std::path::PathBuf;
     use std::sync::Arc;
     use stroem_server::workspace::WorkspaceEntry;
-    use tokio::sync::RwLock;
 
     let src: Arc<dyn stroem_server::workspace::WorkspaceSource> =
         Arc::new(InMemSourceWithRev(workspace.clone()));
@@ -21545,15 +21517,12 @@ async fn test_scheduler_triggered_job_stores_revision() -> Result<()> {
     let mut entries = HashMap::new();
     entries.insert(
         "default".to_string(),
-        WorkspaceEntry {
-            config: Arc::new(RwLock::new(Arc::new(workspace))),
-            source: src,
-            name: "default".to_string(),
-            source_path: PathBuf::from("/dev/null"),
-            load_error: Arc::new(std::sync::RwLock::new(None)),
-            load_warnings: Arc::new(std::sync::RwLock::new(Vec::new())),
-            reload_state: WorkspaceEntry::default_reload_state(),
-        },
+        WorkspaceEntry::new(
+            "default",
+            src,
+            workspace,
+            Some(EXPECTED_REVISION.to_string()),
+        ),
     );
     let mgr = WorkspaceManager::from_entries(entries);
 
@@ -21752,10 +21721,8 @@ impl stroem_server::workspace::WorkspaceSource for FixedRevisionSource {
 /// Build an [`AppState`] backed by a single workspace whose source always
 /// reports `"test-rev"` as the revision.  The workspace name is `"default"`.
 fn revision_test_state(pool: PgPool, workspace: WorkspaceConfig) -> AppState {
-    use std::path::PathBuf;
     use std::sync::Arc;
     use stroem_server::workspace::WorkspaceEntry;
-    use tokio::sync::RwLock;
 
     let temp_dir = std::env::temp_dir().join(format!("stroem-rev-test-{}", Uuid::new_v4()));
     let config = ServerConfig {
@@ -21795,15 +21762,7 @@ fn revision_test_state(pool: PgPool, workspace: WorkspaceConfig) -> AppState {
     let mut entries = HashMap::new();
     entries.insert(
         "default".to_string(),
-        WorkspaceEntry {
-            config: Arc::new(RwLock::new(Arc::new(workspace))),
-            source: src,
-            name: "default".to_string(),
-            source_path: PathBuf::from("/dev/null"),
-            load_error: Arc::new(std::sync::RwLock::new(None)),
-            load_warnings: Arc::new(std::sync::RwLock::new(Vec::new())),
-            reload_state: WorkspaceEntry::default_reload_state(),
-        },
+        WorkspaceEntry::new("default", src, workspace, Some("test-rev".to_string())),
     );
 
     let mgr = WorkspaceManager::from_entries(entries);
