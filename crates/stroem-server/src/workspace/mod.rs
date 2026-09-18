@@ -3,11 +3,15 @@ pub mod entry;
 pub mod folder;
 pub mod git;
 pub mod library;
+pub mod lifecycle;
 pub mod source;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 pub use entry::{LoadSuccess, Published, ReloadState, WorkspaceEntry};
 pub use folder::load_folder_workspace;
 pub use library::{merge_library_into_workspace, LibraryResolver, ResolvedLibrary};
+pub use lifecycle::ReloadBusy;
 pub use source::{LoadOutcome, Peek, WorkspaceSource};
 
 use anyhow::{Context, Result};
@@ -536,55 +540,45 @@ impl WorkspaceManager {
         infos
     }
 
-    /// Reload a specific workspace from its source, updating config and revision.
-    /// Library items are re-merged into the workspace config.
-    /// On success, clears any previous load error. On failure, sets the load error.
-    ///
-    /// Concurrent reload attempts on the same workspace are serialized via the
-    /// per-workspace `reload_state` mutex — this is the only reason the
-    /// expensive `source.load()` (git fetch + reset --hard) can be safely
-    /// invoked from multiple call sites (watcher, scheduler, hooks, API).
-    /// Without this guard, two simultaneous reloads would perform
-    /// `reset --hard` on the same on-disk libgit2 clone and corrupt its
-    /// working tree.
+    /// Reload a workspace now (peer notification, scheduler/webhook
+    /// `force_refresh`, tests). Returns `Err(ReloadBusy)` — check with
+    /// `err.downcast_ref::<ReloadBusy>()` — if another load of this
+    /// workspace is running; never waits for it (spec § 4.5 (8)).
     pub async fn reload(&self, name: &str) -> Result<()> {
         let entry = self
             .entries
             .get(name)
-            .with_context(|| format!("Workspace '{}' not found", name))?;
-
-        let exec = entry.exec();
-        let mut reload_state = exec.lock().await;
-        let result = self.do_reload(name, entry).await;
-        reload_state.last_completed = Some(Instant::now());
-        result
+            .with_context(|| format!("Workspace '{}' not found", name))?
+            .clone();
+        let guard = entry
+            .exec()
+            .try_lock_owned()
+            .map_err(|_| anyhow::Error::new(ReloadBusy))?;
+        self.run_external_load(entry, guard)
+            .await
+            .with_context(|| format!("Failed to reload workspace '{}'", name))
     }
 
-    /// Like [`Self::reload`], but enforces a `cooldown` window since the last
-    /// completed reload and returns a typed [`ReloadApiError`] so the HTTP
-    /// handler can map cleanly to 404 / 429 / 500. Pass `Duration::ZERO` to
-    /// skip the cooldown (used by tests).
     pub async fn reload_for_api(
         &self,
         name: &str,
         cooldown: Duration,
     ) -> std::result::Result<(), ReloadApiError> {
-        let entry = self.entries.get(name).ok_or(ReloadApiError::NotFound)?;
-
-        // try_lock first so a refresh that's currently in flight is
-        // surfaced as a cooldown response rather than queueing the caller
-        // and tying up a worker.
-        let exec = entry.exec();
-        let mut reload_state = match exec.try_lock() {
+        let entry = self
+            .entries
+            .get(name)
+            .ok_or(ReloadApiError::NotFound)?
+            .clone();
+        // try_lock: an in-flight reload surfaces as a cooldown, never a queue.
+        let guard = match entry.exec().try_lock_owned() {
             Ok(guard) => guard,
             Err(_) => {
                 return Err(ReloadApiError::Cooldown {
                     retry_after_secs: cooldown.as_secs().max(1),
-                });
+                })
             }
         };
-
-        if let Some(last) = reload_state.last_completed {
+        if let Some(last) = guard.last_completed {
             let elapsed = last.elapsed();
             if elapsed < cooldown {
                 let retry_after = (cooldown - elapsed).as_secs().max(1);
@@ -593,31 +587,56 @@ impl WorkspaceManager {
                 });
             }
         }
-
-        let result = self.do_reload(name, entry).await;
-        reload_state.last_completed = Some(Instant::now());
-        result.map_err(ReloadApiError::Failed)
+        self.run_external_load(entry, guard)
+            .await
+            .map_err(ReloadApiError::Failed)
     }
 
-    /// Reload implementation. Caller must hold `entry.exec()`.
-    async fn do_reload(&self, name: &str, entry: &WorkspaceEntry) -> Result<()> {
-        let source = entry.source.clone();
-        let budget = LoadBudget::from_now(self.settings.load_timeout);
-        let result = tokio::task::spawn_blocking(move || source.load(&budget))
-            .await
-            .unwrap_or_else(|e| Err(anyhow::anyhow!("workspace load task panicked: {e}")));
+    /// External load through the detached finalizer: no permit, no watchdog,
+    /// but guard ownership and result application survive the caller being
+    /// cancelled (spec § 4.5 (8)).
+    async fn run_external_load(
+        &self,
+        entry: Arc<WorkspaceEntry>,
+        guard: tokio::sync::OwnedMutexGuard<ReloadState>,
+    ) -> Result<()> {
         let policy = self.settings.policy(entry.poll_interval());
-        entry
-            .apply_load_result(
-                Caller::External,
-                None,
-                result,
-                &self.resolved_libraries,
-                &policy,
-                Instant::now(),
-            )
+        let handle = lifecycle::spawn_load(lifecycle::LoadRequest {
+            entry,
+            libs: Arc::clone(&self.resolved_libraries),
+            policy,
+            guard,
+            permit: None,
+            caller: Caller::External,
+            op_id: None,
+            budget: LoadBudget::from_now(self.settings.load_timeout),
+            notifier: None,
+        });
+        handle
+            .await
+            .map_err(|e| anyhow::anyhow!("workspace reload task failed: {e}"))?
             .map(|_| ())
-            .with_context(|| format!("Failed to reload workspace '{}'", name))
+    }
+
+    /// Test hook: occupy a workspace's execution mutex, as a running load does.
+    #[doc(hidden)]
+    pub async fn hold_exec_for_test(
+        &self,
+        name: &str,
+    ) -> tokio::sync::OwnedMutexGuard<ReloadState> {
+        self.entries
+            .get(name)
+            .expect("hold_exec_for_test: no entry")
+            .exec()
+            .lock_owned()
+            .await
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code)] // used by the watcher's peek-policy tests (Task 12)
+    pub(crate) fn with_settings(mut self, settings: ReloadSettings) -> Self {
+        self.settings = settings;
+        self
     }
 
     /// Get library source paths for tarball building.
@@ -2701,5 +2720,112 @@ tasks:
         assert!(mgr.get_path("ws").is_some());
         assert_eq!(mgr.get_revision("ws").as_deref(), Some("rev-a"));
         assert_eq!(mgr.list_workspace_info().await.len(), 1);
+    }
+
+    use crate::workspace::test_support::{config_with, TestLoad, TestPeek, TestSource};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn manager_with(source: Arc<TestSource>) -> Arc<WorkspaceManager> {
+        let mut entries = HashMap::new();
+        entries.insert(
+            "ws".to_string(),
+            WorkspaceEntry::new("ws", source, config_with("a"), Some("rev-a".to_string())),
+        );
+        Arc::new(WorkspaceManager::from_entries(entries))
+    }
+
+    async fn wait_until(what: &str, mut f: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !f() {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Round-5 major: cancelling an external caller must not release the
+    /// execution mutex mid-mutation or skip result application.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancelled_api_reload_keeps_the_guard_and_still_applies_its_result() {
+        let gate = Arc::new(AtomicBool::new(false));
+        let source = Arc::new(
+            TestSource::new(
+                TestLoad::Ok {
+                    action: "b",
+                    revision: "rev-b",
+                },
+                TestPeek::Failed,
+            )
+            .gated(gate.clone()),
+        );
+        let mgr = manager_with(source.clone());
+
+        let caller = tokio::spawn({
+            let mgr = mgr.clone();
+            async move { mgr.reload_for_api("ws", Duration::ZERO).await }
+        });
+        wait_until("load to start", || source.started.load(Ordering::SeqCst)).await;
+        caller.abort();
+        let _ = caller.await;
+
+        let busy = mgr.reload("ws").await.unwrap_err();
+        assert!(
+            busy.downcast_ref::<ReloadBusy>().is_some(),
+            "mutex must still be held: {busy:#}"
+        );
+        assert!(matches!(
+            mgr.reload_for_api("ws", Duration::ZERO).await,
+            Err(ReloadApiError::Cooldown { .. })
+        ));
+
+        gate.store(true, Ordering::SeqCst);
+        wait_until("result to be applied", || {
+            mgr.get_revision("ws").as_deref() == Some("rev-b")
+        })
+        .await;
+        wait_until("mutex release", || {
+            mgr.entry("ws").unwrap().exec().try_lock().is_ok()
+        })
+        .await;
+
+        // The cancelled request still started the completion-based cooldown...
+        assert!(matches!(
+            mgr.reload_for_api("ws", Duration::from_secs(3600)).await,
+            Err(ReloadApiError::Cooldown { .. })
+        ));
+        // ...and once the window allows, a retry refreshes again.
+        assert!(mgr.reload_for_api("ws", Duration::ZERO).await.is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn panicking_load_is_a_failed_load_and_releases_the_mutex() {
+        let source = Arc::new(TestSource::new(TestLoad::Panic, TestPeek::Failed));
+        let mgr = manager_with(source);
+        let err = mgr.reload("ws").await.unwrap_err();
+        assert!(format!("{err:#}").contains("panicked"), "{err:#}");
+        assert!(mgr.get_config("ws").await.is_none());
+        assert!(mgr.entry("ws").unwrap().availability().is_errored());
+        let again = mgr.reload("ws").await.unwrap_err();
+        assert!(
+            again.downcast_ref::<ReloadBusy>().is_none(),
+            "mutex must be free after a panic"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn peer_reload_while_busy_returns_immediately() {
+        let source = Arc::new(TestSource::new(
+            TestLoad::Ok {
+                action: "a",
+                revision: "rev-a",
+            },
+            TestPeek::Failed,
+        ));
+        let mgr = manager_with(source.clone());
+        let _held = mgr.hold_exec_for_test("ws").await;
+        let started = Instant::now();
+        let err = mgr.reload("ws").await.unwrap_err();
+        assert!(err.downcast_ref::<ReloadBusy>().is_some());
+        assert!(started.elapsed() < Duration::from_millis(100));
+        assert_eq!(source.load_count(), 0);
     }
 }

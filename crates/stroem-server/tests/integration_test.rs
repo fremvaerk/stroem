@@ -16323,6 +16323,57 @@ async fn test_trigger_fire_on_unavailable_workspace_has_no_side_effects() -> Res
     Ok(())
 }
 
+/// Spec § 4.5 (8): a busy force_refresh fires from a healthy snapshot and is
+/// still MISSED when the workspace is errored.
+#[tokio::test]
+async fn test_force_refresh_while_busy_fires_only_from_a_healthy_snapshot() -> Result<()> {
+    use stroem_common::models::workflow::{ConcurrencyPolicy, TriggerDef};
+
+    let (state, pool, _tmp, _container) = setup_recovery().await?;
+    let mut cfg = (*state.get_workspace("default").await.unwrap()).clone();
+    cfg.triggers.insert(
+        "refresh-busy".to_string(),
+        TriggerDef::Scheduler {
+            cron: "0 1 * * *".to_string(),
+            task: "hello-world".to_string(),
+            input: HashMap::new(),
+            enabled: true,
+            concurrency: ConcurrencyPolicy::Allow,
+            timezone: None,
+            force_refresh: true,
+        },
+    );
+    state
+        .workspaces
+        .replace_config_for_test("default", cfg.clone())
+        .await;
+    let remembered = WorkspaceManager::from_config("default", cfg);
+    let source_id = "default/refresh-busy";
+    let rows = |pool: PgPool| async move {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM job WHERE source_type = 'trigger' AND source_id = $1",
+        )
+        .bind(source_id)
+        .fetch_one(&pool)
+        .await
+    };
+
+    let _busy = state.workspaces.hold_exec_for_test("default").await;
+    stroem_server::scheduler::fire_trigger_once(&state, &state.workspaces, &remembered, source_id)
+        .await;
+    assert_eq!(
+        rows(pool.clone()).await?,
+        1,
+        "busy + healthy ⇒ fires from the snapshot"
+    );
+
+    state.workspaces.mark_unavailable_for_test("default");
+    stroem_server::scheduler::fire_trigger_once(&state, &state.workspaces, &remembered, source_id)
+        .await;
+    assert_eq!(rows(pool.clone()).await?, 1, "busy + errored ⇒ MISSED");
+    Ok(())
+}
+
 /// Codex review round 3: the scheduler retains the schedule of a workspace in
 /// load error. If the workspace RECOVERS with that trigger removed or disabled
 /// before the retained fire happens, the remembered definition must not run —

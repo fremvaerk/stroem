@@ -66,19 +66,30 @@ async fn webhook_handler(
 
     // 4. Force-refresh workspace if configured (before fetching config)
     if wh.force_refresh {
-        if let Err(e) = state.workspaces.reload(&wh.ws_name).await {
-            tracing::warn!(
-                "Webhook '{}': force_refresh failed, continuing with cached revision: {:#}",
-                name,
-                e
-            );
-        } else {
-            // Notify peer replicas that the workspace has been refreshed so
-            // they converge without waiting for their own poll tick.
-            state
-                .event_bus
-                .publish_workspace_reloaded(&wh.ws_name)
-                .await;
+        match state.workspaces.reload(&wh.ws_name).await {
+            Ok(()) => {
+                // Notify peer replicas that the workspace has been refreshed so
+                // they converge without waiting for their own poll tick.
+                state
+                    .event_bus
+                    .publish_workspace_reloaded(&wh.ws_name)
+                    .await;
+            }
+            Err(e) if e.downcast_ref::<crate::workspace::ReloadBusy>().is_some() => {
+                // New policy (spec § 4.5 (8)): fire from the published snapshot
+                // if it is healthy; an errored workspace is still MISSED below.
+                tracing::info!(
+                    "Webhook '{}': force_refresh skipped — a reload is already in progress",
+                    name
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Webhook '{}': force_refresh failed, continuing with cached revision: {:#}",
+                    name,
+                    e
+                );
+            }
         }
     }
 

@@ -390,20 +390,25 @@ async fn dispatch(state: &AppState, channel: &str, payload: &str) {
                 Ok(p) if p.replica_id == state.event_bus.replica_id() => {
                     // Self-emitted; our watcher already reloaded the cache.
                 }
-                Ok(p) => {
-                    if let Err(e) = state.workspaces.reload(&p.workspace).await {
-                        tracing::warn!(
-                            "Cross-replica workspace reload failed for '{}': {:#}",
-                            p.workspace,
-                            e
-                        );
-                    } else {
+                Ok(p) => match state.workspaces.reload(&p.workspace).await {
+                    Ok(()) => tracing::debug!(
+                        "Cross-replica reload applied for workspace '{}'",
+                        p.workspace
+                    ),
+                    Err(e) if e.downcast_ref::<crate::workspace::ReloadBusy>().is_some() => {
+                        // Convergence then relies on this replica's own watcher
+                        // (spec § 4.5 (8)); peer reloads never rebroadcast.
                         tracing::debug!(
-                            "Cross-replica reload applied for workspace '{}'",
+                            "Cross-replica reload of '{}' skipped: a reload is already in progress",
                             p.workspace
-                        );
+                        )
                     }
-                }
+                    Err(e) => tracing::warn!(
+                        "Cross-replica workspace reload failed for '{}': {:#}",
+                        p.workspace,
+                        e
+                    ),
+                },
                 Err(e) => tracing::warn!("Bad {} payload: {:#}", channel, e),
             }
         }
