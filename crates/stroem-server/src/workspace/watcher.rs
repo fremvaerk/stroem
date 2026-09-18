@@ -12,7 +12,7 @@ use crate::metrics::{
 use metrics::counter;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use stroem_common::budget::LoadBudget;
 use tokio::sync::Semaphore;
 use tokio::time::MissedTickBehavior;
@@ -29,7 +29,11 @@ pub(crate) struct WatcherCtx {
 pub(crate) async fn run_watcher(ctx: WatcherCtx, cancel: CancellationToken) {
     let poll = ctx.entry.poll_interval();
     let policy = ctx.settings.policy(poll);
-    let offset = jitter_offset(&ctx.entry.name, poll);
+    let offset = if ctx.entry.availability().is_errored() {
+        Duration::ZERO // startup failure: retry on the first tick (spec § 4.4 startup row)
+    } else {
+        jitter_offset(&ctx.entry.name, poll)
+    };
     let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + offset, poll);
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
     tracing::info!(
@@ -52,8 +56,11 @@ pub(crate) async fn run_watcher(ctx: WatcherCtx, cancel: CancellationToken) {
 
 pub(crate) async fn watcher_tick(ctx: &WatcherCtx, policy: &Policy) {
     let entry = &ctx.entry;
-    if entry.availability().peek_in_flight.is_some() {
+    let a = entry.availability();
+    if !a.is_errored() && a.peek_in_flight.is_some() {
         // The previous peek's observer gave up; this tick counts as a failure.
+        // (Only while Fresh — an Errored entry doesn't peek, so a stale
+        // in-flight record there is not a hung-peek failure.)
         counter!(STROEM_WORKSPACE_PEEK_FAILURES_TOTAL, "workspace" => entry.name.clone())
             .increment(1);
     }
@@ -206,8 +213,8 @@ pub(crate) async fn attempt_watcher_load(ctx: &WatcherCtx, policy: &Policy) {
 mod tests {
     use super::*;
     use crate::workspace::availability::Freshness;
+    use crate::workspace::source::WorkspaceSource;
     use crate::workspace::test_support::{config_with, TestLoad, TestPeek, TestSource};
-    use std::time::Duration;
 
     fn settings() -> ReloadSettings {
         ReloadSettings {
@@ -511,5 +518,55 @@ mod tests {
             "config must still be served below K"
         );
         assert!(ctx.entry.published().config.actions.contains_key("a"));
+    }
+
+    /// Fix round 1, Important finding: a workspace that failed at startup
+    /// must retry on its FIRST tick, without waiting out the per-workspace
+    /// jitter offset (spec § 4.4 startup row). Uses a huge poll interval so
+    /// jitter, if applied, would otherwise delay the first tick by up to an
+    /// hour.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_errored_workspace_is_retried_on_the_first_tick_without_jitter() {
+        let mut source = TestSource::new(
+            TestLoad::Ok {
+                action: "a",
+                revision: "rev-a",
+            },
+            TestPeek::Failed,
+        );
+        source.poll_secs = 3600;
+        let source = Arc::new(source);
+        let s = settings();
+        let poll = Duration::from_secs(source.poll_interval_secs().max(1));
+        let policy = s.policy(poll);
+        let entry = Arc::new(WorkspaceEntry::startup_failed(
+            "ws".to_string(),
+            source.clone(),
+            "boom".to_string(),
+            &policy,
+        ));
+        let ctx = WatcherCtx {
+            entry: entry.clone(),
+            libs: Arc::new(HashMap::new()),
+            permits: Arc::new(Semaphore::new(8)),
+            settings: s,
+            notifier: None,
+        };
+        let cancel = CancellationToken::new();
+        let handle = tokio::spawn(run_watcher(ctx, cancel.clone()));
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if source.load_count() >= 1 && entry.is_healthy() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("an errored entry must retry on the first tick, not after a jittered delay");
+
+        cancel.cancel();
+        let _ = handle.await;
     }
 }

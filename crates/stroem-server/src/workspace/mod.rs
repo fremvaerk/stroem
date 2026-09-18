@@ -2160,14 +2160,13 @@ tasks:
             "actions:\n  a:\n    type: script\n    script: echo ok\ntasks:\n  t:\n    flow:\n      s:\n        action: a\n",
         ).unwrap();
 
-        // Start watchers — the errored entry retries on its first tick, which
-        // lands somewhere in [0, poll) after a per-workspace jitter offset
-        // (spec § 4.4), not necessarily immediately.
+        // Start watchers — a workspace that failed at STARTUP retries on its
+        // very first tick with zero jitter offset (spec § 4.4 startup row),
+        // so this should recover fast.
         let cancel_token = CancellationToken::new();
         mgr.start_watchers(cancel_token.clone(), None);
 
-        // Wait for the watcher to pick up the fix (folder poll is 30s default).
-        wait_until_within("workspace to recover", Duration::from_secs(35), || {
+        wait_until_within("workspace to recover", Duration::from_secs(2), || {
             mgr.entry("retry").is_some_and(|e| e.is_healthy())
         })
         .await;
@@ -2222,9 +2221,18 @@ tasks:
         )
         .unwrap();
 
-        // Start watchers. The entry is errored, so it retries on its first
-        // tick, which lands somewhere in [0, poll) after a per-workspace
-        // jitter offset (spec § 4.4), not necessarily immediately.
+        // Start watchers. The entry is already Errored when the watcher
+        // starts (from the `reload()` failure above), so it gets the
+        // zero-jitter first tick too (spec § 4.4 startup row) — but that
+        // failure was an EXTERNAL-caller transition out of Fresh, which
+        // (unlike a startup failure) sets `next_attempt = completed_at +
+        // poll_interval`, not `now` (see `availability::transition`'s
+        // `LoadCompleted` rule). So the watcher's first tick still lands
+        // before `next_attempt` and is skipped; recovery only happens once
+        // the full poll interval (30 s default for folders) has elapsed
+        // since the `reload()` failure, independent of tick jitter. Keep the
+        // long wait here — this is the ONE test whose fast path genuinely
+        // depends on a near-full poll interval, not on jitter.
         let cancel_token = CancellationToken::new();
         mgr.start_watchers(cancel_token.clone(), None);
         wait_until_within("workspace to recover", Duration::from_secs(35), || {
