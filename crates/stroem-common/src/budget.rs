@@ -26,8 +26,12 @@ impl LoadBudget {
             deadline: Some(deadline),
         }
     }
+    /// A deadline `duration` from now. A duration too large to represent as an
+    /// `Instant` (overflow) yields an unbounded budget instead of panicking.
     pub fn from_now(duration: Duration) -> Self {
-        Self::until(Instant::now() + duration)
+        Instant::now()
+            .checked_add(duration)
+            .map_or_else(Self::unbounded, Self::until)
     }
     pub fn deadline(&self) -> Option<Instant> {
         self.deadline
@@ -108,13 +112,29 @@ pub fn run_with_deadline(
     let status = if budget.deadline().is_none() {
         child.wait().context("failed to wait for subprocess")?
     } else {
+        // The deadline covers the pipe I/O too, not just the child's exit: a
+        // descendant that inherited stdout/stderr (or blocks stdin) keeps the
+        // threads alive after the child exits, and joining them would hang.
+        let mut exited = None;
         loop {
-            if let Some(status) = child.try_wait().context("failed to poll subprocess")? {
+            if exited.is_none() {
+                exited = child.try_wait().context("failed to poll subprocess")?;
+            }
+            let io_done = writer.as_ref().is_none_or(|h| h.is_finished())
+                && stdout.as_ref().is_none_or(|h| h.is_finished())
+                && stderr.as_ref().is_none_or(|h| h.is_finished());
+            if let (Some(status), true) = (exited, io_done) {
                 break status;
             }
             if budget.expired() {
+                // The process group outlives a reaped leader while any member
+                // (the one holding our pipes) is alive, so this still reaches it.
                 kill_process_tree(&mut child);
-                let _ = child.wait();
+                if exited.is_none() {
+                    let _ = child.wait();
+                }
+                // Threads are detached, not joined: a setsid daemon may keep
+                // the pipes open beyond the group kill.
                 return Err(DeadlineExceeded.into());
             }
             std::thread::sleep(POLL_INTERVAL);
@@ -279,5 +299,55 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(50));
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deadline_covers_pipes_held_by_a_descendant_after_the_parent_exits() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let pid_file = dir.path().join("grandchild.pid");
+        let mut cmd = Command::new("sh");
+        // The parent exits at once; the backgrounded sleep inherits stdout and
+        // stderr, so the reader threads never see EOF on their own.
+        cmd.arg("-c").arg(format!(
+            "sleep 30 & echo $! > {}; exit 0",
+            pid_file.display()
+        ));
+        let started = Instant::now();
+        let err = run_with_deadline(cmd, None, &LoadBudget::from_now(Duration::from_millis(300)))
+            .unwrap_err();
+        assert!(is_deadline_exceeded(&err), "got {err:#}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "took {:?}",
+            started.elapsed()
+        );
+        let pid = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .to_string();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let alive = Command::new("kill")
+                .args(["-0", &pid])
+                .status()
+                .unwrap()
+                .success();
+            if !alive {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "grandchild {pid} survived the deadline kill"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    #[test]
+    fn from_now_with_an_absurd_duration_does_not_panic() {
+        let b = LoadBudget::from_now(Duration::from_secs(u64::MAX));
+        assert!(!b.expired());
+        assert!(b.check().is_ok());
     }
 }
