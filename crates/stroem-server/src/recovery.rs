@@ -532,6 +532,7 @@ mod tests {
             artifact_storage: None,
             default_step_timeout: None,
             default_job_timeout: None,
+            workspace_reload: Default::default(),
         };
 
         let ws_config = WorkspaceConfig::new();
@@ -613,6 +614,7 @@ mod tests {
             artifact_storage: None,
             default_step_timeout: None,
             default_job_timeout: None,
+            workspace_reload: Default::default(),
         };
 
         let ws_config = WorkspaceConfig::new();

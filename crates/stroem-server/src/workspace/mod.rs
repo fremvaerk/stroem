@@ -100,12 +100,12 @@ impl WorkspaceManager {
     /// Individual workspace failures are captured in `load_errors` rather than
     /// failing the entire server — other workspaces continue to load normally.
     /// Libraries are resolved first and merged into every workspace config.
-    pub async fn new(
+    pub async fn new_with_reload(
         defs: HashMap<String, WorkspaceSourceDef>,
         library_defs: HashMap<String, LibraryDef>,
         git_auth: HashMap<String, GitAuthConfig>,
+        settings: ReloadSettings,
     ) -> Self {
-        let settings = ReloadSettings::default();
         let mut entries = HashMap::new();
         let mut load_errors = HashMap::new();
 
@@ -260,6 +260,15 @@ impl WorkspaceManager {
             triggers_disabled,
             settings,
         }
+    }
+
+    /// [`Self::new_with_reload`] with default reload settings (tests, tools).
+    pub async fn new(
+        defs: HashMap<String, WorkspaceSourceDef>,
+        library_defs: HashMap<String, LibraryDef>,
+        git_auth: HashMap<String, GitAuthConfig>,
+    ) -> Self {
+        Self::new_with_reload(defs, library_defs, git_auth, ReloadSettings::default()).await
     }
 
     /// Create a WorkspaceManager from pre-built entries (for testing)

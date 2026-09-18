@@ -242,6 +242,7 @@ async fn build_test_app(workspace_name: &str, workspace: WorkspaceConfig) -> Res
         artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
 
     let mgr = WorkspaceManager::from_config(workspace_name, workspace);

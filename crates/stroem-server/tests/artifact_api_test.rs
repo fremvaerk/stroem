@@ -93,6 +93,7 @@ async fn build_test_app() -> Result<TestApp> {
         artifact_storage: Some(ArtifactStorageConfig::default()),
         default_step_timeout: None,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
 
     let workspace = WorkspaceConfig::new();

@@ -84,6 +84,17 @@ impl ReloadSettings {
     }
 }
 
+impl From<&crate::config::WorkspaceReloadConfig> for ReloadSettings {
+    fn from(c: &crate::config::WorkspaceReloadConfig) -> Self {
+        Self {
+            peek_failure_threshold: c.peek_failure_threshold,
+            peek_timeout: Duration::from_secs(c.peek_timeout_secs),
+            load_timeout: Duration::from_secs(c.load_timeout_secs),
+            max_backoff: Duration::from_secs(c.max_backoff_secs),
+        }
+    }
+}
+
 /// A peek outcome reduced to what the transition needs (spec § 4.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PeekObservation {

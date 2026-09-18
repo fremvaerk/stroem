@@ -1172,6 +1172,7 @@ mod tests {
             artifact_storage: None,
             default_step_timeout: None,
             default_job_timeout: None,
+            workspace_reload: Default::default(),
         };
         let log_storage = LogStorage::new(&config.log_storage.local_dir);
         let pool = sqlx::PgPool::connect_lazy("postgres://invalid:5432/db").unwrap();

@@ -403,6 +403,63 @@ pub struct RecoveryConfig {
     pub unmatched_step_timeout_secs: u64,
 }
 
+/// Workspace watcher reload tuning (spec § 4). Server-level so env overrides
+/// (`STROEM__WORKSPACE_RELOAD__LOAD_TIMEOUT_SECS=…`) coerce normally.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceReloadConfig {
+    /// K — consecutive failed peeks before a forced load (default 5).
+    #[serde(default = "default_peek_failure_threshold")]
+    pub peek_failure_threshold: u32,
+    /// P — budget for one peek, seconds (default 30).
+    #[serde(default = "default_peek_timeout_secs")]
+    pub peek_timeout_secs: u64,
+    /// L — budget for one load, seconds (default 300).
+    #[serde(default = "default_load_timeout_secs")]
+    pub load_timeout_secs: u64,
+    /// Cap of the retry backoff for a workspace in load error, seconds (default 900).
+    #[serde(default = "default_max_backoff_secs")]
+    pub max_backoff_secs: u64,
+    /// libgit2 TCP connect timeout, milliseconds, process-wide (default 10 000).
+    #[serde(default = "default_git_connect_timeout_ms")]
+    pub git_connect_timeout_ms: u32,
+    /// libgit2 per-read socket timeout, milliseconds, process-wide (default 60 000).
+    #[serde(default = "default_git_read_timeout_ms")]
+    pub git_read_timeout_ms: u32,
+}
+
+fn default_peek_failure_threshold() -> u32 {
+    5
+}
+fn default_peek_timeout_secs() -> u64 {
+    30
+}
+fn default_load_timeout_secs() -> u64 {
+    300
+}
+fn default_max_backoff_secs() -> u64 {
+    900
+}
+fn default_git_connect_timeout_ms() -> u32 {
+    10_000
+}
+fn default_git_read_timeout_ms() -> u32 {
+    60_000
+}
+
+impl Default for WorkspaceReloadConfig {
+    fn default() -> Self {
+        Self {
+            peek_failure_threshold: default_peek_failure_threshold(),
+            peek_timeout_secs: default_peek_timeout_secs(),
+            load_timeout_secs: default_load_timeout_secs(),
+            max_backoff_secs: default_max_backoff_secs(),
+            git_connect_timeout_ms: default_git_connect_timeout_ms(),
+            git_read_timeout_ms: default_git_read_timeout_ms(),
+        }
+    }
+}
+
 /// Data retention configuration for cleaning up old workers, jobs, and logs
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -501,6 +558,9 @@ pub struct ServerConfig {
     /// Capped at the same 7d limit as per-task timeouts. `None` = no default.
     #[serde(default)]
     pub default_job_timeout: Option<HumanDuration>,
+    /// Workspace watcher reload tuning (spec § 4). Defaults apply when absent.
+    #[serde(default)]
+    pub workspace_reload: WorkspaceReloadConfig,
 }
 
 /// Resolved timeout defaults passed into job creation.
@@ -625,6 +685,21 @@ impl ServerConfig {
                     );
                 }
             }
+        }
+        let r = &self.workspace_reload;
+        if r.peek_failure_threshold == 0 {
+            anyhow::bail!("workspace_reload.peek_failure_threshold must be at least 1");
+        }
+        if r.peek_timeout_secs == 0 || r.load_timeout_secs == 0 || r.max_backoff_secs == 0 {
+            anyhow::bail!("workspace_reload timeouts and max_backoff_secs must be at least 1");
+        }
+        let c_int_max = i32::MAX as u32;
+        if r.git_connect_timeout_ms == 0
+            || r.git_read_timeout_ms == 0
+            || r.git_connect_timeout_ms > c_int_max
+            || r.git_read_timeout_ms > c_int_max
+        {
+            anyhow::bail!("workspace_reload git timeouts must be between 1 and {c_int_max} ms");
         }
         Ok(())
     }
@@ -2578,6 +2653,7 @@ worker_token: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             artifact_storage: None,
             default_step_timeout: None,
             default_job_timeout: None,
+            workspace_reload: Default::default(),
         }
     }
 
@@ -2663,5 +2739,71 @@ artifact_storage:
         assert_eq!(art.max_file_bytes, 52_428_800);
         assert_eq!(art.max_job_bytes, 524_288_000);
         assert_eq!(art.prefix, "art/");
+    }
+
+    #[test]
+    fn workspace_reload_defaults_when_absent() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://x"
+log_storage:
+  local_dir: /tmp/logs
+worker_token: "0123456789abcdef0123456789abcdef"
+"#;
+        let cfg: ServerConfig = serde_yaml::from_str(yaml).unwrap();
+        let r = &cfg.workspace_reload;
+        assert_eq!(r.peek_failure_threshold, 5);
+        assert_eq!(r.peek_timeout_secs, 30);
+        assert_eq!(r.load_timeout_secs, 300);
+        assert_eq!(r.max_backoff_secs, 900);
+        assert_eq!(r.git_connect_timeout_ms, 10_000);
+        assert_eq!(r.git_read_timeout_ms, 60_000);
+    }
+
+    #[test]
+    fn workspace_reload_overrides_parse() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://x"
+log_storage:
+  local_dir: /tmp/logs
+worker_token: "0123456789abcdef0123456789abcdef"
+workspace_reload:
+  peek_failure_threshold: 3
+  load_timeout_secs: 120
+"#;
+        let cfg: ServerConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.workspace_reload.peek_failure_threshold, 3);
+        assert_eq!(cfg.workspace_reload.load_timeout_secs, 120);
+        assert_eq!(cfg.workspace_reload.peek_timeout_secs, 30);
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn workspace_reload_rejects_zero_and_overflowing_values() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://x"
+log_storage:
+  local_dir: /tmp/logs
+worker_token: "0123456789abcdef0123456789abcdef"
+"#;
+        let base: ServerConfig = serde_yaml::from_str(yaml).unwrap();
+        for mutate in [
+            (|c: &mut ServerConfig| c.workspace_reload.peek_failure_threshold = 0)
+                as fn(&mut ServerConfig),
+            |c| c.workspace_reload.peek_timeout_secs = 0,
+            |c| c.workspace_reload.load_timeout_secs = 0,
+            |c| c.workspace_reload.max_backoff_secs = 0,
+            |c| c.workspace_reload.git_connect_timeout_ms = 0,
+            |c| c.workspace_reload.git_read_timeout_ms = u32::MAX,
+        ] {
+            let mut c = base.clone();
+            mutate(&mut c);
+            assert!(c.validate().is_err());
+        }
     }
 }

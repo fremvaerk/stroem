@@ -110,10 +110,15 @@ async fn async_main(worker_threads: usize) -> Result<()> {
 
     // Load workspaces (individual failures are logged but don't crash the server)
     tracing::info!("Loading {} workspace(s)...", config.workspaces.len());
-    let workspace_manager = WorkspaceManager::new(
+    stroem_server::workspace::git::configure_global_timeouts(
+        config.workspace_reload.git_connect_timeout_ms,
+        config.workspace_reload.git_read_timeout_ms,
+    )?;
+    let workspace_manager = WorkspaceManager::new_with_reload(
         config.workspaces.clone(),
         config.libraries.clone(),
         config.git_auth.clone(),
+        stroem_server::workspace::availability::ReloadSettings::from(&config.workspace_reload),
     )
     .await;
 

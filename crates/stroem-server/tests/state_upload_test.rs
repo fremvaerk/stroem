@@ -166,6 +166,7 @@ async fn build_test_app_inner(
         artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
 
     let mut workspace = WorkspaceConfig::new();
@@ -727,6 +728,7 @@ async fn build_test_app_with_auth(
         artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
 
     let mut workspace = WorkspaceConfig::new();

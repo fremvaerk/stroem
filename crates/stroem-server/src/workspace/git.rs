@@ -352,6 +352,22 @@ impl WorkspaceSource for GitSource {
     }
 }
 
+/// Process-wide libgit2 socket timeouts (spec § 4.5): bound each TCP connect
+/// and each socket read — including `peek_revision`. Call once at startup,
+/// before any thread uses libgit2.
+pub fn configure_global_timeouts(connect_ms: u32, read_ms: u32) -> Result<()> {
+    // SAFETY: libgit2 requires global options to be set before other threads
+    // use it. `main` calls this before `WorkspaceManager::new`, the first
+    // libgit2 user; values are validated to fit a C int by `ServerConfig::validate`.
+    unsafe {
+        git2::opts::set_server_connect_timeout_in_milliseconds(connect_ms as i32)
+            .context("set libgit2 connect timeout")?;
+        git2::opts::set_server_timeout_in_milliseconds(read_ms as i32)
+            .context("set libgit2 server timeout")?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1305,5 +1321,20 @@ mod tests {
         let out = source.load(&unbounded()).unwrap();
         assert!(out.revision.is_some());
         assert_eq!(out.config.actions.len(), 1);
+    }
+
+    #[test]
+    fn configure_global_timeouts_applies_values() {
+        configure_global_timeouts(10_000, 60_000).unwrap();
+        unsafe {
+            assert_eq!(
+                git2::opts::get_server_connect_timeout_in_milliseconds().unwrap(),
+                10_000
+            );
+            assert_eq!(
+                git2::opts::get_server_timeout_in_milliseconds().unwrap(),
+                60_000
+            );
+        }
     }
 }

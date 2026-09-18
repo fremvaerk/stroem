@@ -236,6 +236,7 @@ async fn build_test_app_with_pool(
         artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
 
     let mgr = WorkspaceManager::from_config(workspace_name, workspace.clone());
