@@ -1,3 +1,4 @@
+pub mod availability;
 pub mod folder;
 pub mod git;
 pub mod library;
