@@ -20,6 +20,7 @@ pub mod oidc;
 pub mod recovery;
 pub mod render_context;
 pub mod restart;
+pub mod runtime;
 pub mod scheduler;
 pub mod settlement;
 pub mod state;

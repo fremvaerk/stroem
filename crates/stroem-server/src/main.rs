@@ -23,8 +23,19 @@ struct Cli {
     config: String,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    let worker_threads = stroem_server::runtime::worker_threads(
+        std::thread::available_parallelism().map(|n| n.get()).ok(),
+    );
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(worker_threads)
+        .enable_all()
+        .build()
+        .context("Failed to build tokio runtime")?;
+    runtime.block_on(async_main(worker_threads))
+}
+
+async fn async_main(worker_threads: usize) -> Result<()> {
     // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -34,6 +45,7 @@ async fn main() -> Result<()> {
         .init();
 
     tracing::info!("Starting Strøm server v{}", env!("CARGO_PKG_VERSION"));
+    tracing::info!("Tokio runtime: {} worker threads", worker_threads);
 
     // Load configuration
     let cli = Cli::parse();
