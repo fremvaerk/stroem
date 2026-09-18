@@ -91,7 +91,7 @@ rig-core = "0.36"
 
 # Workspace sources
 async-trait = "0.1"
-git2 = "0.21"
+git2 = { version = "0.21", features = ["ssh", "https"] }
 notify = { version = "8" }
 blake2 = "0.10"
 flate2 = "1"

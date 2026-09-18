@@ -1065,4 +1065,13 @@ mod tests {
         // unexpectedly for a no-auth local clone.
         source.load().await.unwrap();
     }
+
+    /// git2 0.21 made ssh/https opt-in (`default = []`). Production remotes
+    /// are ssh:// and https://; a build without them fails only at runtime.
+    #[test]
+    fn libgit2_is_built_with_ssh_and_https_transports() {
+        let version = git2::Version::get();
+        assert!(version.ssh(), "libgit2 built without SSH transport");
+        assert!(version.https(), "libgit2 built without HTTPS transport");
+    }
 }
