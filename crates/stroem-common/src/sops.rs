@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use std::path::Path;
 
+use crate::budget::{is_deadline_exceeded, run_with_deadline, LoadBudget};
+
 /// Check if a file path is a SOPS-encrypted file (by naming convention).
 /// Matches `*.sops.yaml` and `*.sops.yml` but NOT `.sops.yaml` (the SOPS config file).
 pub fn is_sops_file(path: &Path) -> bool {
@@ -11,11 +13,23 @@ pub fn is_sops_file(path: &Path) -> bool {
 /// Decrypt a SOPS-encrypted file by shelling out to the `sops` CLI.
 /// Returns the decrypted YAML content as a string.
 pub fn decrypt_sops_file(path: &Path) -> Result<String> {
-    let output = std::process::Command::new("sops")
-        .arg("-d")
-        .arg(path)
-        .output()
-        .context("Failed to run sops — is it installed and on PATH?")?;
+    decrypt_sops_file_with(path, &LoadBudget::unbounded())
+}
+
+/// [`decrypt_sops_file`], killing `sops` if `budget` expires.
+pub fn decrypt_sops_file_with(path: &Path, budget: &LoadBudget) -> Result<String> {
+    let mut cmd = std::process::Command::new("sops");
+    cmd.arg("-d").arg(path);
+    let output = run_with_deadline(cmd, None, budget).map_err(|e| {
+        if is_deadline_exceeded(&e) {
+            e.context(format!(
+                "sops decryption of {} exceeded the load deadline",
+                path.display()
+            ))
+        } else {
+            e.context("Failed to run sops — is it installed and on PATH?")
+        }
+    })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -32,8 +46,14 @@ pub fn decrypt_sops_file(path: &Path) -> Result<String> {
 
 /// Read a YAML file, decrypting it first if it's a SOPS file.
 pub fn read_yaml_file(path: &Path) -> Result<String> {
+    read_yaml_file_with(path, &LoadBudget::unbounded())
+}
+
+/// [`read_yaml_file`] under a [`LoadBudget`].
+pub fn read_yaml_file_with(path: &Path, budget: &LoadBudget) -> Result<String> {
+    budget.check()?;
     if is_sops_file(path) {
-        decrypt_sops_file(path)
+        decrypt_sops_file_with(path, budget)
     } else {
         std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read file: {}", path.display()))
@@ -144,5 +164,15 @@ mod tests {
 
         let result = decrypt_sops_file(&path);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn read_yaml_file_with_expired_budget_is_deadline_exceeded() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("plain.yaml");
+        std::fs::write(&path, "key: value\n").unwrap();
+        let expired = crate::budget::LoadBudget::until(std::time::Instant::now());
+        let err = read_yaml_file_with(&path, &expired).unwrap_err();
+        assert!(crate::budget::is_deadline_exceeded(&err), "{err:#}");
     }
 }

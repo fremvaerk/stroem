@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
+use crate::budget::{is_deadline_exceeded, LoadBudget};
 use crate::models::workflow::WorkspaceConfig;
 
 /// Maximum recursion depth for subdirectory scanning (matches `compute_revision`).
@@ -35,6 +36,20 @@ pub fn scan_and_merge_yaml_files(
     skip_sops: bool,
     infer_folders: bool,
 ) -> Result<(WorkspaceConfig, Vec<String>)> {
+    scan_and_merge_yaml_files_with(scan_dir, skip_sops, infer_folders, &LoadBudget::unbounded())
+}
+
+/// [`scan_and_merge_yaml_files`] under a [`LoadBudget`].
+///
+/// `budget` expiry aborts the WHOLE scan with [`crate::budget::DeadlineExceeded`]
+/// — it is never downgraded to a per-file warning, which would publish a
+/// partial config.
+pub fn scan_and_merge_yaml_files_with(
+    scan_dir: &Path,
+    skip_sops: bool,
+    infer_folders: bool,
+    budget: &LoadBudget,
+) -> Result<(WorkspaceConfig, Vec<String>)> {
     // Collect YAML files recursively from scan_dir and all subdirectories.
     let mut entries: Vec<PathBuf> = Vec::new();
     collect_yaml_files(scan_dir, &mut entries, 0)?;
@@ -46,6 +61,7 @@ pub fn scan_and_merge_yaml_files(
     let mut warnings: Vec<String> = Vec::new();
 
     for file_path in entries {
+        budget.check()?;
         let is_sops = crate::sops::is_sops_file(&file_path);
 
         if is_sops && skip_sops {
@@ -69,8 +85,9 @@ pub fn scan_and_merge_yaml_files(
             .display()
             .to_string();
 
-        let content = match crate::sops::read_yaml_file(&file_path) {
+        let content = match crate::sops::read_yaml_file_with(&file_path, budget) {
             Ok(c) => c,
+            Err(e) if is_deadline_exceeded(&e) => return Err(e),
             Err(e) => {
                 let msg = format!("Skipping '{}': failed to read file: {:#}", display_path, e);
                 tracing::warn!("{}", msg);
@@ -152,6 +169,14 @@ fn collect_yaml_files(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) -> Resul
 ///
 /// Returns the merged config and any warnings from skipped files.
 pub fn load_workspace(path: &Path) -> Result<(WorkspaceConfig, Vec<String>)> {
+    load_workspace_with(path, &LoadBudget::unbounded())
+}
+
+/// [`load_workspace`] under a [`LoadBudget`] (spec § 4.5).
+pub fn load_workspace_with(
+    path: &Path,
+    budget: &LoadBudget,
+) -> Result<(WorkspaceConfig, Vec<String>)> {
     if !path.exists() {
         anyhow::bail!("Workspace path does not exist: {}", path.display());
     }
@@ -163,15 +188,15 @@ pub fn load_workspace(path: &Path) -> Result<(WorkspaceConfig, Vec<String>)> {
         path.to_path_buf()
     };
 
-    let (mut workspace, warnings) = scan_and_merge_yaml_files(&scan_dir, false, true)
+    let (mut workspace, warnings) = scan_and_merge_yaml_files_with(&scan_dir, false, true, budget)
         .with_context(|| format!("Failed to scan workspace directory: {}", scan_dir.display()))?;
 
     workspace
-        .render_secrets()
+        .render_secrets_with(budget)
         .context("Failed to render workspace secrets")?;
 
     workspace
-        .render_connections()
+        .render_connections_with(budget)
         .context("Failed to render workspace connections")?;
 
     Ok((workspace, warnings))
@@ -417,5 +442,29 @@ mod tests {
             Some("custom".to_string()),
             "Explicit folder should not be overridden by subdirectory inference"
         );
+    }
+
+    #[test]
+    fn scan_with_expired_budget_aborts_instead_of_warning() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("a.yaml"), "actions: {}\n").unwrap();
+        fs::write(dir.path().join("b.yaml"), "actions: {}\n").unwrap();
+        let expired = crate::budget::LoadBudget::until(std::time::Instant::now());
+        let err = scan_and_merge_yaml_files_with(dir.path(), false, true, &expired).unwrap_err();
+        assert!(crate::budget::is_deadline_exceeded(&err), "{err:#}");
+    }
+
+    #[test]
+    fn load_workspace_with_unbounded_matches_load_workspace() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("w.yaml"),
+            "actions:\n  a:\n    type: script\n    script: echo hi\n",
+        )
+        .unwrap();
+        let (a, _) = load_workspace(dir.path()).unwrap();
+        let (b, _) =
+            load_workspace_with(dir.path(), &crate::budget::LoadBudget::unbounded()).unwrap();
+        assert_eq!(a.actions.len(), b.actions.len());
     }
 }
