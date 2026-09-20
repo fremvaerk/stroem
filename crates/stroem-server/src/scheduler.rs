@@ -349,19 +349,30 @@ async fn fire_trigger(app_state: &AppState, workspaces: &WorkspaceManager, tstat
 
     // Force-refresh workspace before job creation if configured
     if tstate.force_refresh {
-        if let Err(e) = app_state.workspaces.reload(&tstate.workspace).await {
-            tracing::warn!(
-                "Trigger '{}': force_refresh failed, continuing with cached revision: {:#}",
-                source_id,
-                e
-            );
-        } else {
-            // Notify peer replicas that the workspace has been refreshed so
-            // they converge without waiting for their own poll tick.
-            app_state
-                .event_bus
-                .publish_workspace_reloaded(&tstate.workspace)
-                .await;
+        match app_state.workspaces.reload(&tstate.workspace).await {
+            Ok(()) => {
+                // Notify peer replicas that the workspace has been refreshed so
+                // they converge without waiting for their own poll tick.
+                app_state
+                    .event_bus
+                    .publish_workspace_reloaded(&tstate.workspace)
+                    .await;
+            }
+            Err(e) if e.downcast_ref::<crate::workspace::ReloadBusy>().is_some() => {
+                // New policy (spec § 4.5 (8)): fire from the published snapshot
+                // if it is healthy; an errored workspace is still MISSED below.
+                tracing::info!(
+                    "Trigger '{}': force_refresh skipped — a reload is already in progress",
+                    source_id
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Trigger '{}': force_refresh failed, continuing with cached revision: {:#}",
+                    source_id,
+                    e
+                );
+            }
         }
     }
 
@@ -1172,6 +1183,7 @@ mod tests {
             artifact_storage: None,
             default_step_timeout: None,
             default_job_timeout: None,
+            workspace_reload: Default::default(),
         };
         let log_storage = LogStorage::new(&config.log_storage.local_dir);
         let pool = sqlx::PgPool::connect_lazy("postgres://invalid:5432/db").unwrap();

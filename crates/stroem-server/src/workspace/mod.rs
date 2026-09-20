@@ -1,79 +1,39 @@
+pub mod availability;
+pub mod entry;
 pub mod folder;
 pub mod git;
 pub mod library;
+pub mod lifecycle;
+pub mod source;
+#[cfg(test)]
+pub(crate) mod test_support;
+mod watcher;
 
+pub use entry::{LoadSuccess, Published, ReloadState, WorkspaceEntry};
 pub use folder::load_folder_workspace;
 pub use library::{merge_library_into_workspace, LibraryResolver, ResolvedLibrary};
+pub use lifecycle::ReloadBusy;
+pub use source::{LoadOutcome, Peek, WorkspaceSource};
 
 use anyhow::{Context, Result};
-use async_trait::async_trait;
+use availability::{Caller, ReloadSettings};
+use chrono::{DateTime, Utc};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use stroem_common::budget::LoadBudget;
 use stroem_common::models::workflow::WorkspaceConfig;
-use tokio::sync::{Mutex, RwLock, Semaphore};
+use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{GitAuthConfig, LibraryDef, WorkspaceSourceDef};
 
-/// Upper bound on how many workspace sources `WorkspaceManager::new` loads at
-/// once. Git sources block a whole worker thread each (see the comment in
-/// `new()`), so this also caps how many worker threads a large workspace
-/// fleet can occupy at startup.
+/// Upper bound on concurrent loads: startup loads, and every watcher load (a
+/// permit is held until the load really finishes, spec § 4.5). External
+/// reloads take no permit.
 const MAX_CONCURRENT_WORKSPACE_LOADS: usize = 8;
-
-/// Trait for workspace sources (folder, git, etc.)
-#[async_trait]
-pub trait WorkspaceSource: Send + Sync {
-    /// Load/reload workspace configuration from this source.
-    /// Returns the config paired with per-file warnings for files that were
-    /// skipped due to read or parse errors.
-    async fn load(&self) -> Result<(WorkspaceConfig, Vec<String>)>;
-    /// Filesystem path where the workspace files reside
-    fn path(&self) -> &Path;
-    /// Current revision identifier (content hash for folder, git OID for git)
-    fn revision(&self) -> Option<String>;
-    /// Compute the current revision without a full load.
-    /// Used by the watcher to cheaply detect changes before doing expensive YAML parsing.
-    /// Default implementation returns `None` (forces a full reload every cycle).
-    fn peek_revision(&self) -> Option<String> {
-        None
-    }
-    /// Polling interval in seconds for the background watcher.
-    /// Default is 30 seconds. Git sources override with their configured value.
-    fn poll_interval_secs(&self) -> u64 {
-        30
-    }
-}
-
-/// A loaded workspace entry with its source and cached config
-pub struct WorkspaceEntry {
-    pub config: Arc<RwLock<Arc<WorkspaceConfig>>>,
-    pub source: Arc<dyn WorkspaceSource>,
-    pub name: String,
-    pub source_path: PathBuf,
-    /// None when healthy, Some(message) when last load failed.
-    /// Uses std::sync::RwLock since it's read from both sync and async contexts.
-    pub load_error: Arc<std::sync::RwLock<Option<String>>>,
-    /// Per-file warnings from the last successful load (files that were skipped
-    /// due to read or parse errors). Empty when the workspace has a load_error.
-    pub load_warnings: Arc<std::sync::RwLock<Vec<String>>>,
-    /// Serializes concurrent reload attempts on the same workspace. The
-    /// expensive `source.load()` call (git fetch + reset --hard, or folder
-    /// re-hash) is held under this mutex along with the config write — without
-    /// it, two concurrent reloads on a `GitSource` would both perform
-    /// `reset --hard` on the same on-disk clone, corrupting the working tree.
-    /// Stores the `Instant` of the last completed (successful or failed)
-    /// reload so `reload_for_api` can enforce a cooldown.
-    pub reload_state: Arc<Mutex<ReloadState>>,
-}
-
-#[derive(Default)]
-pub struct ReloadState {
-    pub last_completed: Option<Instant>,
-}
 
 /// Outcome of `WorkspaceManager::reload_for_api`. Distinguishes the three
 /// cases the public refresh endpoint cares about so the handler can return
@@ -104,76 +64,44 @@ impl std::fmt::Display for ReloadApiError {
 
 impl std::error::Error for ReloadApiError {}
 
-impl WorkspaceEntry {
-    /// Returns `true` if the workspace loaded successfully (no load error).
-    fn is_healthy(&self) -> bool {
-        self.load_error
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_none()
-    }
-
-    /// Helper for tests and constructors that need a fresh `reload_state`
-    /// without having to name [`ReloadState`] directly.
-    pub fn default_reload_state() -> Arc<Mutex<ReloadState>> {
-        Arc::new(Mutex::new(ReloadState::default()))
-    }
-}
-
-impl std::fmt::Debug for WorkspaceEntry {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut s = f.debug_struct("WorkspaceEntry");
-        s.field("name", &self.name)
-            .field("source_path", &self.source_path);
-        if let Ok(err) = self.load_error.read() {
-            if err.is_some() {
-                s.field("load_error", &err);
-            }
-        }
-        s.finish()
-    }
-}
-
 /// In-memory workspace source for testing
 struct InMemorySource {
-    config: tokio::sync::RwLock<WorkspaceConfig>,
+    config: WorkspaceConfig,
     /// Optional pinned revision. `None` mirrors the historic behaviour of
     /// `from_config`; `from_configs` can supply an explicit revision so tests
     /// exercising cross-workspace pinning observe a concrete value.
     revision: Option<String>,
 }
 
-#[async_trait]
 impl WorkspaceSource for InMemorySource {
-    async fn load(&self) -> Result<(WorkspaceConfig, Vec<String>)> {
-        Ok((self.config.read().await.clone(), Vec::new()))
+    fn load(&self, _budget: &LoadBudget) -> Result<LoadOutcome> {
+        Ok(LoadOutcome {
+            config: self.config.clone(),
+            warnings: Vec::new(),
+            revision: self.revision.clone(),
+        })
     }
 
     fn path(&self) -> &Path {
         Path::new("/dev/null")
-    }
-
-    fn revision(&self) -> Option<String> {
-        self.revision.clone()
-    }
-
-    fn peek_revision(&self) -> Option<String> {
-        None
     }
 }
 
 /// Manages multiple workspaces
 #[derive(Debug)]
 pub struct WorkspaceManager {
-    entries: HashMap<String, WorkspaceEntry>,
+    entries: HashMap<String, Arc<WorkspaceEntry>>,
     load_errors: HashMap<String, String>,
-    /// Resolved libraries — shared across all workspaces
-    resolved_libraries: HashMap<String, ResolvedLibrary>,
+    /// Resolved libraries — shared across all workspaces and load tasks.
+    resolved_libraries: Arc<HashMap<String, ResolvedLibrary>>,
     /// Workspaces whose triggers this server must NOT fire
     /// (`workspaces.<name>.triggers: false` in the server config). Kept
     /// separate from `entries` so it also covers workspaces whose source
     /// failed to construct, and so test constructors need not thread it.
     triggers_disabled: HashSet<String>,
+    settings: ReloadSettings,
+    /// Shared across startup loads and every watcher load (spec § 4.5).
+    load_permits: Arc<Semaphore>,
 }
 
 impl WorkspaceManager {
@@ -181,10 +109,11 @@ impl WorkspaceManager {
     /// Individual workspace failures are captured in `load_errors` rather than
     /// failing the entire server — other workspaces continue to load normally.
     /// Libraries are resolved first and merged into every workspace config.
-    pub async fn new(
+    pub async fn new_with_reload(
         defs: HashMap<String, WorkspaceSourceDef>,
         library_defs: HashMap<String, LibraryDef>,
         git_auth: HashMap<String, GitAuthConfig>,
+        settings: ReloadSettings,
     ) -> Self {
         let mut entries = HashMap::new();
         let mut load_errors = HashMap::new();
@@ -250,18 +179,10 @@ impl WorkspaceManager {
         }
 
         // Load every workspace concurrently. `tokio::spawn` (via `JoinSet`)
-        // is required here rather than `join_all` over the loading futures:
-        // `GitSource::load` wraps its blocking libgit2 clone/fetch in
-        // `tokio::task::block_in_place`, which hands the *current* worker
-        // thread over to blocking work for the duration of the call — it
-        // does not yield that thread back to the runtime for other tasks to
-        // use. Polling several such futures on one task (as `join_all`
-        // would) still runs them one at a time; only separate spawned tasks,
-        // each occupying its own worker thread, actually run the blocking
-        // git operations in parallel. Without this, a single slow or
-        // misbehaving remote would still stall every other workspace's
-        // startup, exactly as it did before this change.
-        let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_WORKSPACE_LOADS));
+        // Each load runs on the blocking pool (spawn_blocking), so no runtime
+        // worker thread is ever occupied by git or YAML work (spec § 4.5 (0)).
+        let load_permits = Arc::new(Semaphore::new(MAX_CONCURRENT_WORKSPACE_LOADS));
+        let semaphore = Arc::clone(&load_permits);
         let mut join_set = JoinSet::new();
         let mut task_names: HashMap<tokio::task::Id, String> =
             HashMap::with_capacity(sources.len());
@@ -272,8 +193,14 @@ impl WorkspaceManager {
                     .acquire_owned()
                     .await
                     .expect("semaphore is never closed");
-                let result = source.load().await;
-                (source, result)
+                let budget = LoadBudget::from_now(settings.load_timeout);
+                let loader = source.clone();
+                let result = tokio::task::spawn_blocking(move || loader.load(&budget))
+                    .await
+                    .unwrap_or_else(|e| Err(anyhow::anyhow!("workspace load task panicked: {e}")));
+                // This workspace's own completion time, not the end of startup.
+                let completed_at = Instant::now();
+                (source, result, completed_at)
             });
             task_names.insert(abort_handle.id(), name);
         }
@@ -281,16 +208,17 @@ impl WorkspaceManager {
         type LoadedWorkspace = (
             String,
             Arc<dyn WorkspaceSource>,
-            Result<(WorkspaceConfig, Vec<String>)>,
+            Result<LoadOutcome>,
+            Instant,
         );
         let mut loaded: Vec<LoadedWorkspace> = Vec::with_capacity(task_names.len());
         while let Some(joined) = join_set.join_next_with_id().await {
             match joined {
-                Ok((id, (source, result))) => {
+                Ok((id, (source, result, completed_at))) => {
                     let name = task_names
                         .remove(&id)
                         .unwrap_or_else(|| "<unknown>".to_string());
-                    loaded.push((name, source, result));
+                    loaded.push((name, source, result, completed_at));
                 }
                 Err(join_err) => {
                     // A panicked load task must not take the server down.
@@ -306,54 +234,24 @@ impl WorkspaceManager {
             }
         }
 
-        for (name, source, result) in loaded {
-            match result {
-                Ok((mut config, warnings)) => {
-                    // Merge library items into workspace config
-                    for lib in resolved_libraries.values() {
-                        merge_library_into_workspace(&mut config, lib);
-                    }
-
-                    if !warnings.is_empty() {
-                        tracing::warn!(
-                            "Workspace '{}': {} file(s) skipped due to errors",
-                            name,
-                            warnings.len()
-                        );
-                    }
-
-                    let source_path = source.path().to_path_buf();
-                    entries.insert(
-                        name.clone(),
-                        WorkspaceEntry {
-                            config: Arc::new(RwLock::new(Arc::new(config))),
-                            source,
-                            name: name.clone(),
-                            source_path,
-                            load_error: Arc::new(std::sync::RwLock::new(None)),
-                            load_warnings: Arc::new(std::sync::RwLock::new(warnings)),
-                            reload_state: Arc::new(Mutex::new(ReloadState::default())),
-                        },
-                    );
-                }
-                Err(e) => {
-                    let err_msg = format!("{:#}", e);
-                    tracing::error!("Failed to load workspace '{}': {}", name, err_msg);
-                    let source_path = source.path().to_path_buf();
-                    entries.insert(
-                        name.clone(),
-                        WorkspaceEntry {
-                            config: Arc::new(RwLock::new(Arc::new(WorkspaceConfig::new()))),
-                            source,
-                            name: name.clone(),
-                            source_path,
-                            load_error: Arc::new(std::sync::RwLock::new(Some(err_msg))),
-                            load_warnings: Arc::new(std::sync::RwLock::new(Vec::new())),
-                            reload_state: Arc::new(Mutex::new(ReloadState::default())),
-                        },
-                    );
-                }
+        // Every result goes through the single writer (spec § 4.5 (9)). A
+        // failure lands in Errored with `next_attempt = completed_at`, so the
+        // watcher retries on its first, un-jittered tick.
+        for (name, source, result, completed_at) in loaded {
+            if let Err(e) = &result {
+                tracing::error!("Failed to load workspace '{}': {:#}", name, e);
             }
+            let entry = WorkspaceEntry::pending(name.clone(), source);
+            let policy = settings.policy(entry.poll_interval());
+            let _ = entry.apply_load_result(
+                Caller::Startup,
+                None,
+                result,
+                &resolved_libraries,
+                &policy,
+                completed_at,
+            );
+            entries.insert(name, Arc::new(entry));
         }
 
         tracing::info!(
@@ -365,18 +263,31 @@ impl WorkspaceManager {
         Self {
             entries,
             load_errors,
-            resolved_libraries,
+            resolved_libraries: Arc::new(resolved_libraries),
             triggers_disabled,
+            settings,
+            load_permits,
         }
+    }
+
+    /// [`Self::new_with_reload`] with default reload settings (tests, tools).
+    pub async fn new(
+        defs: HashMap<String, WorkspaceSourceDef>,
+        library_defs: HashMap<String, LibraryDef>,
+        git_auth: HashMap<String, GitAuthConfig>,
+    ) -> Self {
+        Self::new_with_reload(defs, library_defs, git_auth, ReloadSettings::default()).await
     }
 
     /// Create a WorkspaceManager from pre-built entries (for testing)
     pub fn from_entries(entries: HashMap<String, WorkspaceEntry>) -> Self {
         Self {
-            entries,
+            entries: entries.into_iter().map(|(k, v)| (k, Arc::new(v))).collect(),
             load_errors: HashMap::new(),
-            resolved_libraries: HashMap::new(),
+            resolved_libraries: Arc::new(HashMap::new()),
             triggers_disabled: HashSet::new(),
+            settings: ReloadSettings::default(),
+            load_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_WORKSPACE_LOADS)),
         }
     }
 
@@ -384,27 +295,26 @@ impl WorkspaceManager {
     /// The workspace is registered under the given name with a temp path.
     pub fn from_config(name: &str, config: WorkspaceConfig) -> Self {
         let source = Arc::new(InMemorySource {
-            config: tokio::sync::RwLock::new(config.clone()),
+            config: config.clone(),
             revision: None,
         });
         let mut entries = HashMap::new();
         entries.insert(
             name.to_string(),
-            WorkspaceEntry {
-                config: Arc::new(RwLock::new(Arc::new(config))),
-                source: source as Arc<dyn WorkspaceSource>,
-                name: name.to_string(),
-                source_path: PathBuf::from("/dev/null"),
-                load_error: Arc::new(std::sync::RwLock::new(None)),
-                load_warnings: Arc::new(std::sync::RwLock::new(Vec::new())),
-                reload_state: Arc::new(Mutex::new(ReloadState::default())),
-            },
+            Arc::new(WorkspaceEntry::new(
+                name.to_string(),
+                source as Arc<dyn WorkspaceSource>,
+                config,
+                None,
+            )),
         );
         Self {
             entries,
             load_errors: HashMap::new(),
-            resolved_libraries: HashMap::new(),
+            resolved_libraries: Arc::new(HashMap::new()),
             triggers_disabled: HashSet::new(),
+            settings: ReloadSettings::default(),
+            load_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_WORKSPACE_LOADS)),
         }
     }
 
@@ -415,27 +325,26 @@ impl WorkspaceManager {
         let mut entries = HashMap::new();
         for (name, config, revision) in configs {
             let source = Arc::new(InMemorySource {
-                config: tokio::sync::RwLock::new(config.clone()),
-                revision,
+                config: config.clone(),
+                revision: revision.clone(),
             });
             entries.insert(
                 name.clone(),
-                WorkspaceEntry {
-                    config: Arc::new(RwLock::new(Arc::new(config))),
-                    source: source as Arc<dyn WorkspaceSource>,
+                Arc::new(WorkspaceEntry::new(
                     name,
-                    source_path: PathBuf::from("/dev/null"),
-                    load_error: Arc::new(std::sync::RwLock::new(None)),
-                    load_warnings: Arc::new(std::sync::RwLock::new(Vec::new())),
-                    reload_state: Arc::new(Mutex::new(ReloadState::default())),
-                },
+                    source as Arc<dyn WorkspaceSource>,
+                    config,
+                    revision,
+                )),
             );
         }
         Self {
             entries,
             load_errors: HashMap::new(),
-            resolved_libraries: HashMap::new(),
+            resolved_libraries: Arc::new(HashMap::new()),
             triggers_disabled: HashSet::new(),
+            settings: ReloadSettings::default(),
+            load_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_WORKSPACE_LOADS)),
         }
     }
 
@@ -447,6 +356,13 @@ impl WorkspaceManager {
         self.load_errors.insert(name.to_string(), error.to_string());
     }
 
+    /// Look up an entry by name. `start_watchers` iterates `entries.values()`
+    /// directly, so this is unit-test-only.
+    #[cfg(test)]
+    pub(crate) fn entry(&self, name: &str) -> Option<Arc<WorkspaceEntry>> {
+        self.entries.get(name).cloned()
+    }
+
     /// Test-only: replace a loaded workspace's config in place (simulates a
     /// reload that changed the YAML) without touching the source. Not
     /// `#[cfg(test)]` for the same reason as `mark_unavailable_for_test`:
@@ -454,7 +370,7 @@ impl WorkspaceManager {
     #[doc(hidden)]
     pub async fn replace_config_for_test(&self, name: &str, cfg: WorkspaceConfig) {
         if let Some(entry) = self.entries.get(name) {
-            *entry.config.write().await = Arc::new(cfg);
+            entry.replace_config(cfg);
         }
     }
 
@@ -472,39 +388,56 @@ impl WorkspaceManager {
             .entries
             .get(name)
             .expect("mark_unavailable_for_test: no entry registered for this name");
-        let mut guard = entry.load_error.write().unwrap_or_else(|e| e.into_inner());
-        *guard = Some("marked unavailable for test".to_string());
+        self.fail_for_test(entry, "marked unavailable for test");
+    }
+
+    /// Test-only: put a loaded workspace into its load-error state, as a
+    /// failed reload does.
+    #[cfg(test)]
+    pub fn mark_errored_for_test(&self, name: &str, error: &str) {
+        let entry = self.entries.get(name).expect("workspace entry");
+        self.fail_for_test(entry, error);
+    }
+
+    /// Route a synthetic test failure through the single writer so
+    /// availability and the published error never diverge.
+    fn fail_for_test(&self, entry: &WorkspaceEntry, error: &str) {
+        let policy = self.settings.policy(entry.poll_interval());
+        let _ = entry.apply_load_result(
+            Caller::External,
+            None,
+            Err(anyhow::anyhow!("{error}")),
+            &HashMap::new(),
+            &policy,
+            Instant::now(),
+        );
     }
 
     /// Get the workspace config for a given name.
     /// Returns None for workspaces with a load error (empty placeholder config).
     pub async fn get_config(&self, name: &str) -> Option<Arc<WorkspaceConfig>> {
-        let entry = self.entries.get(name)?;
-        if !entry.is_healthy() {
-            return None;
-        }
-        let config = entry.config.read().await;
-        Some(Arc::clone(&config))
+        let published = self.entries.get(name)?.published();
+        published
+            .error
+            .is_none()
+            .then(|| Arc::clone(&published.config))
     }
 
     /// Get the filesystem path for a workspace.
     /// Returns None for workspaces with a load error.
     pub fn get_path(&self, name: &str) -> Option<&Path> {
         let entry = self.entries.get(name)?;
-        if !entry.is_healthy() {
-            return None;
-        }
-        Some(entry.source_path.as_path())
+        entry.is_healthy().then_some(entry.source_path.as_path())
     }
 
     /// Get the current revision for a workspace.
     /// Returns `None` if the workspace does not exist or has a load error.
     pub fn get_revision(&self, name: &str) -> Option<String> {
-        let entry = self.entries.get(name)?;
-        if !entry.is_healthy() {
+        let published = self.entries.get(name)?.published();
+        if published.error.is_some() {
             return None;
         }
-        entry.source.revision()
+        published.revision.clone()
     }
 
     /// List all workspace names (including errored workspaces with placeholder entries).
@@ -547,14 +480,6 @@ impl WorkspaceManager {
         names.into_iter().collect()
     }
 
-    /// Test-only: put a loaded workspace into its load-error state, as a
-    /// failed reload does.
-    #[cfg(test)]
-    pub fn mark_errored_for_test(&self, name: &str, error: &str) {
-        let entry = self.entries.get(name).expect("workspace entry");
-        *entry.load_error.write().unwrap() = Some(error.to_string());
-    }
-
     /// Check whether a workspace with the given name exists (regardless of health status).
     // TODO: like `names()`, this ignores `load_errors` — a workspace whose
     // *source construction* failed (e.g. `GitSource::new()`) has no `entries`
@@ -569,15 +494,15 @@ impl WorkspaceManager {
     /// Get all workspace configs as (name, config) pairs.
     /// Skips workspaces with load errors.
     pub async fn get_all_configs(&self) -> Vec<(String, Arc<WorkspaceConfig>)> {
-        let mut result = Vec::new();
-        for (name, entry) in &self.entries {
-            if !entry.is_healthy() {
-                continue;
-            }
-            let config = entry.config.read().await;
-            result.push((name.clone(), Arc::clone(&config)));
-        }
-        result
+        self.entries
+            .iter()
+            .filter_map(|(name, entry)| {
+                let p = entry.published();
+                p.error
+                    .is_none()
+                    .then(|| (name.clone(), Arc::clone(&p.config)))
+            })
+            .collect()
     }
 
     /// List all workspaces including ones that failed to load.
@@ -586,32 +511,28 @@ impl WorkspaceManager {
     pub async fn list_workspace_info(&self) -> Vec<WorkspaceInfo> {
         let mut infos = Vec::new();
         for (name, entry) in &self.entries {
-            let error = entry
-                .load_error
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone();
-            let warnings = if error.is_none() {
-                entry
-                    .load_warnings
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clone()
+            let p = entry.published();
+            let warnings = if p.error.is_none() {
+                p.warnings.clone()
             } else {
                 Vec::new()
             };
-            // Errored workspaces have an empty placeholder config, so .len() is 0.
-            let config = entry.config.read().await;
             infos.push(WorkspaceInfo {
                 name: name.clone(),
-                tasks_count: config.tasks.len(),
-                actions_count: config.actions.len(),
-                triggers_count: config.triggers.len(),
-                connections_count: config.connections.len(),
-                revision: entry.source.revision(),
-                error,
+                tasks_count: p.config.tasks.len(),
+                actions_count: p.config.actions.len(),
+                triggers_count: p.config.triggers.len(),
+                connections_count: p.config.connections.len(),
+                revision: p.revision.clone(),
+                error: p.error.clone(),
                 warnings,
                 triggers_enabled: self.triggers_enabled(name),
+                last_successful_load: p.loaded_at_utc,
+                availability: if entry.availability().is_errored() {
+                    "errored".to_string()
+                } else {
+                    "fresh".to_string()
+                },
             });
         }
         // Source construction failures (e.g. GitSource::new() failed — no source object)
@@ -626,58 +547,56 @@ impl WorkspaceManager {
                 revision: None,
                 error: Some(error.clone()),
                 warnings: Vec::new(),
+                last_successful_load: None,
+                availability: "errored".to_string(),
             });
         }
         infos
     }
 
-    /// Reload a specific workspace from its source, updating config and revision.
-    /// Library items are re-merged into the workspace config.
-    /// On success, clears any previous load error. On failure, sets the load error.
-    ///
-    /// Concurrent reload attempts on the same workspace are serialized via the
-    /// per-workspace `reload_state` mutex — this is the only reason the
-    /// expensive `source.load()` (git fetch + reset --hard) can be safely
-    /// invoked from multiple call sites (watcher, scheduler, hooks, API).
-    /// Without this guard, two simultaneous reloads would perform
-    /// `reset --hard` on the same on-disk libgit2 clone and corrupt its
-    /// working tree.
+    /// Reload a workspace now (peer notification, scheduler/webhook
+    /// `force_refresh`, tests). Returns `Err(ReloadBusy)` — check with
+    /// `err.downcast_ref::<ReloadBusy>()` — if another load of this
+    /// workspace is running; never waits for it (spec § 4.5 (8)).
     pub async fn reload(&self, name: &str) -> Result<()> {
         let entry = self
             .entries
             .get(name)
-            .with_context(|| format!("Workspace '{}' not found", name))?;
-
-        let mut reload_state = entry.reload_state.lock().await;
-        let result = Self::do_reload(name, entry, &self.resolved_libraries).await;
-        reload_state.last_completed = Some(Instant::now());
-        result
+            .with_context(|| format!("Workspace '{}' not found", name))?
+            .clone();
+        let guard = entry
+            .exec()
+            .try_lock_owned()
+            .map_err(|_| anyhow::Error::new(ReloadBusy))?;
+        self.run_external_load(entry, guard)
+            .await
+            .with_context(|| format!("Failed to reload workspace '{}'", name))
     }
 
     /// Like [`Self::reload`], but enforces a `cooldown` window since the last
-    /// completed reload and returns a typed [`ReloadApiError`] so the HTTP
-    /// handler can map cleanly to 404 / 429 / 500. Pass `Duration::ZERO` to
-    /// skip the cooldown (used by tests).
+    /// completed external reload and returns a typed [`ReloadApiError`] (404 /
+    /// 429 / 500). An in-flight reload surfaces as `Cooldown`. Pass
+    /// `Duration::ZERO` to skip the cooldown (tests).
     pub async fn reload_for_api(
         &self,
         name: &str,
         cooldown: Duration,
     ) -> std::result::Result<(), ReloadApiError> {
-        let entry = self.entries.get(name).ok_or(ReloadApiError::NotFound)?;
-
-        // try_lock first so a refresh that's currently in flight is
-        // surfaced as a cooldown response rather than queueing the caller
-        // and tying up a worker.
-        let mut reload_state = match entry.reload_state.try_lock() {
+        let entry = self
+            .entries
+            .get(name)
+            .ok_or(ReloadApiError::NotFound)?
+            .clone();
+        // try_lock: an in-flight reload surfaces as a cooldown, never a queue.
+        let guard = match entry.exec().try_lock_owned() {
             Ok(guard) => guard,
             Err(_) => {
                 return Err(ReloadApiError::Cooldown {
                     retry_after_secs: cooldown.as_secs().max(1),
-                });
+                })
             }
         };
-
-        if let Some(last) = reload_state.last_completed {
+        if let Some(last) = guard.last_completed {
             let elapsed = last.elapsed();
             if elapsed < cooldown {
                 let retry_after = (cooldown - elapsed).as_secs().max(1);
@@ -686,63 +605,70 @@ impl WorkspaceManager {
                 });
             }
         }
-
-        let result = Self::do_reload(name, entry, &self.resolved_libraries).await;
-        reload_state.last_completed = Some(Instant::now());
-        result.map_err(ReloadApiError::Failed)
+        self.run_external_load(entry, guard)
+            .await
+            .map_err(ReloadApiError::Failed)
     }
 
-    /// Reload implementation. Caller must hold `entry.reload_state` lock.
-    async fn do_reload(
-        name: &str,
-        entry: &WorkspaceEntry,
-        resolved_libraries: &HashMap<String, ResolvedLibrary>,
+    /// External load through the detached finalizer: no permit, no watchdog,
+    /// but guard ownership and result application survive the caller being
+    /// cancelled (spec § 4.5 (8)).
+    async fn run_external_load(
+        &self,
+        entry: Arc<WorkspaceEntry>,
+        guard: tokio::sync::OwnedMutexGuard<ReloadState>,
     ) -> Result<()> {
-        match entry.source.load().await {
-            Ok((mut new_config, new_warnings)) => {
-                // Re-merge library items
-                for lib in resolved_libraries.values() {
-                    merge_library_into_workspace(&mut new_config, lib);
-                }
+        let policy = self.settings.policy(entry.poll_interval());
+        let handle = lifecycle::spawn_load(lifecycle::LoadRequest {
+            entry,
+            libs: Arc::clone(&self.resolved_libraries),
+            policy,
+            guard,
+            permit: None,
+            caller: Caller::External,
+            op_id: None,
+            budget: LoadBudget::from_now(self.settings.load_timeout),
+            notifier: None,
+        });
+        handle
+            .await
+            .map_err(|e| anyhow::anyhow!("workspace reload task failed: {e}"))?
+            .map(|_| ())
+    }
 
-                if !new_warnings.is_empty() {
-                    tracing::warn!(
-                        "Workspace '{}': {} file(s) skipped due to errors",
-                        name,
-                        new_warnings.len()
-                    );
-                }
+    /// Test hook: occupy a workspace's execution mutex, as a running load does.
+    #[doc(hidden)]
+    pub async fn hold_exec_for_test(
+        &self,
+        name: &str,
+    ) -> tokio::sync::OwnedMutexGuard<ReloadState> {
+        self.entries
+            .get(name)
+            .expect("hold_exec_for_test: no entry")
+            .exec()
+            .lock_owned()
+            .await
+    }
 
-                let mut config = entry.config.write().await;
-                *config = Arc::new(new_config);
+    /// Free permits left in the shared load semaphore (spec § 4.5). Exposed
+    /// for the health/metrics surface and tests.
+    pub fn load_permits_available(&self) -> usize {
+        self.load_permits.available_permits()
+    }
 
-                // Clear any previous error and store new warnings
-                let mut err = entry.load_error.write().unwrap_or_else(|e| e.into_inner());
-                *err = None;
-                drop(err);
-
-                let mut warnings = entry
-                    .load_warnings
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner());
-                *warnings = new_warnings;
-
-                Ok(())
-            }
-            Err(e) => {
-                let err_msg = format!("{:#}", e);
-                let mut err = entry.load_error.write().unwrap_or_else(|e| e.into_inner());
-                *err = Some(err_msg);
-                // Clear warnings when workspace is fully errored
-                drop(err);
-                let mut warnings = entry
-                    .load_warnings
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner());
-                *warnings = Vec::new();
-                Err(e).with_context(|| format!("Failed to reload workspace '{}'", name))
-            }
-        }
+    /// Scrape-time freshness of every workspace (spec § 4.8).
+    pub fn watch_statuses(&self, now: Instant) -> Vec<WatchStatus> {
+        self.entries
+            .iter()
+            .map(|(name, entry)| WatchStatus {
+                name: name.clone(),
+                load_overdue: entry.availability().load_overdue(now),
+                last_successful_load_age: entry
+                    .published()
+                    .loaded_at
+                    .map(|t| now.saturating_duration_since(t)),
+            })
+            .collect()
     }
 
     /// Get library source paths for tarball building.
@@ -755,163 +681,38 @@ impl WorkspaceManager {
     }
 
     /// Start background watchers for hot-reload (folder watchers + git pollers).
-    /// Only reloads when the source revision changes.
-    /// Uses each source's `poll_interval_secs()` for the polling frequency.
-    /// Errored workspaces retry `load()` on each poll cycle until they recover.
-    /// Watchers stop cleanly when `cancel_token` is cancelled.
-    ///
-    /// When `event_bus` is provided, the watcher emits
-    /// [`crate::events::CHANNEL_WORKSPACE_RELOADED`] every time the source
-    /// revision changes so peer replicas can refresh their cached config
-    /// without waiting for their own poll tick.
+    /// One tick per workspace peeks for a revision change (or, once K
+    /// consecutive peeks have failed, forces a load); a peek failure just
+    /// skips that tick and keeps serving the last loaded config (spec §
+    /// 4.2). Errored workspaces retry on the backoff ladder without peeking.
+    /// A successful watcher reload that changed the revision notifies peer
+    /// replicas. Watchers stop cleanly when `cancel_token` is cancelled.
     pub fn start_watchers(
         &self,
         cancel_token: CancellationToken,
         event_bus: Option<crate::events::EventBus>,
     ) {
-        for (name, entry) in &self.entries {
-            let config_lock = entry.config.clone();
-            let source = entry.source.clone();
-            let ws_name = name.clone();
-            let poll_secs = source.poll_interval_secs();
-            let libs = self.resolved_libraries.clone();
-            let cancel = cancel_token.clone();
-            let load_error = entry.load_error.clone();
-            let load_warnings = entry.load_warnings.clone();
-            let needs_initial_load = !entry.is_healthy();
-            let bus = event_bus.clone();
-
-            tokio::spawn(async move {
-                tracing::info!(
-                    "Watcher started for workspace '{}' (poll interval: {}s{})",
-                    ws_name,
-                    poll_secs,
-                    if needs_initial_load {
-                        ", retrying failed load"
-                    } else {
-                        ""
-                    },
-                );
-
-                let mut interval = tokio::time::interval(std::time::Duration::from_secs(poll_secs));
-                let mut last_revision = source.revision();
-
-                if !needs_initial_load {
-                    // Skip the first immediate tick — the workspace was just loaded
-                    interval.tick().await;
-                }
-
-                loop {
-                    tokio::select! {
-                        _ = interval.tick() => {}
-                        () = cancel.cancelled() => {
-                            tracing::info!(
-                                "Watcher for workspace '{}' stopping (shutdown)",
-                                ws_name
-                            );
-                            break;
-                        }
-                    }
-
-                    let is_errored = load_error
-                        .read()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .is_some();
-
-                    // For errored entries, skip the peek optimization and always try load()
-                    if !is_errored {
-                        // Check revision cheaply first. For folder sources this
-                        // hashes file metadata+content without parsing YAML.
-                        // For git sources this does a lightweight ls-remote
-                        // (blocking network call, so wrap in spawn_blocking).
-                        let source_clone = source.clone();
-                        let current_revision =
-                            tokio::task::spawn_blocking(move || source_clone.peek_revision())
-                                .await
-                                .unwrap_or_else(|e| {
-                                    tracing::error!("peek_revision task failed: {:#}", e);
-                                    None
-                                });
-                        if current_revision == last_revision && current_revision.is_some() {
-                            continue;
-                        }
-
-                        tracing::info!("Workspace '{}': change detected, reloading...", ws_name);
-                    }
-
-                    // Revision changed (or source doesn't support peek, or errored) — do full reload
-                    match source.load().await {
-                        Ok((mut new_config, new_warnings)) => {
-                            // Re-merge library items
-                            for lib in libs.values() {
-                                merge_library_into_workspace(&mut new_config, lib);
-                            }
-
-                            if !new_warnings.is_empty() {
-                                tracing::warn!(
-                                    "Workspace '{}': {} file(s) skipped due to errors",
-                                    ws_name,
-                                    new_warnings.len()
-                                );
-                            }
-
-                            let new_revision = source.revision();
-                            {
-                                let mut config = config_lock.write().await;
-                                *config = Arc::new(new_config);
-                            }
-
-                            // Scope the std::sync lock guards so they don't
-                            // straddle the publish_workspace_reloaded().await
-                            // below — std::sync::RwLockWriteGuard is !Send.
-                            {
-                                let mut err = load_error.write().unwrap_or_else(|e| e.into_inner());
-                                if err.is_some() {
-                                    tracing::info!(
-                                        "Workspace '{}' recovered from load error",
-                                        ws_name
-                                    );
-                                } else {
-                                    tracing::info!(
-                                        "Workspace '{}' reloaded (revision: {:?} -> {:?})",
-                                        ws_name,
-                                        last_revision.as_deref().map(|s| &s[..8.min(s.len())]),
-                                        new_revision.as_deref().map(|s| &s[..8.min(s.len())]),
-                                    );
-                                }
-                                *err = None;
-                            }
-                            {
-                                let mut warnings =
-                                    load_warnings.write().unwrap_or_else(|e| e.into_inner());
-                                *warnings = new_warnings;
-                            }
-
-                            // Notify peer replicas that this workspace
-                            // changed, so they don't have to wait for their
-                            // own next poll tick to converge.
-                            if let Some(bus) = &bus {
-                                bus.publish_workspace_reloaded(&ws_name).await;
-                            }
-                            last_revision = new_revision;
-                        }
-                        Err(e) => {
-                            let mut err = load_error.write().unwrap_or_else(|e| e.into_inner());
-                            *err = Some(format!("{:#}", e));
-                            tracing::warn!("Failed to reload workspace '{}': {:#}", ws_name, e);
-                            drop(err);
-                            // Clear warnings when workspace is in full error state
-                            let mut warnings =
-                                load_warnings.write().unwrap_or_else(|e| e.into_inner());
-                            *warnings = Vec::new();
-                            // No event_bus publish on error: each replica polls its own source and
-                            // reports its own load_error. There's no peer state to converge.
-                        }
-                    }
-                }
-            });
+        let notifier: Option<Arc<dyn lifecycle::ReloadNotifier>> =
+            event_bus.map(|bus| Arc::new(bus) as Arc<dyn lifecycle::ReloadNotifier>);
+        for entry in self.entries.values() {
+            let ctx = watcher::WatcherCtx {
+                entry: Arc::clone(entry),
+                libs: Arc::clone(&self.resolved_libraries),
+                permits: Arc::clone(&self.load_permits),
+                settings: self.settings,
+                notifier: notifier.clone(),
+            };
+            tokio::spawn(watcher::run_watcher(ctx, cancel_token.clone()));
         }
     }
+}
+
+/// Scrape-time freshness of one workspace (spec § 4.8).
+#[derive(Debug, Clone)]
+pub struct WatchStatus {
+    pub name: String,
+    pub load_overdue: bool,
+    pub last_successful_load_age: Option<Duration>,
 }
 
 /// Info about a workspace for the API
@@ -930,6 +731,11 @@ pub struct WorkspaceInfo {
     /// `false` when the server config sets `triggers: false` for this
     /// workspace — its triggers are listed but never fired by this server.
     pub triggers_enabled: bool,
+    /// When this workspace last loaded successfully (UTC); absent if never.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_successful_load: Option<DateTime<Utc>>,
+    /// `"fresh"` or `"errored"` — the watcher's view (spec § 4.8).
+    pub availability: String,
 }
 
 #[cfg(test)]
@@ -1164,6 +970,8 @@ tasks:
             error: None,
             warnings: Vec::new(),
             triggers_enabled: false,
+            last_successful_load: None,
+            availability: "fresh".to_string(),
         };
         let json = serde_json::to_value(&info).unwrap();
         assert_eq!(json["triggers_enabled"], serde_json::Value::Bool(false));
@@ -2107,7 +1915,7 @@ tasks:
         .unwrap();
 
         let source = folder::FolderSource::new(temp.path().to_str().unwrap());
-        let (config, _) = source.load().await.unwrap();
+        let config = source.load(&LoadBudget::unbounded()).unwrap().config;
 
         // Verify both files were merged
         assert_eq!(config.actions.len(), 2);
@@ -2387,13 +2195,16 @@ tasks:
             "actions:\n  a:\n    type: script\n    script: echo ok\ntasks:\n  t:\n    flow:\n      s:\n        action: a\n",
         ).unwrap();
 
-        // Start watchers — errored entry should retry immediately (no first-tick skip)
+        // Start watchers — a workspace that failed at STARTUP retries on its
+        // very first tick with zero jitter offset (spec § 4.4 startup row),
+        // so this should recover fast.
         let cancel_token = CancellationToken::new();
         mgr.start_watchers(cancel_token.clone(), None);
 
-        // Wait for the watcher to pick up the fix (folder poll is 30s default,
-        // but errored entries don't skip the first tick, so it fires right away)
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        wait_until_within("workspace to recover", Duration::from_secs(2), || {
+            mgr.entry("retry").is_some_and(|e| e.is_healthy())
+        })
+        .await;
         cancel_token.cancel();
 
         // Workspace should have recovered
@@ -2445,11 +2256,24 @@ tasks:
         )
         .unwrap();
 
-        // Start watchers.  The entry is errored, so the watcher retries
-        // immediately without waiting for a full poll interval.
+        // Start watchers. The entry is already Errored when the watcher
+        // starts (from the `reload()` failure above), so it gets the
+        // zero-jitter first tick too (spec § 4.4 startup row) — but that
+        // failure was an EXTERNAL-caller transition out of Fresh, which
+        // (unlike a startup failure) sets `next_attempt = completed_at +
+        // poll_interval`, not `now` (see `availability::transition`'s
+        // `LoadCompleted` rule). So the watcher's first tick still lands
+        // before `next_attempt` and is skipped; recovery only happens once
+        // the full poll interval (30 s default for folders) has elapsed
+        // since the `reload()` failure, independent of tick jitter. Keep the
+        // long wait here — this is the ONE test whose fast path genuinely
+        // depends on a near-full poll interval, not on jitter.
         let cancel_token = CancellationToken::new();
         mgr.start_watchers(cancel_token.clone(), None);
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        wait_until_within("workspace to recover", Duration::from_secs(35), || {
+            mgr.entry("cycle").is_some_and(|e| e.is_healthy())
+        })
+        .await;
         cancel_token.cancel();
 
         // Should have recovered.
@@ -2639,8 +2463,8 @@ tasks:
         // Cooldown immediately. We simulate "already in flight" by manually
         // grabbing the per-entry mutex.
         let (mgr, _temp) = make_reloadable_manager().await;
-        let entry = mgr.entries.get("ws").unwrap();
-        let _guard = entry.reload_state.lock().await;
+        let entry = mgr.entry("ws").unwrap();
+        let _guard = entry.exec().lock_owned().await;
 
         let result = mgr.reload_for_api("ws", Duration::from_secs(30)).await;
         match result {
@@ -2683,9 +2507,9 @@ tasks:
     }
 
     /// `WorkspaceManager::new` must load workspaces concurrently: two git
-    /// sources (backed by local bare repos, exercising the real
-    /// `block_in_place` clone path) plus a folder source pointing at a
-    /// non-existent path all load correctly, and none blocks the others.
+    /// sources (backed by local bare repos, exercising the real blocking
+    /// clone path) plus a folder source pointing at a non-existent path all
+    /// load correctly, and none blocks the others.
     #[tokio::test(flavor = "multi_thread")]
     async fn test_new_loads_git_and_folder_workspaces_concurrently() {
         let (_bare1, url1) = create_bare_repo_for_test(&[(
@@ -2762,5 +2586,228 @@ tasks:
             .find(|i| i.name == "missing-folder")
             .expect("missing-folder should appear in workspace info");
         assert!(missing.error.is_some());
+    }
+
+    // ─── Task 8: three-way entry state, single writer ───────────────────
+
+    fn cfg_with_action(action: &str) -> WorkspaceConfig {
+        serde_yaml::from_str(&format!(
+            "actions:\n  {action}:\n    type: script\n    script: echo hi\n"
+        ))
+        .unwrap()
+    }
+
+    fn one_ws(rev: &str) -> WorkspaceManager {
+        WorkspaceManager::from_configs(vec![(
+            "ws".to_string(),
+            cfg_with_action("a"),
+            Some(rev.to_string()),
+        )])
+    }
+
+    #[tokio::test]
+    async fn failed_load_publishes_only_the_error() {
+        let mgr = one_ws("rev-a");
+        let entry = mgr.entry("ws").unwrap();
+        let policy = mgr.settings.policy(entry.poll_interval());
+        let before = entry.published();
+        let err = entry
+            .apply_load_result(
+                availability::Caller::External,
+                None,
+                Err(anyhow::anyhow!("secret render failed")),
+                &HashMap::new(),
+                &policy,
+                Instant::now(),
+            )
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("secret render failed"));
+        let after = entry.published();
+        assert!(
+            Arc::ptr_eq(&before.config, &after.config),
+            "config must not change"
+        );
+        assert_eq!(
+            after.revision.as_deref(),
+            Some("rev-a"),
+            "revision must not change"
+        );
+        assert_eq!(after.error.as_deref(), Some("secret render failed"));
+        assert!(mgr.get_config("ws").await.is_none());
+        assert!(mgr.get_revision("ws").is_none());
+        assert!(
+            entry.availability().is_errored(),
+            "external failure must land in Errored"
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_load_publishes_config_and_revision_together() {
+        let mgr = one_ws("rev-a");
+        let entry = mgr.entry("ws").unwrap();
+        let policy = mgr.settings.policy(entry.poll_interval());
+        let ok = entry
+            .apply_load_result(
+                availability::Caller::Watcher,
+                None,
+                Ok(LoadOutcome {
+                    config: cfg_with_action("b"),
+                    warnings: vec!["w".to_string()],
+                    revision: Some("rev-b".to_string()),
+                }),
+                &HashMap::new(),
+                &policy,
+                Instant::now(),
+            )
+            .unwrap();
+        assert!(ok.revision_changed);
+        assert_eq!(mgr.get_revision("ws").as_deref(), Some("rev-b"));
+        assert!(mgr
+            .get_config("ws")
+            .await
+            .unwrap()
+            .actions
+            .contains_key("b"));
+        assert_eq!(
+            mgr.list_workspace_info().await[0].warnings,
+            vec!["w".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn readers_do_not_wait_for_the_execution_mutex() {
+        let mgr = one_ws("rev-a");
+        let entry = mgr.entry("ws").unwrap();
+        let _held = entry.exec().lock_owned().await;
+        let cfg = tokio::time::timeout(Duration::from_millis(200), mgr.get_config("ws"))
+            .await
+            .expect("get_config must not wait for a load");
+        assert!(cfg.is_some());
+        assert!(mgr.get_path("ws").is_some());
+        assert_eq!(mgr.get_revision("ws").as_deref(), Some("rev-a"));
+        assert_eq!(mgr.list_workspace_info().await.len(), 1);
+    }
+
+    use crate::workspace::test_support::{config_with, TestLoad, TestPeek, TestSource};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn manager_with(source: Arc<TestSource>) -> Arc<WorkspaceManager> {
+        let mut entries = HashMap::new();
+        entries.insert(
+            "ws".to_string(),
+            WorkspaceEntry::new("ws", source, config_with("a"), Some("rev-a".to_string())),
+        );
+        Arc::new(WorkspaceManager::from_entries(entries))
+    }
+
+    async fn wait_until(what: &str, f: impl FnMut() -> bool) {
+        wait_until_within(what, Duration::from_secs(5), f).await;
+    }
+
+    /// Like `wait_until`, with an explicit timeout — for assertions that must
+    /// survive a workspace's full per-name jitter offset (up to its poll
+    /// interval, spec § 4.4), not just a few milliseconds.
+    async fn wait_until_within(what: &str, timeout: Duration, mut f: impl FnMut() -> bool) {
+        let deadline = Instant::now() + timeout;
+        while !f() {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Round-5 major: cancelling an external caller must not release the
+    /// execution mutex mid-mutation or skip result application.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancelled_api_reload_keeps_the_guard_and_still_applies_its_result() {
+        let gate = Arc::new(AtomicBool::new(false));
+        let source = Arc::new(
+            TestSource::new(
+                TestLoad::Ok {
+                    action: "b",
+                    revision: "rev-b",
+                },
+                TestPeek::Failed,
+            )
+            .gated(gate.clone()),
+        );
+        let mgr = manager_with(source.clone());
+
+        let caller = tokio::spawn({
+            let mgr = mgr.clone();
+            async move { mgr.reload_for_api("ws", Duration::ZERO).await }
+        });
+        wait_until("load to start", || source.started.load(Ordering::SeqCst)).await;
+        caller.abort();
+        let _ = caller.await;
+
+        let busy = tokio::time::timeout(Duration::from_secs(2), mgr.reload("ws"))
+            .await
+            .expect("must not wait on the mutex")
+            .unwrap_err();
+        assert!(
+            busy.downcast_ref::<ReloadBusy>().is_some(),
+            "mutex must still be held: {busy:#}"
+        );
+        assert!(matches!(
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                mgr.reload_for_api("ws", Duration::ZERO)
+            )
+            .await
+            .expect("must not wait on the mutex"),
+            Err(ReloadApiError::Cooldown { .. })
+        ));
+
+        gate.store(true, Ordering::SeqCst);
+        wait_until("result to be applied", || {
+            mgr.get_revision("ws").as_deref() == Some("rev-b")
+        })
+        .await;
+        wait_until("mutex release", || {
+            mgr.entry("ws").unwrap().exec().try_lock().is_ok()
+        })
+        .await;
+
+        // The cancelled request still started the completion-based cooldown...
+        assert!(matches!(
+            mgr.reload_for_api("ws", Duration::from_secs(3600)).await,
+            Err(ReloadApiError::Cooldown { .. })
+        ));
+        // ...and once the window allows, a retry refreshes again.
+        assert!(mgr.reload_for_api("ws", Duration::ZERO).await.is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn panicking_load_is_a_failed_load_and_releases_the_mutex() {
+        let source = Arc::new(TestSource::new(TestLoad::Panic, TestPeek::Failed));
+        let mgr = manager_with(source);
+        let err = mgr.reload("ws").await.unwrap_err();
+        assert!(format!("{err:#}").contains("panicked"), "{err:#}");
+        assert!(mgr.get_config("ws").await.is_none());
+        assert!(mgr.entry("ws").unwrap().availability().is_errored());
+        let again = mgr.reload("ws").await.unwrap_err();
+        assert!(
+            again.downcast_ref::<ReloadBusy>().is_none(),
+            "mutex must be free after a panic"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn peer_reload_while_busy_returns_immediately() {
+        let source = Arc::new(TestSource::new(
+            TestLoad::Ok {
+                action: "a",
+                revision: "rev-a",
+            },
+            TestPeek::Failed,
+        ));
+        let mgr = manager_with(source.clone());
+        let _held = mgr.hold_exec_for_test("ws").await;
+        let err = tokio::time::timeout(Duration::from_secs(2), mgr.reload("ws"))
+            .await
+            .expect("must not wait on the mutex")
+            .unwrap_err();
+        assert!(err.downcast_ref::<ReloadBusy>().is_some());
+        assert_eq!(source.load_count(), 0);
     }
 }

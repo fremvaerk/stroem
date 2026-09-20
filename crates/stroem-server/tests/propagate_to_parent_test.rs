@@ -66,6 +66,7 @@ fn setup_state(
         artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
     let mgr = WorkspaceManager::from_config("default", workspace_config);
     let log_storage = LogStorage::new(log_dir);

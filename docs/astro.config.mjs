@@ -69,6 +69,7 @@ export default defineConfig({
             { label: "Log Storage", slug: "operations/log-storage" },
             { label: "Artifact Storage", slug: "operations/storage" },
             { label: "Metrics", slug: "operations/metrics" },
+            { label: "Sizing", slug: "operations/sizing" },
             { label: "Recovery", slug: "operations/recovery" },
             { label: "Startup Scripts", slug: "operations/startup-scripts" },
             {

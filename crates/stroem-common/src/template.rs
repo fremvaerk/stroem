@@ -2,17 +2,29 @@ use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
 use tera::Tera;
 
+use crate::budget::{is_deadline_exceeded, run_with_deadline, LoadBudget};
 use crate::models::workflow::{ConnectionDef, InputFieldDef, WorkspaceConfig};
+
+/// Test-only wrapper keeping the historic two-argument filter signature.
+#[cfg(test)]
+fn vals_filter(
+    value: &tera::Value,
+    args: &HashMap<String, tera::Value>,
+) -> tera::Result<tera::Value> {
+    vals_filter_with(value, args, LoadBudget::unbounded())
+}
 
 /// Tera filter that resolves `ref+` secret references via the vals CLI.
 ///
 /// Usage in templates: `{{ secret.KEY | vals }}`
 /// - Non-string values pass through unchanged
 /// - Strings not starting with `ref+` pass through unchanged
-/// - Strings starting with `ref+` are resolved via `vals eval`
-fn vals_filter(
+/// - Strings starting with `ref+` are resolved via `vals eval`, killed if
+///   `budget` expires
+fn vals_filter_with(
     value: &tera::Value,
     _args: &HashMap<String, tera::Value>,
+    budget: LoadBudget,
 ) -> tera::Result<tera::Value> {
     let s = match value.as_str() {
         Some(s) => s,
@@ -27,28 +39,17 @@ fn vals_filter(
     let input_str = serde_json::to_string(&input)
         .map_err(|e| tera::Error::msg(format!("vals: serialize failed: {e}")))?;
 
-    let mut child = std::process::Command::new("vals")
-        .args(["eval", "-f", "-", "-o", "json"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| {
+    let mut cmd = std::process::Command::new("vals");
+    cmd.args(["eval", "-f", "-", "-o", "json"]);
+    let output = run_with_deadline(cmd, Some(input_str.as_bytes()), &budget).map_err(|e| {
+        if is_deadline_exceeded(&e) {
+            tera::Error::msg("vals: deadline exceeded while resolving a ref+ secret")
+        } else {
             tera::Error::msg(format!(
-                "vals CLI not found. Install vals to use ref+ secrets: {e}"
+                "vals CLI not found. Install vals to use ref+ secrets: {e:#}"
             ))
-        })?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        use std::io::Write;
-        stdin
-            .write_all(input_str.as_bytes())
-            .map_err(|e| tera::Error::msg(format!("vals: stdin write failed: {e}")))?;
-    }
-
-    let output = child
-        .wait_with_output()
-        .map_err(|e| tera::Error::msg(format!("vals: process failed: {e}")))?;
+        }
+    })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -70,13 +71,28 @@ fn vals_filter(
 
 /// Renders a single Tera template string against a JSON context
 pub fn render_template(template: &str, context: &serde_json::Value) -> Result<String> {
+    render_template_with(template, context, &LoadBudget::unbounded())
+}
+
+/// [`render_template`] whose `vals` filter honours `budget`.
+pub fn render_template_with(
+    template: &str,
+    context: &serde_json::Value,
+    budget: &LoadBudget,
+) -> Result<String> {
     let mut tera = Tera::default();
     let template_name = "__template__";
 
     tera.add_raw_template(template_name, template)
         .context("Failed to parse template")?;
 
-    tera.register_filter("vals", vals_filter);
+    let budget = *budget;
+    tera.register_filter(
+        "vals",
+        move |value: &tera::Value, args: &HashMap<String, tera::Value>| {
+            vals_filter_with(value, args, budget)
+        },
+    );
 
     let tera_context =
         tera::Context::from_serialize(context).context("Failed to convert JSON to Tera context")?;
@@ -3734,5 +3750,25 @@ mod tests {
         assert_eq!(out["db"]["host"], "a.mine");
         assert_eq!(out["x"], 1);
         assert_eq!(out["y"], 2);
+    }
+
+    #[test]
+    fn render_template_with_expired_budget_fails_on_ref_secret() {
+        let expired = crate::budget::LoadBudget::until(std::time::Instant::now());
+        let err = render_template_with(
+            "{{ 'ref+echo://x' | vals }}",
+            &serde_json::json!({}),
+            &expired,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("deadline"), "{err:#}");
+    }
+
+    #[test]
+    fn render_template_with_expired_budget_still_renders_plain_values() {
+        let expired = crate::budget::LoadBudget::until(std::time::Instant::now());
+        let out =
+            render_template_with("{{ 'plain' | vals }}", &serde_json::json!({}), &expired).unwrap();
+        assert_eq!(out, "plain");
     }
 }

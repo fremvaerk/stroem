@@ -174,6 +174,7 @@ async fn setup() -> Result<(
         artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
 
     let workspace = stats_test_workspace();

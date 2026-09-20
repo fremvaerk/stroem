@@ -1,98 +1,140 @@
 use anyhow::Result;
-use async_trait::async_trait;
 use blake2::{Blake2s256, Digest};
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use stroem_common::budget::{DeadlineExceeded, LoadBudget};
 use stroem_common::models::workflow::WorkspaceConfig;
 
+use super::source::{LoadOutcome, Peek};
 use super::WorkspaceSource;
 
 /// Folder-based workspace source
 pub struct FolderSource {
     path: PathBuf,
-    revision: RwLock<Option<String>>,
 }
 
 impl FolderSource {
     pub fn new(path: &str) -> Self {
         Self {
             path: PathBuf::from(path),
-            revision: RwLock::new(None),
         }
     }
 
-    /// Compute a content hash over all files in the workspace directory.
-    ///
-    /// Walks the entire workspace tree (up to 10 levels deep, following symlinks)
-    /// and hashes every file's relative path + content. This detects changes to
-    /// scripts, configs, and any other files — not just YAML workflow definitions.
-    fn compute_revision(path: &Path) -> Option<String> {
+    /// Hash every file's relative path + content (spec § 4.3 folder rows).
+    fn compute_revision(path: &Path, budget: &LoadBudget) -> Peek {
         if !path.exists() {
-            return None;
+            return Peek::LocalInvalid(anyhow::anyhow!(
+                "workspace folder {} does not exist",
+                path.display()
+            ));
         }
-
         let mut hasher = Blake2s256::new();
-
         for entry in walkdir::WalkDir::new(path)
             .max_depth(10)
             .follow_links(true)
             .sort_by_file_name()
-            .into_iter()
-            .filter_map(|e| e.ok())
         {
+            if budget.expired() {
+                return Peek::Failed(DeadlineExceeded.into());
+            }
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => match symlink_walk_error(&e) {
+                    Some((p, target)) => {
+                        // A dangling symlink or a symlink loop is stable local
+                        // state (stale venvs, editor lock files, node_modules/.bin
+                        // leftovers) — not a sign the workspace is broken. Hash
+                        // the link's relative path plus its target (or "loop")
+                        // instead of failing the whole walk.
+                        let relative = p.strip_prefix(path).unwrap_or(&p).to_string_lossy();
+                        hasher.update(relative.as_bytes());
+                        hasher.update(target.as_bytes());
+                        continue;
+                    }
+                    None => {
+                        return Peek::Failed(anyhow::Error::new(e).context("walk workspace folder"))
+                    }
+                },
+            };
             if !entry.file_type().is_file() {
                 continue;
             }
-
             let relative = entry
                 .path()
                 .strip_prefix(path)
                 .unwrap_or(entry.path())
                 .to_string_lossy();
             hasher.update(relative.as_bytes());
-
             match std::fs::read(entry.path()) {
                 Ok(content) => hasher.update(&content),
-                Err(e) => hasher.update(format!("error:{}", e).as_bytes()),
+                Err(e) => {
+                    return Peek::Failed(
+                        anyhow::Error::new(e).context(format!("read {}", entry.path().display())),
+                    )
+                }
             }
         }
-
-        let hash = hasher.finalize();
-        Some(hex::encode(hash))
+        Peek::Revision(hex::encode(hasher.finalize()))
     }
 }
 
-#[async_trait]
+/// A dangling symlink or a symlink loop found while walking the workspace
+/// folder is stable local state (stale venvs, editor lock files,
+/// `node_modules/.bin` leftovers) — not a sign the workspace is broken.
+/// Returns the path and a stand-in for its "content" (the link target, or the
+/// literal `"loop"`) to hash instead of failing the whole walk. Only a real
+/// loop, or a symlink whose target is `NotFound` (dangling), qualifies; every
+/// other walk error — including a permission or I/O error reached through a
+/// symlink — returns `None`, which still fails the walk (`Peek::Failed`).
+fn symlink_walk_error(err: &walkdir::Error) -> Option<(PathBuf, String)> {
+    let p = err.path()?;
+    if err.loop_ancestor().is_some() {
+        return Some((p.to_path_buf(), "loop".to_string()));
+    }
+    let is_symlink = std::fs::symlink_metadata(p)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false);
+    let dangling = err.io_error().map(|e| e.kind()) == Some(std::io::ErrorKind::NotFound);
+    if !(is_symlink && dangling) {
+        return None;
+    }
+    let target = std::fs::read_link(p)
+        .map(|t| t.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    Some((p.to_path_buf(), target))
+}
+
 impl WorkspaceSource for FolderSource {
-    async fn load(&self) -> Result<(WorkspaceConfig, Vec<String>)> {
-        let (config, warnings) = load_folder_workspace(self.path.to_str().unwrap_or("")).await?;
-        if let Some(rev) = Self::compute_revision(&self.path) {
-            if let Ok(mut lock) = self.revision.write() {
-                *lock = Some(rev);
+    fn load(&self, budget: &LoadBudget) -> Result<LoadOutcome> {
+        let (config, warnings) = load_folder_workspace_with(&self.path, budget)?;
+        let revision = match Self::compute_revision(&self.path, budget) {
+            Peek::Revision(r) => Some(r),
+            Peek::Unsupported => None,
+            Peek::Failed(e) | Peek::LocalInvalid(e) => {
+                return Err(e.context("hash workspace folder"))
             }
-        }
-        Ok((config, warnings))
+        };
+        Ok(LoadOutcome {
+            config,
+            warnings,
+            revision,
+        })
     }
 
     fn path(&self) -> &Path {
         &self.path
     }
 
-    fn revision(&self) -> Option<String> {
-        self.revision.read().ok().and_then(|r| r.clone())
-    }
-
-    fn peek_revision(&self) -> Option<String> {
-        Self::compute_revision(&self.path)
+    fn peek_revision(&self, budget: &LoadBudget) -> Peek {
+        Self::compute_revision(&self.path, budget)
     }
 }
 
-/// Load workspace from a folder containing workflow YAML files.
-/// Looks for .workflows/ subdirectory, or scans the folder itself if it contains YAML files.
-/// Returns the config paired with per-file warnings for files that were skipped.
-pub async fn load_folder_workspace(path: &str) -> Result<(WorkspaceConfig, Vec<String>)> {
-    let (workspace, warnings) = stroem_common::workspace_loader::load_workspace(Path::new(path))?;
-
+/// Load a workspace folder under a [`LoadBudget`] (blocking).
+pub fn load_folder_workspace_with(
+    path: &Path,
+    budget: &LoadBudget,
+) -> Result<(WorkspaceConfig, Vec<String>)> {
+    let (workspace, warnings) = stroem_common::workspace_loader::load_workspace_with(path, budget)?;
     tracing::debug!(
         "Loaded workspace: {} actions, {} tasks, {} triggers, {} secrets, {} connection_types, {} connections",
         workspace.actions.len(),
@@ -102,8 +144,14 @@ pub async fn load_folder_workspace(path: &str) -> Result<(WorkspaceConfig, Vec<S
         workspace.connection_types.len(),
         workspace.connections.len()
     );
-
     Ok((workspace, warnings))
+}
+
+/// Load workspace from a folder containing workflow YAML files.
+/// Looks for .workflows/ subdirectory, or scans the folder itself if it contains YAML files.
+/// Returns the config paired with per-file warnings for files that were skipped.
+pub async fn load_folder_workspace(path: &str) -> Result<(WorkspaceConfig, Vec<String>)> {
+    load_folder_workspace_with(Path::new(path), &LoadBudget::unbounded())
 }
 
 /// Hex-encode helper (avoids adding another dep)
@@ -267,8 +315,8 @@ actions:
         assert!(result.is_err());
     }
 
-    #[tokio::test]
-    async fn test_folder_source_revision() {
+    #[test]
+    fn test_folder_source_revision() {
         let temp_dir = TempDir::new().unwrap();
         fs::write(
             temp_dir.path().join("test.yaml"),
@@ -282,10 +330,8 @@ actions:
         .unwrap();
 
         let source = FolderSource::new(temp_dir.path().to_str().unwrap());
-        assert!(source.revision().is_none()); // no revision before load
-
-        source.load().await.unwrap();
-        assert!(source.revision().is_some()); // revision set after load
+        let out = source.load(&LoadBudget::unbounded()).unwrap();
+        assert!(out.revision.is_some()); // revision set after load
     }
 
     #[test]
@@ -297,9 +343,14 @@ actions:
         )
         .unwrap();
 
-        let rev1 = FolderSource::compute_revision(temp_dir.path());
-        let rev2 = FolderSource::compute_revision(temp_dir.path());
-        assert!(rev1.is_some());
+        let rev1 = match FolderSource::compute_revision(temp_dir.path(), &LoadBudget::unbounded()) {
+            Peek::Revision(r) => r,
+            other => panic!("{other:?}"),
+        };
+        let rev2 = match FolderSource::compute_revision(temp_dir.path(), &LoadBudget::unbounded()) {
+            Peek::Revision(r) => r,
+            other => panic!("{other:?}"),
+        };
         assert_eq!(rev1, rev2, "Same content should produce same revision");
     }
 
@@ -313,14 +364,20 @@ actions:
             "actions:\n  greet:\n    type: script\n    script: echo v1\n",
         )
         .unwrap();
-        let rev1 = FolderSource::compute_revision(temp_dir.path()).unwrap();
+        let rev1 = match FolderSource::compute_revision(temp_dir.path(), &LoadBudget::unbounded()) {
+            Peek::Revision(r) => r,
+            other => panic!("{other:?}"),
+        };
 
         fs::write(
             &yaml_path,
             "actions:\n  greet:\n    type: script\n    script: echo v2\n",
         )
         .unwrap();
-        let rev2 = FolderSource::compute_revision(temp_dir.path()).unwrap();
+        let rev2 = match FolderSource::compute_revision(temp_dir.path(), &LoadBudget::unbounded()) {
+            Peek::Revision(r) => r,
+            other => panic!("{other:?}"),
+        };
 
         assert_ne!(
             rev1, rev2,
@@ -336,14 +393,20 @@ actions:
             "actions:\n  a:\n    type: script\n    script: echo a\n",
         )
         .unwrap();
-        let rev1 = FolderSource::compute_revision(temp_dir.path()).unwrap();
+        let rev1 = match FolderSource::compute_revision(temp_dir.path(), &LoadBudget::unbounded()) {
+            Peek::Revision(r) => r,
+            other => panic!("{other:?}"),
+        };
 
         fs::write(
             temp_dir.path().join("b.yaml"),
             "actions:\n  b:\n    type: script\n    script: echo b\n",
         )
         .unwrap();
-        let rev2 = FolderSource::compute_revision(temp_dir.path()).unwrap();
+        let rev2 = match FolderSource::compute_revision(temp_dir.path(), &LoadBudget::unbounded()) {
+            Peek::Revision(r) => r,
+            other => panic!("{other:?}"),
+        };
 
         assert_ne!(rev1, rev2, "Adding a file should change revision");
     }
@@ -362,10 +425,16 @@ actions:
             "actions:\n  b:\n    type: script\n    script: echo b\n",
         )
         .unwrap();
-        let rev1 = FolderSource::compute_revision(temp_dir.path()).unwrap();
+        let rev1 = match FolderSource::compute_revision(temp_dir.path(), &LoadBudget::unbounded()) {
+            Peek::Revision(r) => r,
+            other => panic!("{other:?}"),
+        };
 
         fs::remove_file(&b_path).unwrap();
-        let rev2 = FolderSource::compute_revision(temp_dir.path()).unwrap();
+        let rev2 = match FolderSource::compute_revision(temp_dir.path(), &LoadBudget::unbounded()) {
+            Peek::Revision(r) => r,
+            other => panic!("{other:?}"),
+        };
 
         assert_ne!(rev1, rev2, "Removing a file should change revision");
     }
@@ -378,11 +447,17 @@ actions:
             "actions:\n  a:\n    type: script\n    script: echo a\n",
         )
         .unwrap();
-        let rev1 = FolderSource::compute_revision(temp_dir.path()).unwrap();
+        let rev1 = match FolderSource::compute_revision(temp_dir.path(), &LoadBudget::unbounded()) {
+            Peek::Revision(r) => r,
+            other => panic!("{other:?}"),
+        };
 
         // Add a non-YAML file — revision SHOULD change (scripts, configs, etc.)
         fs::write(temp_dir.path().join("run.sh"), "#!/bin/bash\necho hello").unwrap();
-        let rev2 = FolderSource::compute_revision(temp_dir.path()).unwrap();
+        let rev2 = match FolderSource::compute_revision(temp_dir.path(), &LoadBudget::unbounded()) {
+            Peek::Revision(r) => r,
+            other => panic!("{other:?}"),
+        };
 
         assert_ne!(
             rev1, rev2,
@@ -401,14 +476,17 @@ actions:
         )
         .unwrap();
 
-        let rev = FolderSource::compute_revision(temp_dir.path());
-        assert!(rev.is_some());
+        let rev = FolderSource::compute_revision(temp_dir.path(), &LoadBudget::unbounded());
+        assert!(matches!(rev, Peek::Revision(_)));
 
         // Adding a script in root should change revision (all files are hashed)
         fs::write(temp_dir.path().join("deploy.sh"), "#!/bin/bash\ndeploy").unwrap();
-        let rev2 = FolderSource::compute_revision(temp_dir.path());
+        let rev2 = FolderSource::compute_revision(temp_dir.path(), &LoadBudget::unbounded());
+        let (Peek::Revision(r), Peek::Revision(r2)) = (rev, rev2) else {
+            panic!("expected Revision variants");
+        };
         assert_ne!(
-            rev, rev2,
+            r, r2,
             "All workspace files should affect revision, not just .workflows/"
         );
     }
@@ -421,13 +499,19 @@ actions:
             "actions:\n  a:\n    type: script\n    script: echo a\n",
         )
         .unwrap();
-        let rev1 = FolderSource::compute_revision(temp_dir.path()).unwrap();
+        let rev1 = match FolderSource::compute_revision(temp_dir.path(), &LoadBudget::unbounded()) {
+            Peek::Revision(r) => r,
+            other => panic!("{other:?}"),
+        };
 
         // Add a file in a subdirectory — revision should change
         let sub_dir = temp_dir.path().join("scripts");
         fs::create_dir(&sub_dir).unwrap();
         fs::write(sub_dir.join("helper.py"), "print('hello')").unwrap();
-        let rev2 = FolderSource::compute_revision(temp_dir.path()).unwrap();
+        let rev2 = match FolderSource::compute_revision(temp_dir.path(), &LoadBudget::unbounded()) {
+            Peek::Revision(r) => r,
+            other => panic!("{other:?}"),
+        };
 
         assert_ne!(rev1, rev2, "Files in subdirectories should affect revision");
     }
@@ -436,15 +520,18 @@ actions:
     fn test_compute_revision_empty_dir_returns_some() {
         let temp_dir = TempDir::new().unwrap();
         // No YAML files at all
-        let rev = FolderSource::compute_revision(temp_dir.path());
-        // Should still return Some (hash of empty input)
-        assert!(rev.is_some());
+        let rev = FolderSource::compute_revision(temp_dir.path(), &LoadBudget::unbounded());
+        // Should still return a Revision (hash of empty input)
+        assert!(matches!(rev, Peek::Revision(_)));
     }
 
     #[test]
-    fn test_compute_revision_nonexistent_dir_returns_none() {
-        let rev = FolderSource::compute_revision(Path::new("/nonexistent/path/12345"));
-        assert!(rev.is_none());
+    fn test_compute_revision_nonexistent_dir_returns_local_invalid() {
+        let rev = FolderSource::compute_revision(
+            Path::new("/nonexistent/path/12345"),
+            &LoadBudget::unbounded(),
+        );
+        assert!(matches!(rev, Peek::LocalInvalid(_)));
     }
 
     #[tokio::test]
@@ -460,8 +547,9 @@ actions:
         .unwrap();
 
         let source = FolderSource::new(temp_dir.path().to_str().unwrap());
-        let (config1, _) = source.load().await.unwrap();
-        let rev1 = source.revision().unwrap();
+        let out1 = source.load(&LoadBudget::unbounded()).unwrap();
+        let config1 = out1.config;
+        let rev1 = out1.revision.unwrap();
 
         assert_eq!(config1.actions.len(), 1);
         assert!(config1.actions.contains_key("greet"));
@@ -473,8 +561,9 @@ actions:
         )
         .unwrap();
 
-        let (config2, _) = source.load().await.unwrap();
-        let rev2 = source.revision().unwrap();
+        let out2 = source.load(&LoadBudget::unbounded()).unwrap();
+        let config2 = out2.config;
+        let rev2 = out2.revision.unwrap();
 
         // Config should reflect the new file
         assert_eq!(config2.actions.len(), 2);
@@ -494,7 +583,10 @@ actions:
         )
         .unwrap();
 
-        let rev = FolderSource::compute_revision(temp_dir.path()).unwrap();
+        let rev = match FolderSource::compute_revision(temp_dir.path(), &LoadBudget::unbounded()) {
+            Peek::Revision(r) => r,
+            other => panic!("{other:?}"),
+        };
         assert!(!rev.is_empty());
         assert!(
             rev.chars().all(|c| c.is_ascii_hexdigit()),
@@ -800,5 +892,128 @@ tasks:
             Some("deploy/staging".to_string()),
             "Nested subdirectory should produce slash-separated folder path"
         );
+    }
+
+    // ─── Task 9: Peek classification ────────────────────────────────────
+
+    #[test]
+    fn folder_peek_on_a_missing_root_is_local_invalid() {
+        let source = FolderSource::new("/nonexistent/stroem-peek-root");
+        assert!(matches!(
+            source.peek_revision(&LoadBudget::unbounded()),
+            Peek::LocalInvalid(_)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn folder_peek_on_an_unreadable_file_is_failed() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("w.yaml");
+        std::fs::write(&file, "actions: {}\n").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&file).is_ok() {
+            return; // running as root: permissions are not enforced
+        }
+        let source = FolderSource::new(dir.path().to_str().unwrap());
+        let peek = source.peek_revision(&LoadBudget::unbounded());
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(matches!(peek, Peek::Failed(_)), "{peek:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn folder_peek_on_a_symlink_to_an_unreadable_dir_is_failed() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("w.yaml"), "actions: {}\n").unwrap();
+        // The target lives OUTSIDE the workspace root, so the only way the walk
+        // reaches it is through the symlink. The link points INTO the mode-000
+        // directory, so following it fails with EACCES on the link's own path —
+        // a symlink error that is neither dangling nor a loop. (A link straight
+        // to `secret` already failed: walkdir's path-less loop-check error.)
+        let outside = TempDir::new().unwrap();
+        let secret = outside.path().join("secret");
+        let inner = secret.join("inner");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::write(inner.join("f.yaml"), "actions: {}\n").unwrap();
+        std::os::unix::fs::symlink(&inner, dir.path().join("link")).unwrap();
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_dir(&secret).is_ok() {
+            std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o755)).unwrap();
+            return; // running as root: permissions are not enforced
+        }
+        let source = FolderSource::new(dir.path().to_str().unwrap());
+        let peek = source.peek_revision(&LoadBudget::unbounded());
+        let load = source.load(&LoadBudget::unbounded());
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(matches!(peek, Peek::Failed(_)), "{peek:?}");
+        assert!(load.is_err(), "load must fail too");
+    }
+
+    #[test]
+    fn folder_peek_matches_the_loaded_revision() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("w.yaml"), "actions: {}\n").unwrap();
+        let source = FolderSource::new(dir.path().to_str().unwrap());
+        let loaded = source
+            .load(&LoadBudget::unbounded())
+            .unwrap()
+            .revision
+            .unwrap();
+        match source.peek_revision(&LoadBudget::unbounded()) {
+            Peek::Revision(r) => assert_eq!(r, loaded),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn folder_with_a_dangling_symlink_loads_and_peeks_stably() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("w.yaml"), "actions: {}\n").unwrap();
+        std::os::unix::fs::symlink("/nonexistent/target", dir.path().join(".#lock")).unwrap();
+
+        let source = FolderSource::new(dir.path().to_str().unwrap());
+        let loaded = source
+            .load(&LoadBudget::unbounded())
+            .unwrap()
+            .revision
+            .unwrap();
+
+        let peeked = match source.peek_revision(&LoadBudget::unbounded()) {
+            Peek::Revision(r) => r,
+            other => panic!("expected Revision, got {other:?}"),
+        };
+        assert_eq!(
+            peeked, loaded,
+            "a dangling symlink must not move the revision"
+        );
+
+        // Stable across repeated peeks too.
+        let peeked_again = match source.peek_revision(&LoadBudget::unbounded()) {
+            Peek::Revision(r) => r,
+            other => panic!("expected Revision, got {other:?}"),
+        };
+        assert_eq!(peeked_again, loaded);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn folder_with_a_symlink_loop_loads() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("w.yaml"), "actions: {}\n").unwrap();
+        // A link to its own parent directory — following it loops forever.
+        std::os::unix::fs::symlink(dir.path(), dir.path().join("loop")).unwrap();
+
+        let source = FolderSource::new(dir.path().to_str().unwrap());
+        let out = source.load(&LoadBudget::unbounded()).unwrap();
+        assert!(out.revision.is_some());
+
+        assert!(matches!(
+            source.peek_revision(&LoadBudget::unbounded()),
+            Peek::Revision(_)
+        ));
     }
 }

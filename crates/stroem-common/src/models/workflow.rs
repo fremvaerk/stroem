@@ -1022,12 +1022,24 @@ impl WorkspaceConfig {
     /// String values are rendered with an empty context. Non-string values
     /// and strings without template syntax pass through unchanged.
     pub fn render_secrets(&mut self) -> anyhow::Result<()> {
+        self.render_secrets_with(&crate::budget::LoadBudget::unbounded())
+    }
+
+    /// [`Self::render_secrets`] whose `vals` calls honour `budget`.
+    pub fn render_secrets_with(
+        &mut self,
+        budget: &crate::budget::LoadBudget,
+    ) -> anyhow::Result<()> {
         let empty_context = serde_json::json!({});
         for (key, value) in &mut self.secrets {
-            render_secret_value(value, &empty_context)
+            render_secret_value(value, &empty_context, budget)
                 .with_context(|| format!("Failed to render secret '{key}'"))?;
         }
         Ok(())
+    }
+
+    pub fn render_connections(&mut self) -> anyhow::Result<()> {
+        self.render_connections_with(&crate::budget::LoadBudget::unbounded())
     }
 
     /// Render connection values through Tera templates and apply type defaults.
@@ -1035,13 +1047,16 @@ impl WorkspaceConfig {
     /// Phase 1: Render template strings in connection values using secrets as context
     ///          (e.g. `{{ secret.db_host }}`, `{{ 'ref+...' | vals }}`).
     /// Phase 2: Apply default values from connection type properties for missing fields.
-    pub fn render_connections(&mut self) -> anyhow::Result<()> {
+    pub fn render_connections_with(
+        &mut self,
+        budget: &crate::budget::LoadBudget,
+    ) -> anyhow::Result<()> {
         let context = serde_json::json!({ "secret": &self.secrets });
 
         // Phase 1: Render template values in connections (with secrets available)
         for (conn_name, conn) in &mut self.connections {
             for (key, value) in &mut conn.values {
-                render_secret_value(value, &context).with_context(|| {
+                render_secret_value(value, &context, budget).with_context(|| {
                     format!("Failed to render connection '{conn_name}' field '{key}'")
                 })?;
             }
@@ -1071,23 +1086,24 @@ impl WorkspaceConfig {
 fn render_secret_value(
     value: &mut serde_json::Value,
     context: &serde_json::Value,
+    budget: &crate::budget::LoadBudget,
 ) -> anyhow::Result<()> {
-    use crate::template::render_template;
+    use crate::template::render_template_with;
 
     match value {
         serde_json::Value::String(s) if s.contains("{{") => {
-            let rendered = render_template(s, context)?;
+            let rendered = render_template_with(s, context, budget)?;
             *s = rendered;
         }
         serde_json::Value::String(_) => {}
         serde_json::Value::Object(map) => {
             for (_, v) in map.iter_mut() {
-                render_secret_value(v, context)?;
+                render_secret_value(v, context, budget)?;
             }
         }
         serde_json::Value::Array(arr) => {
             for v in arr.iter_mut() {
-                render_secret_value(v, context)?;
+                render_secret_value(v, context, budget)?;
             }
         }
         _ => {}

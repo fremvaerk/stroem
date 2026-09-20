@@ -104,6 +104,7 @@ worker_token: "change-in-production"
 | `log_storage.s3` | No | S3 archival config (see [Log Storage](/operations/log-storage/)) |
 | `workspaces` | Yes | Map of workspace definitions (see [Multi-Workspace](/guides/multi-workspace/)) |
 | `workspaces.<name>.triggers` | No | `false` loads the workspace but never fires its triggers on this server (default: `true`; see [Disabling triggers per server](/guides/multi-workspace/#disabling-triggers-per-server)) |
+| `workspace_reload` | No | Tunes workspace refresh timing and backoff (see [`workspace_reload`](#workspace_reload) below) |
 | `worker_token` | Yes | Shared secret for worker authentication |
 | `recovery` | No | Recovery sweeper settings (see [Recovery](/operations/recovery/)) |
 | `retention` | No | Data retention settings (see [Retention](/operations/retention/)) |
@@ -141,6 +142,27 @@ acl:
 | `rules[].users` | User email addresses to match (OR'd with `groups`). |
 
 See [Authorization](/operations/authorization/) for detailed behavior, admin role, and rule evaluation order.
+
+### `workspace_reload`
+
+Tunes how the server refreshes workspaces. All fields are optional.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `peek_failure_threshold` | `5` | Consecutive failed change checks before a forced reload |
+| `peek_timeout_secs` | `30` | Budget for one change check (`ls-remote` / folder hash). At most `86400` (24 h) |
+| `load_timeout_secs` | `300` | Budget for one load — see the note below. At most `86400` (24 h) |
+| `max_backoff_secs` | `900` | Cap of the retry backoff for a workspace whose reload failed. At most `86400` (24 h) |
+| `git_connect_timeout_ms` | `10000` | libgit2 TCP connect timeout (process-wide) |
+| `git_read_timeout_ms` | `60000` | libgit2 per-read socket timeout (process-wide) |
+
+`load_timeout_secs` **aborts** the load when it expires — for the initial load at startup, for watcher reloads and for API/trigger/peer reloads alike. The abort is cooperative: it is checked during the git transfer, checkout planning, the YAML scan, and `sops`/`vals` (which are killed). A load that ends on the deadline fails like any other failed load. This means a repository whose **first clone** takes longer than `load_timeout_secs` can never finish loading — raise the value for very large repositories. The few steps that cannot be interrupted (DNS, a single blocked socket read, the checkout write phase) keep running past the deadline and are reported by `stroem_workspace_load_overdue`.
+
+The three duration fields above are capped at 24 hours; a larger value is rejected at startup.
+
+Environment overrides use the usual form, e.g. `STROEM__WORKSPACE_RELOAD__LOAD_TIMEOUT_SECS=600`.
+
+See [How workspaces are refreshed](/guides/multi-workspace/#how-workspaces-are-refreshed) for the policy these tune.
 
 ## Agent providers
 

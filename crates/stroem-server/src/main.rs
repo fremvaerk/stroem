@@ -23,8 +23,19 @@ struct Cli {
     config: String,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    let worker_threads = stroem_server::runtime::worker_threads(
+        std::thread::available_parallelism().map(|n| n.get()).ok(),
+    );
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(worker_threads)
+        .enable_all()
+        .build()
+        .context("Failed to build tokio runtime")?;
+    runtime.block_on(async_main(worker_threads))
+}
+
+async fn async_main(worker_threads: usize) -> Result<()> {
     // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -34,6 +45,7 @@ async fn main() -> Result<()> {
         .init();
 
     tracing::info!("Starting Strøm server v{}", env!("CARGO_PKG_VERSION"));
+    tracing::info!("Tokio runtime: {} worker threads", worker_threads);
 
     // Load configuration
     let cli = Cli::parse();
@@ -98,10 +110,15 @@ async fn main() -> Result<()> {
 
     // Load workspaces (individual failures are logged but don't crash the server)
     tracing::info!("Loading {} workspace(s)...", config.workspaces.len());
-    let workspace_manager = WorkspaceManager::new(
+    stroem_server::workspace::git::configure_global_timeouts(
+        config.workspace_reload.git_connect_timeout_ms,
+        config.workspace_reload.git_read_timeout_ms,
+    )?;
+    let workspace_manager = WorkspaceManager::new_with_reload(
         config.workspaces.clone(),
         config.libraries.clone(),
         config.git_auth.clone(),
+        stroem_server::workspace::availability::ReloadSettings::from(&config.workspace_reload),
     )
     .await;
 

@@ -1273,6 +1273,7 @@ async fn setup() -> Result<(
         artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
 
     let workspace = test_workspace();
@@ -1485,6 +1486,7 @@ async fn setup_two_workspaces() -> Result<(
         artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
 
     let mgr = WorkspaceManager::from_configs(vec![
@@ -1837,6 +1839,7 @@ async fn setup_shared_connections() -> Result<(
         artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
     let mgr = WorkspaceManager::from_configs(vec![
         ("caller".to_string(), caller, None),
@@ -2442,6 +2445,7 @@ async fn setup_with_task_needing_missing_connection() -> Result<(
         artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
 
     let workspace = test_workspace_with_missing_connection();
@@ -2808,6 +2812,7 @@ async fn setup_with_library_dotted_action() -> Result<(
         artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
 
     let mgr = WorkspaceManager::from_config("default", workspace);
@@ -3671,6 +3676,7 @@ async fn setup_cross_task_workspaces(
         artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
 
     if opts.auth {
@@ -6241,6 +6247,7 @@ async fn test_task_detail_connections() -> Result<()> {
         artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
 
     // Build a workspace with connections
@@ -8469,6 +8476,7 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
         artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
 
     let mgr = WorkspaceManager::from_config("default", workspace);
@@ -8743,6 +8751,7 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
         artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
 
     let mgr = WorkspaceManager::from_config("default", workspace);
@@ -8987,6 +8996,7 @@ async fn setup_with_auth() -> Result<(
         artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
 
     // Seed initial user
@@ -11254,29 +11264,31 @@ async fn setup_multi_workspace_with(
         artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
 
     let ws_default = test_workspace();
     let ws_ops = test_workspace_ops();
 
     // Build workspace manager with two workspaces using from_entries
-    use std::path::PathBuf;
     use std::sync::Arc;
     use stroem_server::workspace::WorkspaceEntry;
-    use tokio::sync::RwLock;
 
     // Helper in-memory source
     struct InMemSource(WorkspaceConfig);
-    #[async_trait::async_trait]
     impl stroem_server::workspace::WorkspaceSource for InMemSource {
-        async fn load(&self) -> Result<(WorkspaceConfig, Vec<String>)> {
-            Ok((self.0.clone(), Vec::new()))
+        fn load(
+            &self,
+            _budget: &stroem_common::budget::LoadBudget,
+        ) -> Result<stroem_server::workspace::LoadOutcome> {
+            Ok(stroem_server::workspace::LoadOutcome {
+                config: self.0.clone(),
+                warnings: Vec::new(),
+                revision: Some("test-rev".to_string()),
+            })
         }
         fn path(&self) -> &std::path::Path {
             std::path::Path::new("/dev/null")
-        }
-        fn revision(&self) -> Option<String> {
-            Some("test-rev".to_string())
         }
     }
 
@@ -11288,27 +11300,16 @@ async fn setup_multi_workspace_with(
     let mut entries = HashMap::new();
     entries.insert(
         "default".to_string(),
-        WorkspaceEntry {
-            config: Arc::new(RwLock::new(Arc::new(ws_default))),
-            source: src_default,
-            name: "default".to_string(),
-            source_path: PathBuf::from("/dev/null"),
-            load_error: Arc::new(std::sync::RwLock::new(None)),
-            load_warnings: Arc::new(std::sync::RwLock::new(Vec::new())),
-            reload_state: WorkspaceEntry::default_reload_state(),
-        },
+        WorkspaceEntry::new(
+            "default",
+            src_default,
+            ws_default,
+            Some("test-rev".to_string()),
+        ),
     );
     entries.insert(
         "ops".to_string(),
-        WorkspaceEntry {
-            config: Arc::new(RwLock::new(Arc::new(ws_ops))),
-            source: src_ops,
-            name: "ops".to_string(),
-            source_path: PathBuf::from("/dev/null"),
-            load_error: Arc::new(std::sync::RwLock::new(None)),
-            load_warnings: Arc::new(std::sync::RwLock::new(Vec::new())),
-            reload_state: WorkspaceEntry::default_reload_state(),
-        },
+        WorkspaceEntry::new("ops", src_ops, ws_ops, Some("test-rev".to_string())),
     );
 
     let mut mgr = WorkspaceManager::from_entries(entries);
@@ -11557,6 +11558,7 @@ async fn setup_with_auth_and_acl() -> Result<(
         artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
 
     // Seed three users.
@@ -11587,22 +11589,23 @@ async fn setup_with_auth_and_acl() -> Result<(
     .await?;
 
     // Build manager with two workspaces using in-memory sources.
-    use std::path::PathBuf;
     use std::sync::Arc;
     use stroem_server::workspace::WorkspaceEntry;
-    use tokio::sync::RwLock;
 
     struct InMemSource(WorkspaceConfig);
-    #[async_trait::async_trait]
     impl stroem_server::workspace::WorkspaceSource for InMemSource {
-        async fn load(&self) -> Result<(WorkspaceConfig, Vec<String>)> {
-            Ok((self.0.clone(), Vec::new()))
+        fn load(
+            &self,
+            _budget: &stroem_common::budget::LoadBudget,
+        ) -> Result<stroem_server::workspace::LoadOutcome> {
+            Ok(stroem_server::workspace::LoadOutcome {
+                config: self.0.clone(),
+                warnings: Vec::new(),
+                revision: Some("test-rev".to_string()),
+            })
         }
         fn path(&self) -> &std::path::Path {
             std::path::Path::new("/dev/null")
-        }
-        fn revision(&self) -> Option<String> {
-            Some("test-rev".to_string())
         }
     }
 
@@ -11616,27 +11619,16 @@ async fn setup_with_auth_and_acl() -> Result<(
     let mut entries = HashMap::new();
     entries.insert(
         "default".to_string(),
-        WorkspaceEntry {
-            config: Arc::new(RwLock::new(Arc::new(ws_default))),
-            source: src_default,
-            name: "default".to_string(),
-            source_path: PathBuf::from("/dev/null"),
-            load_error: Arc::new(std::sync::RwLock::new(None)),
-            load_warnings: Arc::new(std::sync::RwLock::new(Vec::new())),
-            reload_state: WorkspaceEntry::default_reload_state(),
-        },
+        WorkspaceEntry::new(
+            "default",
+            src_default,
+            ws_default,
+            Some("test-rev".to_string()),
+        ),
     );
     entries.insert(
         "ops".to_string(),
-        WorkspaceEntry {
-            config: Arc::new(RwLock::new(Arc::new(ws_ops))),
-            source: src_ops,
-            name: "ops".to_string(),
-            source_path: PathBuf::from("/dev/null"),
-            load_error: Arc::new(std::sync::RwLock::new(None)),
-            load_warnings: Arc::new(std::sync::RwLock::new(Vec::new())),
-            reload_state: WorkspaceEntry::default_reload_state(),
-        },
+        WorkspaceEntry::new("ops", src_ops, ws_ops, Some("test-rev".to_string())),
     );
 
     let mgr = WorkspaceManager::from_entries(entries);
@@ -12199,6 +12191,7 @@ async fn test_workspace_tarball_download() -> Result<()> {
         artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
 
     let mgr = WorkspaceManager::new(
@@ -12374,6 +12367,7 @@ async fn test_tarball_mismatched_etag_returns_200() -> Result<()> {
         artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
 
     let mgr = WorkspaceManager::new(
@@ -12467,6 +12461,7 @@ async fn test_tarball_bare_etag_matches() -> Result<()> {
         artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
 
     let mgr = WorkspaceManager::new(
@@ -12576,6 +12571,7 @@ async fn test_tarball_stale_etag_after_workspace_change() -> Result<()> {
         artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
 
     let mgr = WorkspaceManager::new(
@@ -12720,6 +12716,7 @@ async fn test_tarball_etag_header_format() -> Result<()> {
         artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
 
     let mgr = WorkspaceManager::new(
@@ -13629,6 +13626,7 @@ async fn test_config_returns_oidc_providers_with_auth() -> Result<()> {
         artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
 
     let workspace = test_workspace();
@@ -13721,6 +13719,7 @@ async fn test_config_returns_has_internal_auth_true() -> Result<()> {
         artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
 
     let workspace = test_workspace();
@@ -13797,6 +13796,7 @@ async fn test_config_returns_has_internal_auth_false_oidc_only() -> Result<()> {
         artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
 
     let workspace = test_workspace();
@@ -13992,6 +13992,7 @@ fn hook_test_state(pool: PgPool, workspace: &WorkspaceConfig) -> AppState {
         artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
     let mgr = WorkspaceManager::from_config("default", workspace.clone());
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
@@ -14035,6 +14036,7 @@ fn hook_test_state_with_default_step_timeout(
         artifact_storage: None,
         default_step_timeout,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
     let mgr = WorkspaceManager::from_config("default", workspace.clone());
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
@@ -16162,6 +16164,7 @@ async fn setup_recovery() -> Result<(
         artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
 
     let workspace = test_workspace();
@@ -16317,6 +16320,57 @@ async fn test_trigger_fire_on_unavailable_workspace_has_no_side_effects() -> Res
             "{trigger}: a fire that cannot run must leave no row behind"
         );
     }
+    Ok(())
+}
+
+/// Spec § 4.5 (8): a busy force_refresh fires from a healthy snapshot and is
+/// still MISSED when the workspace is errored.
+#[tokio::test]
+async fn test_force_refresh_while_busy_fires_only_from_a_healthy_snapshot() -> Result<()> {
+    use stroem_common::models::workflow::{ConcurrencyPolicy, TriggerDef};
+
+    let (state, pool, _tmp, _container) = setup_recovery().await?;
+    let mut cfg = (*state.get_workspace("default").await.unwrap()).clone();
+    cfg.triggers.insert(
+        "refresh-busy".to_string(),
+        TriggerDef::Scheduler {
+            cron: "0 1 * * *".to_string(),
+            task: "hello-world".to_string(),
+            input: HashMap::new(),
+            enabled: true,
+            concurrency: ConcurrencyPolicy::Allow,
+            timezone: None,
+            force_refresh: true,
+        },
+    );
+    state
+        .workspaces
+        .replace_config_for_test("default", cfg.clone())
+        .await;
+    let remembered = WorkspaceManager::from_config("default", cfg);
+    let source_id = "default/refresh-busy";
+    let rows = |pool: PgPool| async move {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM job WHERE source_type = 'trigger' AND source_id = $1",
+        )
+        .bind(source_id)
+        .fetch_one(&pool)
+        .await
+    };
+
+    let _busy = state.workspaces.hold_exec_for_test("default").await;
+    stroem_server::scheduler::fire_trigger_once(&state, &state.workspaces, &remembered, source_id)
+        .await;
+    assert_eq!(
+        rows(pool.clone()).await?,
+        1,
+        "busy + healthy ⇒ fires from the snapshot"
+    );
+
+    state.workspaces.mark_unavailable_for_test("default");
+    stroem_server::scheduler::fire_trigger_once(&state, &state.workspaces, &remembered, source_id)
+        .await;
+    assert_eq!(rows(pool.clone()).await?, 1, "busy + errored ⇒ MISSED");
     Ok(())
 }
 
@@ -16615,6 +16669,7 @@ async fn test_recovery_propagates_to_parent() -> Result<()> {
         artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
 
     let workspace = task_action_test_workspace();
@@ -18389,6 +18444,7 @@ async fn test_connection_input_passthrough_at_claim() -> Result<()> {
         artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
 
     let mut workspace = WorkspaceConfig::default();
@@ -18755,6 +18811,7 @@ async fn setup_sync_webhook() -> Result<(
         artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
 
     let mgr = WorkspaceManager::from_config("default", workspace);
@@ -19316,6 +19373,7 @@ async fn test_scheduler_fires_cron_trigger() -> Result<()> {
         artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
     let sched_log_storage = LogStorage::new(&sched_config.log_storage.local_dir);
     let sched_state = AppState::new(
@@ -19406,6 +19464,7 @@ async fn test_scheduler_disabled_trigger_does_not_fire() -> Result<()> {
         artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
     let sched_log_storage = LogStorage::new(&sched_config.log_storage.local_dir);
     let sched_state = AppState::new(
@@ -19478,6 +19537,7 @@ async fn test_scheduler_passes_trigger_input_to_job() -> Result<()> {
         artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
     let sched_log_storage = LogStorage::new(&sched_config.log_storage.local_dir);
     let sched_state = AppState::new(
@@ -19556,6 +19616,7 @@ async fn test_scheduler_clean_shutdown() -> Result<()> {
         artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
     let sched_log_storage = LogStorage::new(&sched_config.log_storage.local_dir);
     let sched_state = AppState::new(
@@ -19960,6 +20021,7 @@ async fn test_multi_workspace_tarball_download() -> Result<()> {
         artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
 
     let mgr =
@@ -20209,6 +20271,7 @@ async fn setup_recovery_with_unmatched_timeout(
         artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
 
     let workspace = test_workspace();
@@ -21521,23 +21584,24 @@ async fn test_scheduler_triggered_job_stores_revision() -> Result<()> {
     const EXPECTED_REVISION: &str = "sched-rev-deadbeef";
 
     struct InMemSourceWithRev(WorkspaceConfig);
-    #[async_trait::async_trait]
     impl stroem_server::workspace::WorkspaceSource for InMemSourceWithRev {
-        async fn load(&self) -> Result<(WorkspaceConfig, Vec<String>)> {
-            Ok((self.0.clone(), Vec::new()))
+        fn load(
+            &self,
+            _budget: &stroem_common::budget::LoadBudget,
+        ) -> Result<stroem_server::workspace::LoadOutcome> {
+            Ok(stroem_server::workspace::LoadOutcome {
+                config: self.0.clone(),
+                warnings: Vec::new(),
+                revision: Some(EXPECTED_REVISION.to_string()),
+            })
         }
         fn path(&self) -> &std::path::Path {
             std::path::Path::new("/dev/null")
         }
-        fn revision(&self) -> Option<String> {
-            Some(EXPECTED_REVISION.to_string())
-        }
     }
 
-    use std::path::PathBuf;
     use std::sync::Arc;
     use stroem_server::workspace::WorkspaceEntry;
-    use tokio::sync::RwLock;
 
     let src: Arc<dyn stroem_server::workspace::WorkspaceSource> =
         Arc::new(InMemSourceWithRev(workspace.clone()));
@@ -21545,15 +21609,12 @@ async fn test_scheduler_triggered_job_stores_revision() -> Result<()> {
     let mut entries = HashMap::new();
     entries.insert(
         "default".to_string(),
-        WorkspaceEntry {
-            config: Arc::new(RwLock::new(Arc::new(workspace))),
-            source: src,
-            name: "default".to_string(),
-            source_path: PathBuf::from("/dev/null"),
-            load_error: Arc::new(std::sync::RwLock::new(None)),
-            load_warnings: Arc::new(std::sync::RwLock::new(Vec::new())),
-            reload_state: WorkspaceEntry::default_reload_state(),
-        },
+        WorkspaceEntry::new(
+            "default",
+            src,
+            workspace,
+            Some(EXPECTED_REVISION.to_string()),
+        ),
     );
     let mgr = WorkspaceManager::from_entries(entries);
 
@@ -21581,6 +21642,7 @@ async fn test_scheduler_triggered_job_stores_revision() -> Result<()> {
         artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
     let sched_log_storage = LogStorage::new(&sched_config.log_storage.local_dir);
     let sched_state = AppState::new(
@@ -21736,26 +21798,27 @@ async fn test_healthz_returns_structured_json() -> Result<()> {
 /// touching the filesystem.
 struct FixedRevisionSource(WorkspaceConfig);
 
-#[async_trait::async_trait]
 impl stroem_server::workspace::WorkspaceSource for FixedRevisionSource {
-    async fn load(&self) -> Result<(WorkspaceConfig, Vec<String>)> {
-        Ok((self.0.clone(), Vec::new()))
+    fn load(
+        &self,
+        _budget: &stroem_common::budget::LoadBudget,
+    ) -> Result<stroem_server::workspace::LoadOutcome> {
+        Ok(stroem_server::workspace::LoadOutcome {
+            config: self.0.clone(),
+            warnings: Vec::new(),
+            revision: Some("test-rev".to_string()),
+        })
     }
     fn path(&self) -> &std::path::Path {
         std::path::Path::new("/dev/null")
-    }
-    fn revision(&self) -> Option<String> {
-        Some("test-rev".to_string())
     }
 }
 
 /// Build an [`AppState`] backed by a single workspace whose source always
 /// reports `"test-rev"` as the revision.  The workspace name is `"default"`.
 fn revision_test_state(pool: PgPool, workspace: WorkspaceConfig) -> AppState {
-    use std::path::PathBuf;
     use std::sync::Arc;
     use stroem_server::workspace::WorkspaceEntry;
-    use tokio::sync::RwLock;
 
     let temp_dir = std::env::temp_dir().join(format!("stroem-rev-test-{}", Uuid::new_v4()));
     let config = ServerConfig {
@@ -21787,6 +21850,7 @@ fn revision_test_state(pool: PgPool, workspace: WorkspaceConfig) -> AppState {
         artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
 
     let src: Arc<dyn stroem_server::workspace::WorkspaceSource> =
@@ -21795,15 +21859,7 @@ fn revision_test_state(pool: PgPool, workspace: WorkspaceConfig) -> AppState {
     let mut entries = HashMap::new();
     entries.insert(
         "default".to_string(),
-        WorkspaceEntry {
-            config: Arc::new(RwLock::new(Arc::new(workspace))),
-            source: src,
-            name: "default".to_string(),
-            source_path: PathBuf::from("/dev/null"),
-            load_error: Arc::new(std::sync::RwLock::new(None)),
-            load_warnings: Arc::new(std::sync::RwLock::new(Vec::new())),
-            reload_state: WorkspaceEntry::default_reload_state(),
-        },
+        WorkspaceEntry::new("default", src, workspace, Some("test-rev".to_string())),
     );
 
     let mgr = WorkspaceManager::from_entries(entries);
@@ -22448,6 +22504,7 @@ async fn setup_with_workspace(
         artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
 
     let mgr = WorkspaceManager::from_config("default", workspace);
@@ -22508,6 +22565,7 @@ async fn setup_state_with_workspace(
         artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
 
     let mgr = WorkspaceManager::from_config("default", workspace);
@@ -23457,6 +23515,7 @@ async fn setup_event_source() -> Result<(
         artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
 
     let workspace = event_source_workspace();
@@ -23972,6 +24031,7 @@ async fn test_emit_endpoint_disabled_trigger() -> Result<()> {
         artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
 
     let workspace = disabled_event_source_workspace();
@@ -24107,6 +24167,7 @@ async fn setup_event_source_with_workspace(
         artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
 
     let mgr = WorkspaceManager::from_config("default", workspace);
@@ -30204,6 +30265,7 @@ async fn setup_with_state_storage() -> Result<(
         artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        workspace_reload: Default::default(),
     };
 
     let workspace = test_workspace();
