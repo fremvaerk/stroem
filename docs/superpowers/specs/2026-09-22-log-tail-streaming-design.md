@@ -1,12 +1,29 @@
 # Log reads: tail by default, streamed full log
 
-Status: revision 5, proposed (2026-09-22)
+Status: revision 6, proposed (2026-09-22)
 
 Companion of `docs/internal/TODO.md` § Performance ("Opening the job page of a
 job with a large log OOM-kills every server replica") and of the HA log
 mirroring record in TODO.md § "Review: HA Log Mirroring (2026-05-21)".
 
 ## Revision history
+
+**Revision 6 (2026-09-22).** After the fifth Codex review (8 of 12
+round-four items resolved, 4 partial, 9 remaining, "none requires
+abandoning the revised design"). The peak-allocation test gets an explicit
+measurement policy — what is counted, baseline subtraction, isolation,
+full consumption of streams, the envelope included — and fixtures that
+reach the paths they claim to (distinct short lines for the merger,
+an under-cap line with a trailing escape for the parser scratch,
+newline normalisation through the full-merge path, the archive path
+measured in the S3 suite) (findings 1, 2, 5). The matcher's divergence is
+documented as a CLASS — malformed content in a field the matcher ignores —
+with the three known members pinned by tests (3). The full merge reads the
+local file's snapshot length so the two input buffers sum to `C + 65`, not
+`2 C` (4). The server-events card shows the banner when a tail is empty but
+truncated (7). `appendTail`'s remedy sentence no longer claims a full
+reload shows every identical line, since the merger collapses them (8).
+Table entries and two citations corrected (6, 9).
 
 **Revision 5 (2026-09-22).** After the fourth Codex review (7 of 13
 round-three items resolved, 6 partial, 12 new). Framing change agreed with
@@ -138,9 +155,9 @@ Goals:
    (retention TOCTOU), archive errors degrade to local whenever a fallback
    is still possible, archive only for terminal jobs, union recovery of
    mirrored-away lines for terminal jobs whenever it fits the caps,
-   exact-match step filter with today's semantics (one documented
-   divergence, § 3.2), `_server` as a pseudo-step, "keep last non-empty
-   body" in the UI, EOF content of legacy logs never hidden.
+   exact-match step filter with today's semantics (one documented class
+   of divergence, § 3.2), `_server` as a pseudo-step, "keep last
+   non-empty body" in the UI, EOF content of legacy logs never hidden.
 4. Existing callers keep working: the `logs` field stays; the JSON envelope
    stays for every request that does not opt into streaming.
 
@@ -342,16 +359,24 @@ scratch is a `Vec` that grows geometrically as the string is decoded
 of `n` bytes it can reach `2 n` of capacity; every filtered read hands the
 matcher lines of `<= L` bytes, so the matcher term in § 3.4 is `2 L`.
 
-**One documented divergence.** `IgnoredAny` skips escape sequences in
-ignored strings without validating them (`read.rs:1033-1040`), whereas
-`Value` rejects an invalid surrogate such as `"\uDC00"` anywhere in the
-line. A line with a well-formed `step` and an invalid surrogate escape in
-an UNRELATED field is therefore treated as non-JSON (not matched) today and
-matched by the new matcher. The worker serialises lines with serde_json,
-which never emits a lone surrogate, so no line the system writes is
-affected; the difference exists only for hand-crafted files. A test pins
-the new behaviour explicitly (§ 5) so the choice is visible, not
-accidental.
+**One documented class of divergence: malformed content in a field the
+matcher ignores.** `Value` validates the whole line; the new matcher
+validates the structure it needs and skips the rest with `IgnoredAny`,
+whose scanner is syntactic. A line with a well-formed `step` that today is
+rejected as non-JSON only because of an UNRELATED field is therefore
+matched by the new matcher. Known members of the class, from serde_json
+1.0.150: an invalid surrogate escape such as `"\uDC00"` in an ignored
+string (`read.rs:1033-1040` skips escapes unvalidated; `:911-913`
+validates them for real strings); nesting deeper than 128 levels in an
+ignored value (`de.rs:1102-1214` iterates without the recursion check that
+`Value` parsing applies at `:1372-1378`, `:1910-1915`); an out-of-range
+number such as `1e400` in an ignored value (`:1261-1281` checks syntax
+only, `:650-664` rejects overflow when `arbitrary_precision` is off, which
+is the workspace's configuration, `Cargo.toml:24`). The worker serialises
+lines with serde_json, which emits none of these, so no line the system
+writes is affected; the class exists only for hand-crafted files. Three
+named tests pin the new behaviour (§ 5) so the choice is visible, not
+accidental, and any further member found later is added there.
 
 **Torn-line rule** (both tails, local). Every writer of a `.jsonl` file
 terminates every line: the worker chunk handler joins lines with `\n` and
@@ -409,7 +434,7 @@ buffer is sized to the request, so `<= K`. Peak **2 K**. It never
 materialises the log.
 
 **Full, filtered, local.** Not `FramedRead`: its `BytesMut` grows by
-doubling (`tokio-util-0.7.18/src/codec/framed_impl.rs:215`,
+doubling (`tokio-util-0.7.18/src/codec/framed_impl.rs:218`,
 `bytes-1.12.0/src/bytes_mut.rs:700-760`) and it ends the stream after any
 decoder error (`framed_impl.rs:161-168`, `:199-204`). Instead a LENDING
 splitter:
@@ -477,11 +502,17 @@ session with identical semantics on every backend (`S3BlobArchive` `:279`,
   .if_match(etag)`; a 412 (object replaced) is an archive error, a 416
   (unsatisfiable range) appends nothing; the body is read through the SDK's
   `into_async_read()` adapter (`aws-smithy-types` `rt-tokio`,
-  `byte_stream.rs:137-144`) with `take(len).read_to_end(into)` — no
-  `collect()`, so no `SegmentedBuf`, no segment descriptors and no
-  contiguous copy; what is alive besides `into` is hyper's read buffer,
-  `<= H`. Local reads from the held descriptor at `offset` with `seek` +
-  `take` + `read_to_end`, unaffected by a later replacement of the path.
+  `byte_stream.rs:434-450`, a `StreamReader` that holds one body chunk,
+  `tokio-util/src/io/stream_reader.rs:274-285`) with
+  `take(len).read_to_end(into)` — no `collect()`, so no `SegmentedBuf`, no
+  segment descriptors and no contiguous copy. What is alive besides `into`
+  is the SDK HTTP client's connection buffering plus that one retained
+  chunk; the client speaks HTTP/1 or HTTP/2 (`blob_storage.rs:259-268`),
+  so this is MODELLED as `H = 408 KiB` (hyper's HTTP/1 read-buffer cap) and
+  MEASURED, not derived: the peak-allocation test's archive cases run in
+  the S3 suite against a real MinIO through the real SDK client (§ 5).
+  Local reads from the held descriptor at `offset` with `seek` + `take` +
+  `read_to_end`, unaffected by a later replacement of the path.
 
 `ArchiveRangeReader { archive, obj, pos, buf: Vec<u8>, consumed: usize }`
 implements `AsyncBufRead` directly over ONE range buffer of `R + 32`:
@@ -557,18 +588,21 @@ its large-size threshold): `M = 2 × 40 × max(I / 80, N') + 16 N'`, i.e. `M
 `N'` by `N`. Whether the factor 2 is enough is exactly what the peak test
 checks.
 
-**Full, terminal, under the caps.** Gate: `local_len + isize <= C`. If it
-holds, local is read through `take(C)` into a buffer preallocated per the
-rule, then the archive is decompressed through `take(C - local_read + 1)`
-into a second one; if either `take` fills (the local file grew past its
-snapshot, the trailer lied or wrapped, the object changed), the merge is
-ABANDONED before any output and the single-source rule below applies. Lines
-are counted while reading; if `lines > N` the merge is likewise abandoned.
-Otherwise `merge_jsonl_logs` runs and the result is streamed from that one
-string in `K` chunks. `source: merged`. This preserves today's behaviour
-for every normal-sized log. Peak: inputs `<= C + 64` + `M` (`<= C + 96 N`) +
-output `<= C + 2` + range buffer `R` + hyper `H` + decoder `D` + reader `K` =
-**3 C + 96 N + R + H + D + K**.
+**Full, terminal, under the caps.** Gate: `local_len + isize <= C`, with
+`local_len` the snapshot length. If it holds, local is read as exactly its
+snapshot range — `take(local_len)` into a buffer of `local_len + 32`, the
+same snapshot discipline as the tail, so a file that grows afterwards
+neither overruns the buffer nor changes the gate — then the archive is
+decompressed through `take(C - local_len + 1)` into a buffer of `C -
+local_len + 33`; the two input buffers therefore sum to `C + 65`. If the
+archive `take` fills (the trailer lied or wrapped, the object changed), the
+merge is ABANDONED before any output and the single-source rule below
+applies. Lines are counted while reading; if `lines > N` the merge is
+likewise abandoned. Otherwise `merge_jsonl_logs` runs and the result is
+streamed from that one string in `K` chunks. `source: merged`. This
+preserves today's behaviour for every normal-sized log. Peak: inputs `<= C
++ 65` + `M` (`<= C + 96 N`) + output `<= C + 2` + range buffer `R` + HTTP
+client `H` + decoder `D` + reader `K` = **3 C + 96 N + R + H + D + K**.
 
 **Full, terminal, above a cap or archive size unknown.** ONE source is
 streamed: the LOCAL file when it exists (§ 3.2 full modes), else the
@@ -612,17 +646,17 @@ test (§ 5) asserts each mode's measured peak `<=` its formula × 1.5; the
 |---|---|---|---|
 | Tail, unfiltered, local | `2 T + E` | 2.1 MiB | 32.1 MiB |
 | Tail, step, local | `3 T + 3 L + E` | 5.3 MiB | 39.1 MiB |
-| Tail, terminal, merged | `11 T + 3 L + R + H + D + K + M + 256`, `M <= 2 T + 96 N'` | 7.8 MiB + `96 N'` (≤ 12 MiB adversarial; ~0.2 MiB typical) → 19.8 MiB | 56.5 MiB + 8 MiB + 12 MiB → 76.5 MiB |
+| Tail, terminal, merged | `11 T + 3 L + R + H + D + K + M + 256`, `M <= 2 T + 96 N'` | 7.8 MiB + `96 N'` (≤ 12 MiB adversarial; ~0.2 MiB typical) → 19.8 MiB | 56.6 MiB + 12 MiB → 68.6 MiB |
 | Full, unfiltered, local | `2 K` | 0.2 MiB | 0.2 MiB |
 | Full, filtered, local | `5 L + 2 K` | 5.2 MiB | 5.2 MiB |
-| Full, archive, single source | `R + H + D + 3 K` (`R + H + D + K + 5 L` filtered) | 1.7 MiB (6.5 MiB) | same |
+| Full, archive, single source | `R + H + D + 3 K` (`R + H + D + K + 5 L` filtered) | 1.7 MiB (6.6 MiB) | same |
 | Full, terminal, merged | `3 C + 96 N + R + H + D + K` | 61.6 MiB | 61.6 MiB |
 
 With defaults, a UI poll costs at most 5.3 MiB and the most expensive read
-any client can trigger costs about 76.5 MiB by formula (a 4 MiB terminal
-tail over adversarial one-byte lines), i.e. up to ~115 MiB at the test's
-× 1.5 allowance — which is why `tail_max_bytes` is configurable and why
-the production limit bump (256 Mi/512 Mi → 1 Gi/2 Gi, already in the
+any client can trigger costs about 68.6 MiB by formula (a 4 MiB terminal
+tail over adversarial short distinct lines), i.e. up to ~103 MiB at the
+test's × 1.5 allowance — which is why `tail_max_bytes` is configurable and
+why the production limit bump (256 Mi/512 Mi → 1 Gi/2 Gi, already in the
 helmfile) is due before this ships; on today's ~100 MiB of headroom the
 operator should set `tail_max_bytes` to 1 MiB. The "typical" figure is not
 a bound and is not relied on.
@@ -684,7 +718,13 @@ top of the viewer reads "Showing the last ~2,100 lines (256 KiB of up to
 (`server-events.tsx`) keep running, unchanged in cadence, and now receive at
 most `tail_default_bytes`. The "keep last non-empty body" guard
 (`step-detail.tsx:70-79`, `server-events.tsx:23-31`) is untouched: an empty
-body from a cold replica still never clears the view.
+body from a cold replica still never clears the view. One guard changes:
+`server-events.tsx:56` returns `null` whenever `logs` is empty, which would
+hide the banner for a finished job whose `_server` tail is empty because
+its only record was torn (§ 3.2) — the card's visibility becomes `logs ||
+truncated`, and an empty-but-truncated tail renders the banner with its
+two actions and no lines. The step panel already renders for every
+non-skipped step, so it needs no such change.
 
 - In **tail mode** each poll replaces the body, as today: the tail IS the
   latest view.
@@ -714,7 +754,9 @@ body from a cold replica still never clears the view.
   poll already covered is indistinguishable from the unchanged overlap and
   is not added — the view shows the multiplicity it has observed across
   polls, not necessarily every occurrence; "Load full log" again, or the
-  download, shows them all. Ordering is "everything not in the tail, then
+  download, shows what the SOURCE holds, which for a running job is the
+  file as written and for a finished job under the merge cap is the
+  merger's union, in which identical lines collapse to one (§ 3.3). Ordering is "everything not in the tail, then
   the tail", which for a running step means older content then the newest
   window; a straggler can sit out of time order, as it does in the file.
   Cost per poll is `O(|displayed| + |tail|)` map lookups (~475 k for the
@@ -808,21 +850,54 @@ exported and typed but remains unused by the UI.
 
 **Peak-allocation test** (the regression test this incident needs;
 `crates/stroem-server/tests/log_peak_alloc_test.rs`, its own binary so it
-can install a `#[global_allocator]`): a wrapper around `System` that tracks
-bytes currently allocated and the high-water mark in two atomics, with
-`reset_peak()`/`peak()`. For each read mode the test resets the peak, runs
-the read against a fixture, and asserts `peak() <= formula(T, L, K, R, H,
-D, C, N') × 1.5`, evaluating the formula with the fixture's actual `N'`.
-Fixtures: (a) an incident-shaped 100 MiB JSONL file of ~475 k lines, local
-and as a gzipped archive object; (b) one-byte lines to the line cap
-(exercises `96 N'` and the union skip); (c) `\u0001`-only content
-(exercises `E`); (d) lines of `L - 1` literal bytes followed by one escape
-(exercises the matcher's `2 L` scratch); (e) a 15 MiB single line under
-`N = 1` (exercises the merger's byte-based reservation). The same test
-asserts, after every preallocated read, that the buffer's `capacity()` is
-unchanged. It runs in CI on fixtures sized to the defaults (`C` = 16 MiB,
-so the merged-full case uses a 12 MiB local + 4 MiB archive pair) and has
-an `#[ignore]`d 100 MiB variant for the release checklist. It is also what
+can install a `#[global_allocator]`).
+
+*What it measures.* A wrapper around `System` that tracks bytes currently
+allocated and the high-water mark in two atomics, counting the REQUESTED
+sizes of `alloc`, `realloc` and `dealloc` (a `realloc` counts the new size
+and releases the old; the transient copy inside `System::realloc` is not
+observable and is one of the things the × 1.5 allowance covers). It
+measures Rust-heap allocations made through the global allocator by the
+code under test: not allocator metadata or fragmentation, not stack, not
+memory mapped outside `GlobalAlloc`, not the process RSS. It is a
+regression detector for the paths it exercises, not a proof for arbitrary
+inputs; that is what goal 1 says.
+
+*Measurement policy.* One request at a time: the binary runs its cases
+serially (a global mutex, and `harness = false` with a hand-rolled main so
+no test-thread pool exists). Fixtures live on DISK — JSONL files under a
+temp dir, archive objects in a `LocalBlobArchive` on disk (never the
+in-memory mock, which clones its bytes on every read,
+`log_storage.rs:615`, `:628`) — so no fixture bytes sit on the heap. For
+each case: build the request, record `baseline = current()`, `reset_peak()`,
+then run the WHOLE server-side path — for a tail, `read_tail` followed by
+the envelope serialisation exactly as the handler does it; for a full
+read, `stream_full` followed by draining the returned stream to completion,
+dropping each chunk as it arrives — and assert `peak() - baseline <=
+formula(T, L, K, R, H, D, C, N') × 1.5`, with `N'` the fixture's actual
+line count. The same case asserts, after every preallocated read, that the
+buffer's `capacity()` is unchanged. The archive cases also run against a
+real S3-compatible store through the real SDK client in
+`s3_integration_test.rs` (MinIO via testcontainers), which is the only
+place the `H` term is measured rather than modelled.
+
+*Fixtures*, each chosen to reach the term it exercises: (a) an
+incident-shaped JSONL file of ~475 k realistic lines (~83 MiB), local and
+as a gzipped archive object; (b) DISTINCT short lines — `{"step":"s","line":"<n>"}`
+with a counter — up to the line cap, so the merger holds near `N` distinct
+entries (blank or repeated one-byte lines would be dropped or collapsed by
+`merge_jsonl_logs`, `:40-44`, and exercise nothing); (c) `\u0001`-only line
+content (exercises `E`); (d) lines whose total length is `L - 64` bytes,
+consisting of a literal run followed by ONE escape sequence at the end, so
+the line passes the `<= L` filter and serde_json's scratch has to grow to
+hold the decoded prefix (exercises `2 L`); (e) a 15 MiB single line under
+`N = 1` (exercises the merger's byte-based reservation); (f) for newline
+normalisation, two inputs whose last lines lack a newline, merged through
+the FULL-merge path (the tail path's torn-line rule would drop them first),
+asserting the merger's output did not reallocate and `returned <= total`.
+It runs in CI on fixtures sized to the defaults (`C` = 16 MiB, so the
+merged-full case uses a 12 MiB local + 4 MiB archive pair) and has an
+`#[ignore]`d 100 MiB variant for the release checklist. It is also what
 measures `D`.
 
 Unit (`log_storage.rs`):
@@ -848,18 +923,23 @@ Unit (`log_storage.rs`):
 - matcher: every existing fixture (`:768-930`, `:1478-1505`) unchanged; NEW
   fixtures — positional form `["build"]` does not match; duplicate `step`
   keys, last wins; a compound first `step` value followed by the real one
-  matches; non-string `step` does not match; escaped step VALUE
-  (`"build"`) matches `build`; escaped step KEY (`"step"`)
-  matches; an unrelated escaped key does not break the match; trailing
+  matches; non-string `step` does not match; escaped step VALUE — the
+  Rust literal `r#"{"step":"build"}"#`, i.e. the six characters
+  backslash, `u`, `0`, `0`, `6`, `9` on disk — matches `build`; escaped
+  step KEY (`r#"{"step":"build"}"#`) matches; an unrelated escaped key
+  (`r#"{"step":"build","a":0}"#`) does not break the match; trailing
   garbage after the object does not match; `step` absent; nested object
-  with an inner `step` does not match; and the DOCUMENTED DIVERGENCE pinned
-  as a named test: an invalid surrogate escape in an unrelated field no
-  longer prevents the match.
+  with an inner `step` does not match; and the DOCUMENTED DIVERGENCE CLASS
+  pinned as three named tests, each asserting the NEW behaviour and
+  carrying a comment that the old matcher rejected the line: an invalid
+  surrogate escape in an unrelated string, a 129-level nested array in an
+  unrelated value, and `1e400` in an unrelated value.
 - terminal tail: local + archive → merged content equals the union of the
   two tails, cut to `T`, `source: merged`, `total_bytes = local_len +
-  counted archive bytes + 2`; two unterminated one-line inputs (`"A"`,
-  `"B"`, `T` = 4) → `returned_bytes <= total_bytes` holds and the merger's
-  output did not reallocate; archive error → local tail, `source: local`;
+  counted archive bytes + 2` (the newline-normalisation case itself is
+  exercised through the full-merge path, § 5 fixture (f), because the tail
+  path drops an unterminated last line before merging); archive error →
+  local tail, `source: local`;
   local missing → archive ring with correct `total_bytes`; step tail from
   the archive; line cap exceeded → local only, `truncated`, `source:
   local`; UNFILTERED archive tail with `T` = 4 MiB keeps a whole 2 MiB
@@ -919,8 +999,11 @@ no-op; the arrival-ordered counterexample `[B, A, C]` does not duplicate;
 recovered middle line shown; straggler appended once; gap only when nothing
 was removed; `[X, X]` + `[X]` → `[X, X]`; `[A]` + `[B, B]` → `[A, B, B]`;
 `[A, A]` + `[B]` → `[A, A, B]`; kept lines keep their order; empty inputs.
-Banner rendered when `truncated`, absent otherwise; confirmation above
-64 MiB; `step-detail.test.tsx` updated for the envelope; a `log-viewer`
+Banner rendered when `truncated`, absent otherwise; a `server-events` test
+that an empty body with `truncated: true` renders the card with the banner
+and no lines, and that an empty body with `truncated: false` still renders
+nothing; confirmation above 64 MiB; `step-detail.test.tsx` updated for the
+envelope; a `log-viewer`
 test that a 10 000-line body renders fewer than 200 rows (virtualisation is
 in effect; jsdom needs the size mock the TanStack docs describe).
 Playwright (`ui/e2e/log-streaming.spec.ts`): banner appears for a log
@@ -978,10 +1061,11 @@ above the default tail and "Load full log" renders the first line.
   union would need sorted inputs, which arrival-ordered files are not.
 - **`total_bytes` is an upper bound of the job log, not the step's share.**
   The banner says "of up to".
-- **Adversarial maxima.** A 4 MiB terminal tail over one-byte lines is
-  ~76.5 MiB by formula, ~115 MiB at the test allowance. Bounded and stated;
-  set `tail_max_bytes` to 1 MiB on a 512 Mi deployment. The deploy-side
-  limit bump is the real fix for headroom and is the user's.
-- **The matcher's one divergence** (invalid surrogate escapes in unrelated
-  fields) is pinned by a named test so that a future reader knows it was a
-  decision.
+- **Adversarial maxima.** A 4 MiB terminal tail over short distinct lines
+  is ~68.6 MiB by formula, ~103 MiB at the test allowance. Bounded and
+  stated; set `tail_max_bytes` to 1 MiB on a 512 Mi deployment. The
+  deploy-side limit bump is the real fix for headroom and is the user's.
+- **The matcher's divergence class** (malformed content in fields it
+  ignores) has three known members, each pinned by a named test so that a
+  future reader knows it was a decision; a newly found member joins the
+  list rather than silently changing behaviour.
