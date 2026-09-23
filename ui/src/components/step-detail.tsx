@@ -1,4 +1,3 @@
-import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router";
 import { RotateCcw } from "lucide-react";
 import {
@@ -9,9 +8,10 @@ import {
 } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { LogViewer } from "@/components/log-viewer";
+import { LogTailBanner } from "@/components/log-tail-banner";
 import { JsonViewer } from "@/components/json-viewer";
 import { ApprovalCard } from "@/components/approval-card";
-import { getStepLogs } from "@/lib/api";
+import { useStepLog } from "@/hooks/use-step-log";
 import { formatTime } from "@/lib/formatting";
 import { isTerminalJobStatus } from "@/lib/job-status";
 import type { JobStep } from "@/lib/types";
@@ -43,63 +43,15 @@ export function StepDetail({
   onRestart,
   restartPending = false,
 }: StepDetailProps) {
-  const [logs, setLogs] = useState("");
-  const [loadingLogs, setLoadingLogs] = useState(true);
-  const hasLogsRef = useRef(false);
   const isCarriedOver = step.carried_over;
   const isSkipped = step.status === "skipped";
 
-  useEffect(() => {
-    // Carried-over steps were never executed by this job — their logs and
-    // artifacts belong to the source job, so there is nothing to fetch here.
-    // Skipped steps were never executed either — there is nothing to fetch.
-    if (isCarriedOver || isSkipped) {
-      setLoadingLogs(false);
-      return;
-    }
-
-    // Reset state for the current step (guards against same component instance
-    // being reused for a different step when parent re-renders).
-    let cancelled = false;
-    hasLogsRef.current = false;
-    setLoadingLogs(true);
-
-    async function fetchLogs() {
-      try {
-        const data = await getStepLogs(jobId, step.step_name);
-        if (cancelled) return;
-        // With multi-replica servers, a poll routed to a replica that hasn't
-        // received this job's chunks returns "". Don't clear what we already
-        // have — keep the last non-empty body until a real update arrives.
-        if (data.logs) {
-          hasLogsRef.current = true;
-          setLogs(data.logs);
-        } else if (!hasLogsRef.current) {
-          setLogs("");
-        }
-      } catch {
-        // Silently handle — logs may not exist yet
-      } finally {
-        if (!cancelled) setLoadingLogs(false);
-      }
-    }
-
-    fetchLogs();
-
-    // Poll while step is running
-    const isActive = step.status === "running" || step.status === "ready";
-    if (isActive) {
-      const interval = setInterval(fetchLogs, 2000);
-      return () => {
-        cancelled = true;
-        clearInterval(interval);
-      };
-    }
-
-    return () => {
-      cancelled = true;
-    };
-  }, [jobId, step.step_name, step.status, isCarriedOver, isSkipped]);
+  const isActive = step.status === "running" || step.status === "ready";
+  const log = useStepLog(jobId, step.step_name, {
+    enabled: !isCarriedOver && !isSkipped,
+    pollMs: isActive ? 2000 : null,
+  });
+  const showBanner = log.truncated || log.fullState === "loading" || log.fullState === "error";
 
   const isStreaming = step.status === "running";
   const isSuspendedApproval =
@@ -197,12 +149,28 @@ export function StepDetail({
             >
               {skipExplanation(step.skip_reason)}
             </p>
-          ) : loadingLogs ? (
+          ) : log.loading ? (
             <div className="flex items-center justify-center py-8">
               <div className="h-5 w-5 animate-spin rounded-full border-2 border-muted border-t-primary" />
             </div>
           ) : (
-            <LogViewer logs={logs} isStreaming={isStreaming} />
+            <LogViewer
+              logs={log.lines}
+              isStreaming={isStreaming}
+              header={
+                showBanner ? (
+                  <LogTailBanner
+                    lineCount={log.lines.length}
+                    returnedBytes={log.returnedBytes}
+                    totalBytes={log.totalBytes}
+                    fullState={log.fullState}
+                    progressBytes={log.progressBytes}
+                    onLoadFull={log.loadFull}
+                    onDownload={log.download}
+                  />
+                ) : null
+              }
+            />
           )}
         </TabsContent>
         <TabsContent value="input">
