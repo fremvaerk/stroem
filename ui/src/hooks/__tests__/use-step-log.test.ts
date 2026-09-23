@@ -79,6 +79,119 @@ describe("useStepLog", () => {
     await waitFor(() => expect(result.current.lines).toEqual(["a", "b", "c", "d", "e"]));
   });
 
+  it("stitches a tail that arrives from a poll while a full load is in flight", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    getStepLogs
+      .mockResolvedValueOnce(tail("c\nd\n", { truncated: true }))
+      .mockResolvedValue(tail("d\ne\n", { truncated: true }));
+    let resolveFull!: (text: string) => void;
+    const full = new Promise<string>((resolve) => {
+      resolveFull = resolve;
+    });
+    getStepLogsFull.mockReturnValueOnce(full);
+    const { result } = renderHook(() => useStepLog("j", "build", { enabled: true, pollMs: 2000 }));
+    await waitFor(() => expect(result.current.truncated).toBe(true));
+
+    act(() => {
+      result.current.loadFull();
+    });
+    expect(result.current.fullState).toBe("loading");
+
+    // A poll resolves ("d\ne\n") while the full-log request is still pending.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2100);
+    });
+
+    await act(async () => {
+      resolveFull("a\nb\nc\nd\n");
+      await full;
+    });
+    await waitFor(() => expect(result.current.fullState).toBe("loaded"));
+    // The poll's newer line ("e") is stitched onto the snapshot, not lost.
+    expect(result.current.lines).toEqual(["a", "b", "c", "d", "e"]);
+  });
+
+  it("stitches a tail from the pollMs -> null final fetch that arrives during a pending full load", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    getStepLogs.mockResolvedValue(tail("c\nd\n", { truncated: true }));
+    let resolveFull!: (text: string) => void;
+    const full = new Promise<string>((resolve) => {
+      resolveFull = resolve;
+    });
+    getStepLogsFull.mockReturnValueOnce(full);
+    const { result, rerender } = renderHook(
+      ({ pollMs }: { pollMs: number | null }) => useStepLog("j", "build", { enabled: true, pollMs }),
+      { initialProps: { pollMs: 2000 as number | null } },
+    );
+    await waitFor(() => expect(result.current.truncated).toBe(true));
+
+    act(() => {
+      result.current.loadFull();
+    });
+    expect(result.current.fullState).toBe("loading");
+
+    // The step goes terminal mid-load: the caller switches pollMs to null,
+    // which fires exactly one more fetch with newer content.
+    const callsBeforeTransition = getStepLogs.mock.calls.length;
+    getStepLogs.mockResolvedValue(tail("d\ne\n", { truncated: true }));
+    rerender({ pollMs: null });
+    await waitFor(() => expect(getStepLogs.mock.calls.length).toBe(callsBeforeTransition + 1));
+
+    await act(async () => {
+      resolveFull("a\nb\nc\nd\n");
+      await full;
+    });
+    await waitFor(() => expect(result.current.fullState).toBe("loaded"));
+    expect(result.current.lines).toEqual(["a", "b", "c", "d", "e"]);
+  });
+
+  it("a tail that arrives during the load and is already covered by the snapshot's end is a no-op", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    getStepLogs
+      .mockResolvedValueOnce(tail("a\nb\n", { truncated: true }))
+      // Arrives mid-load, but its content ("c","d") sits exactly at the
+      // end of what the full load is about to return, so nothing new.
+      .mockResolvedValue(tail("c\nd\n", { truncated: true }));
+    let resolveFull!: (text: string) => void;
+    const full = new Promise<string>((resolve) => {
+      resolveFull = resolve;
+    });
+    getStepLogsFull.mockReturnValueOnce(full);
+    const { result } = renderHook(() => useStepLog("j", "build", { enabled: true, pollMs: 2000 }));
+    await waitFor(() => expect(result.current.truncated).toBe(true));
+
+    act(() => {
+      result.current.loadFull();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2100);
+    });
+
+    await act(async () => {
+      resolveFull("a\nb\nc\nd\n");
+      await full;
+    });
+    await waitFor(() => expect(result.current.fullState).toBe("loaded"));
+    expect(result.current.lines).toEqual(["a", "b", "c", "d"]);
+  });
+
+  it("adopts truncated and the larger bound from an empty poll once a body was seen", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    getStepLogs
+      .mockResolvedValueOnce(tail("a\n"))
+      .mockResolvedValue(tail("", { truncated: true, total_bytes: 999 }));
+    const { result } = renderHook(() => useStepLog("j", "build", { enabled: true, pollMs: 2000 }));
+    await waitFor(() => expect(result.current.lines).toEqual(["a"]));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2100);
+    });
+
+    expect(result.current.lines).toEqual(["a"]);
+    expect(result.current.truncated).toBe(true);
+    expect(result.current.totalBytes).toBe(999);
+  });
+
   it("marks a gap when a poll shares no line with the full view", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     getStepLogs.mockResolvedValueOnce(tail("b\n", { truncated: true })).mockResolvedValue(tail("y\nz\n", { truncated: true }));

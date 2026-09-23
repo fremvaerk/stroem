@@ -42,6 +42,14 @@ export function useStepLog(jobId: string, stepName: string, { enabled, pollMs }:
   const [downloadError, setDownloadError] = useState(false);
   const hasLogsRef = useRef(false);
   const fullRef = useRef<string[] | null>(null);
+  // Every non-empty poll's split lines, so a tail that arrives while a full
+  // load is in flight can be stitched onto the snapshot once it resolves
+  // (a load in flight has no full view yet, so the ordinary "append to
+  // fullRef" branch below can't catch it). Cleared at the start of each
+  // `loadFull` call so a stale tail from BEFORE that load started — already
+  // reflected, or not, in whatever the load returns — is never replayed
+  // onto an unrelated later load.
+  const tailRef = useRef<string[] | null>(null);
   const generationRef = useRef(0);
 
   // A different step (or job) starts from scratch.
@@ -49,6 +57,7 @@ export function useStepLog(jobId: string, stepName: string, { enabled, pollMs }:
     generationRef.current += 1;
     hasLogsRef.current = false;
     fullRef.current = null;
+    tailRef.current = null;
     setTail(null);
     setFullLines(null);
     setFullState("idle");
@@ -78,13 +87,24 @@ export function useStepLog(jobId: string, stepName: string, { enabled, pollMs }:
         if (data.logs) {
           hasLogsRef.current = true;
           setTail(data);
+          const lines = splitLogLines(data.logs);
+          tailRef.current = lines;
           if (fullRef.current) {
-            const { lines } = appendTail(fullRef.current, splitLogLines(data.logs));
-            fullRef.current = lines;
-            setFullLines(lines);
+            const { lines: stitched } = appendTail(fullRef.current, lines);
+            fullRef.current = stitched;
+            setFullLines(stitched);
           }
         } else if (!hasLogsRef.current) {
           setTail(data);
+        } else if (data.truncated) {
+          // A scan cap or an over-window newest line can come back empty
+          // AND truncated once a body was seen; the cold-replica case this
+          // guard exists for always answers `truncated: false`. Keep the
+          // body but adopt the flag (and the larger bound) so the banner
+          // doesn't hide behind stale metadata.
+          setTail((prev) =>
+            prev ? { ...prev, truncated: true, total_bytes: Math.max(prev.total_bytes, data.total_bytes) } : data,
+          );
         }
       } catch {
         // Logs may not exist yet.
@@ -119,14 +139,22 @@ export function useStepLog(jobId: string, stepName: string, { enabled, pollMs }:
     const generation = generationRef.current;
     setFullState("loading");
     setProgressBytes(0);
+    // Only a tail that arrives from here on belongs to THIS load.
+    tailRef.current = null;
     try {
       const text = await getStepLogsFull(jobId, stepName, (n) => {
         if (generationRef.current === generation) setProgressBytes(n);
       });
       if (generationRef.current !== generation) return;
       const lines = splitLogLines(text);
-      fullRef.current = lines;
-      setFullLines(lines);
+      // A poll (or the pollMs -> null final fetch) can resolve while this
+      // request is in flight; the snapshot alone would silently drop
+      // whatever it fetched. appendTail is idempotent, so a tail already
+      // reflected in the snapshot is a no-op and a newer one appends
+      // exactly its new lines.
+      const stitched = tailRef.current ? appendTail(lines, tailRef.current).lines : lines;
+      fullRef.current = stitched;
+      setFullLines(stitched);
       setFullState("loaded");
     } catch {
       if (generationRef.current === generation) setFullState("error");
