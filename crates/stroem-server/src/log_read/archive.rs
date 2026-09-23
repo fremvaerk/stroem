@@ -1,14 +1,23 @@
 //! Terminal-job archive reads: ranged gzip decoding, tails, streams, merge.
 
-use super::{RANGE, READ_SLACK};
+use super::local::{read_range_exact, LocalFile, LocalKind};
+use super::splitter::{filtered_stream, LineRef, LineSplitter};
+use super::{count_lines, matcher, retain_matching_lines, trim_torn, CHUNK, RANGE, READ_SLACK};
 use crate::blob_storage::{ArchiveObject, BlobArchive};
+use crate::config::LogReadConfig;
+use crate::log_storage::merge_jsonl_logs;
 use anyhow::Context as _;
+use async_compression::tokio::bufread::GzipDecoder;
+use bytes::Bytes;
+use futures_core::stream::BoxStream;
 use futures_util::future::BoxFuture;
+use std::collections::VecDeque;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{ready, Context, Poll};
-use tokio::io::{AsyncBufRead, AsyncRead, ReadBuf};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader, ReadBuf};
+use tokio_util::io::ReaderStream;
 
 /// `AsyncBufRead` over an opened archive object, fetched in ranges of
 /// `range` bytes into ONE buffer that moves into each fetch and back, so a
@@ -136,6 +145,207 @@ pub(crate) async fn gzip_isize(
     Ok(u64::from(u32::from_le_bytes(bytes)))
 }
 
+pub(crate) struct ArchiveTail {
+    pub logs: String,
+    pub truncated: bool,
+    /// Decompressed bytes counted while streaming (never the trailer).
+    pub decompressed: u64,
+}
+
+fn decoder(
+    archive: Arc<dyn BlobArchive>,
+    obj: Arc<ArchiveObject>,
+) -> GzipDecoder<ArchiveRangeReader> {
+    GzipDecoder::new(ArchiveRangeReader::new(archive, obj))
+}
+
+/// The newest `t` bytes of the archived log (whole lines), or of its lines
+/// for one step. Computed completely before the caller answers, so any
+/// archive error can still fall back to local.
+pub(crate) async fn tail(
+    archive: Arc<dyn BlobArchive>,
+    obj: Arc<ArchiveObject>,
+    filter: Option<&str>,
+    t: u64,
+    max_line: usize,
+) -> anyhow::Result<ArchiveTail> {
+    let reader = BufReader::with_capacity(CHUNK, decoder(archive, obj));
+    Ok(match filter {
+        None => byte_ring_tail(reader, t).await?,
+        Some(step) => line_ring_tail(reader, step, t, max_line).await?,
+    })
+}
+
+/// A ring of the last `t` decompressed bytes. No line splitter, so a line
+/// of any length survives exactly as it does from the local file.
+async fn byte_ring_tail<R: tokio::io::AsyncBufRead + Unpin>(
+    mut reader: R,
+    t: u64,
+) -> io::Result<ArchiveTail> {
+    let cap = usize::try_from(t).map_err(io::Error::other)?;
+    let mut ring: VecDeque<u8> = VecDeque::with_capacity(cap);
+    let mut total = 0u64;
+    // The byte just before the ring's first byte, once anything was evicted.
+    let mut before_ring: Option<u8> = None;
+    loop {
+        let buf = reader.fill_buf().await?;
+        if buf.is_empty() {
+            break;
+        }
+        let n = buf.len();
+        total += n as u64;
+        if n >= cap {
+            before_ring = if n > cap {
+                Some(buf[n - cap - 1])
+            } else {
+                ring.back().copied().or(before_ring)
+            };
+            ring.clear();
+            ring.extend(buf[n - cap..].iter().copied());
+        } else {
+            let overflow = (ring.len() + n).saturating_sub(cap);
+            if overflow > 0 {
+                before_ring = ring.get(overflow - 1).copied();
+                ring.drain(..overflow);
+            }
+            ring.extend(buf.iter().copied());
+        }
+        reader.consume(n);
+    }
+    let evicted = total > ring.len() as u64;
+    let mut v = Vec::from(ring); // never reallocates
+    let head = if evicted && before_ring != Some(b'\n') {
+        v.iter()
+            .position(|&b| b == b'\n')
+            .map_or(v.len(), |p| p + 1)
+    } else {
+        0
+    };
+    v.drain(..head);
+    let torn = trim_torn(&mut v);
+    let logs = String::from_utf8(v).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    Ok(ArchiveTail {
+        logs,
+        truncated: evicted || torn,
+        decompressed: total,
+    })
+}
+
+/// A ring of whole matching lines, at most `t` bytes, oldest evicted first.
+async fn line_ring_tail<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: R,
+    step: &str,
+    t: u64,
+    max_line: usize,
+) -> io::Result<ArchiveTail> {
+    let cap = usize::try_from(t).map_err(io::Error::other)?;
+    let mut ring: VecDeque<u8> = VecDeque::with_capacity(cap);
+    let mut split = LineSplitter::new(reader, max_line);
+    let mut truncated = false;
+    loop {
+        match split.next().await? {
+            None => break,
+            // Oversize, or a torn record at the end of a .jsonl snapshot.
+            Some(LineRef::Skipped { .. }) | Some(LineRef::Unterminated(_)) => truncated = true,
+            Some(LineRef::Line(line)) => {
+                if line.is_empty() || !matcher::matches_bytes(line, step) {
+                    continue;
+                }
+                let need = line.len() + 1;
+                if need > cap {
+                    truncated = true;
+                    continue;
+                }
+                if ring.len() + need > cap {
+                    let must_free = ring.len() + need - cap;
+                    let cut = ring
+                        .iter()
+                        .skip(must_free - 1)
+                        .position(|&b| b == b'\n')
+                        .map_or(ring.len(), |p| must_free + p);
+                    ring.drain(..cut);
+                    truncated = true;
+                }
+                ring.extend(line.iter().copied());
+                ring.push_back(b'\n');
+            }
+        }
+    }
+    let decompressed = split.bytes_consumed();
+    let logs = String::from_utf8(Vec::from(ring))
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    Ok(ArchiveTail {
+        logs,
+        truncated,
+        decompressed,
+    })
+}
+
+/// The archived log as a stream, served as stored (no torn-line trim:
+/// the end is only known after it was sent).
+pub(crate) fn full_stream(
+    archive: Arc<dyn BlobArchive>,
+    obj: Arc<ArchiveObject>,
+    step: Option<String>,
+    max_line: usize,
+) -> BoxStream<'static, io::Result<Bytes>> {
+    let decoder = decoder(archive, obj);
+    match step {
+        None => Box::pin(ReaderStream::with_capacity(decoder, CHUNK)),
+        Some(step) => filtered_stream(
+            BufReader::with_capacity(CHUNK, decoder),
+            step,
+            max_line,
+            false,
+        ),
+    }
+}
+
+/// The union of the local snapshot and the archive, when both fit the caps.
+/// `Ok(None)` means "over a cap, or the trailer disagrees with the body":
+/// the caller streams a single source instead. Nothing is sent before this
+/// returns, so every failure here can still fall back.
+pub(crate) async fn read_merged_full(
+    local: &mut LocalFile,
+    archive: Arc<dyn BlobArchive>,
+    obj: Arc<ArchiveObject>,
+    filter: Option<&str>,
+    cfg: &LogReadConfig,
+) -> anyhow::Result<Option<String>> {
+    let isize = gzip_isize(archive.as_ref(), &obj).await?;
+    if local.len.saturating_add(isize) > cfg.merge_max_bytes {
+        return Ok(None);
+    }
+    let mut l = Vec::with_capacity(usize::try_from(local.len)? + READ_SLACK);
+    read_range_exact(&mut local.file, 0, local.len, &mut l)
+        .await
+        .context("read local log for merge")?;
+    let mut a = Vec::with_capacity(usize::try_from(isize)? + 1 + READ_SLACK);
+    let limited = decoder(archive, obj).take(isize + 1);
+    let mut limited = std::pin::pin!(limited);
+    let n = limited
+        .read_to_end(&mut a)
+        .await
+        .context("decompress archive for merge")?;
+    if n as u64 != isize {
+        return Ok(None); // wrong, wrapped or stale trailer
+    }
+    if local.kind == LocalKind::Jsonl {
+        trim_torn(&mut l);
+    }
+    trim_torn(&mut a);
+    if let Some(step) = filter {
+        retain_matching_lines(&mut l, step, cfg.max_line_bytes);
+        retain_matching_lines(&mut a, step, cfg.max_line_bytes);
+    }
+    if count_lines(&l) + count_lines(&a) > cfg.merge_max_lines {
+        return Ok(None);
+    }
+    let l = String::from_utf8(l).context("local log is not UTF-8")?;
+    let a = String::from_utf8(a).context("archived log is not UTF-8")?;
+    Ok(Some(merge_jsonl_logs(&l, &a)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,5 +399,242 @@ mod tests {
         let dir2 = tempfile::TempDir::new().unwrap();
         let (store2, obj2) = put(&dir2, b"short".to_vec()).await;
         assert!(gzip_isize(store2.as_ref(), &obj2).await.is_err());
+    }
+
+    use crate::config::LogReadConfig;
+    use crate::log_read::local::{open_local, LocalKind};
+    use futures_util::TryStreamExt;
+
+    fn jl(step: &str, msg: &str) -> String {
+        format!(
+            r#"{{"ts":"2026-09-22T00:00:0{}Z","step":"{step}","line":"{msg}"}}"#,
+            msg.len() % 10
+        )
+    }
+
+    fn lines(step: &str, n: usize) -> String {
+        (0..n)
+            .map(|i| format!("{}\n", jl(step, &format!("m{i:04}"))))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn unfiltered_tail_keeps_the_newest_whole_lines() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let content = lines("s", 10);
+        let (store, obj) = put(&dir, gzip(content.as_bytes())).await;
+        let per = content.lines().next().unwrap().len() as u64 + 1;
+        let t = tail(store.clone(), obj.clone(), None, 3 * per + 5, 1024)
+            .await
+            .unwrap();
+        let expected: String = content.lines().skip(7).map(|l| format!("{l}\n")).collect();
+        assert_eq!(t.logs, expected);
+        assert!(t.truncated);
+        assert_eq!(t.decompressed, content.len() as u64);
+
+        let whole = tail(store.clone(), obj.clone(), None, 1 << 20, 1024)
+            .await
+            .unwrap();
+        assert_eq!((whole.logs, whole.truncated), (content.clone(), false));
+
+        let exact = tail(store, obj, None, 3 * per, 1024).await.unwrap();
+        assert_eq!(
+            exact.logs, expected,
+            "a window that starts on a line boundary keeps that line"
+        );
+    }
+
+    #[tokio::test]
+    async fn unfiltered_tail_keeps_a_long_line_the_filtered_cap_would_drop() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let long = format!("{}\n", "x".repeat(2 << 20));
+        let (store, obj) = put(&dir, gzip(long.as_bytes())).await;
+        let t = tail(store, obj, None, 4 << 20, 1 << 20).await.unwrap();
+        assert_eq!((t.logs.len(), t.truncated), (long.len(), false));
+    }
+
+    #[tokio::test]
+    async fn a_torn_archive_line_is_dropped_and_flagged() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (store, obj) = put(&dir, gzip(b"a\nb\nhalf")).await;
+        let t = tail(store, obj, None, 1 << 20, 1024).await.unwrap();
+        assert_eq!((t.logs.as_str(), t.truncated), ("a\nb\n", true));
+    }
+
+    #[tokio::test]
+    async fn filtered_tail_keeps_the_newest_matching_lines() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut content = String::new();
+        for i in 0..20 {
+            content.push_str(&jl(if i % 2 == 0 { "a" } else { "b" }, &format!("m{i:04}")));
+            content.push('\n');
+        }
+        let (store, obj) = put(&dir, gzip(content.as_bytes())).await;
+        let a_lines: Vec<&str> = content
+            .lines()
+            .filter(|l| l.contains(r#""step":"a""#))
+            .collect();
+        let per = a_lines[0].len() as u64 + 1;
+        let t = tail(store.clone(), obj.clone(), Some("a"), 2 * per, 1024)
+            .await
+            .unwrap();
+        assert_eq!(t.logs, format!("{}\n{}\n", a_lines[8], a_lines[9]));
+        assert!(t.truncated, "older matches were evicted");
+
+        let all = tail(store, obj, Some("a"), 1 << 20, 1024).await.unwrap();
+        assert_eq!(all.logs.lines().count(), 10);
+        assert!(!all.truncated);
+    }
+
+    #[tokio::test]
+    async fn filtered_tail_flags_skipped_and_torn_lines() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let content = format!(
+            "{}\n{}\n{}",
+            jl("a", &"y".repeat(200)),
+            jl("a", "ok"),
+            r#"{"step":"a","li"#
+        );
+        let (store, obj) = put(&dir, gzip(content.as_bytes())).await;
+        let t = tail(store, obj, Some("a"), 1 << 20, 100).await.unwrap();
+        assert_eq!(t.logs, format!("{}\n", jl("a", "ok")));
+        assert!(t.truncated);
+    }
+
+    #[tokio::test]
+    async fn a_corrupt_object_is_an_error() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (store, obj) = put(&dir, b"this is not gzip data at all".to_vec()).await;
+        assert!(tail(store, obj, None, 1024, 1024).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn full_stream_decompresses_and_filters() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let content = format!("{}{}", lines("a", 3), lines("b", 2));
+        let (store, obj) = put(&dir, gzip(content.as_bytes())).await;
+        let all: Vec<Bytes> = full_stream(store.clone(), obj.clone(), None, 1024)
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(all.concat(), content.as_bytes());
+        let a: Vec<Bytes> = full_stream(store, obj, Some("a".into()), 1024)
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(String::from_utf8(a.concat()).unwrap(), lines("a", 3));
+    }
+
+    async fn local_with(dir: &tempfile::TempDir, kind: LocalKind, content: &str) -> LocalFile {
+        let (jsonl, legacy) = (dir.path().join("l.jsonl"), dir.path().join("l.log"));
+        tokio::fs::write(
+            if kind == LocalKind::Jsonl {
+                &jsonl
+            } else {
+                &legacy
+            },
+            content,
+        )
+        .await
+        .unwrap();
+        open_local(&jsonl, &legacy).await.unwrap().unwrap()
+    }
+
+    #[tokio::test]
+    async fn merged_full_unions_both_sources_under_the_caps() {
+        let (d1, d2) = (
+            tempfile::TempDir::new().unwrap(),
+            tempfile::TempDir::new().unwrap(),
+        );
+        let (only_local, shared, only_archive) =
+            (jl("s", "local"), jl("s", "shared"), jl("s", "archive"));
+        let mut local =
+            local_with(&d1, LocalKind::Jsonl, &format!("{only_local}\n{shared}\n")).await;
+        let (store, obj) = put(&d2, gzip(format!("{shared}\n{only_archive}\n").as_bytes())).await;
+        let merged = read_merged_full(&mut local, store, obj, None, &LogReadConfig::default())
+            .await
+            .unwrap()
+            .expect("under both caps");
+        for l in [&only_local, &shared, &only_archive] {
+            assert_eq!(merged.matches(l.as_str()).count(), 1, "{l}");
+        }
+    }
+
+    #[tokio::test]
+    async fn merged_full_filters_by_step() {
+        let (d1, d2) = (
+            tempfile::TempDir::new().unwrap(),
+            tempfile::TempDir::new().unwrap(),
+        );
+        let mut local = local_with(
+            &d1,
+            LocalKind::Jsonl,
+            &format!("{}\n{}\n", jl("a", "1"), jl("b", "2")),
+        )
+        .await;
+        let (store, obj) = put(&d2, gzip(format!("{}\n", jl("a", "3")).as_bytes())).await;
+        let merged = read_merged_full(&mut local, store, obj, Some("a"), &LogReadConfig::default())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(merged.contains(r#""line":"1""#) && merged.contains(r#""line":"3""#));
+        assert!(!merged.contains(r#""step":"b""#));
+    }
+
+    #[tokio::test]
+    async fn merged_full_is_abandoned_over_either_cap_or_on_a_lying_trailer() {
+        let content = lines("s", 50);
+        let cfg = LogReadConfig::default();
+        let over_bytes = LogReadConfig {
+            merge_max_bytes: 100,
+            max_line_bytes: 100,
+            ..cfg
+        };
+        let over_lines = LogReadConfig {
+            merge_max_lines: 10,
+            ..cfg
+        };
+        for c in [over_bytes, over_lines] {
+            let (d1, d2) = (
+                tempfile::TempDir::new().unwrap(),
+                tempfile::TempDir::new().unwrap(),
+            );
+            let mut local = local_with(&d1, LocalKind::Jsonl, &content).await;
+            let (store, obj) = put(&d2, gzip(content.as_bytes())).await;
+            assert!(read_merged_full(&mut local, store, obj, None, &c)
+                .await
+                .unwrap()
+                .is_none());
+        }
+        // A trailer claiming 3 bytes for a 50-line body.
+        let (d1, d2) = (
+            tempfile::TempDir::new().unwrap(),
+            tempfile::TempDir::new().unwrap(),
+        );
+        let mut local = local_with(&d1, LocalKind::Jsonl, "x\n").await;
+        let mut lying = gzip(content.as_bytes());
+        let n = lying.len();
+        lying[n - 4..].copy_from_slice(&3u32.to_le_bytes());
+        let (store, obj) = put(&d2, lying).await;
+        assert!(read_merged_full(&mut local, store, obj, None, &cfg)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn merged_full_keeps_a_legacy_unterminated_line_and_trims_torn_jsonl() {
+        let (d1, d2) = (
+            tempfile::TempDir::new().unwrap(),
+            tempfile::TempDir::new().unwrap(),
+        );
+        let mut local = local_with(&d1, LocalKind::Legacy, "legacy tail").await;
+        let (store, obj) = put(&d2, gzip(format!("{}\nhalf", jl("s", "arch")).as_bytes())).await;
+        let merged = read_merged_full(&mut local, store, obj, None, &LogReadConfig::default())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(merged.contains("legacy tail\n"));
+        assert!(!merged.contains("half"));
     }
 }
