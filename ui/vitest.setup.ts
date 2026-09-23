@@ -21,6 +21,9 @@ if (typeof Element !== "undefined") {
   if (!Element.prototype.scrollIntoView) {
     Element.prototype.scrollIntoView = () => {};
   }
+  if (!Element.prototype.scrollTo) {
+    Element.prototype.scrollTo = () => {};
+  }
 }
 
 // Node 22+ exposes an experimental `localStorage` global that is `undefined`
