@@ -1,8 +1,5 @@
 //! Bounded log reads: tails, full streams and the terminal-job merge.
 //! Spec: `docs/superpowers/specs/2026-09-22-log-tail-streaming-design.md`.
-// Pieces land task by task and are wired into `LogStorage` in Task 8;
-// Task 10 removes this allow.
-#![allow(dead_code)]
 
 pub(crate) mod archive;
 pub(crate) mod local;

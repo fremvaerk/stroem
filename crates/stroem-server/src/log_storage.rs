@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::fs::{self, File, OpenOptions};
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
+use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -363,250 +363,6 @@ impl LogStorage {
         Ok(())
     }
 
-    /// Download a job's log from the archive (gzip-compressed). Returns `None` if
-    /// the key doesn't exist or no archive is configured.
-    async fn get_log_from_archive(
-        &self,
-        job_id: Uuid,
-        meta: &JobLogMeta,
-    ) -> Result<Option<String>> {
-        if let Some(ref archive) = self.archive {
-            let key = archive_key(&self.archive_prefix, job_id, meta);
-            if let Some(blob) = archive.get(&key).await? {
-                use flate2::read::GzDecoder;
-                use std::io::Read;
-
-                let mut decoder = GzDecoder::new(blob.bytes.as_ref());
-                let mut content = String::new();
-                decoder
-                    .read_to_string(&mut content)
-                    .context("Failed to gzip-decompress archive log content")?;
-
-                return Ok(Some(content));
-            }
-        }
-        Ok(None)
-    }
-
-    /// Get the full log contents for a job.
-    ///
-    /// Strategy:
-    /// * If `is_terminal` is `true` AND an archive is configured, fetch the
-    ///   archive blob in addition to the local file and return their
-    ///   line-level union sorted by timestamp. This recovers chunks that were
-    ///   lost in HA cross-replica mirroring: each replica's local file may
-    ///   only hold the subset of chunks worker calls happened to route there,
-    ///   so for terminal jobs the union of (local on this replica) + (archive
-    ///   uploaded by the orchestrating replica) is the most complete view.
-    /// * If the archive read errors transiently (e.g. S3 5xx), fall through
-    ///   to local-only rather than 500ing the caller — the local file alone
-    ///   is strictly better than nothing.
-    /// * Otherwise: local `.jsonl` → legacy `.log`, returning the first that
-    ///   exists. Archive is consulted only for terminal jobs because the
-    ///   upload happens at terminal time; pre-terminal archive reads are
-    ///   guaranteed 404s.
-    pub async fn get_log(
-        &self,
-        job_id: Uuid,
-        meta: &JobLogMeta,
-        is_terminal: bool,
-    ) -> Result<String> {
-        let local_content = self.read_local_log(job_id).await?;
-
-        // Single archive read regardless of which downstream branch consumes
-        // it — eliminates the previous double-fetch on the "terminal + key
-        // missing + local missing" path. Archive errors degrade to None +
-        // warning rather than propagating so the local-only fallback works
-        // when S3 has a transient blip.
-        let archive_content = if is_terminal && self.archive.is_some() {
-            match self.get_log_from_archive(job_id, meta).await {
-                Ok(opt) => opt,
-                Err(e) => {
-                    tracing::warn!(
-                        "archive read failed for terminal job {}, returning local-only: {:#}",
-                        job_id,
-                        e
-                    );
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        match (local_content, archive_content) {
-            (local, Some(archive)) => {
-                Ok(merge_jsonl_logs(local.as_deref().unwrap_or(""), &archive))
-            }
-            (Some(local), None) => Ok(local),
-            (None, None) => Ok(String::new()),
-        }
-    }
-
-    /// Read the local `.jsonl` (preferred) or legacy `.log` if either exists.
-    /// Returns `None` when neither file is present. Uses error-kind detection
-    /// rather than `path.exists()` so a TOCTOU race with `delete_local_log`
-    /// (which can fire during retention sweeps mid-request) doesn't surface
-    /// as a 500 — a vanished file becomes `Ok(None)` and the caller falls
-    /// through to the archive.
-    async fn read_local_log(&self, job_id: Uuid) -> Result<Option<String>> {
-        if let Some(content) = Self::read_file_if_present(&self.log_path(job_id)).await? {
-            return Ok(Some(content));
-        }
-        Self::read_file_if_present(&self.legacy_log_path(job_id)).await
-    }
-
-    /// `Some(content)` if the file exists and is readable, `None` if it does
-    /// not exist (the only error kind translated to None). All other I/O
-    /// errors — permission denied, mid-read I/O failure, invalid UTF-8 —
-    /// propagate.
-    async fn read_file_if_present(path: &Path) -> Result<Option<String>> {
-        let mut file = match fs::File::open(path).await {
-            Ok(f) => f,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => {
-                return Err(e).with_context(|| format!("Failed to open log file: {path:?}"));
-            }
-        };
-
-        let mut contents = String::new();
-        file.read_to_string(&mut contents)
-            .await
-            .context("Failed to read log file")?;
-
-        Ok(Some(contents))
-    }
-
-    /// Get log lines for a specific step within a job.
-    ///
-    /// Strategy mirrors [`Self::get_log`]: for terminal jobs with an archive
-    /// configured, merge the step-filtered local and archive views to recover
-    /// chunks lost in HA mirroring. Archive errors degrade to local-only
-    /// rather than 500ing the caller. Pre-terminal jobs never touch the
-    /// archive (no upload exists yet).
-    pub async fn get_step_log(
-        &self,
-        job_id: Uuid,
-        step_name: &str,
-        meta: &JobLogMeta,
-        is_terminal: bool,
-    ) -> Result<String> {
-        let local = self.read_local_step_log(job_id, step_name).await?;
-
-        let archive_content = if is_terminal && self.archive.is_some() {
-            match self
-                .get_step_log_from_archive(job_id, step_name, meta)
-                .await
-            {
-                Ok(opt) => opt,
-                Err(e) => {
-                    tracing::warn!(
-                        "archive read failed for terminal job {} step '{}', returning local-only: {:#}",
-                        job_id,
-                        step_name,
-                        e
-                    );
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        match (local, archive_content) {
-            (local, Some(archive)) => {
-                Ok(merge_jsonl_logs(local.as_deref().unwrap_or(""), &archive))
-            }
-            (Some(local), None) => Ok(local),
-            (None, None) => Ok(String::new()),
-        }
-    }
-
-    /// Filter local `.jsonl` (preferred) or legacy `.log` for a step's lines.
-    /// Returns `None` when neither file is present. Same TOCTOU-safe error
-    /// handling as `read_local_log`.
-    async fn read_local_step_log(&self, job_id: Uuid, step_name: &str) -> Result<Option<String>> {
-        let path = self.log_path(job_id);
-        if let Some(c) = self
-            .filter_step_from_file_if_present(&path, step_name)
-            .await?
-        {
-            return Ok(Some(c));
-        }
-        let legacy_path = self.legacy_log_path(job_id);
-        self.filter_step_from_file_if_present(&legacy_path, step_name)
-            .await
-    }
-
-    async fn filter_step_from_file_if_present(
-        &self,
-        path: &Path,
-        step_name: &str,
-    ) -> Result<Option<String>> {
-        use tokio::io::{AsyncBufReadExt, BufReader};
-
-        let file = match fs::File::open(path).await {
-            Ok(f) => f,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => {
-                return Err(e).with_context(|| format!("Failed to open log file: {path:?}"));
-            }
-        };
-
-        let reader = BufReader::new(file);
-        let mut lines = reader.lines();
-        let mut result = String::new();
-
-        while let Some(line) = lines.next_line().await.context("Failed to read log line")? {
-            if Self::line_matches_step(&line, step_name) {
-                result.push_str(&line);
-                result.push('\n');
-            }
-        }
-
-        Ok(Some(result))
-    }
-
-    /// Check if a JSONL line belongs to the given step.
-    fn line_matches_step(line: &str, step_name: &str) -> bool {
-        crate::log_read::matcher::line_matches_step(line, step_name)
-    }
-
-    /// Download from archive, decompress, and return only lines matching `step_name`.
-    async fn get_step_log_from_archive(
-        &self,
-        job_id: Uuid,
-        step_name: &str,
-        meta: &JobLogMeta,
-    ) -> Result<Option<String>> {
-        let Some(ref archive) = self.archive else {
-            return Ok(None);
-        };
-
-        let key = archive_key(&self.archive_prefix, job_id, meta);
-        match archive.get(&key).await? {
-            Some(blob) => {
-                use flate2::read::GzDecoder;
-                use std::io::{BufRead, BufReader};
-
-                let decoder = GzDecoder::new(blob.bytes.as_ref());
-                let reader = BufReader::new(decoder);
-                let mut result = String::new();
-
-                for line_result in reader.lines() {
-                    let line = line_result.context("Failed to read gzip line")?;
-                    if Self::line_matches_step(&line, step_name) {
-                        result.push_str(&line);
-                        result.push('\n');
-                    }
-                }
-
-                Ok(Some(result))
-            }
-            None => Ok(None),
-        }
-    }
-
     /// Get the log file path as a string (for storing in database).
     pub fn get_log_path(&self, job_id: Uuid) -> String {
         self.log_path(job_id).to_string_lossy().to_string()
@@ -921,7 +677,7 @@ mod tests {
         // Flush before reading so BufWriter contents are on disk.
         storage.close_log(job_id).await;
 
-        let log = storage.get_log(job_id, &test_meta(), false).await.unwrap();
+        let log = read_all(&storage, job_id, &test_meta(), false, StepFilter::All).await;
         assert_eq!(log, format!("{}\n{}\n", line1, line2));
     }
 
@@ -931,7 +687,7 @@ mod tests {
         let storage = LogStorage::new(temp_dir.path());
 
         let job_id = Uuid::new_v4();
-        let log = storage.get_log(job_id, &test_meta(), false).await.unwrap();
+        let log = read_all(&storage, job_id, &test_meta(), false, StepFilter::All).await;
         assert_eq!(log, "");
     }
 
@@ -959,8 +715,8 @@ mod tests {
         storage.close_log(job2).await;
 
         let meta = test_meta();
-        let log1 = storage.get_log(job1, &meta, false).await.unwrap();
-        let log2 = storage.get_log(job2, &meta, false).await.unwrap();
+        let log1 = read_all(&storage, job1, &meta, false, StepFilter::All).await;
+        let log2 = read_all(&storage, job2, &meta, false, StepFilter::All).await;
 
         assert_eq!(log1, format!("{}\n", l1));
         assert_eq!(log2, format!("{}\n", l2));
@@ -984,16 +740,10 @@ mod tests {
         storage.close_log(job_id).await;
 
         let meta = test_meta();
-        let build_logs = storage
-            .get_step_log(job_id, "build", &meta, false)
-            .await
-            .unwrap();
+        let build_logs = read_all(&storage, job_id, &meta, false, StepFilter::Step("build")).await;
         assert_eq!(build_logs, format!("{}\n{}\n", build1, build2));
 
-        let test_logs = storage
-            .get_step_log(job_id, "test", &meta, false)
-            .await
-            .unwrap();
+        let test_logs = read_all(&storage, job_id, &meta, false, StepFilter::Step("test")).await;
         assert_eq!(test_logs, format!("{}\n", test1));
     }
 
@@ -1011,10 +761,14 @@ mod tests {
 
         storage.close_log(job_id).await;
 
-        let logs = storage
-            .get_step_log(job_id, "deploy", &test_meta(), false)
-            .await
-            .unwrap();
+        let logs = read_all(
+            &storage,
+            job_id,
+            &test_meta(),
+            false,
+            StepFilter::Step("deploy"),
+        )
+        .await;
         assert_eq!(logs, "");
     }
 
@@ -1036,10 +790,14 @@ mod tests {
 
         storage.close_log(job_id).await;
 
-        let logs = storage
-            .get_step_log(job_id, "build", &test_meta(), false)
-            .await
-            .unwrap();
+        let logs = read_all(
+            &storage,
+            job_id,
+            &test_meta(),
+            false,
+            StepFilter::Step("build"),
+        )
+        .await;
         assert_eq!(logs, format!("{}\n", valid));
     }
 
@@ -1049,10 +807,14 @@ mod tests {
         let storage = LogStorage::new(temp_dir.path());
         let job_id = Uuid::new_v4();
 
-        let logs = storage
-            .get_step_log(job_id, "build", &test_meta(), false)
-            .await
-            .unwrap();
+        let logs = read_all(
+            &storage,
+            job_id,
+            &test_meta(),
+            false,
+            StepFilter::Step("build"),
+        )
+        .await;
         assert_eq!(logs, "");
     }
 
@@ -1082,7 +844,7 @@ mod tests {
             .await
             .unwrap();
 
-        let log = storage.get_log(job_id, &test_meta(), false).await.unwrap();
+        let log = read_all(&storage, job_id, &test_meta(), false, StepFilter::All).await;
         assert_eq!(log, "legacy line 1\nlegacy line 2\n");
     }
 
@@ -1106,7 +868,7 @@ mod tests {
 
         storage.close_log(job_id).await;
 
-        let log = storage.get_log(job_id, &test_meta(), false).await.unwrap();
+        let log = read_all(&storage, job_id, &test_meta(), false, StepFilter::All).await;
         assert!(log.contains("new content"));
         assert!(!log.contains("legacy content"));
     }
@@ -1132,10 +894,14 @@ mod tests {
         storage.close_log(job_id).await;
 
         // Both stdout and stderr for "build" should be returned
-        let build_logs = storage
-            .get_step_log(job_id, "build", &test_meta(), false)
-            .await
-            .unwrap();
+        let build_logs = read_all(
+            &storage,
+            job_id,
+            &test_meta(),
+            false,
+            StepFilter::Step("build"),
+        )
+        .await;
         assert_eq!(build_logs, format!("{}\n{}\n", stdout_line, stderr_line));
     }
 
@@ -1451,7 +1217,7 @@ mod tests {
         // get_log should fall back to archive. Pass is_terminal=true because
         // archive is only consulted for terminal jobs (pre-terminal archive
         // reads are guaranteed 404s — the upload happens at terminal time).
-        let log = storage.get_log(job_id, &meta, true).await.unwrap();
+        let log = read_all(&storage, job_id, &meta, true, StepFilter::All).await;
         assert_eq!(log, content);
     }
 
@@ -1486,16 +1252,10 @@ mod tests {
 
         // Step log should filter from archived data. is_terminal=true
         // because archive is gated to terminal jobs (see test_archive_read_fallback).
-        let build_logs = storage
-            .get_step_log(job_id, "build", &meta, true)
-            .await
-            .unwrap();
+        let build_logs = read_all(&storage, job_id, &meta, true, StepFilter::Step("build")).await;
         assert_eq!(build_logs, format!("{}\n", build_line));
 
-        let test_logs = storage
-            .get_step_log(job_id, "test", &meta, true)
-            .await
-            .unwrap();
+        let test_logs = read_all(&storage, job_id, &meta, true, StepFilter::Step("test")).await;
         assert_eq!(test_logs, format!("{}\n", test_line));
     }
 
@@ -1622,10 +1382,7 @@ mod tests {
 
         // is_terminal=true to exercise the merge path. Corrupt archive
         // must not propagate — local content is returned instead.
-        let result = storage
-            .get_log(job_id, &meta, true)
-            .await
-            .expect("corrupt archive must degrade to local-only, not error");
+        let result = read_all(&storage, job_id, &meta, true, StepFilter::All).await;
         assert!(result.contains("local-bytes"));
     }
 
@@ -1665,14 +1422,11 @@ mod tests {
 
         // Read should fall back to local archive. is_terminal=true because
         // archive is only consulted for terminal jobs.
-        let log = storage.get_log(job_id, &meta, true).await.unwrap();
+        let log = read_all(&storage, job_id, &meta, true, StepFilter::All).await;
         assert_eq!(log, content);
 
         // Step log should also work from archive
-        let step_log = storage
-            .get_step_log(job_id, "build", &meta, true)
-            .await
-            .unwrap();
+        let step_log = read_all(&storage, job_id, &meta, true, StepFilter::Step("build")).await;
         assert_eq!(step_log, content);
     }
 
@@ -1695,17 +1449,25 @@ mod tests {
         storage.close_log(job_id).await;
 
         // "build" must NOT match "build-notify" lines
-        let build_logs = storage
-            .get_step_log(job_id, "build", &test_meta(), false)
-            .await
-            .unwrap();
+        let build_logs = read_all(
+            &storage,
+            job_id,
+            &test_meta(),
+            false,
+            StepFilter::Step("build"),
+        )
+        .await;
         assert_eq!(build_logs, format!("{}\n", build_line));
 
         // "build-notify" must NOT match "build" lines
-        let notify_logs = storage
-            .get_step_log(job_id, "build-notify", &test_meta(), false)
-            .await
-            .unwrap();
+        let notify_logs = read_all(
+            &storage,
+            job_id,
+            &test_meta(),
+            false,
+            StepFilter::Step("build-notify"),
+        )
+        .await;
         assert_eq!(notify_logs, format!("{}\n", build_notify_line));
     }
 
@@ -1893,12 +1655,12 @@ mod tests {
             .unwrap();
 
         // Non-terminal: only local returned (back-compat path).
-        let non_term = storage.get_log(job_id, &meta, false).await.unwrap();
+        let non_term = read_all(&storage, job_id, &meta, false, StepFilter::All).await;
         assert!(non_term.contains("from-local"));
         assert!(!non_term.contains("from-archive"));
 
         // Terminal: merged view contains both.
-        let term = storage.get_log(job_id, &meta, true).await.unwrap();
+        let term = read_all(&storage, job_id, &meta, true, StepFilter::All).await;
         assert!(term.contains("from-local"));
         assert!(term.contains("from-archive"));
         // Sorted by ts: local's 05:00:01 comes before archive's 05:00:02.
@@ -1932,10 +1694,7 @@ mod tests {
             .await
             .unwrap();
 
-        let merged = storage
-            .get_step_log(job_id, "build", &meta, true)
-            .await
-            .unwrap();
+        let merged = read_all(&storage, job_id, &meta, true, StepFilter::Step("build")).await;
         assert!(merged.contains("local-line"));
         assert!(merged.contains("archive-line"));
     }
@@ -1956,7 +1715,7 @@ mod tests {
             .await
             .unwrap();
 
-        let term = storage.get_log(job_id, &meta, true).await.unwrap();
+        let term = read_all(&storage, job_id, &meta, true, StepFilter::All).await;
         assert!(term.contains("only-archive"));
     }
 
@@ -1977,7 +1736,7 @@ mod tests {
         storage.append_log(job_id, &local).await.unwrap();
         // Mock archive is intentionally empty.
 
-        let result = storage.get_log(job_id, &meta, true).await.unwrap();
+        let result = read_all(&storage, job_id, &meta, true, StepFilter::All).await;
         assert!(result.contains("only-local"));
         assert_eq!(
             mock.get_call_count().await,
@@ -2002,10 +1761,7 @@ mod tests {
         let local = format!("{}\n", ts_line("2026-06-10T05:00:01Z", "s", "only-local"));
         storage.append_log(job_id, &local).await.unwrap();
 
-        let result = storage
-            .get_log(job_id, &meta, true)
-            .await
-            .expect("transient archive error must not propagate");
+        let result = read_all(&storage, job_id, &meta, true, StepFilter::All).await;
         assert!(result.contains("only-local"));
     }
 
@@ -2024,10 +1780,7 @@ mod tests {
         );
         storage.append_log(job_id, &local).await.unwrap();
 
-        let result = storage
-            .get_step_log(job_id, "build", &meta, true)
-            .await
-            .unwrap();
+        let result = read_all(&storage, job_id, &meta, true, StepFilter::Step("build")).await;
         assert!(result.contains("only-local"));
     }
 
@@ -2046,10 +1799,7 @@ mod tests {
         );
         storage.append_log(job_id, &local).await.unwrap();
 
-        let result = storage
-            .get_step_log(job_id, "build", &meta, true)
-            .await
-            .expect("transient archive error must not propagate");
+        let result = read_all(&storage, job_id, &meta, true, StepFilter::Step("build")).await;
         assert!(result.contains("only-local"));
     }
 
@@ -2085,10 +1835,7 @@ mod tests {
             .await
             .unwrap();
 
-        let result = storage
-            .get_step_log(job_id, "build", &meta, true)
-            .await
-            .unwrap();
+        let result = read_all(&storage, job_id, &meta, true, StepFilter::Step("build")).await;
         assert!(result.contains("from-legacy"));
         assert!(result.contains("from-archive"));
     }
@@ -2128,6 +1875,22 @@ mod tests {
     use crate::log_read::{LogSource, StepFilter};
 
     const ALL: u64 = 16 * 1024 * 1024;
+
+    /// The whole log in one read — test helper standing in for the removed
+    /// `get_log` / `get_step_log`.
+    async fn read_all(
+        storage: &LogStorage,
+        job: Uuid,
+        meta: &JobLogMeta,
+        terminal: bool,
+        filter: StepFilter<'_>,
+    ) -> String {
+        storage
+            .read_tail(job, meta, terminal, filter, ALL)
+            .await
+            .unwrap()
+            .logs
+    }
 
     async fn full_text(
         storage: &LogStorage,

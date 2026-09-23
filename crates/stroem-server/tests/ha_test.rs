@@ -24,6 +24,7 @@ use stroem_server::config::{
 };
 use stroem_server::events::{start_listener, EventBus, NOTIFY_MAX_BYTES};
 use stroem_server::leader::LeaderElection;
+use stroem_server::log_read::StepFilter;
 use stroem_server::log_storage::LogStorage;
 use stroem_server::state::AppState;
 use stroem_server::web::build_router;
@@ -35,6 +36,10 @@ use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 use uuid::Uuid;
+
+/// `read_tail`'s tail budget for tests that want the whole log — well above
+/// anything these fixtures write.
+const ALL: u64 = 16 * 1024 * 1024;
 
 struct Harness {
     _container: testcontainers::ContainerAsync<Postgres>,
@@ -317,7 +322,11 @@ async fn notify_log_chunk_mirrors_to_receiver_local_disk() -> Result<()> {
     // And get_log on replica B must return the chunk (no archive configured —
     // this would be empty before the fix).
     state_b.log_storage.close_log(job).await;
-    let logs = state_b.log_storage.get_log(job, &meta, false).await?;
+    let logs = state_b
+        .log_storage
+        .read_tail(job, &meta, false, StepFilter::All, ALL)
+        .await?
+        .logs;
     assert!(
         logs.contains("mirror-me"),
         "get_log on replica B must see the mirrored content (got {logs:?})"
@@ -382,7 +391,11 @@ async fn notify_log_chunk_oversize_multiline_splits_and_mirrors() -> Result<()> 
         task_name: "task".to_string(),
         created_at: chrono::Utc::now(),
     };
-    let logs = state_b.log_storage.get_log(job, &meta, false).await?;
+    let logs = state_b
+        .log_storage
+        .read_tail(job, &meta, false, StepFilter::All, ALL)
+        .await?
+        .logs;
     assert_eq!(
         logs, chunk,
         "mirrored bytes on replica B must match publisher byte-for-byte"
@@ -533,7 +546,11 @@ async fn notify_log_chunk_mixed_inline_and_signal_partial_mirrors() -> Result<()
         task_name: "task".to_string(),
         created_at: chrono::Utc::now(),
     };
-    let logs_b = state_b.log_storage.get_log(job, &meta, false).await?;
+    let logs_b = state_b
+        .log_storage
+        .read_tail(job, &meta, false, StepFilter::All, ALL)
+        .await?
+        .logs;
     assert!(
         !logs_b.contains(&"x".repeat(10)),
         "replica B must NOT contain the huge line's raw content (signal-only)"

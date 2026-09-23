@@ -21,6 +21,7 @@ use stroem_server::config::{
     AuthConfig, DbConfig, InitialUserConfig, JobDefaults, LogStorageConfig, RetentionConfig,
     ServerConfig, WorkspaceSourceDef,
 };
+use stroem_server::log_read::StepFilter;
 use stroem_server::log_storage::LogStorage;
 use stroem_server::state::AppState;
 use stroem_server::state_storage::StateStorage;
@@ -32,6 +33,10 @@ use testcontainers_modules::postgres::Postgres;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 use uuid::Uuid;
+
+/// `read_tail`'s tail budget for tests that want the whole log — well above
+/// anything these fixtures write.
+const ALL: u64 = 16 * 1024 * 1024;
 
 // ─── Test helpers ───────────────────────────────────────────────────────
 
@@ -29318,8 +29323,12 @@ async fn test_indirect_hook_cycle_is_bounded() -> Result<()> {
             task_name: job.task_name.clone(),
             created_at: job.created_at,
         };
-        if let Ok(text) = state.log_storage.get_log(job.job_id, &meta, false).await {
-            if text.contains("hook chain depth") {
+        if let Ok(tail) = state
+            .log_storage
+            .read_tail(job.job_id, &meta, false, StepFilter::All, ALL)
+            .await
+        {
+            if tail.logs.contains("hook chain depth") {
                 found = true;
                 break;
             }
@@ -29636,7 +29645,11 @@ async fn test_parent_dispatch_error_escapes_but_approvals_still_dispatch() -> Re
         task_name: parent.task_name.clone(),
         created_at: parent.created_at,
     };
-    let log = state.log_storage.get_log(parent_id, &meta, false).await?;
+    let log = state
+        .log_storage
+        .read_tail(parent_id, &meta, false, StepFilter::All, ALL)
+        .await?
+        .logs;
     assert!(
         log.contains("[orchestration] Failed to handle task steps:"),
         "the escaping dispatch error must be logged to the parent job: {log}"
