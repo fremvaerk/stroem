@@ -67,11 +67,13 @@ The MCP server provides ten tools for interacting with Strøm:
 | `get_task` | Get detailed task definition | `workspace`, `task_name` |
 | `execute_task` | Execute a task and return job ID | `workspace`, `task_name`, `input?` |
 | `get_job_status` | Get current job status with step details | `job_id` |
-| `get_job_logs` | Get formatted log output | `job_id`, `step?` (optional; all steps if omitted) |
+| `get_job_logs` | The end of a job's log (last 256 KiB), formatted | `job_id`, `step?`, `tail_bytes?` |
 | `list_jobs` | List recent jobs with optional filters | `workspace?`, `task_name?`, `status?`, `limit?` |
 | `cancel_job` | Cancel a running or pending job | `job_id` |
 | `list_artifacts` | List a job's artifacts (name, content type, size, download URL) | `job_id` |
 | `get_artifact` | Fetch one artifact's content | `job_id`, `name` |
+
+When the log is longer than the tail, the result ends with `[truncated: showing the last 256.0 KiB of up to 83.3 MiB — earlier lines omitted]`.
 
 `get_artifact` returns content shaped to the artifact's type: textual artifacts
 (text, JSON, YAML, XML) come back as inline text, `image/*` artifacts as image
@@ -308,6 +310,8 @@ Returns:
 [start-container] Container started with ID abc123def456
 [start-container] Health check: passed
 ```
+
+This shows the tail of the log (last 256 KiB by default); pass `tail_bytes` for more history, up to `log_storage.read.tail_max_bytes`.
 
 ## Use Cases
 

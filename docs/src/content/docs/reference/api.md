@@ -432,17 +432,30 @@ permission on the task. The source job must be terminal, must be a **top-level**
 
 ```
 GET /api/jobs/{id}/logs
+GET /api/jobs/{id}/logs?tail_bytes=1048576
+GET /api/jobs/{id}/logs?full=true
 ```
 
-Returns combined log output from all steps in JSONL format.
+Returns the **end** of the job's log by default: the last 256 KiB, cut to whole JSONL lines. `tail_bytes` asks for a different tail (1 byte to `log_storage.read.tail_max_bytes`, 4 MiB by default). `full=true` streams the whole log instead. The two parameters are mutually exclusive; an invalid value is a 400.
 
-**Response:**
+**Tail response** (`application/json`):
 
 ```json
 {
-  "logs": "{\"ts\":\"...\",\"stream\":\"stdout\",\"step\":\"say-hello\",\"line\":\"Hello World\"}\n"
+  "logs": "{\"ts\":\"...\",\"stream\":\"stdout\",\"step\":\"say-hello\",\"line\":\"Hello World\"}\n",
+  "truncated": false,
+  "total_bytes": 81,
+  "returned_bytes": 81
 }
 ```
+
+- `truncated` — `true` when earlier lines may exist; `false` is exact.
+- `total_bytes` — an upper bound on the size of the whole job log.
+- `returned_bytes` — the length of `logs`.
+
+**Full response** (`application/x-ndjson; charset=utf-8`): the raw JSONL stream, no envelope.
+
+Every response carries `X-Stroem-Log-Source: local | archive | merged | none`, naming the source that answered (see [Log storage](/operations/log-storage/#reading-logs)).
 
 ## Get Step Logs
 
@@ -450,7 +463,7 @@ Returns combined log output from all steps in JSONL format.
 GET /api/jobs/{id}/steps/{step}/logs
 ```
 
-Returns JSONL log output for a specific step. Use `_server` as the step name for server-side events.
+Same parameters, envelope and header as **Get Job Logs**, filtered to one step. Use `_server` as the step name for server-side events.
 
 ## Stream Job Logs (WebSocket)
 
@@ -458,7 +471,7 @@ Returns JSONL log output for a specific step. Use `_server` as the step name for
 GET /api/jobs/{id}/logs/stream
 ```
 
-Opens a WebSocket connection for real-time log streaming. Sends existing content (backfill) on connect, then streams new chunks.
+Opens a WebSocket for live log streaming. On connect the server sends the last 256 KiB of the log (whole lines) as one frame, then streams new chunks. `?skip_backfill=true` skips that first frame.
 
 ```bash
 websocat ws://localhost:8080/api/jobs/JOB_ID/logs/stream

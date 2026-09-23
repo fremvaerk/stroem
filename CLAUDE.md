@@ -471,12 +471,13 @@ Everything a job owes after one of its steps moves (or a job was created, or can
 ### Log Storage
 - `LogStorage` — local JSONL for live buffering + optional `LogArchive` backend (S3 or local)
 - Archive keys: `{prefix}{workspace}/{task}/YYYY/MM/DD/YYYY-MM-DDTHH-MM-SS_{job_id}.jsonl.gz` (gzipped)
-- Upload spawned after hooks fire (includes server events). Read fallback: local → legacy .log → archive.
+- Upload spawned after hooks fire (includes server events).
+- **Reads are bounded** (spec `docs/superpowers/specs/2026-09-22-log-tail-streaming-design.md`): `LogStorage::read_tail` (default 256 KiB, whole lines, `truncated`/`total_bytes`) and `LogStorage::stream_full` (NDJSON stream) are the ONLY readers; the String-returning `get_log`/`get_step_log` were removed on purpose — never add a reader that materialises a whole log. Primitives live in `crate::log_read` (`matcher`, `splitter`, `local`, `archive`). Finished jobs: tail = union of local + archive tails; full = in-memory union under `log_storage.read.merge_max_{bytes,lines}`, else local-first single source. `X-Stroem-Log-Source` names the source. Bounds are enforced by `tests/log_peak_alloc_test.rs` (counting allocator, `harness = false`) — a new read path needs a case there. Read fallback: `.jsonl` → legacy `.log` → (terminal) archive; `NotFound` is never a 500.
 - Config: `archive` (preferred) or `s3` (legacy) in `log_storage` section.
 - **Server events**: `append_server_log()` writes `step: "_server"` entries for hook failures, orchestration errors, recovery timeouts.
 
 ### WebSocket Log Streaming
-- `GET /api/jobs/{id}/logs/stream` — backfill on connect, then live via `tokio::sync::broadcast`
+- `GET /api/jobs/{id}/logs/stream` — backfill = the default tail (`read_tail`), then live via `tokio::sync::broadcast`
 
 ### Task Duration Stats
 - `GET /api/workspaces/{ws}/tasks/{name}/stats?limit=50` — p50/p95/avg/min/max + recent durations + per-step breakdown over last N **completed** runs (View permission sufficient). Failed/cancelled runs excluded; `for_each` instance rows excluded from per-step breakdown.
@@ -496,7 +497,7 @@ Everything a job owes after one of its steps moves (or a job was created, or can
 - **Cross-replica event bus**: `events.rs` — Postgres `LISTEN/NOTIFY` over `sqlx::postgres::PgListener`. Three channels: `stroem_job_cancelled` (job cancel → all replicas' `cancelled_jobs` cache), `stroem_workspace_reloaded` (revision change → peers re-read workspace cache), `stroem_job_log_chunk` (worker log push → peer WS subscribers). Payloads carry the originating replica's UUID; listeners drop self-emitted messages to avoid duplicate broadcasts.
 - **Publishers** (one-line each, all best-effort, DB is source of truth):
   - `cancellation.rs` cancel_job — publishes `stroem_job_cancelled` after local insert.
-  - `web/worker_api/jobs.rs` append_log — publishes `stroem_job_log_chunk` after local broadcast. Lines > `NOTIFY_MAX_BYTES` (7000) degrade to signal-only.
+  - `web/worker_api/jobs.rs` append_log — publishes `stroem_job_log_chunk` after local broadcast. Lines > `NOTIFY_MAX_BYTES` (3500) degrade to signal-only.
   - `workspace/mod.rs` watcher — publishes `stroem_workspace_reloaded` when source revision changes. `start_watchers(cancel, Some(event_bus))` opts in.
 - **`/healthz`**: `web/health.rs` — leader-aware. Process + DB checks always required. Scheduler/recovery/event_source liveness only failure-eligible on the leader; followers report `"follower"` and return 200. Adds `checks.leader: bool`.
 - **Replica id**: generated per-process (UUID v4) in `main.rs`, passed into `EventBus::new` for self-filtering.
@@ -510,7 +511,7 @@ Everything a job owes after one of its steps moves (or a job was created, or can
 - **Workspace is a navigation level**: every workspace name in the UI links to `/workspaces/<name>` (Workspaces list, Tasks page badges/group rows, job header). Task Detail's back arrow goes to the workspace page. Breadcrumbs come from the pure `lib/breadcrumbs.ts::buildBreadcrumbs`, which drops the `tasks` segment of `/workspaces/:ws/tasks/:name` so every crumb links to a real route — keep it in sync when adding nested routes.
 - **Task tree**: `components/task-tree.tsx` (`<TaskTree>`) renders the collapsible folder tree used by both the Tasks page and the workspace page; row building lives in the React-free `lib/task-tree.ts::buildRows` (unit-tested). Folder expansion keys are workspace-qualified (`ws::path`) only in grouped mode; workspace groups are open by default (inverted `collapsed` set). localStorage keys: `stroem_tasks_view` (`merged`|`workspace`), `stroem_tasks_expanded_folders`, `stroem_tasks_collapsed_workspaces`. The Merged/By-workspace toggle only renders when tasks span >1 workspace.
 - Vitest: `vitest.setup.ts` installs an in-memory `localStorage` because Node 22+'s experimental global shadows jsdom's and is `undefined` without `--localstorage-file`.
-- `ui/src/lib/api.ts` — token management. `ui/src/hooks/use-job-logs.ts` — WebSocket logs.
+- `ui/src/lib/api.ts` — token management. `ui/src/hooks/use-step-log.ts` — step log polling, full-log load and stitching (`lib/log-tail.ts::appendTail`).
 
 ### Release Pipeline
 - Current state of `.github/workflows/release.yml` (arm64/darwin/windows jobs are commented out, not yet re-enabled): one `build-binaries` job builds all four binaries (`stroem-server`, `stroem-worker`, `stroem`, `stroem-api`) for linux-amd64 only and uploads four `*-x86_64-unknown-linux-gnu.tar.gz` tarballs as GitHub release assets.
