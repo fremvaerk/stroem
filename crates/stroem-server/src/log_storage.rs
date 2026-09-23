@@ -48,7 +48,8 @@ pub(crate) fn merge_jsonl_logs(a: &str, b: &str) -> String {
 
     lines.sort_by(|a, b| extract_ts(a).cmp(&extract_ts(b)));
 
-    let mut out = String::with_capacity(a.len() + b.len());
+    // +2: each input's last line gains a '\n' if it had none.
+    let mut out = String::with_capacity(a.len() + b.len() + 2);
     for line in lines {
         out.push_str(line);
         out.push('\n');
@@ -1627,6 +1628,15 @@ mod tests {
                 r#"{"step":"b2"}"#,
             ]
         );
+    }
+
+    #[test]
+    fn merge_jsonl_logs_reserves_room_for_two_missing_newlines() {
+        // Each input's last line gains a '\n' it did not have; the output
+        // must be reserved for that, not reallocated.
+        let merged = merge_jsonl_logs("AAAA", "BBBB");
+        assert_eq!(merged, "AAAA\nBBBB\n");
+        assert_eq!(merged.capacity(), merged.len(), "output reallocated");
     }
 
     #[test]
