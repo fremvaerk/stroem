@@ -92,6 +92,11 @@ impl AsyncBufRead for ArchiveRangeReader {
                 format!("archive object {} is shorter than its size", this.obj.key),
             ))),
             Ok(buf) => {
+                debug_assert_eq!(
+                    buf.capacity(),
+                    this.range as usize + READ_SLACK,
+                    "range buffer must not reallocate across fetches"
+                );
                 this.pos += buf.len() as u64;
                 this.buf = buf;
                 Poll::Ready(Ok(&this.buf[..]))
@@ -321,12 +326,18 @@ pub(crate) async fn read_merged_full(
         .await
         .context("read local log for merge")?;
     let mut a = Vec::with_capacity(usize::try_from(isize)? + 1 + READ_SLACK);
+    let a_capacity = a.capacity();
     let limited = decoder(archive, obj).take(isize + 1);
     let mut limited = std::pin::pin!(limited);
     let n = limited
         .read_to_end(&mut a)
         .await
         .context("decompress archive for merge")?;
+    debug_assert_eq!(
+        a.capacity(),
+        a_capacity,
+        "merge archive buffer must not reallocate a preallocated buffer"
+    );
     if n as u64 != isize {
         return Ok(None); // wrong, wrapped or stale trailer
     }

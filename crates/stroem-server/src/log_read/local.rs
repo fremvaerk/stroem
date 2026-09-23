@@ -69,7 +69,13 @@ pub(crate) async fn read_range_exact(
 ) -> io::Result<()> {
     file.seek(SeekFrom::Start(start)).await?;
     buf.clear();
+    let before_capacity = buf.capacity();
     let n = (&mut *file).take(end - start).read_to_end(buf).await?;
+    debug_assert_eq!(
+        buf.capacity(),
+        before_capacity,
+        "read_range_exact must not reallocate a preallocated buffer"
+    );
     if (n as u64) < end - start {
         return Err(io::Error::new(
             io::ErrorKind::UnexpectedEof,

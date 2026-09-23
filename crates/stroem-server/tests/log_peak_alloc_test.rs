@@ -417,6 +417,33 @@ async fn run(large: bool) {
         );
     }
 
+    // (d2) Matcher scratch, the 2 L case: a NON-matching line whose
+    // `contains` guard passes because the target ("A") appears in `line`,
+    // not because the decoded step name repeats there — so almost the
+    // whole line can be one escaped string, and the scratch buffer that
+    // holds its decoded content grows close to `2 L`. A MATCHING line
+    // can't reach this: matching (d)'s design needs the decoded name to
+    // also appear literally elsewhere in the line, which halves the room
+    // available to the escaped value.
+    {
+        let e = env_with(cfg);
+        let job = Uuid::new_v4();
+        let shell = r#"{"step":"","line":"A"}"#;
+        // The escape is built at runtime: a literal backslash-u sequence in
+        // source text does not survive every editing tool. Decodes to 'A'.
+        let esc = format!("{}u0041", '\\');
+        let body = "s".repeat(l - 64 - shell.len());
+        let line = format!(r#"{{"step":"{body}{esc}","line":"A"}}"#);
+        assert!(line.len() <= l, "fixture line must fit the line cap");
+        e.local(job, "jsonl", format!("{line}\n").as_bytes()).await;
+        let (_, p) = peak_of(e.drain(job, false, StepFilter::Step("A"))).await;
+        report.check(
+            "full, filtered, 2L matcher scratch (non-matching)",
+            p,
+            full_local_filtered(l),
+        );
+    }
+
     // (e) One 15 MiB line under merge_max_lines = 2: the merger's
     // byte-based reservation, not its line count, dominates.
     {
