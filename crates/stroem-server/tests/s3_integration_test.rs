@@ -395,3 +395,42 @@ async fn s3_delete_prefix_surfaces_partial_failures() -> Result<()> {
     server.abort();
     Ok(())
 }
+
+#[tokio::test]
+async fn s3_open_and_read_range_are_bounded_and_version_pinned() -> Result<()> {
+    let (_container, endpoint) = setup_minio().await?;
+    let bucket = format!("test-{}", Uuid::new_v4());
+    let client = test_s3_client(&endpoint);
+    create_bucket(&client, &bucket).await?;
+    let archive = S3BlobArchive::from_client(client.clone(), bucket.clone());
+
+    assert!(archive.open("missing").await?.is_none());
+    archive
+        .put("k", "text/plain", Bytes::from_static(b"0123456789"))
+        .await?;
+    let obj = archive.open("k").await?.unwrap();
+    assert_eq!(obj.size, 10);
+
+    let mut v = Vec::with_capacity(64);
+    archive.read_range(&obj, 2, 3, &mut v).await?;
+    assert_eq!(v, b"234");
+    v.clear();
+    archive.read_range(&obj, 8, 10, &mut v).await?;
+    assert_eq!(v, b"89");
+    v.clear();
+    archive.read_range(&obj, 10, 5, &mut v).await?;
+    assert!(v.is_empty());
+
+    archive
+        .put("k", "text/plain", Bytes::from_static(b"replaced!!"))
+        .await?;
+    let err = archive
+        .read_range(&obj, 0, 5, &mut Vec::new())
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{err:#}").contains("changed since it was opened"),
+        "{err:#}"
+    );
+    Ok(())
+}

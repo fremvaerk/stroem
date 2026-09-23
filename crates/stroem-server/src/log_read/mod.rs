@@ -4,6 +4,7 @@
 // Task 10 removes this allow.
 #![allow(dead_code)]
 
+pub(crate) mod archive;
 pub(crate) mod local;
 pub(crate) mod matcher;
 pub(crate) mod splitter;

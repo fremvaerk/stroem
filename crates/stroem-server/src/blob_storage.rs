@@ -5,7 +5,7 @@ use bytes::Bytes;
 use futures_core::stream::BoxStream;
 use std::path::{Path, PathBuf};
 use tokio::fs;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use uuid::Uuid;
 
 /// A retrieved blob plus its content type.
@@ -13,6 +13,27 @@ use uuid::Uuid;
 pub struct Blob {
     pub content_type: String,
     pub bytes: Bytes,
+}
+
+/// An archive object opened for ranged reads, pinned to the version seen
+/// at open: a replaced object is an error, never a silent mix.
+#[derive(Debug)]
+pub struct ArchiveObject {
+    pub key: String,
+    pub size: u64,
+    pub version: ArchiveVersion,
+}
+
+#[derive(Debug)]
+pub enum ArchiveVersion {
+    /// The whole object, held by the default `open` (test and in-memory
+    /// backends only).
+    Snapshot(Bytes),
+    /// An open descriptor: reads see the opened file even after the path
+    /// is atomically replaced.
+    File(tokio::sync::Mutex<fs::File>),
+    /// An S3 ETag, sent as `If-Match` on every ranged GET.
+    ETag(Option<String>),
 }
 
 /// Unified pluggable storage for logs, state snapshots, and artifacts.
@@ -58,6 +79,43 @@ pub trait BlobArchive: Send + Sync {
                 Ok(Some((blob.content_type, Box::pin(one_shot))))
             }
         }
+    }
+
+    /// Open `key` for ranged reads; `None` when it does not exist. The
+    /// default holds the whole object in memory, which is acceptable only
+    /// for test and in-memory backends; the local and S3 backends override.
+    async fn open(&self, key: &str) -> Result<Option<ArchiveObject>> {
+        Ok(self.get(key).await?.map(|blob| ArchiveObject {
+            key: key.to_string(),
+            size: blob.bytes.len() as u64,
+            version: ArchiveVersion::Snapshot(blob.bytes),
+        }))
+    }
+
+    /// Append `[offset, min(offset + len, size))` of the opened object to
+    /// `into`: never more than `len` bytes, nothing when `offset >= size`.
+    /// Callers preallocate `into`; implementations must not grow it beyond
+    /// `len` bytes of new content.
+    async fn read_range(
+        &self,
+        obj: &ArchiveObject,
+        offset: u64,
+        len: u64,
+        into: &mut Vec<u8>,
+    ) -> Result<()> {
+        let ArchiveVersion::Snapshot(bytes) = &obj.version else {
+            anyhow::bail!(
+                "read_range: object {} was not opened by this backend",
+                obj.key
+            );
+        };
+        let size = bytes.len() as u64;
+        if offset >= size {
+            return Ok(());
+        }
+        let end = offset.saturating_add(len).min(size);
+        into.extend_from_slice(&bytes[offset as usize..end as usize]);
+        Ok(())
     }
 }
 
@@ -226,6 +284,52 @@ impl BlobArchive for LocalBlobArchive {
             Err(e) => Err(e.into()),
         }
     }
+
+    async fn open(&self, key: &str) -> Result<Option<ArchiveObject>> {
+        let path = self.path_for(key)?;
+        let file = match fs::File::open(&path).await {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e).with_context(|| format!("open {}", path.display())),
+        };
+        let size = file
+            .metadata()
+            .await
+            .with_context(|| format!("stat {}", path.display()))?
+            .len();
+        Ok(Some(ArchiveObject {
+            key: key.to_string(),
+            size,
+            version: ArchiveVersion::File(tokio::sync::Mutex::new(file)),
+        }))
+    }
+
+    async fn read_range(
+        &self,
+        obj: &ArchiveObject,
+        offset: u64,
+        len: u64,
+        into: &mut Vec<u8>,
+    ) -> Result<()> {
+        let ArchiveVersion::File(file) = &obj.version else {
+            anyhow::bail!(
+                "LocalBlobArchive::read_range: {} was not opened by this backend",
+                obj.key
+            );
+        };
+        if offset >= obj.size {
+            return Ok(());
+        }
+        let len = len.min(obj.size - offset);
+        let mut file = file.lock().await;
+        file.seek(std::io::SeekFrom::Start(offset)).await?;
+        (&mut *file)
+            .take(len)
+            .read_to_end(into)
+            .await
+            .with_context(|| format!("read {} bytes of {} at {offset}", len, obj.key))?;
+        Ok(())
+    }
 }
 
 #[cfg(feature = "s3")]
@@ -236,6 +340,7 @@ mod s3_blob_archive {
     use super::*;
     use crate::config::ArchiveConfig;
     use aws_sdk_s3::operation::get_object::GetObjectError;
+    use aws_sdk_s3::operation::head_object::HeadObjectError;
     use aws_sdk_s3::primitives::ByteStream;
     use aws_sdk_s3::types::{Delete, ObjectIdentifier};
 
@@ -408,6 +513,79 @@ mod s3_blob_archive {
                     break;
                 }
             }
+            Ok(())
+        }
+
+        async fn open(&self, key: &str) -> Result<Option<ArchiveObject>> {
+            match self
+                .client
+                .head_object()
+                .bucket(&self.bucket)
+                .key(key)
+                .send()
+                .await
+            {
+                Ok(out) => Ok(Some(ArchiveObject {
+                    key: key.to_string(),
+                    size: u64::try_from(out.content_length().unwrap_or(0)).unwrap_or(0),
+                    version: ArchiveVersion::ETag(out.e_tag().map(str::to_string)),
+                })),
+                Err(e) => {
+                    if matches!(e.as_service_error(), Some(HeadObjectError::NotFound(_))) {
+                        return Ok(None);
+                    }
+                    Err(anyhow::anyhow!(e)).context(format!("S3 HEAD {key}"))
+                }
+            }
+        }
+
+        async fn read_range(
+            &self,
+            obj: &ArchiveObject,
+            offset: u64,
+            len: u64,
+            into: &mut Vec<u8>,
+        ) -> Result<()> {
+            let ArchiveVersion::ETag(etag) = &obj.version else {
+                anyhow::bail!(
+                    "S3BlobArchive::read_range: {} was not opened by this backend",
+                    obj.key
+                );
+            };
+            if offset >= obj.size || len == 0 {
+                return Ok(());
+            }
+            let want = len.min(obj.size - offset);
+            let mut req = self
+                .client
+                .get_object()
+                .bucket(&self.bucket)
+                .key(&obj.key)
+                .range(format!("bytes={offset}-{}", offset + want - 1));
+            if let Some(etag) = etag {
+                req = req.if_match(etag);
+            }
+            let out = match req.send().await {
+                Ok(out) => out,
+                Err(e) => {
+                    match e.raw_response().map(|r| r.status().as_u16()) {
+                        Some(416) => return Ok(()),
+                        Some(412) => anyhow::bail!(
+                            "S3 object {} changed since it was opened (If-Match failed)",
+                            obj.key
+                        ),
+                        _ => {}
+                    }
+                    return Err(anyhow::anyhow!(e)).context(format!("S3 ranged GET {}", obj.key));
+                }
+            };
+            // Read through the SDK's async adapter into the caller's buffer:
+            // no `collect()`, so no segment list and no contiguous copy.
+            let reader = tokio::io::AsyncReadExt::take(out.body.into_async_read(), want);
+            let mut reader = std::pin::pin!(reader);
+            tokio::io::AsyncReadExt::read_to_end(&mut reader, into)
+                .await
+                .with_context(|| format!("S3 read range of {}", obj.key))?;
             Ok(())
         }
     }
@@ -752,5 +930,85 @@ mod tests {
         };
         writer.await.unwrap();
         reader.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn default_open_and_read_range_slice_a_snapshot() {
+        let store = InMemoryBlob::new();
+        assert!(store.open("missing").await.unwrap().is_none());
+        store
+            .put("k", "t", Bytes::from_static(b"0123456789"))
+            .await
+            .unwrap();
+        let obj = store.open("k").await.unwrap().unwrap();
+        assert_eq!((obj.key.as_str(), obj.size), ("k", 10));
+        let mut v = Vec::new();
+        store.read_range(&obj, 2, 3, &mut v).await.unwrap();
+        assert_eq!(v, b"234");
+        v.clear();
+        store.read_range(&obj, 8, 10, &mut v).await.unwrap();
+        assert_eq!(v, b"89");
+        v.clear();
+        store.read_range(&obj, 10, 5, &mut v).await.unwrap();
+        assert!(v.is_empty());
+    }
+
+    #[tokio::test]
+    async fn local_open_and_read_range() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = LocalBlobArchive::new(tmp.path().to_path_buf());
+        assert!(store.open("a/missing.gz").await.unwrap().is_none());
+        store
+            .put(
+                "a/obj.gz",
+                "application/gzip",
+                Bytes::from_static(b"0123456789"),
+            )
+            .await
+            .unwrap();
+        let obj = store.open("a/obj.gz").await.unwrap().unwrap();
+        assert_eq!(obj.size, 10);
+        let mut v = Vec::with_capacity(64);
+        store.read_range(&obj, 2, 3, &mut v).await.unwrap();
+        assert_eq!(v, b"234");
+        v.clear();
+        store.read_range(&obj, 8, 10, &mut v).await.unwrap();
+        assert_eq!(v, b"89");
+        v.clear();
+        store.read_range(&obj, 12, 5, &mut v).await.unwrap();
+        assert!(v.is_empty());
+    }
+
+    #[tokio::test]
+    async fn local_read_range_serves_the_opened_version_after_the_path_is_replaced() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = LocalBlobArchive::new(tmp.path().to_path_buf());
+        store
+            .put("a/obj.gz", "t", Bytes::from_static(b"old-content"))
+            .await
+            .unwrap();
+        let obj = store.open("a/obj.gz").await.unwrap().unwrap();
+        store
+            .put("a/obj.gz", "t", Bytes::from_static(b"NEW-CONTENT!!"))
+            .await
+            .unwrap();
+        let mut v = Vec::new();
+        store.read_range(&obj, 0, 100, &mut v).await.unwrap();
+        assert_eq!(v, b"old-content");
+    }
+
+    #[tokio::test]
+    async fn read_range_rejects_an_object_opened_by_another_backend() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = LocalBlobArchive::new(tmp.path().to_path_buf());
+        let foreign = ArchiveObject {
+            key: "k".into(),
+            size: 3,
+            version: ArchiveVersion::Snapshot(Bytes::from_static(b"abc")),
+        };
+        assert!(store
+            .read_range(&foreign, 0, 3, &mut Vec::new())
+            .await
+            .is_err());
     }
 }
