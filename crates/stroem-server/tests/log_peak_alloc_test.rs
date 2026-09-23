@@ -116,6 +116,21 @@ fn full_merged(c: usize, n: usize) -> usize {
     3 * c + 96 * n + R + H + D + K
 }
 
+/// `N'` for a merged read: the complete lines a tail read of `bytes` would
+/// actually return — those fully inside its last `t` bytes (a leading
+/// partial line, cut by the window boundary, is dropped, mirroring
+/// `tail_unfiltered` / `byte_ring_tail`). Pass `t >= bytes.len()` to count
+/// every line, for the full-merged cases where there is no window.
+fn lines_in_last(bytes: &[u8], t: usize) -> usize {
+    let start = bytes.len().saturating_sub(t);
+    let newlines = bytes[start..].iter().filter(|&&b| b == b'\n').count();
+    if start == 0 || bytes[start - 1] == b'\n' {
+        newlines
+    } else {
+        newlines.saturating_sub(1)
+    }
+}
+
 #[derive(Default)]
 struct Report {
     over: Vec<String>,
@@ -257,19 +272,22 @@ fn main() {
 async fn run(large: bool) {
     let cfg = LogReadConfig::default();
     let (t, l) = (cfg.tail_default_bytes as usize, cfg.max_line_bytes);
-    let (c, n) = (cfg.merge_max_bytes as usize, cfg.merge_max_lines);
+    let c = cfg.merge_max_bytes as usize;
     let mut report = Report::default();
 
     // (a) Incident-shaped log, local and archived.
     let e = env_with(cfg);
     let job = Uuid::new_v4();
-    {
-        // 9 MiB, not 8: local + archive must exceed merge_max_bytes (16 MiB)
-        // so the "over the cap" case below is really over it.
-        let log = incident_log(if large { 100 * MIB } else { 9 * MIB }, "Uploading");
-        e.local(job, "jsonl", log.as_bytes()).await;
-        e.archived(job, log.as_bytes()).await;
-    }
+    // 9 MiB, not 8: local + archive must exceed merge_max_bytes (16 MiB)
+    // so the "over the cap" case below is really over it.
+    let log = incident_log(if large { 100 * MIB } else { 9 * MIB }, "Uploading");
+    e.local(job, "jsonl", log.as_bytes()).await;
+    e.archived(job, log.as_bytes()).await;
+    // Local and archive are byte-identical here, so both tails contribute
+    // the same count: the lines each one actually returns from its last `t`
+    // bytes (spec § 5: ~2 800 for the default 256 KiB tail), not
+    // `merge_max_lines`.
+    let incident_tail_n = 2 * lines_in_last(log.as_bytes(), t);
     // Warm up the blocking pool and lazy statics before any measurement.
     e.tail(job, false, StepFilter::All, 1024).await;
 
@@ -280,7 +298,7 @@ async fn run(large: bool) {
     report.check("tail, step (chatty), local", p, tail_step(t, l));
     let (_, p) = peak_of(e.tail(job, false, StepFilter::Step("quiet"), t)).await;
     report.check(
-        "tail, step (quiet: scans to the cap), local",
+        "tail, step (quiet: scans back to the start or the cap), local",
         p,
         tail_step(t, l),
     );
@@ -290,9 +308,17 @@ async fn run(large: bool) {
     report.check("full, filtered, local", p, full_local_filtered(l));
     let (s, p) = peak_of(e.tail(job, true, StepFilter::All, t)).await;
     assert_eq!(s, LogSource::Merged);
-    report.check("tail, terminal, merged", p, tail_merged(t, l, n));
+    report.check(
+        "tail, terminal, merged",
+        p,
+        tail_merged(t, l, incident_tail_n),
+    );
     let (_, p) = peak_of(e.tail(job, true, StepFilter::Step("sync"), t)).await;
-    report.check("tail, terminal step, merged", p, tail_merged(t, l, n));
+    report.check(
+        "tail, terminal step, merged",
+        p,
+        tail_merged(t, l, incident_tail_n),
+    );
     let (s, p) = peak_of(e.drain(job, true, StepFilter::All)).await;
     assert_eq!(
         s,
@@ -317,13 +343,16 @@ async fn run(large: bool) {
     {
         let e = env_with(cfg);
         let job = Uuid::new_v4();
-        e.local(job, "jsonl", incident_log(10 * MIB, "Uploading").as_bytes())
-            .await;
-        e.archived(job, incident_log(4 * MIB, "Archived").as_bytes())
-            .await;
+        let local_log = incident_log(10 * MIB, "Uploading");
+        let archive_log = incident_log(4 * MIB, "Archived");
+        // A full read has no window: N' is every line of both inputs.
+        let full_n = lines_in_last(local_log.as_bytes(), local_log.len())
+            + lines_in_last(archive_log.as_bytes(), archive_log.len());
+        e.local(job, "jsonl", local_log.as_bytes()).await;
+        e.archived(job, archive_log.as_bytes()).await;
         let (s, p) = peak_of(e.drain(job, true, StepFilter::All)).await;
         assert_eq!(s, LogSource::Merged);
-        report.check("full, terminal, merged", p, full_merged(c, n));
+        report.check("full, terminal, merged", p, full_merged(c, full_n));
     }
 
     // (b) Distinct short lines filling a 4 MiB tail on each side, just
@@ -333,10 +362,14 @@ async fn run(large: bool) {
         let job = Uuid::new_v4();
         let t4 = 4 * MIB;
         // 60-byte lines: 60 000 per side is 3.4 MiB (under the 4 MiB tail)
-        // and 120 000 in the union (under merge_max_lines = 131 072).
-        e.local(job, "jsonl", short_lines(60_000, "L").as_bytes())
-            .await;
-        e.archived(job, short_lines(60_000, "A").as_bytes()).await;
+        // and 120 000 in the union (under merge_max_lines = 131 072); every
+        // line fits inside the 4 MiB window, so N' is exactly 120 000.
+        let local_log = short_lines(60_000, "L");
+        let archive_log = short_lines(60_000, "A");
+        let short_n =
+            lines_in_last(local_log.as_bytes(), t4) + lines_in_last(archive_log.as_bytes(), t4);
+        e.local(job, "jsonl", local_log.as_bytes()).await;
+        e.archived(job, archive_log.as_bytes()).await;
         let (s, p) = peak_of(e.tail(job, true, StepFilter::All, t4)).await;
         assert_eq!(
             s,
@@ -346,7 +379,7 @@ async fn run(large: bool) {
         report.check(
             "tail 4 MiB, terminal, merged, short lines",
             p,
-            tail_merged(t4, l, n),
+            tail_merged(t4, l, short_n),
         );
     }
 
@@ -450,16 +483,14 @@ async fn s3_cases(report: &mut Report, cfg: LogReadConfig) {
         .with_read_config(cfg);
     let job = Uuid::new_v4();
     let key = archive_key("", job, &meta());
-    {
-        let log = incident_log(8 * MIB, "Uploading");
-        tokio::fs::write(live.path().join(format!("{job}.jsonl")), &log)
-            .await
-            .unwrap();
-        archive
-            .put(&key, "application/gzip", gzip(log.as_bytes()).into())
-            .await
-            .unwrap();
-    }
+    let log = incident_log(8 * MIB, "Uploading");
+    tokio::fs::write(live.path().join(format!("{job}.jsonl")), &log)
+        .await
+        .unwrap();
+    archive
+        .put(&key, "application/gzip", gzip(log.as_bytes()).into())
+        .await
+        .unwrap();
     // Warm the SDK's connection pool, credentials and endpoint caches.
     let obj = archive.open(&key).await.unwrap().unwrap();
     archive
@@ -468,11 +499,9 @@ async fn s3_cases(report: &mut Report, cfg: LogReadConfig) {
         .unwrap();
     drop(obj);
 
-    let (t, l, n) = (
-        cfg.tail_default_bytes as usize,
-        cfg.max_line_bytes,
-        cfg.merge_max_lines,
-    );
+    let (t, l) = (cfg.tail_default_bytes as usize, cfg.max_line_bytes);
+    // Local and archive are byte-identical here too.
+    let s3_tail_n = 2 * lines_in_last(log.as_bytes(), t);
     let (_, p) = peak_of(async {
         let tail = storage
             .read_tail(job, &meta(), true, StepFilter::All, t as u64)
@@ -482,7 +511,11 @@ async fn s3_cases(report: &mut Report, cfg: LogReadConfig) {
         drop(tail_body(&tail).unwrap());
     })
     .await;
-    report.check("S3: tail, terminal, merged", p, tail_merged(t, l, n));
+    report.check(
+        "S3: tail, terminal, merged",
+        p,
+        tail_merged(t, l, s3_tail_n),
+    );
 
     tokio::fs::remove_file(live.path().join(format!("{job}.jsonl")))
         .await
