@@ -196,26 +196,46 @@ mod tests {
 
     #[test]
     fn an_escaped_step_key_matches() {
-        assert!(m(r#"{"step":"build"}"#, "build"));
+        // The `step` key with its `e` written as a JSON unicode escape, so
+        // the fixture actually exercises the escaped-key path instead of a
+        // plain literal `step` key.
+        let e = format!("{}u0065", '\\');
+        let line = format!(r#"{{"st{e}p":"build"}}"#);
+        assert!(line.contains('\\'), "fixture must contain a real escape");
+        assert!(m(&line, "build"));
     }
 
     #[test]
     fn an_escaped_step_value_is_rejected_by_the_fast_guard_as_before() {
-        // The raw line does not contain "build", so the `contains` guard
-        // rejects it before parsing — the old matcher behaved the same way.
-        let line = r#"{"step":"b\u0075ild"}"#;
-        assert!(!m(line, "build"));
-        assert!(!super::legacy_value_matcher(line, "build"));
+        // The `step` value "build" with its `u` written as a JSON unicode
+        // escape: the raw line's bytes do not literally contain "build", so
+        // the `contains` guard rejects it before parsing -- the old matcher
+        // behaved the same way.
+        let u = format!("{}u0075", '\\');
+        let line = format!(r#"{{"step":"b{u}ild"}}"#);
+        assert!(line.contains('\\'), "fixture must contain a real escape");
+        assert!(!m(&line, "build"));
+        assert!(!super::legacy_value_matcher(&line, "build"));
     }
 
     #[test]
     fn an_escaped_step_value_matches_when_the_name_also_appears_literally() {
-        assert!(m(r#"{"step":"build","line":"build"}"#, "build"));
+        // The step value "build" with its `d` written as a JSON unicode
+        // escape; the plain name also appears literally in `line`, so the
+        // fast `contains` guard still lets the line through.
+        let d = format!("{}u0064", '\\');
+        let line = format!(r#"{{"step":"buil{d}","line":"build"}}"#);
+        assert!(line.contains('\\'), "fixture must contain a real escape");
+        assert!(m(&line, "build"));
     }
 
     #[test]
     fn an_unrelated_escaped_key_does_not_break_the_match() {
-        assert!(m(r#"{"step":"build","a":0}"#, "build"));
+        // An unrelated key written as a single JSON unicode escape (`a`).
+        let a = format!("{}u0061", '\\');
+        let line = format!(r#"{{"step":"build","{a}":0}}"#);
+        assert!(line.contains('\\'), "fixture must contain a real escape");
+        assert!(m(&line, "build"));
     }
 
     #[test]
@@ -256,6 +276,15 @@ mod tests {
                 "{line}"
             );
         }
+    }
+
+    #[test]
+    fn matches_bytes_matches_a_valid_line_and_rejects_invalid_utf8() {
+        let line = br#"{"step":"build"}"#;
+        assert!(super::matches_bytes(line, "build"));
+
+        let invalid_utf8: &[u8] = &[0xFF, 0xFE, 0x00];
+        assert!(!super::matches_bytes(invalid_utf8, "build"));
     }
 
     // ── The documented divergence class: malformed content in a field the

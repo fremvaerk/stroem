@@ -963,8 +963,9 @@ Unit (`log_storage.rs`):
   matches; non-string `step` does not match; escaped step VALUE does not
   match (the `contains` fast guard, as today); with the name also present
   literally elsewhere in the line, it matches; escaped
-  step KEY (`r#"{"step":"build"}"#`) matches; an unrelated escaped key
-  (`r#"{"step":"build","a":0}"#`) does not break the match; trailing
+  step KEY (the key `step` with its `e` written as a JSON unicode escape)
+  matches; an unrelated key written as a JSON unicode escape does not
+  break the match; trailing
   garbage after the object does not match; `step` absent; nested object
   with an inner `step` does not match; and the DOCUMENTED DIVERGENCE CLASS
   pinned as three named tests, each asserting the NEW behaviour and
