@@ -30,10 +30,16 @@ pub enum Commands {
         /// Job ID
         job_id: String,
     },
-    /// Get job logs
+    /// Get job logs (the last 256 KiB unless --full or --tail-bytes)
     Logs {
         /// Job ID
         job_id: String,
+        /// Stream the whole log instead of its tail
+        #[arg(long, conflicts_with = "tail_bytes")]
+        full: bool,
+        /// Bytes of the log's end to print (server default 256 KiB, max 4 MiB)
+        #[arg(long)]
+        tail_bytes: Option<u64>,
     },
     /// List tasks
     Tasks {
@@ -141,8 +147,12 @@ pub async fn dispatch(command: Commands, server: &str, token: Option<&str>) -> R
         Commands::Status { job_id } => {
             status::cmd_status(&http_client, server, &job_id).await?;
         }
-        Commands::Logs { job_id } => {
-            logs::cmd_logs(&http_client, server, &job_id).await?;
+        Commands::Logs {
+            job_id,
+            full,
+            tail_bytes,
+        } => {
+            logs::cmd_logs(&http_client, server, &job_id, full, tail_bytes).await?;
         }
         Commands::Tasks { workspace } => {
             tasks::cmd_tasks(&http_client, server, workspace.as_deref()).await?;
@@ -337,7 +347,7 @@ mod tests {
     fn logs_subcommand_captures_job_id() {
         let cli = parse(&["stroem-api", "logs", "job-xyz"]).unwrap();
         match cli.command {
-            super::Commands::Logs { job_id } => assert_eq!(job_id, "job-xyz"),
+            super::Commands::Logs { job_id, .. } => assert_eq!(job_id, "job-xyz"),
             _ => panic!("unexpected command variant"),
         }
     }
@@ -346,6 +356,37 @@ mod tests {
     fn logs_subcommand_requires_job_id() {
         let result = parse(&["stroem-api", "logs"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn logs_subcommand_flags() {
+        match parse(&["stroem-api", "logs", "j1"]).unwrap().command {
+            super::Commands::Logs {
+                job_id,
+                full,
+                tail_bytes,
+            } => {
+                assert_eq!(job_id, "j1");
+                assert!(!full);
+                assert!(tail_bytes.is_none());
+            }
+            _ => panic!("unexpected command variant"),
+        }
+        match parse(&["stroem-api", "logs", "j1", "--full"])
+            .unwrap()
+            .command
+        {
+            super::Commands::Logs { full, .. } => assert!(full),
+            _ => panic!("unexpected command variant"),
+        }
+        match parse(&["stroem-api", "logs", "j1", "--tail-bytes", "1024"])
+            .unwrap()
+            .command
+        {
+            super::Commands::Logs { tail_bytes, .. } => assert_eq!(tail_bytes, Some(1024)),
+            _ => panic!("unexpected command variant"),
+        }
+        assert!(parse(&["stroem-api", "logs", "j1", "--full", "--tail-bytes", "5"]).is_err());
     }
 
     #[test]
