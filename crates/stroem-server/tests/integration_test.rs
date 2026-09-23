@@ -22,7 +22,7 @@ use stroem_server::config::{
     ServerConfig, WorkspaceSourceDef,
 };
 use stroem_server::log_read::StepFilter;
-use stroem_server::log_storage::LogStorage;
+use stroem_server::log_storage::{archive_key, JobLogMeta, LogStorage};
 use stroem_server::state::AppState;
 use stroem_server::state_storage::StateStorage;
 use stroem_server::web::build_router;
@@ -31486,6 +31486,118 @@ async fn test_log_full_streams_ndjson_equal_to_the_file() -> Result<()> {
         .starts_with("application/x-ndjson"));
     assert_eq!(response.headers()["x-stroem-log-source"], "local");
     assert_eq!(body_bytes(response).await, content.into_bytes());
+    Ok(())
+}
+
+/// Same workspace as `setup()` (task `hello-world` included), but with a
+/// `LogStorage` archive backend attached (a `LocalBlobArchive`) so a
+/// terminal job's archive path is reachable instead of always missing.
+async fn setup_with_log_archive() -> Result<(
+    Router,
+    PgPool,
+    TempDir,
+    Arc<dyn BlobArchive>,
+    testcontainers::ContainerAsync<Postgres>,
+)> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let temp_dir = TempDir::new()?;
+    let log_dir = temp_dir.path().join("logs");
+    std::fs::create_dir_all(&log_dir)?;
+    let archive_dir = temp_dir.path().join("log-archive");
+    std::fs::create_dir_all(&archive_dir)?;
+
+    let config = ServerConfig {
+        listen: "127.0.0.1:0".to_string(),
+        db: DbConfig { url },
+        log_storage: LogStorageConfig {
+            local_dir: log_dir.to_string_lossy().to_string(),
+            s3: None,
+            archive: None,
+            read: Default::default(),
+        },
+        workspaces: HashMap::from([(
+            "default".to_string(),
+            WorkspaceSourceDef::Folder {
+                triggers: true,
+                path: temp_dir.path().to_string_lossy().to_string(),
+            },
+        )]),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
+        worker_token: "test-token-secret".to_string(),
+        auth: None,
+        recovery: Default::default(),
+        retention: RetentionConfig::default(),
+        acl: None,
+        mcp: None,
+        metrics: None,
+        agents: None,
+        state_storage: None,
+        artifact_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
+        workspace_reload: Default::default(),
+    };
+
+    let workspace = test_workspace();
+    let mgr = WorkspaceManager::from_config("default", workspace);
+    let archive: Arc<dyn BlobArchive> = Arc::new(LocalBlobArchive::new(archive_dir));
+    let log_storage = LogStorage::new(&config.log_storage.local_dir)
+        .with_archive(Arc::clone(&archive), String::new());
+    let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None);
+    let router = build_router(state, CancellationToken::new());
+
+    Ok((router, pool, temp_dir, archive, container))
+}
+
+#[tokio::test]
+async fn test_log_full_archive_priming_failure_answers_empty_none() -> Result<()> {
+    // C6: a terminal job whose local log is gone and whose archive object
+    // exists but is not gzip (`open`/HEAD succeeds, the first range read +
+    // gzip header fails during priming) must answer an empty 200 with
+    // `source: none`, not a torn or hung body.
+    let (router, pool, _tmp, archive, _container) = setup_with_log_archive().await?;
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "hello-world",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+    sqlx::query("UPDATE job SET status = 'completed', completed_at = NOW() WHERE job_id = $1")
+        .bind(job_id)
+        .execute(&pool)
+        .await?;
+    let job = JobRepo::get(&pool, job_id).await?.expect("job exists");
+    let meta = JobLogMeta {
+        workspace: job.workspace,
+        task_name: job.task_name,
+        created_at: job.created_at,
+    };
+    archive
+        .put(
+            &archive_key("", job_id, &meta),
+            "application/octet-stream",
+            bytes::Bytes::from_static(b"not gzip data"),
+        )
+        .await?;
+
+    let response = router
+        .oneshot(api_get(&format!("/api/jobs/{job_id}/logs?full=true")))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-stroem-log-source"], "none");
+    assert!(body_bytes(response).await.is_empty());
     Ok(())
 }
 

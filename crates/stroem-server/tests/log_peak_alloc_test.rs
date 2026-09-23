@@ -110,7 +110,11 @@ fn full_local_filtered(l: usize) -> usize {
     5 * l + 4 * K
 }
 fn full_archive(l: usize, filtered: bool) -> usize {
-    R + H + D + 3 * K + if filtered { 5 * l } else { 0 }
+    // Priming (C6) adds one more `K`-sized `BufReader` in front of the
+    // decoder for the UNFILTERED branch (the filtered branch already reads
+    // through a `BufReader` it reuses for priming, so its own term is
+    // unchanged): `R + H + D + 3K` -> `R + H + D + 4K`.
+    R + H + D + 3 * K + if filtered { 5 * l } else { K }
 }
 fn full_merged(c: usize, n: usize) -> usize {
     3 * c + 96 * n + R + H + D + K

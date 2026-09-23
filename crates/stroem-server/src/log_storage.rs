@@ -476,13 +476,19 @@ impl LogStorage {
                     let obj = Arc::new(obj);
                     match local.as_mut() {
                         None => {
-                            let stream = archive_read::full_stream(
+                            match archive_read::full_stream(
                                 Arc::clone(archive),
                                 obj,
-                                step,
+                                step.clone(),
                                 read.max_line_bytes,
-                            );
-                            return Ok((LogSource::Archive, stream));
+                            )
+                            .await
+                            {
+                                Ok(stream) => return Ok((LogSource::Archive, stream)),
+                                Err(e) => tracing::warn!(
+                                    "archive stream priming failed for terminal job {job_id}, serving local only: {e:#}"
+                                ),
+                            }
                         }
                         Some(lf) => match archive_read::read_merged_full(
                             lf,
@@ -1870,6 +1876,44 @@ mod tests {
         }
     }
 
+    /// `BlobArchive` impl whose `open` succeeds but whose `read_range`
+    /// always fails — simulates a ranged GET that 404s or 412s after a
+    /// successful HEAD (C6: the first read after a good `open`, not `open`
+    /// itself).
+    struct RangeErrorArchive;
+
+    #[async_trait::async_trait]
+    impl BlobArchive for RangeErrorArchive {
+        async fn put(&self, _: &str, _: &str, _: Bytes) -> Result<()> {
+            Ok(())
+        }
+        async fn get(&self, _: &str) -> Result<Option<crate::blob_storage::Blob>> {
+            Ok(None)
+        }
+        async fn delete(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn delete_prefix(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn open(&self, key: &str) -> Result<Option<crate::blob_storage::ArchiveObject>> {
+            Ok(Some(crate::blob_storage::ArchiveObject {
+                key: key.to_string(),
+                size: 100,
+                version: crate::blob_storage::ArchiveVersion::Snapshot(Bytes::new()),
+            }))
+        }
+        async fn read_range(
+            &self,
+            _obj: &crate::blob_storage::ArchiveObject,
+            _offset: u64,
+            _len: u64,
+            _into: &mut Vec<u8>,
+        ) -> Result<()> {
+            anyhow::bail!("simulated range read failure")
+        }
+    }
+
     fn gzip(s: &str) -> Vec<u8> {
         use flate2::write::GzEncoder;
         use flate2::Compression;
@@ -2154,6 +2198,58 @@ mod tests {
         storage.append_log(job, "a\n").await.unwrap();
         assert_eq!(
             full_text(&storage, job, &meta, true, StepFilter::All).await,
+            (LogSource::Local, "a\n".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_full_archive_first_read_failure_answers_empty_none() {
+        // `open` succeeds (the object exists) but its bytes are not gzip:
+        // priming's gzip-header read fails, and with no local file the
+        // response is an empty 200 with `source: none`, not a torn body.
+        let tmp = TempDir::new().unwrap();
+        let (mock, storage) = mocked(&tmp);
+        let (job, meta) = (Uuid::new_v4(), test_meta());
+        mock.put(
+            &archive_key("", job, &meta),
+            "application/octet-stream",
+            Bytes::from_static(b"not gzip data"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            full_text(&storage, job, &meta, true, StepFilter::All).await,
+            (LogSource::None, String::new())
+        );
+
+        // A good `open` whose ranged reads always fail behaves the same
+        // way: the failure surfaces at the first read, not at `open`.
+        let tmp2 = TempDir::new().unwrap();
+        let storage2 = LogStorage::new(tmp2.path()).with_archive(
+            Arc::new(RangeErrorArchive) as Arc<dyn BlobArchive>,
+            String::new(),
+        );
+        assert_eq!(
+            full_text(&storage2, Uuid::new_v4(), &meta, true, StepFilter::All).await,
+            (LogSource::None, String::new())
+        );
+
+        // With a local file present, the same priming failure falls back
+        // to it instead of answering empty.
+        let tmp3 = TempDir::new().unwrap();
+        let (mock3, storage3) = mocked(&tmp3);
+        let job3 = Uuid::new_v4();
+        storage3.append_log(job3, "a\n").await.unwrap();
+        mock3
+            .put(
+                &archive_key("", job3, &meta),
+                "application/octet-stream",
+                Bytes::from_static(b"not gzip data"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            full_text(&storage3, job3, &meta, true, StepFilter::All).await,
             (LogSource::Local, "a\n".to_string())
         );
     }

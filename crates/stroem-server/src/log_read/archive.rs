@@ -294,24 +294,29 @@ async fn line_ring_tail<R: tokio::io::AsyncBufRead + Unpin>(
     })
 }
 
-/// The archived log as a stream, served as stored (no torn-line trim:
-/// the end is only known after it was sent).
-pub(crate) fn full_stream(
+/// The archived log as a stream, served as stored (no torn-line trim: the
+/// end is only known after it was sent, and an unterminated final record is
+/// kept, filtered or not -- there is only one source, so nothing else could
+/// complete it). Primed before returning: the first range read, the gzip
+/// header and the first inflate all run here (`fill_buf` on the `BufReader`
+/// wrapping the decoder), so a failure that would otherwise surface only
+/// after the response's headers were already committed instead comes back
+/// as an `Err` the caller can still fall back from -- local when present,
+/// else an empty `LogSource::None` response, the same as an `open` failure.
+/// The primed reader is threaded into the returned stream so its buffered
+/// bytes are not lost.
+pub(crate) async fn full_stream(
     archive: Arc<dyn BlobArchive>,
     obj: Arc<ArchiveObject>,
     step: Option<String>,
     max_line: usize,
-) -> BoxStream<'static, io::Result<Bytes>> {
-    let decoder = decoder(archive, obj);
-    match step {
-        None => Box::pin(ReaderStream::with_capacity(decoder, CHUNK)),
-        Some(step) => filtered_stream(
-            BufReader::with_capacity(CHUNK, decoder),
-            step,
-            max_line,
-            false,
-        ),
-    }
+) -> io::Result<BoxStream<'static, io::Result<Bytes>>> {
+    let mut reader = BufReader::with_capacity(CHUNK, decoder(archive, obj));
+    reader.fill_buf().await?;
+    Ok(match step {
+        None => Box::pin(ReaderStream::with_capacity(reader, CHUNK)),
+        Some(step) => filtered_stream(reader, step, max_line, true),
+    })
 }
 
 /// The union of the local snapshot and the archive, when both fit the caps.
@@ -567,15 +572,41 @@ mod tests {
         let content = format!("{}{}", lines("a", 3), lines("b", 2));
         let (store, obj) = put(&dir, gzip(content.as_bytes())).await;
         let all: Vec<Bytes> = full_stream(store.clone(), obj.clone(), None, 1024)
+            .await
+            .unwrap()
             .try_collect()
             .await
             .unwrap();
         assert_eq!(all.concat(), content.as_bytes());
         let a: Vec<Bytes> = full_stream(store, obj, Some("a".into()), 1024)
+            .await
+            .unwrap()
             .try_collect()
             .await
             .unwrap();
         assert_eq!(String::from_utf8(a.concat()).unwrap(), lines("a", 3));
+    }
+
+    #[tokio::test]
+    async fn full_stream_filtered_keeps_an_unterminated_final_record() {
+        // The single-source archive stream is served exactly as stored,
+        // filtered or not: an unterminated final record (a snapshot taken
+        // mid-write) is kept, not dropped, since there is only one source
+        // and nothing else could ever complete it.
+        let dir = tempfile::TempDir::new().unwrap();
+        let (a1, a2) = (jl("a", "one"), jl("a", "two"));
+        let content = format!("{a1}\n{a2}"); // no trailing newline
+        let (store, obj) = put(&dir, gzip(content.as_bytes())).await;
+        let out: Vec<Bytes> = full_stream(store, obj, Some("a".into()), 1024)
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(out.concat()).unwrap(),
+            format!("{a1}\n{a2}\n")
+        );
     }
 
     async fn local_with(dir: &tempfile::TempDir, kind: LocalKind, content: &str) -> LocalFile {
