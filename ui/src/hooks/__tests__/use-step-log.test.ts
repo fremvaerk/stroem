@@ -107,6 +107,47 @@ describe("useStepLog", () => {
     expect(getStepLogsFull).not.toHaveBeenCalled();
   });
 
+  it("reloads the full log from the loaded state, replacing the view", async () => {
+    getStepLogs.mockResolvedValue(tail("c\nd\n", { truncated: true }));
+    getStepLogsFull
+      .mockResolvedValueOnce("a\nb\nc\nd\n")
+      .mockResolvedValueOnce("x\ny\nz\n");
+    const { result } = renderHook(() => useStepLog("j", "build", { enabled: true, pollMs: null }));
+    await waitFor(() => expect(result.current.truncated).toBe(true));
+
+    await act(async () => {
+      result.current.loadFull();
+    });
+    await waitFor(() => expect(result.current.fullState).toBe("loaded"));
+    expect(result.current.lines).toEqual(["a", "b", "c", "d"]);
+
+    await act(async () => {
+      result.current.loadFull();
+    });
+    await waitFor(() => expect(result.current.fullState).toBe("loaded"));
+    expect(getStepLogsFull).toHaveBeenCalledTimes(2);
+    expect(result.current.lines).toEqual(["x", "y", "z"]);
+  });
+
+  it("keeps the previously loaded full view on screen after a reload fails", async () => {
+    getStepLogs.mockResolvedValue(tail("c\nd\n", { truncated: true }));
+    getStepLogsFull.mockResolvedValueOnce("a\nb\nc\nd\n").mockRejectedValueOnce(new Error("boom"));
+    const { result } = renderHook(() => useStepLog("j", "build", { enabled: true, pollMs: null }));
+    await waitFor(() => expect(result.current.truncated).toBe(true));
+
+    await act(async () => {
+      result.current.loadFull();
+    });
+    await waitFor(() => expect(result.current.fullState).toBe("loaded"));
+    expect(result.current.lines).toEqual(["a", "b", "c", "d"]);
+
+    await act(async () => {
+      result.current.loadFull();
+    });
+    await waitFor(() => expect(result.current.fullState).toBe("error"));
+    expect(result.current.lines).toEqual(["a", "b", "c", "d"]);
+  });
+
   it("reports a failed full load", async () => {
     getStepLogs.mockResolvedValue(tail("a\n", { truncated: true }));
     getStepLogsFull.mockRejectedValue(new Error("boom"));

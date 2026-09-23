@@ -51,7 +51,7 @@ export function StepDetail({
     enabled: !isCarriedOver && !isSkipped,
     pollMs: isActive ? 2000 : null,
   });
-  const showBanner = log.truncated || log.fullState === "loading" || log.fullState === "error";
+  const showBanner = log.truncated || log.fullState !== "idle";
 
   const isStreaming = step.status === "running";
   const isSuspendedApproval =

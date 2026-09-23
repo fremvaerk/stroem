@@ -59,7 +59,7 @@ function LogLine({ raw }: { raw: string }) {
         data-testid="log-gap"
         className="my-1 border-t border-dashed border-amber-500/60 pt-0.5 text-center text-[10px] uppercase tracking-wider text-amber-500"
       >
-        Lines missing here — load the full log again to fill the gap
+        Lines missing here — reload the full log to fill the gap
       </div>
     );
   }

@@ -183,7 +183,7 @@ describe("StepDetail tail banner", () => {
     try {
       fireEvent.click(screen.getByRole("button", { name: "Load full log" }));
       await waitFor(() => expect(getStepLogsFull).toHaveBeenCalledWith("job-1", "build", expect.any(Function)));
-      await waitFor(() => expect(screen.queryByTestId("log-tail-banner")).not.toBeInTheDocument());
+      await waitFor(() => expect(screen.getByTestId("log-tail-banner")).toHaveTextContent("Showing the full log"));
     } finally {
       confirmSpy.mockRestore();
     }

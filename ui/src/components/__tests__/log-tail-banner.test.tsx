@@ -43,4 +43,14 @@ describe("LogTailBanner", () => {
     rerender(<LogTailBanner {...base} downloadError />);
     expect(screen.getByText("Could not download the log.")).toBeInTheDocument();
   });
+
+  it("keeps the banner reachable once the full log is loaded", () => {
+    const onLoadFull = vi.fn();
+    render(<LogTailBanner {...base} fullState="loaded" onLoadFull={onLoadFull} />);
+    expect(screen.getByTestId("log-tail-banner")).toHaveTextContent("Showing the full log (~2,100 lines).");
+    fireEvent.click(screen.getByRole("button", { name: "Reload full log" }));
+    expect(onLoadFull).toHaveBeenCalledOnce();
+    // Download stays reachable too.
+    expect(screen.getByRole("button", { name: /Download/ })).toBeInTheDocument();
+  });
 });

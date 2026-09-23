@@ -92,7 +92,7 @@ test.describe("Log Streaming", () => {
     const banner = page.getByTestId("log-tail-banner");
     await expect(banner).toBeVisible({ timeout: 90_000 });
     await banner.getByRole("button", { name: "Load full log" }).click();
-    await expect(banner).toBeHidden({ timeout: 60_000 });
+    await expect(banner).toContainText("Showing the full log", { timeout: 60_000 });
 
     const log = page.getByRole("log");
     // The virtualiser follows the end of the newly loaded full log; assert

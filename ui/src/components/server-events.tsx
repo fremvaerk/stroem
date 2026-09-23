@@ -13,7 +13,7 @@ export function ServerEvents({ jobId, jobStatus }: ServerEventsProps) {
   // which runs one final fetch: hook errors are written after completion.
   const isActive = jobStatus === "pending" || jobStatus === "running";
   const log = useStepLog(jobId, "_server", { enabled: true, pollMs: isActive ? 3000 : null });
-  const showBanner = log.truncated || log.fullState === "loading" || log.fullState === "error";
+  const showBanner = log.truncated || log.fullState !== "idle";
 
   // An empty but truncated tail (its only record was torn) still shows the
   // banner, so the full log stays reachable.
