@@ -5,6 +5,7 @@
 #![allow(dead_code)]
 
 pub(crate) mod matcher;
+pub(crate) mod splitter;
 
 /// Chunk size of streamed bodies and reader buffers (K).
 pub const CHUNK: usize = 64 * 1024;
