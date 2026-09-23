@@ -12,6 +12,7 @@ interface LogTailBannerProps {
   progressBytes: number;
   onLoadFull: () => void;
   onDownload: () => void;
+  downloadError?: boolean;
 }
 
 export function LogTailBanner({
@@ -22,6 +23,7 @@ export function LogTailBanner({
   progressBytes,
   onLoadFull,
   onDownload,
+  downloadError = false,
 }: LogTailBannerProps) {
   const loading = fullState === "loading";
   return (
@@ -36,6 +38,9 @@ export function LogTailBanner({
       </span>
       {fullState === "error" && (
         <span className="text-red-600 dark:text-red-400">Could not load the full log.</span>
+      )}
+      {downloadError && (
+        <span className="text-red-600 dark:text-red-400">Could not download the log.</span>
       )}
       <Button type="button" size="sm" variant="outline" disabled={loading} onClick={onLoadFull}>
         {loading ? `Loading… ${formatBytesIEC(progressBytes)}` : "Load full log"}

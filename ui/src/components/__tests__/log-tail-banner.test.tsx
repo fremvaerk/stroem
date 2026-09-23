@@ -36,4 +36,11 @@ describe("LogTailBanner", () => {
     rerender(<LogTailBanner {...base} fullState="error" />);
     expect(screen.getByText("Could not load the full log.")).toBeInTheDocument();
   });
+
+  it("shows a download error only when the prop is true", () => {
+    const { rerender } = render(<LogTailBanner {...base} />);
+    expect(screen.queryByText("Could not download the log.")).not.toBeInTheDocument();
+    rerender(<LogTailBanner {...base} downloadError />);
+    expect(screen.getByText("Could not download the log.")).toBeInTheDocument();
+  });
 });

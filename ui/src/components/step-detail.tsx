@@ -167,6 +167,7 @@ export function StepDetail({
                     progressBytes={log.progressBytes}
                     onLoadFull={log.loadFull}
                     onDownload={log.download}
+                    downloadError={log.downloadError}
                   />
                 ) : null
               }

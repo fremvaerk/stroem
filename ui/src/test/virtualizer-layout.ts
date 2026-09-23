@@ -12,7 +12,7 @@ import { afterAll, beforeAll, vi } from "vitest";
  * Call this at the top level of any test file that renders `LogViewer` and
  * asserts on row content.
  */
-export function useVirtualizerLayout(): void {
+export function installVirtualizerLayout(): void {
   const originalOffsetHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetHeight");
   const originalOffsetWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetWidth");
   beforeAll(() => {

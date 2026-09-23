@@ -129,4 +129,80 @@ describe("useStepLog", () => {
     rerender({ step: "b" });
     await waitFor(() => expect(result.current.lines).toEqual(["b-line"]));
   });
+
+  it("never runs two tail fetches concurrently", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let resolveFirst!: (value: ReturnType<typeof tail>) => void;
+    const first = new Promise<ReturnType<typeof tail>>((resolve) => {
+      resolveFirst = resolve;
+    });
+    // The first call stays pending; later calls (if any got through) resolve normally.
+    getStepLogs.mockReturnValueOnce(first).mockResolvedValue(tail("b\n"));
+    renderHook(() => useStepLog("j", "build", { enabled: true, pollMs: 2000 }));
+
+    // Two intervals elapse while the first fetch is still in flight: a
+    // second call here would mean the poll overlapped itself.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4100);
+    });
+    expect(getStepLogs).toHaveBeenCalledTimes(1);
+
+    // Resolving the first fetch clears `inFlight`, letting the poll resume.
+    await act(async () => {
+      resolveFirst(tail("a\n"));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2100);
+    });
+    expect(getStepLogs).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the loaded full view across a pollMs change, with exactly one final fetch", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    getStepLogs.mockResolvedValue(tail("c\nd\n", { truncated: true }));
+    getStepLogsFull.mockResolvedValue("a\nb\nc\nd\n");
+    const { result, rerender } = renderHook(
+      ({ pollMs }: { pollMs: number | null }) => useStepLog("j", "build", { enabled: true, pollMs }),
+      { initialProps: { pollMs: 2000 as number | null } },
+    );
+    await waitFor(() => expect(result.current.truncated).toBe(true));
+    await act(async () => {
+      result.current.loadFull();
+    });
+    await waitFor(() => expect(result.current.fullState).toBe("loaded"));
+    expect(result.current.lines).toEqual(["a", "b", "c", "d"]);
+
+    // Step goes terminal: the caller switches pollMs to null.
+    const callsBeforeTransition = getStepLogs.mock.calls.length;
+    rerender({ pollMs: null });
+    await waitFor(() => expect(getStepLogs.mock.calls.length).toBe(callsBeforeTransition + 1));
+    await waitFor(() => expect(result.current.lines).toEqual(["a", "b", "c", "d"]));
+
+    // No more polling after that final fetch.
+    const callsAfterFinalFetch = getStepLogs.mock.calls.length;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(getStepLogs.mock.calls.length).toBe(callsAfterFinalFetch);
+  });
+
+  it("surfaces a failed download and clears it on the next attempt", async () => {
+    getStepLogs.mockResolvedValue(tail("a\n"));
+    downloadStepLog.mockRejectedValueOnce(new Error("boom"));
+    const { result } = renderHook(() => useStepLog("j", "build", { enabled: true, pollMs: null }));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    act(() => {
+      result.current.download();
+    });
+    await waitFor(() => expect(result.current.downloadError).toBe(true));
+
+    // The next attempt clears the error before its own result is known.
+    act(() => {
+      result.current.download();
+    });
+    expect(result.current.downloadError).toBe(false);
+  });
 });

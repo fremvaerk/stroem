@@ -18,6 +18,7 @@ export interface StepLog {
   progressBytes: number;
   loadFull: () => void;
   download: () => void;
+  downloadError: boolean;
 }
 
 interface Options {
@@ -38,6 +39,7 @@ export function useStepLog(jobId: string, stepName: string, { enabled, pollMs }:
   const [fullState, setFullState] = useState<FullLogState>("idle");
   const [progressBytes, setProgressBytes] = useState(0);
   const [loading, setLoading] = useState(enabled);
+  const [downloadError, setDownloadError] = useState(false);
   const hasLogsRef = useRef(false);
   const fullRef = useRef<string[] | null>(null);
   const generationRef = useRef(0);
@@ -52,12 +54,22 @@ export function useStepLog(jobId: string, stepName: string, { enabled, pollMs }:
     setFullState("idle");
     setProgressBytes(0);
     setLoading(enabled);
+    setDownloadError(false);
   }, [jobId, stepName, enabled]);
 
   useEffect(() => {
     if (!enabled) return;
     let cancelled = false;
+    // A slow poll must not resolve after a later one and overwrite newer
+    // data (or, once the full view is loaded, appendTail a stale tail after
+    // a newer one — a spurious gap marker). Each effect run gets its own
+    // flag, so the fetch a `pollMs` change makes when the step goes
+    // terminal is never blocked by the previous run's in-flight request
+    // (that one's result is dropped by `cancelled` instead).
+    let inFlight = false;
     async function fetchTail() {
+      if (inFlight) return;
+      inFlight = true;
       try {
         const data = await getStepLogs(jobId, stepName);
         if (cancelled) return;
@@ -77,6 +89,7 @@ export function useStepLog(jobId: string, stepName: string, { enabled, pollMs }:
       } catch {
         // Logs may not exist yet.
       } finally {
+        inFlight = false;
         if (!cancelled) setLoading(false);
       }
     }
@@ -121,7 +134,11 @@ export function useStepLog(jobId: string, stepName: string, { enabled, pollMs }:
   }, [jobId, stepName, tail]);
 
   const download = useCallback(() => {
-    void downloadStepLog(jobId, stepName).catch(() => {});
+    const generation = generationRef.current;
+    setDownloadError(false);
+    void downloadStepLog(jobId, stepName).catch(() => {
+      if (generationRef.current === generation) setDownloadError(true);
+    });
   }, [jobId, stepName]);
 
   const tailLines = useMemo(() => splitLogLines(tail?.logs ?? ""), [tail]);
@@ -136,5 +153,6 @@ export function useStepLog(jobId: string, stepName: string, { enabled, pollMs }:
     progressBytes,
     loadFull: () => void loadFull(),
     download,
+    downloadError,
   };
 }

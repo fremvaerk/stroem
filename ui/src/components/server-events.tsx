@@ -39,6 +39,7 @@ export function ServerEvents({ jobId, jobStatus }: ServerEventsProps) {
                 progressBytes={log.progressBytes}
                 onLoadFull={log.loadFull}
                 onDownload={log.download}
+                downloadError={log.downloadError}
               />
             ) : null
           }

@@ -1,11 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import { ServerEvents } from "../server-events";
-import { useVirtualizerLayout } from "@/test/virtualizer-layout";
+import { installVirtualizerLayout } from "@/test/virtualizer-layout";
 
-// Not a React hook — a `beforeAll`/`afterAll` registrar named for readability.
-// eslint-disable-next-line react-hooks/rules-of-hooks
-useVirtualizerLayout();
+installVirtualizerLayout();
 
 const getStepLogs = vi.fn();
 vi.mock("@/lib/api", async (importOriginal) => ({

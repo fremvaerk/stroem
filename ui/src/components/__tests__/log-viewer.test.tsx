@@ -2,11 +2,9 @@ import { describe, it, expect } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { LogViewer } from "../log-viewer";
 import { LOG_GAP_MARKER } from "@/lib/log-lines";
-import { useVirtualizerLayout } from "@/test/virtualizer-layout";
+import { installVirtualizerLayout } from "@/test/virtualizer-layout";
 
-// Not a React hook — a `beforeAll`/`afterAll` registrar named for readability.
-// eslint-disable-next-line react-hooks/rules-of-hooks
-useVirtualizerLayout();
+installVirtualizerLayout();
 
 const jsonl = (i: number, stream = "stdout") =>
   JSON.stringify({ ts: "2026-09-22T06:01:04.123Z", stream, step: "s", line: `line ${i}` });
