@@ -68,6 +68,10 @@ pub struct GetJobLogsParams {
     /// Step name to filter logs. If omitted, returns all logs.
     #[serde(default)]
     pub step: Option<String>,
+    /// Bytes of the log's end to return. Defaults to 256 KiB; at most
+    /// `log_storage.read.tail_max_bytes` (4 MiB by default).
+    #[serde(default)]
+    pub tail_bytes: Option<u64>,
 }
 
 #[derive(Deserialize, JsonSchema, Default)]
@@ -599,8 +603,10 @@ impl StromMcpHandler {
         Ok(json_result(&result))
     }
 
-    /// Get log output for a job. Optionally filter by step name.
-    #[tool(description = "Get log output for a job. Optionally filter by step name.")]
+    /// Get the end of a job's log. Optionally filter by step name.
+    #[tool(
+        description = "Get the end of a job's log (the last 256 KiB unless tail_bytes is given). Optionally filter by step name."
+    )]
     async fn get_job_logs(
         &self,
         params: Parameters<GetJobLogsParams>,
@@ -627,22 +633,35 @@ impl StromMcpHandler {
             created_at: job.created_at,
         };
 
-        let logs = match params.step {
-            Some(step) => self
-                .state
-                .log_storage
-                .get_step_log(job_id, &step, &meta, is_terminal)
-                .await
-                .map_err(|e| internal_err(format!("Failed to get step logs: {e}")))?,
-            None => self
-                .state
-                .log_storage
-                .get_log(job_id, &meta, is_terminal)
-                .await
-                .map_err(|e| internal_err(format!("Failed to get logs: {e}")))?,
+        let read = self.state.config.log_storage.read;
+        let tail_bytes = match params.tail_bytes {
+            None => read.tail_default_bytes,
+            Some(n) if (1..=read.tail_max_bytes).contains(&n) => n,
+            Some(_) => {
+                return Err(rmcp::ErrorData::invalid_params(
+                    format!("tail_bytes must be between 1 and {}", read.tail_max_bytes),
+                    None,
+                ))
+            }
         };
+        let filter = params.step.as_deref().map_or(
+            crate::log_read::StepFilter::All,
+            crate::log_read::StepFilter::Step,
+        );
+        let tail = self
+            .state
+            .log_storage
+            .read_tail(job_id, &meta, is_terminal, filter, tail_bytes)
+            .await
+            .map_err(|e| internal_err(format!("Failed to get logs: {e}")))?;
 
-        let formatted = format_logs(&logs);
+        let mut formatted = format_logs(&tail.logs);
+        if tail.truncated {
+            if !formatted.ends_with('\n') {
+                formatted.push('\n');
+            }
+            formatted.push_str(&truncation_trailer(&tail));
+        }
         Ok(text_result(formatted))
     }
 
@@ -920,6 +939,15 @@ fn format_logs(raw: &str) -> String {
     output
 }
 
+/// Last line of a truncated `get_job_logs` result.
+fn truncation_trailer(tail: &crate::log_read::Tail) -> String {
+    format!(
+        "[truncated: showing the last {} of up to {} — earlier lines omitted]",
+        crate::log_read::human_bytes(tail.returned_bytes()),
+        crate::log_read::human_bytes(tail.total_bytes)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -938,6 +966,20 @@ mod tests {
     fn test_format_logs_empty() {
         assert_eq!(format_logs(""), "(no logs available)");
         assert_eq!(format_logs("   \n  "), "(no logs available)");
+    }
+
+    #[test]
+    fn truncation_trailer_names_both_sizes() {
+        let tail = crate::log_read::Tail {
+            logs: "x".repeat(262_144),
+            truncated: true,
+            total_bytes: 87_325_871,
+            source: crate::log_read::LogSource::Local,
+        };
+        assert_eq!(
+            truncation_trailer(&tail),
+            "[truncated: showing the last 256.0 KiB of up to 83.3 MiB — earlier lines omitted]"
+        );
     }
 
     #[test]

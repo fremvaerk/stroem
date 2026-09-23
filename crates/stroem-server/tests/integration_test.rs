@@ -2511,6 +2511,47 @@ async fn body_json(response: axum::response::Response) -> Value {
     serde_json::from_slice(&body).unwrap()
 }
 
+async fn body_bytes(response: axum::response::Response) -> Vec<u8> {
+    response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec()
+}
+
+fn jsonl_entry(step: &str, msg: &str) -> String {
+    format!(r#"{{"ts":"2026-09-22T00:00:00Z","stream":"stdout","step":"{step}","line":"{msg}"}}"#)
+}
+
+/// A pending job whose local log file holds `content`.
+async fn job_with_log(pool: &PgPool, tmp: &TempDir, content: &str) -> Result<Uuid> {
+    let job_id = JobRepo::create(
+        pool,
+        "default",
+        "hello-world",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+    std::fs::write(
+        tmp.path().join("logs").join(format!("{job_id}.jsonl")),
+        content,
+    )?;
+    Ok(job_id)
+}
+
+fn big_log(lines: usize) -> String {
+    (0..lines)
+        .map(|i| format!("{}\n", jsonl_entry("build", &format!("line {i:06}"))))
+        .collect()
+}
+
 /// Extract the `stroem_refresh` cookie value from a response's Set-Cookie headers.
 fn extract_refresh_cookie(response: &axum::response::Response) -> Option<String> {
     response
@@ -31356,5 +31397,172 @@ async fn test_task_dispatch_failure_path_evaluates_when_against_task_state() -> 
         after.status, "skipped",
         "the failure cascade must see the snapshot: after=false skips"
     );
+    Ok(())
+}
+
+// ─── Bounded log reads: REST tail/full, WebSocket backfill ───────────
+
+#[tokio::test]
+async fn test_log_tail_envelope_and_source_header() -> Result<()> {
+    let (router, pool, tmp, _container) = setup().await?;
+    let content = format!(
+        "{}\n{}\n",
+        jsonl_entry("build", "one"),
+        jsonl_entry("build", "two")
+    );
+    let job_id = job_with_log(&pool, &tmp, &content).await?;
+    let response = router
+        .oneshot(api_get(&format!("/api/jobs/{job_id}/logs")))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-stroem-log-source"], "local");
+    let body = body_json(response).await;
+    assert_eq!(body["logs"], content);
+    assert_eq!(body["truncated"], false);
+    assert_eq!(body["total_bytes"], content.len());
+    assert_eq!(body["returned_bytes"], content.len());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_log_tail_is_bounded_and_flags_truncation() -> Result<()> {
+    let (router, pool, tmp, _container) = setup().await?;
+    let content = big_log(20_000);
+    let job_id = job_with_log(&pool, &tmp, &content).await?;
+    let body = body_json(
+        router
+            .clone()
+            .oneshot(api_get(&format!("/api/jobs/{job_id}/logs")))
+            .await?,
+    )
+    .await;
+    let logs = body["logs"].as_str().unwrap();
+    assert_eq!(body["truncated"], true);
+    assert!(
+        logs.len() <= 262_144,
+        "default tail is 256 KiB, got {}",
+        logs.len()
+    );
+    assert!(
+        content.ends_with(logs) && logs.starts_with('{'),
+        "whole lines from the end"
+    );
+    assert_eq!(body["total_bytes"], content.len());
+
+    let small = body_json(
+        router
+            .oneshot(api_get(&format!("/api/jobs/{job_id}/logs?tail_bytes=1024")))
+            .await?,
+    )
+    .await;
+    assert!(small["returned_bytes"].as_u64().unwrap() <= 1024);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_log_full_streams_ndjson_equal_to_the_file() -> Result<()> {
+    let (router, pool, tmp, _container) = setup().await?;
+    let content = big_log(20_000);
+    let job_id = job_with_log(&pool, &tmp, &content).await?;
+    let response = router
+        .oneshot(api_get(&format!("/api/jobs/{job_id}/logs?full=true")))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.headers()["content-type"]
+        .to_str()?
+        .starts_with("application/x-ndjson"));
+    assert_eq!(response.headers()["x-stroem-log-source"], "local");
+    assert_eq!(body_bytes(response).await, content.into_bytes());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_log_query_validation() -> Result<()> {
+    let (router, pool, tmp, _container) = setup().await?;
+    let job_id = job_with_log(&pool, &tmp, "x\n").await?;
+    for q in [
+        "tail_bytes=0",
+        "tail_bytes=4194305",
+        "tail_bytes=abc",
+        "tail_bytes=10&full=true",
+        "full=yes",
+    ] {
+        for path in [
+            format!("/api/jobs/{job_id}/logs?{q}"),
+            format!("/api/jobs/{job_id}/steps/build/logs?{q}"),
+        ] {
+            let response = router.clone().oneshot(api_get(&path)).await?;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
+            assert!(
+                body_json(response).await["error"].is_string(),
+                "{path}: JSON error body"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_step_logs_are_filtered_in_both_modes() -> Result<()> {
+    let (router, pool, tmp, _container) = setup().await?;
+    let (b, t, s) = (
+        jsonl_entry("build", "b"),
+        jsonl_entry("test", "t"),
+        jsonl_entry("_server", "hook failed"),
+    );
+    let job_id = job_with_log(&pool, &tmp, &format!("{b}\n{t}\n{s}\n")).await?;
+    let tail = body_json(
+        router
+            .clone()
+            .oneshot(api_get(&format!("/api/jobs/{job_id}/steps/build/logs")))
+            .await?,
+    )
+    .await;
+    assert_eq!(tail["logs"], format!("{b}\n"));
+    let full = router
+        .clone()
+        .oneshot(api_get(&format!(
+            "/api/jobs/{job_id}/steps/test/logs?full=true"
+        )))
+        .await?;
+    assert_eq!(String::from_utf8(body_bytes(full).await)?, format!("{t}\n"));
+    let server = body_json(
+        router
+            .oneshot(api_get(&format!("/api/jobs/{job_id}/steps/_server/logs")))
+            .await?,
+    )
+    .await;
+    assert_eq!(server["logs"], format!("{s}\n"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_ws_backfill_is_a_tail() -> Result<()> {
+    let (router, pool, tmp, _container) = setup().await?;
+    let content = big_log(20_000);
+    let job_id = job_with_log(&pool, &tmp, &content).await?;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let url = format!(
+        "ws://127.0.0.1:{}/api/jobs/{}/logs/stream",
+        addr.port(),
+        job_id
+    );
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("connect");
+    use futures_util::StreamExt;
+    let text = ws.next().await.unwrap()?.into_text()?;
+    assert!(
+        text.len() <= 262_144,
+        "backfill is the default tail, got {}",
+        text.len()
+    );
+    assert!(content.ends_with(text.as_str()));
+    drop(ws);
+    server.abort();
     Ok(())
 }
