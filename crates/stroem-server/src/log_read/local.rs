@@ -28,6 +28,10 @@ pub(crate) struct LocalFile {
 pub(crate) struct LocalTail {
     pub logs: String,
     pub truncated: bool,
+    /// Snapshot length, plus one when a legacy file's unterminated last
+    /// line was returned with a synthesized newline. An upper bound on
+    /// `logs.len()`, never a lower one: `tail_step` always terminates a
+    /// kept line with `\n`, even when the source line itself had none.
     pub len: u64,
 }
 
@@ -119,19 +123,27 @@ struct StepScan<'a> {
     w: usize,
     /// The next completed line is the text after the file's last `\n`.
     first_line: bool,
+    /// Set when the file's very last line (a Legacy file's possibly
+    /// unterminated tail; a Jsonl file's torn tail never reaches this,
+    /// since [`Self::complete`] returns before writing it) was written to
+    /// `out`. Tells the caller a synthesized trailing `\n` was added past
+    /// the snapshot's real length.
+    first_line_written: bool,
     jsonl: bool,
     truncated: bool,
     stop: bool,
 }
 
 impl StepScan<'_> {
-    fn oversize(&mut self) {
+    fn oversize(&mut self, bytes: u64) {
         self.first_line = false;
         self.truncated = true;
+        tracing::warn!(bytes, "log line over max_line_bytes skipped in a step tail");
     }
 
     fn complete(&mut self, line: &[u8]) {
-        if std::mem::take(&mut self.first_line) && !line.is_empty() && self.jsonl {
+        let is_first = std::mem::take(&mut self.first_line);
+        if is_first && !line.is_empty() && self.jsonl {
             // A torn record: the writer finishes it later.
             self.truncated = true;
             return;
@@ -141,6 +153,10 @@ impl StepScan<'_> {
         }
         if line.len() > self.max_line {
             self.truncated = true;
+            tracing::warn!(
+                bytes = line.len() as u64,
+                "log line over max_line_bytes skipped in a step tail"
+            );
             return;
         }
         if !matcher::matches_bytes(line, self.step) {
@@ -155,15 +171,28 @@ impl StepScan<'_> {
         self.w -= need;
         self.out[self.w..self.w + line.len()].copy_from_slice(line);
         self.out[self.w + line.len()] = b'\n';
+        if is_first {
+            self.first_line_written = true;
+        }
     }
 }
 
-fn prepend(pending: &mut Vec<u8>, oversize: &mut bool, seg: &[u8], max_line: usize) {
+/// `oversize_bytes` accumulates the size at which `max_line` was first
+/// crossed for the run `oversize` is currently tracking; a further prepend
+/// while already oversize is a no-op, so it never overstates the count.
+fn prepend(
+    pending: &mut Vec<u8>,
+    oversize: &mut bool,
+    oversize_bytes: &mut u64,
+    seg: &[u8],
+    max_line: usize,
+) {
     if *oversize {
         return;
     }
     if pending.len() + seg.len() > max_line {
         *oversize = true;
+        *oversize_bytes = (pending.len() + seg.len()) as u64;
         pending.clear();
         return;
     }
@@ -192,12 +221,14 @@ pub(crate) async fn tail_step(
     let mut out = vec![0u8; cap];
     let mut pending: Vec<u8> = Vec::with_capacity(max_line.min(to_usize(len)?));
     let mut pending_oversize = false;
+    let mut pending_oversize_bytes: u64 = 0;
     let mut scan = StepScan {
         step,
         max_line,
         out: &mut out,
         w: cap,
         first_line: true,
+        first_line_written: false,
         jsonl: f.kind == LocalKind::Jsonl,
         truncated: false,
         stop: false,
@@ -220,19 +251,32 @@ pub(crate) async fn tail_step(
                     if pending.is_empty() && !pending_oversize {
                         scan.complete(seg);
                     } else {
-                        prepend(&mut pending, &mut pending_oversize, seg, max_line);
+                        prepend(
+                            &mut pending,
+                            &mut pending_oversize,
+                            &mut pending_oversize_bytes,
+                            seg,
+                            max_line,
+                        );
                         if pending_oversize {
-                            scan.oversize();
+                            scan.oversize(pending_oversize_bytes);
                         } else {
                             scan.complete(&pending);
                         }
                         pending.clear();
                         pending_oversize = false;
+                        pending_oversize_bytes = 0;
                     }
                     i = k;
                 }
                 None => {
-                    prepend(&mut pending, &mut pending_oversize, &window[..i], max_line);
+                    prepend(
+                        &mut pending,
+                        &mut pending_oversize,
+                        &mut pending_oversize_bytes,
+                        &window[..i],
+                        max_line,
+                    );
                     break;
                 }
             }
@@ -242,17 +286,32 @@ pub(crate) async fn tail_step(
     if pos == 0 && !scan.stop {
         // The file's first line has no newline before it.
         if pending_oversize {
-            scan.oversize();
+            scan.oversize(pending_oversize_bytes);
         } else {
             scan.complete(&pending);
         }
     }
-    let (w, truncated) = (scan.w, scan.truncated || pos > 0);
+    // Read every scalar out of `scan` in one statement: it still holds
+    // `out` borrowed mutably, so `out.drain` below can't run until `scan`'s
+    // last use is behind it.
+    let (w, truncated, first_line_written) =
+        (scan.w, scan.truncated || pos > 0, scan.first_line_written);
     out.drain(..w);
+    // `first_line_written` is only ever set for a Legacy file (a Jsonl
+    // file's torn tail returns from `complete` before writing) whose true
+    // last line had no trailing `\n` in the source (the segment after the
+    // file's last `\n` is empty otherwise, so `complete` returns on the
+    // empty-line check without writing) — exactly the case where the `\n`
+    // in `logs` past that line was synthesized, not read from the file.
+    let reported_len = if first_line_written {
+        len.saturating_add(1)
+    } else {
+        len
+    };
     Ok(LocalTail {
         logs: utf8(out)?,
         truncated,
-        len,
+        len: reported_len,
     })
 }
 
@@ -527,6 +586,31 @@ mod tests {
             (t.logs, t.truncated),
             (format!("{first}\n{second}\n"), false)
         );
+    }
+
+    #[tokio::test]
+    async fn step_tail_on_an_empty_file() {
+        let dir = TempDir::new().unwrap();
+        let mut f = open(&dir, LocalKind::Jsonl, "").await;
+        let t = tail_step(&mut f, "a", 1024, 1024, u64::MAX).await.unwrap();
+        assert_eq!((t.logs.as_str(), t.truncated), ("", false));
+    }
+
+    #[tokio::test]
+    async fn step_tail_legacy_len_bounds_the_synthesized_newline() {
+        let dir = TempDir::new().unwrap();
+        let (a, b) = (jl("x", "1"), jl("x", "2"));
+        // No trailing `\n`: the file's raw length is one byte short of what
+        // the joined, newline-terminated output needs.
+        let mut f = open(&dir, LocalKind::Legacy, &format!("{a}\n{b}")).await;
+        let raw_len = f.len;
+        let t = tail_step(&mut f, "x", raw_len + 1, 1024, u64::MAX)
+            .await
+            .unwrap();
+        assert_eq!(t.logs, format!("{a}\n{b}\n"));
+        assert!(!t.truncated);
+        assert!(t.logs.len() as u64 <= t.len);
+        assert_eq!(t.len, raw_len + 1);
     }
 
     #[tokio::test]
