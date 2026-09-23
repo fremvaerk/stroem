@@ -825,9 +825,23 @@ impl ServerClient {
             })
             .collect();
 
-        // Envelope overhead: `{"lines":[...],"step_name":"..."}` plus the step name's bytes.
-        // Slightly generous is fine — it only makes chunks a little smaller, never over cap.
-        let envelope_overhead = step_name.len() + 32;
+        // Envelope skeleton `{"lines":[...],"step_name":"..."}`, everything
+        // except the lines and the step name's own bytes, is exactly 25
+        // bytes: `{"lines":[` (10) + `]` (1) + `,"step_name":` (13) + `}`
+        // (1). The step name must be measured by its escaped, QUOTED JSON
+        // length — the same bytes `send_log_chunk`'s `.json(&..)` puts on
+        // the wire — not its raw `.len()`: a name full of characters that
+        // expand under JSON escaping (`"`, `\`, control bytes) otherwise
+        // undercounts the envelope and can push a tightly packed chunk's
+        // real body over the cap. This makes "never over cap" exactly true
+        // (not just generous): +8 bytes of slack for anything this count
+        // missed still leaves the real body strictly under the cap (see
+        // `test_push_logs_envelope_counts_escaped_step_name`).
+        const ENVELOPE_SKELETON_BYTES: usize = 25;
+        let step_name_json_len = serde_json::to_string(step_name)
+            .context("Failed to measure step name size")?
+            .len();
+        let envelope_overhead = step_name_json_len + ENVELOPE_SKELETON_BYTES + 8;
 
         let mut chunks: Vec<Vec<serde_json::Value>> = Vec::new();
         let mut current: Vec<serde_json::Value> = Vec::new();
@@ -1294,5 +1308,69 @@ mod tests {
             "the oversized entry's chunk must contain only itself"
         );
         assert_eq!(mid_lines[0]["line"].as_str().unwrap(), huge_line);
+    }
+
+    /// A step name that expands under JSON escaping must be counted by its
+    /// escaped, quoted length, not its raw one — an underestimate here packs
+    /// lines tightly enough that the real (escaped) envelope can push a
+    /// request over `LOG_PUSH_MAX_BYTES` (C8/C9 regression: 64 `"`
+    /// characters raw-len 64 but escaped-quoted-len 130).
+    #[tokio::test]
+    async fn test_push_logs_envelope_counts_escaped_step_name() {
+        use wiremock::matchers::{method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"/worker/jobs/.+/logs"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&mock)
+            .await;
+
+        let client = ServerClient::new(&mock.uri(), "t", Some(5), Some(30));
+        let job_id = Uuid::new_v4();
+
+        // 64 `"` characters: each escapes to `\"` (2 bytes), so the quoted
+        // step name is 2 + 64*2 = 130 bytes — far more than its raw 64,
+        // which is exactly what the old `step_name.len() + 32` missed.
+        let step_name = "\"".repeat(64);
+
+        // Small, uniform lines so the packer's greedy boundary lands within
+        // a few bytes of the cap on every chunk but the last — any gap the
+        // escaped-name fix leaves unaccounted for shows up as an
+        // over-cap request.
+        let line_text = "x".repeat(40);
+        let n = 40_000;
+        let lines: Vec<serde_json::Value> = (0..n)
+            .map(|i| {
+                serde_json::json!({
+                    "timestamp": "2026-01-01T00:00:00Z",
+                    "stream": "stdout",
+                    "line": format!("{line_text}-{i}"),
+                })
+            })
+            .collect();
+
+        client
+            .push_logs(job_id, &step_name, lines)
+            .await
+            .expect("push_logs should succeed across all chunks");
+
+        let received = mock.received_requests().await.unwrap();
+        assert!(
+            received.len() >= 2,
+            "expected multiple chunks, got {}",
+            received.len()
+        );
+        for req in &received {
+            assert!(
+                req.body.len() <= LOG_PUSH_MAX_BYTES,
+                "request body {} bytes exceeds cap {} with an escaped step name",
+                req.body.len(),
+                LOG_PUSH_MAX_BYTES
+            );
+            let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+            assert_eq!(body["step_name"], step_name);
+        }
     }
 }
