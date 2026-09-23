@@ -1817,8 +1817,8 @@ mod tests {
         let meta = test_meta();
 
         // Write the legacy .log file directly (not via append_log, which
-        // always writes .jsonl). filter_step_from_file_if_present sees it
-        // because the .jsonl path doesn't exist.
+        // always writes .jsonl). `local_read::open_local` reads it because
+        // no .jsonl file exists for this job.
         let legacy_path = tmp.path().join(format!("{job_id}.log"));
         tokio::fs::create_dir_all(tmp.path()).await.unwrap();
         let legacy_line = ts_line("2026-06-10T05:00:01Z", "build", "from-legacy");
