@@ -32,8 +32,17 @@ pub enum ArchiveVersion {
     /// An open descriptor: reads see the opened file even after the path
     /// is atomically replaced.
     File(tokio::sync::Mutex<fs::File>),
-    /// An S3 ETag, sent as `If-Match` on every ranged GET.
-    ETag(Option<String>),
+    /// An S3(-compatible) object's version as seen by `HEAD`: an `ETag`
+    /// sent as `If-Match` on every ranged GET when present, else the
+    /// object's `Last-Modified` (already formatted as an HTTP-date) sent as
+    /// `If-Unmodified-Since` -- some S3-compatible endpoints omit the
+    /// `ETag` header. Both `None` means the endpoint returned neither, and
+    /// ranged reads of that object are not version-pinned at all (a
+    /// `warn!` at `open` names this, see `S3BlobArchive::open`).
+    S3 {
+        etag: Option<String>,
+        last_modified: Option<String>,
+    },
 }
 
 /// Unified pluggable storage for logs, state snapshots, and artifacts.
@@ -352,6 +361,34 @@ mod s3_blob_archive {
     use aws_sdk_s3::primitives::ByteStream;
     use aws_sdk_s3::types::{Delete, ObjectIdentifier};
 
+    /// Which precondition header pins a ranged GET to the version `open`
+    /// saw. Pure and independent of the SDK's own `DateTime` type so it's
+    /// trivially unit-testable.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum Precondition {
+        /// `If-Match: <etag>`.
+        IfMatch(String),
+        /// `If-Unmodified-Since: <http-date>`, used only when the endpoint
+        /// returned no `ETag`.
+        IfUnmodifiedSince(String),
+        /// The endpoint returned neither header at `open`: nothing pins
+        /// this read to a version (`open` already warned about it once).
+        None,
+    }
+
+    /// `ETag` wins when present (S3 and every compatible store worth using
+    /// gives one); `Last-Modified` is the fallback for the ETag-less
+    /// endpoints C8 exists for.
+    fn range_precondition(etag: Option<&str>, last_modified: Option<&str>) -> Precondition {
+        match (etag, last_modified) {
+            (Some(etag), _) => Precondition::IfMatch(etag.to_string()),
+            (None, Some(last_modified)) => {
+                Precondition::IfUnmodifiedSince(last_modified.to_string())
+            }
+            (None, None) => Precondition::None,
+        }
+    }
+
     pub struct S3BlobArchive {
         client: aws_sdk_s3::Client,
         bucket: String,
@@ -533,11 +570,40 @@ mod s3_blob_archive {
                 .send()
                 .await
             {
-                Ok(out) => Ok(Some(ArchiveObject {
-                    key: key.to_string(),
-                    size: u64::try_from(out.content_length().unwrap_or(0)).unwrap_or(0),
-                    version: ArchiveVersion::ETag(out.e_tag().map(str::to_string)),
-                })),
+                Ok(out) => {
+                    let etag = out.e_tag().map(str::to_string);
+                    // The builder's `if_unmodified_since` wants the SDK's own
+                    // `DateTime`, but `ArchiveVersion` (feature-agnostic) can
+                    // only hold a `String` -- format it once here with the
+                    // SDK's own HTTP-date formatter, parsed back with the
+                    // same formatter in `read_range`. Lossless: HTTP-date
+                    // has second precision, which is all `Last-Modified`
+                    // ever carries.
+                    let last_modified = out.last_modified().and_then(|dt| {
+                        dt.fmt(aws_sdk_s3::primitives::DateTimeFormat::HttpDate)
+                            .inspect_err(|e| {
+                                tracing::warn!(
+                                    "formatting Last-Modified for {key} failed, \
+                                     ranged reads will not be version-pinned by it: {e}"
+                                )
+                            })
+                            .ok()
+                    });
+                    if etag.is_none() && last_modified.is_none() {
+                        tracing::warn!(
+                            "archive endpoint returned no ETag or Last-Modified; \
+                             ranged reads of {key} are not version-pinned"
+                        );
+                    }
+                    Ok(Some(ArchiveObject {
+                        key: key.to_string(),
+                        size: u64::try_from(out.content_length().unwrap_or(0)).unwrap_or(0),
+                        version: ArchiveVersion::S3 {
+                            etag,
+                            last_modified,
+                        },
+                    }))
+                }
                 Err(e) => {
                     if matches!(e.as_service_error(), Some(HeadObjectError::NotFound(_))) {
                         return Ok(None);
@@ -554,7 +620,11 @@ mod s3_blob_archive {
             len: u64,
             into: &mut Vec<u8>,
         ) -> Result<()> {
-            let ArchiveVersion::ETag(etag) = &obj.version else {
+            let ArchiveVersion::S3 {
+                etag,
+                last_modified,
+            } = &obj.version
+            else {
                 anyhow::bail!(
                     "S3BlobArchive::read_range: {} was not opened by this backend",
                     obj.key
@@ -570,8 +640,17 @@ mod s3_blob_archive {
                 .bucket(&self.bucket)
                 .key(&obj.key)
                 .range(format!("bytes={offset}-{}", offset + want - 1));
-            if let Some(etag) = etag {
-                req = req.if_match(etag);
+            match range_precondition(etag.as_deref(), last_modified.as_deref()) {
+                Precondition::IfMatch(etag) => req = req.if_match(etag),
+                Precondition::IfUnmodifiedSince(http_date) => {
+                    let dt = aws_sdk_s3::primitives::DateTime::from_str(
+                        &http_date,
+                        aws_sdk_s3::primitives::DateTimeFormat::HttpDate,
+                    )
+                    .with_context(|| format!("parse stored Last-Modified for {}", obj.key))?;
+                    req = req.if_unmodified_since(dt);
+                }
+                Precondition::None => {}
             }
             let out = match req.send().await {
                 Ok(out) => out,
@@ -579,7 +658,7 @@ mod s3_blob_archive {
                     match e.raw_response().map(|r| r.status().as_u16()) {
                         Some(416) => return Ok(()),
                         Some(412) => anyhow::bail!(
-                            "S3 object {} changed since it was opened (If-Match failed)",
+                            "S3 object {} changed since it was opened (If-Match/If-Unmodified-Since failed)",
                             obj.key
                         ),
                         _ => {}
@@ -595,6 +674,36 @@ mod s3_blob_archive {
                 .await
                 .with_context(|| format!("S3 read range of {}", obj.key))?;
             Ok(())
+        }
+    }
+
+    #[cfg(test)]
+    mod precondition_tests {
+        use super::*;
+
+        #[test]
+        fn etag_wins_when_present() {
+            assert_eq!(
+                range_precondition(Some("\"abc\""), Some("Mon, 01 Jan 2024 00:00:00 GMT")),
+                Precondition::IfMatch("\"abc\"".to_string())
+            );
+            assert_eq!(
+                range_precondition(Some("\"abc\""), None),
+                Precondition::IfMatch("\"abc\"".to_string())
+            );
+        }
+
+        #[test]
+        fn last_modified_is_the_fallback_without_an_etag() {
+            assert_eq!(
+                range_precondition(None, Some("Mon, 01 Jan 2024 00:00:00 GMT")),
+                Precondition::IfUnmodifiedSince("Mon, 01 Jan 2024 00:00:00 GMT".to_string())
+            );
+        }
+
+        #[test]
+        fn neither_header_pins_nothing() {
+            assert_eq!(range_precondition(None, None), Precondition::None);
         }
     }
 }
