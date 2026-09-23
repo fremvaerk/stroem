@@ -45,7 +45,7 @@ clap.workspace = true
 config.workspace = true
 croner.workspace = true
 chrono-tz.workspace = true
-tokio-util.workspace = true
+tokio-util = { workspace = true, features = ["io"] }
 openidconnect.workspace = true
 url.workspace = true
 axum-extra = { version = "0.12", features = ["cookie"] }
