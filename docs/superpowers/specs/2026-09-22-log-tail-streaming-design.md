@@ -1,12 +1,51 @@
 # Log reads: tail by default, streamed full log
 
-Status: revision 7, proposed (2026-09-23)
+Status: revision 8, proposed (2026-09-23)
 
 Companion of `docs/internal/TODO.md` § Performance ("Opening the job page of a
 job with a large log OOM-kills every server replica") and of the HA log
 mirroring record in TODO.md § "Review: HA Log Mirroring (2026-05-21)".
 
 ## Revision history
+
+**Revision 8 (2026-09-23, implementation review).** After Codex reviewed the
+implementation (thread 01a0c805) and found nine real issues, independently
+verified. MCP formatting is now part of the bounded path, not outside it:
+`format_logs` (§ 3.1) parses only the four fields it renders — `ts`,
+`step`, `stream`, `line` — through a borrowing visitor that drains every
+other field with `IgnoredAny` without materialising it, so a tail line
+carrying a large unrelated array costs only that field's syntax scan, not
+its size; § 3.4 gains a row for the resulting peak, `tail formula + 2 T`.
+A filtered archive tail's ring (§ 3.3) empties itself, not just skips the
+line, when a single match's own size exceeds the whole window — the same
+outcome as the local scan, which stops scanning further back the moment a
+match can't fit, so the two no longer disagree on which older matches an
+oversize record evicts. The single-source archive stream — filtered or
+not — is served exactly as stored, including an unterminated final
+record: there is only one source, so nothing else could ever complete it,
+and the FILTERED branch was wrongly dropping it. The pre-first-byte
+archive fallback (§ 3.3) covers more than `open`: the stream is now PRIMED
+(one `fill_buf` through a `BufReader` wrapping the decoder — the first
+range read, the gzip header, and the first inflate) before the response's
+headers are committed, so a failure in any of those three still falls back
+to local when present, else an empty `LogSource::None` response, instead
+of aborting an already-started body; priming's extra `BufReader` adds one
+more `K` to the unfiltered single-source archive stream's peak, `R + H + D
++ 3 K` → `R + H + D + 4 K` (the filtered branch already read through a
+`BufReader` it reuses for priming, so its own formula is unchanged).
+§ 5's fixture (d) is corrected: a MATCHING line can only reach `~L` of
+matcher scratch, not `2 L` — matching this fixture's design needs the
+decoded step name to also appear literally elsewhere in the line (to pass
+the `contains` fast guard on an escaped value), which halves the room left
+for the escaped value itself; the `2 L` case is a NON-matching line whose
+guard passes because the target appears in `line` instead, freeing nearly
+the whole line for one escaped string. Ranged archive reads (§ 3.3) pin
+the object's version with `If-Match` when the endpoint returned an `ETag`,
+else `If-Unmodified-Since` against its `Last-Modified` when THAT exists,
+else neither — some S3-compatible endpoints omit `ETag` — logging one
+`warn!` at `open` when neither header exists, since ranged reads of that
+object are then not version-pinned at all. Where the sections below
+differ, this paragraph wins.
 
 **Revision 7 (2026-09-23, planning).** Ten amendments decided while turning
 this design into an executable task plan. Config keys are nested under
@@ -302,8 +341,12 @@ change: a fresh connection no longer receives the whole history.
 invalid value is `invalid_params`). No full mode: an agent context never
 wants 83 MiB. When the read was truncated the formatted text ends with one
 extra line, `[truncated: showing the last 256.0 KiB of up to 83.3 MiB —
-earlier lines omitted]`, produced after `format_logs` so the existing
-formatter and its tests are untouched.
+earlier lines omitted]`, appended after `format_logs` runs (revision 8:
+the trailer's own tests are unaffected, but `format_logs` itself is now
+part of the bounded path — it parses only `ts`/`step`/`stream`/`line` out
+of each line through a borrowing visitor, draining every other field with
+`IgnoredAny`, so it no longer builds a full `serde_json::Value` per line;
+§ 3.4 states its peak).
 
 **CLI `stroem-api logs <job_id>`**: prints the tail by default and, when
 truncated, one line on stderr: `note: showing the last 256.0 KiB of up to
@@ -525,7 +568,11 @@ session with identical semantics on every backend (`S3BlobArchive` `:279`,
 - `async fn open(&self, key) -> Result<Option<ArchiveObject>>` — `None`
   when the object does not exist. `ArchiveObject { key: String, size: u64,
   version: Version }`: S3 via `head_object` (`size` = content length,
-  `version` = the ETag); local opens the file and keeps the descriptor
+  `version` = the `ETag` when the endpoint returned one, ELSE its
+  `Last-Modified`, ELSE neither — revision 8: some S3-compatible endpoints
+  omit `ETag`, so `open` also carries `Last-Modified` and logs one `warn!`
+  when the HEAD gave neither, since ranged reads of that object are then
+  not version-pinned at all); local opens the file and keeps the descriptor
   (`size` = `metadata().len()` of THAT descriptor, `version` = the
   descriptor itself). A local publish replaces the path atomically
   (`:172-177`) and an S3 write replaces the key (`:280-289`), so the
@@ -535,8 +582,11 @@ session with identical semantics on every backend (`S3BlobArchive` `:279`,
   min(offset + len, size))` to `into`, NOTHING when `offset >= size`, never
   more than `len`. The caller passes a buffer preallocated to `len + 32`
   and cleared; the callee never reallocates it. S3 sends
-  `get_object().key(obj.key).range("bytes=offset-(offset+len-1)")
-  .if_match(etag)`; a 412 (object replaced) is an archive error, a 416
+  `get_object().key(obj.key).range("bytes=offset-(offset+len-1)")`, pinned
+  by `If-Match` when the opened `ArchiveObject` carries an `ETag`, else by
+  `If-Unmodified-Since` against its `Last-Modified` when that exists,
+  else neither header is sent; a 412 from EITHER precondition (object
+  replaced) is an archive error with the same message, a 416
   (unsatisfiable range) appends nothing; the body is read through the SDK's
   `into_async_read()` adapter (`aws-smithy-types` `rt-tokio`,
   `byte_stream.rs:434-450`, a `StreamReader` that holds one body chunk,
@@ -586,8 +636,14 @@ archive error).
   decompressed > T || torn_line_dropped`. FILTERED: `LineSplitter` (§ 3.2,
   `max_line = L`) over the decoder's `BufReader`; each matching `Line` is
   appended to a ring of whole lines capped at `T` bytes with oldest-first
-  eviction; `archive.truncated` is set when a line is evicted, a `Skipped`
-  frame is seen, or the torn-line rule fires. Both count decompressed bytes
+  eviction; a match whose OWN size exceeds the whole `T`-byte window
+  (revision 8) empties the ring entirely rather than merely being skipped
+  — the same outcome as the local scan, which stops scanning further back
+  the moment a match can't fit, so the forward archive scan and the
+  backward local scan agree on which older matches an oversize record
+  evicts; `archive.truncated` is set when a line is evicted (including this
+  whole-ring case), a `Skipped` frame is seen, or the torn-line rule fires.
+  Both count decompressed bytes
   for `total_bytes`. Computed COMPLETELY before the response starts, so an
   archive error at any point (open, 412, download, gzip, footer) degrades to
   the local tail exactly as today (`:358-366`; `test at :1419-1425`).
@@ -644,18 +700,28 @@ client `H` + decoder `D` + reader `K` = **3 C + 96 N + R + H + D + K**.
 **Full, terminal, above a cap or archive size unknown.** ONE source is
 streamed: the LOCAL file when it exists (§ 3.2 full modes), else the
 archive through `ArchiveRangeReader` → `GzipDecoder` → `BufReader(K)` (→
-`LineSplitter` when filtered) in `K` chunks. Local first because a
-plain-file read fails far less often mid-stream than a multi-request
-download and because it is the only place the post-upload lines (§ 2) can
-be; either source can still error mid-stream (`:393-409` propagates a
-mid-read I/O error), and when that happens the body simply ends early —
-once headers are sent there is no fallback and the header cannot be
-rewritten. An archive error BEFORE the first byte (missing object, `open`
-failure) falls back to local when present, else answers an empty 200 with
-`source: none`. `source: local` or `archive`; the docs state that neither
-is guaranteed complete. Peak: local as in § 3.2; archive **R + H + D + K +
-2 K** unfiltered (reader plus two `K` output buffers), **R + H + D + K + 5
-L** filtered (`acc`, scratch, two `L + 1` output buffers).
+`LineSplitter` when filtered) in `K` chunks, served exactly as stored,
+filtered or not — an unterminated final record (a snapshot taken
+mid-write) is kept, since there is only one source and nothing else could
+ever complete it. Local first because a plain-file read fails far less
+often mid-stream than a multi-request download and because it is the only
+place the post-upload lines (§ 2) can be; either source can still error
+mid-stream (`:393-409` propagates a mid-read I/O error), and when that
+happens the body simply ends early — once headers are sent there is no
+fallback and the header cannot be rewritten. Revision 8: the archive
+branch is now PRIMED before the response is committed — a `BufReader`
+wraps the decoder and one `fill_buf` runs the first range read, the gzip
+header parse and the first inflate — so an archive error BEFORE THE FIRST
+BYTE covers more than a missing object or an `open` failure: a bad first
+range read (a 404 after a stale HEAD, a 412, a transient 5xx) or a bad
+gzip header caught during priming falls back to local when present, else
+answers an empty 200 with `source: none`, exactly like an `open` failure,
+instead of committing a 200 and then aborting the body. `source: local` or
+`archive`; the docs state that neither is guaranteed complete. Peak: local
+as in § 3.2; archive **R + H + D + 4 K** unfiltered (the decoder's own
+reader, the priming `BufReader`, and two `K` output buffers), **R + H + D
++ K + 5 L** filtered (the same `BufReader`, reused for priming, then
+`acc`, scratch, two `L + 1` output buffers).
 
 Non-terminal jobs never touch the archive (unchanged; the upload happens at
 terminal time, so a pre-terminal archive read is a guaranteed miss).
@@ -682,11 +748,12 @@ test (§ 5) asserts each mode's measured peak `<=` its formula × 1.5; the
 | Read | Peak | Default (`T` 256 KiB) | Max (`T` 4 MiB, `N'` = N) |
 |---|---|---|---|
 | Tail, unfiltered, local | `2 T + E` | 2.1 MiB | 32.1 MiB |
+| MCP tail, formatted | tail formula + `2 T` = `4 T + E` (revision 8) | 2.6 MiB | 40.1 MiB |
 | Tail, step, local | `3 T + 3 L + E` | 5.3 MiB | 39.1 MiB |
 | Tail, terminal, merged | `11 T + 3 L + R + H + D + K + M + 256`, `M <= 2 T + 96 N'` | 7.8 MiB + `96 N'` (≤ 12 MiB adversarial; ~0.2 MiB typical) → 19.8 MiB | 56.6 MiB + 12 MiB → 68.6 MiB |
 | Full, unfiltered, local | `2 K` | 0.2 MiB | 0.2 MiB |
 | Full, filtered, local | `5 L + 2 K` | 5.2 MiB | 5.2 MiB |
-| Full, archive, single source | `R + H + D + 3 K` (`R + H + D + K + 5 L` filtered) | 1.7 MiB (6.6 MiB) | same |
+| Full, archive, single source | `R + H + D + 4 K` (revision 8; `R + H + D + K + 5 L` filtered, unchanged) | 1.8 MiB (6.6 MiB) | same |
 | Full, terminal, merged | `3 C + 96 N + R + H + D + K` | 61.6 MiB | 61.6 MiB |
 
 With defaults, a UI poll costs at most 5.3 MiB and the most expensive read
@@ -924,10 +991,17 @@ as a gzipped archive object; (b) DISTINCT short lines — `{"step":"s","line":"<
 with a counter — up to the line cap, so the merger holds near `N` distinct
 entries (blank or repeated one-byte lines would be dropped or collapsed by
 `merge_jsonl_logs`, `:40-44`, and exercise nothing); (c) `\u0001`-only line
-content (exercises `E`); (d) lines whose total length is `L - 64` bytes,
-consisting of a literal run followed by ONE escape sequence at the end, so
-the line passes the `<= L` filter and serde_json's scratch has to grow to
-hold the decoded prefix (exercises `2 L`); (e) a 15 MiB single line under
+content (exercises `E`); (d) a MATCHING line whose total length is `L - 64`
+bytes, consisting of a literal run followed by ONE escape sequence at the
+end, so the line passes the `<= L` filter and serde_json's scratch has to
+grow to hold the decoded prefix (exercises `~L`, not `2 L`: matching this
+fixture's design needs the decoded step name to also appear literally
+elsewhere in the line — to pass the `contains` fast guard on an escaped
+value — which halves the room left for the escaped value itself), plus a
+companion NON-matching line (revision 8) whose `contains` guard passes
+because the target appears in `line` instead, freeing nearly the whole
+line for one escaped string and so reaching the full `2 L`; (e) a 15 MiB
+single line under
 `N = 1` (exercises the merger's byte-based reservation); (f) for newline
 normalisation, two inputs whose last lines lack a newline, merged through
 the FULL-merge path (the tail path's torn-line rule would drop them first),
