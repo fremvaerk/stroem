@@ -475,6 +475,7 @@ Everything a job owes after one of its steps moves (or a job was created, or can
 - **Reads are bounded** (spec `docs/superpowers/specs/2026-09-22-log-tail-streaming-design.md`): `LogStorage::read_tail` (default 256 KiB, whole lines, `truncated`/`total_bytes`) and `LogStorage::stream_full` (NDJSON stream) are the ONLY readers; the String-returning `get_log`/`get_step_log` were removed on purpose — never add a reader that materialises a whole log. Primitives live in `crate::log_read` (`matcher`, `splitter`, `local`, `archive`). Finished jobs: tail = union of local + archive tails; full = in-memory union under `log_storage.read.merge_max_{bytes,lines}`, else local-first single source. `X-Stroem-Log-Source` names the source. Bounds are enforced by `tests/log_peak_alloc_test.rs` (counting allocator, `harness = false`) — a new read path needs a case there. Read fallback: `.jsonl` → legacy `.log` → (terminal) archive; `NotFound` is never a 500.
 - Config: `archive` (preferred) or `s3` (legacy) in `log_storage` section.
 - **Server events**: `append_server_log()` writes `step: "_server"` entries for hook failures, orchestration errors, recovery timeouts.
+- Worker pushes log lines in requests of at most 1 MiB (`stroem-worker` `client.rs::LOG_PUSH_MAX_BYTES`); `/worker/jobs/{id}/logs` keeps axum's default 2 MiB body limit — a single batch per flush used to 413 and lose the lines.
 
 ### WebSocket Log Streaming
 - `GET /api/jobs/{id}/logs/stream` — backfill = the default tail (`read_tail`), then live via `tokio::sync::broadcast`
