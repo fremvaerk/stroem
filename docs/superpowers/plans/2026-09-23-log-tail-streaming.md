@@ -4215,7 +4215,10 @@ async fn run(large: bool) {
         let job = Uuid::new_v4();
         let body = "s".repeat((l - 200) / 2);
         let step = format!("{body}A");
-        let hit = format!(r#"{{"step":"{body}A","line":"{body}A"}}"#);
+        // The escape is built at runtime: a literal backslash-u sequence in
+        // source text does not survive every editing tool.
+        let esc = format!("{}u0041", '\\');
+        let hit = format!(r#"{{"step":"{body}{esc}","line":"{body}A"}}"#);
         let miss = r#"{"step":"other","line":"x"}"#;
         let content: String = (0..5).map(|_| format!("{hit}\n{miss}\n")).collect();
         e.local(job, "jsonl", content.as_bytes()).await;
