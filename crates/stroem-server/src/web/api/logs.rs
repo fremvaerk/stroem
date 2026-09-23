@@ -13,6 +13,7 @@ use crate::web::api::parse_uuid_param;
 use crate::web::error::AppError;
 use anyhow::Context;
 use axum::body::Body;
+use axum::extract::rejection::QueryRejection;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderName, HeaderValue};
 use axum::response::{IntoResponse, Response};
@@ -126,14 +127,21 @@ async fn read_logs(
     }
 }
 
+/// A `Query<LogQuery>` rejection (e.g. a duplicated parameter) becomes our
+/// JSON 400 like every other bad query, instead of axum's plain-text one.
+fn query_rejection(err: QueryRejection) -> AppError {
+    AppError::BadRequest(err.body_text())
+}
+
 /// GET /api/jobs/{id}/logs
 #[tracing::instrument(skip(state))]
 pub async fn get_job_logs(
     State(state): State<Arc<AppState>>,
     auth_user: Option<AuthUser>,
     Path(id): Path<String>,
-    Query(query): Query<LogQuery>,
+    query: Result<Query<LogQuery>, QueryRejection>,
 ) -> Result<Response, AppError> {
+    let Query(query) = query.map_err(query_rejection)?;
     read_logs(state, auth_user, id, None, query).await
 }
 
@@ -143,8 +151,9 @@ pub async fn get_step_logs(
     State(state): State<Arc<AppState>>,
     auth_user: Option<AuthUser>,
     Path((id, step_name)): Path<(String, String)>,
-    Query(query): Query<LogQuery>,
+    query: Result<Query<LogQuery>, QueryRejection>,
 ) -> Result<Response, AppError> {
+    let Query(query) = query.map_err(query_rejection)?;
     read_logs(state, auth_user, id, Some(step_name), query).await
 }
 

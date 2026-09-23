@@ -31516,6 +31516,33 @@ async fn test_log_query_validation() -> Result<()> {
 }
 
 #[tokio::test]
+async fn test_log_query_duplicate_param_is_json_bad_request() -> Result<()> {
+    // A `Query<LogQuery>` extractor rejection (axum can't deserialize a
+    // repeated key into one field) must answer our JSON 400, not axum's
+    // plain-text one.
+    let (router, pool, tmp, _container) = setup().await?;
+    let job_id = job_with_log(&pool, &tmp, "x\n").await?;
+    for path in [
+        format!("/api/jobs/{job_id}/logs?tail_bytes=1&tail_bytes=2"),
+        format!("/api/jobs/{job_id}/steps/build/logs?tail_bytes=1&tail_bytes=2"),
+    ] {
+        let response = router.clone().oneshot(api_get(&path)).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
+        assert!(
+            response.headers()["content-type"]
+                .to_str()?
+                .starts_with("application/json"),
+            "{path}: JSON content type"
+        );
+        assert!(
+            body_json(response).await["error"].is_string(),
+            "{path}: JSON error body"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_step_logs_are_filtered_in_both_modes() -> Result<()> {
     let (router, pool, tmp, _container) = setup().await?;
     let (b, t, s) = (
