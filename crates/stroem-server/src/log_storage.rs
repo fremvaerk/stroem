@@ -1,8 +1,12 @@
 use crate::blob_storage::BlobArchive;
 use crate::config::LogReadConfig;
+use crate::log_read::archive::{self as archive_read, ArchiveTail};
+use crate::log_read::local::{self as local_read, LocalTail};
+use crate::log_read::{bytes_stream, count_lines, cut_front_to_lines, LogSource, StepFilter, Tail};
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use dashmap::DashMap;
+use futures_core::stream::BoxStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -83,6 +87,52 @@ pub fn archive_key(prefix: &str, job_id: Uuid, meta: &JobLogMeta) -> String {
         dt.format("%Y-%m-%dT%H-%M-%S"),
         job_id,
     )
+}
+
+/// Spec § 3.3: the union of a local and an archive tail when it fits
+/// `max_lines`, cut back to `t`; otherwise the single source there is.
+/// `total_bytes` is an upper bound: a union is at most the sum of its
+/// inputs, plus the newline each input's last line may gain.
+fn combine_tails(
+    local: Option<LocalTail>,
+    archive: Option<ArchiveTail>,
+    t: u64,
+    max_lines: usize,
+) -> Tail {
+    match (local, archive) {
+        (None, None) => Tail::empty(),
+        (Some(l), None) => Tail {
+            logs: l.logs,
+            truncated: l.truncated,
+            total_bytes: l.len,
+            source: LogSource::Local,
+        },
+        (None, Some(a)) => Tail {
+            logs: a.logs,
+            truncated: a.truncated,
+            total_bytes: a.decompressed,
+            source: LogSource::Archive,
+        },
+        (Some(l), Some(a)) => {
+            let total_bytes = l.len + a.decompressed + 2;
+            if count_lines(l.logs.as_bytes()) + count_lines(a.logs.as_bytes()) > max_lines {
+                return Tail {
+                    logs: l.logs,
+                    truncated: true,
+                    total_bytes,
+                    source: LogSource::Local,
+                };
+            }
+            let merged = merge_jsonl_logs(&l.logs, &a.logs);
+            let (logs, cut) = cut_front_to_lines(merged, t);
+            Tail {
+                logs,
+                truncated: l.truncated || a.truncated || cut,
+                total_bytes,
+                source: LogSource::Merged,
+            }
+        }
+    }
 }
 
 // ─── LogStorage ──────────────────────────────────────────────────────────
@@ -560,6 +610,155 @@ impl LogStorage {
     /// Get the log file path as a string (for storing in database).
     pub fn get_log_path(&self, job_id: Uuid) -> String {
         self.log_path(job_id).to_string_lossy().to_string()
+    }
+
+    /// A bounded read of the log's end (spec § 3.2–3.3). The local tail
+    /// always; for a terminal job also the archive tail, merged with the
+    /// local one when the union fits `merge_max_lines`. Archive errors
+    /// degrade to local: the archive tail is complete before this returns.
+    pub async fn read_tail(
+        &self,
+        job_id: Uuid,
+        meta: &JobLogMeta,
+        is_terminal: bool,
+        filter: StepFilter<'_>,
+        tail_bytes: u64,
+    ) -> Result<Tail> {
+        let read = self.read;
+        let local =
+            match local_read::open_local(&self.log_path(job_id), &self.legacy_log_path(job_id))
+                .await
+                .context("open local log")?
+            {
+                None => None,
+                Some(mut f) => Some(
+                    match filter {
+                        StepFilter::All => local_read::tail_unfiltered(&mut f, tail_bytes).await,
+                        StepFilter::Step(step) => {
+                            local_read::tail_step(
+                                &mut f,
+                                step,
+                                tail_bytes,
+                                read.max_line_bytes,
+                                read.tail_scan_max_bytes,
+                            )
+                            .await
+                        }
+                    }
+                    .context("read local log tail")?,
+                ),
+            };
+        let archive = if is_terminal {
+            self.archive_tail(job_id, meta, filter, tail_bytes).await
+        } else {
+            None
+        };
+        Ok(combine_tails(
+            local,
+            archive,
+            tail_bytes,
+            read.merge_max_lines,
+        ))
+    }
+
+    async fn archive_tail(
+        &self,
+        job_id: Uuid,
+        meta: &JobLogMeta,
+        filter: StepFilter<'_>,
+        tail_bytes: u64,
+    ) -> Option<ArchiveTail> {
+        let archive = self.archive.as_ref()?;
+        let key = archive_key(&self.archive_prefix, job_id, meta);
+        let result: Result<Option<ArchiveTail>> = async {
+            let Some(obj) = archive.open(&key).await? else {
+                return Ok(None);
+            };
+            let tail = archive_read::tail(
+                Arc::clone(archive),
+                Arc::new(obj),
+                filter.step(),
+                tail_bytes,
+                self.read.max_line_bytes,
+            )
+            .await?;
+            Ok(Some(tail))
+        }
+        .await;
+        result.unwrap_or_else(|e| {
+            tracing::warn!(
+                "archive read failed for terminal job {job_id}, serving local only: {e:#}"
+            );
+            None
+        })
+    }
+
+    /// The whole log as a stream (spec § 3.2–3.3). For a terminal job: the
+    /// in-memory union when both sources fit the caps, else ONE source —
+    /// local first, the archive only when there is no local file.
+    pub async fn stream_full(
+        &self,
+        job_id: Uuid,
+        meta: &JobLogMeta,
+        is_terminal: bool,
+        filter: StepFilter<'_>,
+    ) -> Result<(LogSource, BoxStream<'static, std::io::Result<Bytes>>)> {
+        let read = self.read;
+        let step = filter.step().map(str::to_owned);
+        let mut local =
+            local_read::open_local(&self.log_path(job_id), &self.legacy_log_path(job_id))
+                .await
+                .context("open local log")?;
+        if let (true, Some(archive)) = (is_terminal, self.archive.as_ref()) {
+            let key = archive_key(&self.archive_prefix, job_id, meta);
+            match archive.open(&key).await {
+                Err(e) => tracing::warn!(
+                    "archive open failed for terminal job {job_id}, serving local only: {e:#}"
+                ),
+                Ok(None) => {}
+                Ok(Some(obj)) => {
+                    let obj = Arc::new(obj);
+                    match local.as_mut() {
+                        None => {
+                            let stream = archive_read::full_stream(
+                                Arc::clone(archive),
+                                obj,
+                                step,
+                                read.max_line_bytes,
+                            );
+                            return Ok((LogSource::Archive, stream));
+                        }
+                        Some(lf) => match archive_read::read_merged_full(
+                            lf,
+                            Arc::clone(archive),
+                            obj,
+                            filter.step(),
+                            &read,
+                        )
+                        .await
+                        {
+                            Ok(Some(merged)) => return Ok((LogSource::Merged, bytes_stream(merged))),
+                            Ok(None) => {}
+                            Err(e) => tracing::warn!(
+                                "merging the archive of terminal job {job_id} failed, serving local only: {e:#}"
+                            ),
+                        },
+                    }
+                }
+            }
+        }
+        match local {
+            Some(f) => Ok((
+                LogSource::Local,
+                local_read::full_stream(f, step, read.max_line_bytes)
+                    .await
+                    .context("stream local log")?,
+            )),
+            None => Ok((
+                LogSource::None,
+                Box::pin(futures_util::stream::empty::<std::io::Result<Bytes>>()),
+            )),
+        }
     }
 }
 
@@ -1922,5 +2121,255 @@ mod tests {
         let mut enc = GzEncoder::new(Vec::new(), Compression::default());
         enc.write_all(s.as_bytes()).unwrap();
         enc.finish().unwrap()
+    }
+
+    // ─── read_tail / stream_full (spec § 3.2–3.3) ────────────────────────
+
+    use crate::log_read::{LogSource, StepFilter};
+
+    const ALL: u64 = 16 * 1024 * 1024;
+
+    async fn full_text(
+        storage: &LogStorage,
+        job: Uuid,
+        meta: &JobLogMeta,
+        terminal: bool,
+        filter: StepFilter<'_>,
+    ) -> (LogSource, String) {
+        use futures_util::TryStreamExt;
+        let (source, stream) = storage
+            .stream_full(job, meta, terminal, filter)
+            .await
+            .unwrap();
+        let chunks: Vec<Bytes> = stream.try_collect().await.unwrap();
+        (source, String::from_utf8(chunks.concat()).unwrap())
+    }
+
+    fn mocked(tmp: &TempDir) -> (Arc<MockArchive>, LogStorage) {
+        let mock = Arc::new(MockArchive::new());
+        let storage = LogStorage::new(tmp.path())
+            .with_archive(Arc::clone(&mock) as Arc<dyn BlobArchive>, String::new());
+        (mock, storage)
+    }
+
+    async fn seed_archive(mock: &MockArchive, job: Uuid, meta: &JobLogMeta, content: &str) {
+        mock.put(
+            &archive_key("", job, meta),
+            "application/gzip",
+            Bytes::from(gzip(content)),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_tail_non_terminal_never_touches_the_archive() {
+        let tmp = TempDir::new().unwrap();
+        let (mock, storage) = mocked(&tmp);
+        let (job, meta) = (Uuid::new_v4(), test_meta());
+        let local = format!("{}\n", ts_line("2026-06-10T05:00:01Z", "s", "local"));
+        storage.append_log(job, &local).await.unwrap();
+        seed_archive(
+            &mock,
+            job,
+            &meta,
+            &format!("{}\n", ts_line("2026-06-10T05:00:02Z", "s", "arch")),
+        )
+        .await;
+        let tail = storage
+            .read_tail(job, &meta, false, StepFilter::All, ALL)
+            .await
+            .unwrap();
+        assert_eq!((tail.logs, tail.source), (local, LogSource::Local));
+        assert_eq!(mock.get_call_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn read_tail_terminal_merges_both_tails() {
+        let tmp = TempDir::new().unwrap();
+        let (mock, storage) = mocked(&tmp);
+        let (job, meta) = (Uuid::new_v4(), test_meta());
+        let local = format!("{}\n", ts_line("2026-06-10T05:00:01Z", "s", "from-local"));
+        let arch = format!("{}\n", ts_line("2026-06-10T05:00:02Z", "s", "from-archive"));
+        storage.append_log(job, &local).await.unwrap();
+        seed_archive(&mock, job, &meta, &arch).await;
+        let tail = storage
+            .read_tail(job, &meta, true, StepFilter::All, ALL)
+            .await
+            .unwrap();
+        assert_eq!(tail.logs, format!("{local}{arch}"));
+        assert_eq!(tail.source, LogSource::Merged);
+        assert!(!tail.truncated);
+        assert_eq!(tail.total_bytes, (local.len() + arch.len() + 2) as u64);
+        assert!(tail.returned_bytes() <= tail.total_bytes);
+        assert_eq!(mock.get_call_count().await, 1, "one archive fetch");
+    }
+
+    #[tokio::test]
+    async fn read_tail_terminal_cuts_the_union_back_to_the_budget() {
+        let tmp = TempDir::new().unwrap();
+        let (mock, storage) = mocked(&tmp);
+        let (job, meta) = (Uuid::new_v4(), test_meta());
+        let (a, b) = (
+            ts_line("2026-06-10T05:00:01Z", "s", "older"),
+            ts_line("2026-06-10T05:00:02Z", "s", "newer"),
+        );
+        storage.append_log(job, &format!("{a}\n")).await.unwrap();
+        seed_archive(&mock, job, &meta, &format!("{b}\n")).await;
+        let tail = storage
+            .read_tail(job, &meta, true, StepFilter::All, b.len() as u64 + 1)
+            .await
+            .unwrap();
+        assert_eq!((tail.logs, tail.truncated), (format!("{b}\n"), true));
+    }
+
+    #[tokio::test]
+    async fn read_tail_terminal_degrades_and_falls_back() {
+        // Archive error → local.
+        let tmp = TempDir::new().unwrap();
+        let storage = LogStorage::new(tmp.path()).with_archive(
+            Arc::new(ErroringArchive) as Arc<dyn BlobArchive>,
+            String::new(),
+        );
+        let (job, meta) = (Uuid::new_v4(), test_meta());
+        storage.append_log(job, "a\n").await.unwrap();
+        let tail = storage
+            .read_tail(job, &meta, true, StepFilter::All, ALL)
+            .await
+            .unwrap();
+        assert_eq!((tail.logs.as_str(), tail.source), ("a\n", LogSource::Local));
+
+        // Local missing → archive; neither → empty.
+        let tmp2 = TempDir::new().unwrap();
+        let (mock, storage2) = mocked(&tmp2);
+        seed_archive(&mock, job, &meta, "b\n").await;
+        let tail = storage2
+            .read_tail(job, &meta, true, StepFilter::All, ALL)
+            .await
+            .unwrap();
+        assert_eq!(
+            (tail.logs.as_str(), tail.source),
+            ("b\n", LogSource::Archive)
+        );
+        let none = storage2
+            .read_tail(Uuid::new_v4(), &meta, true, StepFilter::All, ALL)
+            .await
+            .unwrap();
+        assert_eq!(none, crate::log_read::Tail::empty());
+    }
+
+    #[tokio::test]
+    async fn read_tail_serves_local_when_the_union_exceeds_the_line_cap() {
+        let tmp = TempDir::new().unwrap();
+        let mock = Arc::new(MockArchive::new());
+        let storage = LogStorage::new(tmp.path())
+            .with_archive(Arc::clone(&mock) as Arc<dyn BlobArchive>, String::new())
+            .with_read_config(crate::config::LogReadConfig {
+                merge_max_lines: 1,
+                ..Default::default()
+            });
+        let (job, meta) = (Uuid::new_v4(), test_meta());
+        storage.append_log(job, "a\n").await.unwrap();
+        seed_archive(&mock, job, &meta, "b\n").await;
+        let tail = storage
+            .read_tail(job, &meta, true, StepFilter::All, ALL)
+            .await
+            .unwrap();
+        assert_eq!(
+            (tail.logs.as_str(), tail.source, tail.truncated),
+            ("a\n", LogSource::Local, true)
+        );
+        assert_eq!(tail.total_bytes, 2 + 2 + 2);
+    }
+
+    #[tokio::test]
+    async fn stream_full_chooses_merged_local_archive_or_none() {
+        let meta = test_meta();
+        let (a, b) = (
+            ts_line("2026-06-10T05:00:01Z", "s", "local"),
+            ts_line("2026-06-10T05:00:02Z", "s", "arch"),
+        );
+        // Under the caps → merged.
+        let tmp = TempDir::new().unwrap();
+        let (mock, storage) = mocked(&tmp);
+        let job = Uuid::new_v4();
+        storage.append_log(job, &format!("{a}\n")).await.unwrap();
+        seed_archive(&mock, job, &meta, &format!("{b}\n")).await;
+        assert_eq!(
+            full_text(&storage, job, &meta, true, StepFilter::All).await,
+            (LogSource::Merged, format!("{a}\n{b}\n"))
+        );
+        // Over the byte cap with local present → local.
+        let small = storage
+            .clone()
+            .with_read_config(crate::config::LogReadConfig {
+                merge_max_bytes: 8,
+                max_line_bytes: 8,
+                ..Default::default()
+            });
+        assert_eq!(
+            full_text(&small, job, &meta, true, StepFilter::All).await,
+            (LogSource::Local, format!("{a}\n"))
+        );
+        // Over the cap, local missing → archive.
+        tokio::fs::remove_file(storage.log_path(job)).await.unwrap();
+        assert_eq!(
+            full_text(&small, job, &meta, true, StepFilter::All).await,
+            (LogSource::Archive, format!("{b}\n"))
+        );
+        // Neither → none.
+        assert_eq!(
+            full_text(&storage, Uuid::new_v4(), &meta, true, StepFilter::All).await,
+            (LogSource::None, String::new())
+        );
+        // Non-terminal never merges.
+        let job2 = Uuid::new_v4();
+        storage.append_log(job2, &format!("{a}\n")).await.unwrap();
+        seed_archive(&mock, job2, &meta, &format!("{b}\n")).await;
+        assert_eq!(
+            full_text(&storage, job2, &meta, false, StepFilter::All).await,
+            (LogSource::Local, format!("{a}\n"))
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_full_archive_error_falls_back_to_local() {
+        let tmp = TempDir::new().unwrap();
+        let storage = LogStorage::new(tmp.path()).with_archive(
+            Arc::new(ErroringArchive) as Arc<dyn BlobArchive>,
+            String::new(),
+        );
+        let (job, meta) = (Uuid::new_v4(), test_meta());
+        storage.append_log(job, "a\n").await.unwrap();
+        assert_eq!(
+            full_text(&storage, job, &meta, true, StepFilter::All).await,
+            (LogSource::Local, "a\n".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn step_filter_applies_to_both_modes() {
+        let tmp = TempDir::new().unwrap();
+        let (_mock, storage) = mocked(&tmp);
+        let (job, meta) = (Uuid::new_v4(), test_meta());
+        let (b, t) = (
+            jsonl_line("build", "stdout", "b"),
+            jsonl_line("test", "stdout", "t"),
+        );
+        storage
+            .append_log(job, &format!("{b}\n{t}\n"))
+            .await
+            .unwrap();
+        let tail = storage
+            .read_tail(job, &meta, false, StepFilter::Step("build"), ALL)
+            .await
+            .unwrap();
+        assert_eq!(tail.logs, format!("{b}\n"));
+        assert_eq!(
+            full_text(&storage, job, &meta, false, StepFilter::Step("test"))
+                .await
+                .1,
+            format!("{t}\n")
+        );
     }
 }
