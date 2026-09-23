@@ -90,3 +90,8 @@ aws-sdk-s3 = { version = "1.127", default-features = false, features = ["sigv4a"
 aws-config = "1"
 regex-lite = "0.1"
 serial_test = "3"
+
+# Counting global allocator, one read at a time: needs its own main.
+[[test]]
+name = "log_peak_alloc_test"
+harness = false
