@@ -517,21 +517,8 @@ impl LogStorage {
     }
 
     /// Check if a JSONL line belongs to the given step.
-    ///
-    /// Uses a fast-path `contains` check to avoid JSON parsing for lines that
-    /// cannot possibly match — the vast majority of lines in a multi-step job.
     fn line_matches_step(line: &str, step_name: &str) -> bool {
-        // Fast path: if the step name doesn't appear anywhere in the line there
-        // is no need to parse the JSON at all.
-        if !line.contains(step_name) {
-            return false;
-        }
-        // Parse only when the step name is present in the raw string.
-        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line) {
-            parsed.get("step").and_then(|s| s.as_str()) == Some(step_name)
-        } else {
-            false
-        }
+        crate::log_read::matcher::line_matches_step(line, step_name)
     }
 
     /// Download from archive, decompress, and return only lines matching `step_name`.
