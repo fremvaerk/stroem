@@ -32,7 +32,15 @@ to local when present, else an empty `LogSource::None` response, instead
 of aborting an already-started body; priming's extra `BufReader` adds one
 more `K` to the unfiltered single-source archive stream's peak, `R + H + D
 + 3 K` → `R + H + D + 4 K` (the filtered branch already read through a
-`BufReader` it reuses for priming, so its own formula is unchanged).
+`BufReader` it reuses for priming, so priming itself adds nothing there —
+but counting that branch's buffers precisely catches a separate,
+pre-existing error: its peak is `R + H + D + 3 K + 5 L`, not the
+previously stated `R + H + D + K + 5 L`, since two live output buffers of
+`K + L + 1` bytes each — the chunk just yielded, still being sent, and
+the next already being filled — contribute `2 K` the old figure missed,
+exactly as revision 7 counted for the local filtered case; the
+peak-allocation test's `full_archive(l, true)` already asserted the
+correct value, only the spec's own arithmetic was wrong).
 § 5's fixture (d) is corrected: a MATCHING line can only reach `~L` of
 matcher scratch, not `2 L` — matching this fixture's design needs the
 decoded step name to also appear literally elsewhere in the line (to pass
@@ -720,8 +728,12 @@ instead of committing a 200 and then aborting the body. `source: local` or
 `archive`; the docs state that neither is guaranteed complete. Peak: local
 as in § 3.2; archive **R + H + D + 4 K** unfiltered (the decoder's own
 reader, the priming `BufReader`, and two `K` output buffers), **R + H + D
-+ K + 5 L** filtered (the same `BufReader`, reused for priming, then
-`acc`, scratch, two `L + 1` output buffers).
++ 3 K + 5 L** filtered (revision 8, corrected: the same `BufReader`,
+reused for priming, contributes one `K`; two live output buffers of
+`K + L + 1` bytes each — the chunk just yielded, still being sent, and
+the next one already being filled — contribute the other `2 K` and
+`2 L`, the same accounting revision 7 gave the local filtered case;
+`acc` (`L`) and matcher scratch (`2 L`) make up the rest).
 
 Non-terminal jobs never touch the archive (unchanged; the upload happens at
 terminal time, so a pre-terminal archive read is a guaranteed miss).
@@ -753,7 +765,7 @@ test (§ 5) asserts each mode's measured peak `<=` its formula × 1.5; the
 | Tail, terminal, merged | `11 T + 3 L + R + H + D + K + M + 256`, `M <= 2 T + 96 N'` | 7.8 MiB + `96 N'` (≤ 12 MiB adversarial; ~0.2 MiB typical) → 19.8 MiB | 56.6 MiB + 12 MiB → 68.6 MiB |
 | Full, unfiltered, local | `2 K` | 0.2 MiB | 0.2 MiB |
 | Full, filtered, local | `5 L + 2 K` | 5.2 MiB | 5.2 MiB |
-| Full, archive, single source | `R + H + D + 4 K` (revision 8; `R + H + D + K + 5 L` filtered, unchanged) | 1.8 MiB (6.6 MiB) | same |
+| Full, archive, single source | `R + H + D + 4 K` (revision 8; `R + H + D + 3 K + 5 L` filtered — corrected, see § 3.3) | 1.8 MiB (6.7 MiB) | same |
 | Full, terminal, merged | `3 C + 96 N + R + H + D + K` | 61.6 MiB | 61.6 MiB |
 
 With defaults, a UI poll costs at most 5.3 MiB and the most expensive read

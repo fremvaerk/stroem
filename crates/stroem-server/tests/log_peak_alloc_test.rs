@@ -110,10 +110,21 @@ fn full_local_filtered(l: usize) -> usize {
     5 * l + 4 * K
 }
 fn full_archive(l: usize, filtered: bool) -> usize {
-    // Priming (C6) adds one more `K`-sized `BufReader` in front of the
-    // decoder for the UNFILTERED branch (the filtered branch already reads
-    // through a `BufReader` it reuses for priming, so its own term is
-    // unchanged): `R + H + D + 3K` -> `R + H + D + 4K`.
+    // Both branches share R + H + D + K: the range buffer, hyper/SDK
+    // connection buffering, the decoder's inflate state, and the one
+    // K-sized BufReader wrapping the decoder -- reused for priming (C6),
+    // so it costs the same whether or not the read is filtered.
+    //
+    // Unfiltered: priming (C6) added this BufReader in front of a decoder
+    // that ReaderStream previously read directly, plus ReaderStream's own
+    // K-sized output buffer: R + H + D + K + 2K = R + H + D + 3K.
+    //
+    // Filtered: the BufReader already existed before C6 (priming adds
+    // nothing extra there); LineSplitter's `acc` (L) + matcher scratch
+    // (2L) + two live output buffers of K + L + 1 bytes each (the chunk
+    // just yielded, still being sent, and the next already being filled --
+    // the same accounting full_local_filtered gives the local case)
+    // contribute 2K + 5L: R + H + D + K + 2K + 5L = R + H + D + 3K + 5L.
     R + H + D + 3 * K + if filtered { 5 * l } else { K }
 }
 fn full_merged(c: usize, n: usize) -> usize {
