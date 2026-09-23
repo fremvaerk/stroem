@@ -115,11 +115,11 @@ Every log read is bounded. A read returns either a **tail** — the newest whole
 | Job | Tail | Full |
 |---|---|---|
 | running | local file | local file |
-| finished, archive configured | union of the local and archived tails (`merged`) | union in memory while local + archive ≤ `merge_max_bytes` and ≤ `merge_max_lines`; otherwise the local file, or the archive when there is no local file |
+| finished, archive configured | union of the local and archived tails (`merged`) while the union fits `merge_max_lines`; otherwise the local tail | union in memory while local + archive ≤ `merge_max_bytes` and ≤ `merge_max_lines`; otherwise the local file, or the archive when there is no local file |
 
 Neither source is guaranteed complete on its own (mirroring gaps, lines written after the archive upload), which is why finished jobs merge them when the caps allow. `X-Stroem-Log-Source` says which source answered. A full stream that fails part-way ends early; there is no fallback once the response has started.
 
-**Memory.** The limits above bound what one read can allocate. The largest read a client can trigger (a 4 MiB tail of a finished job with very short lines) is about 69 MiB; a normal UI poll is under 6 MiB. On a server with a 512 Mi memory limit set `log_storage.read.tail_max_bytes: 1048576`.
+**Memory.** The limits above bound what one read can allocate. The largest read a client can trigger (a 4 MiB tail of a finished job with very short lines) is about 69 MiB; a normal UI poll is under 6 MiB. These bounds are **per read** — concurrent readers multiply them: each open job page polls its own tail, and each "Load full log" of a finished job under the merge caps can hold up to about `merge_max_bytes` × 3 plus line overhead while it streams to a slow client. Budget server memory for the number of job pages you expect open at once, not just for one read. On a server with a 512 Mi memory limit set `log_storage.read.tail_max_bytes: 1048576`.
 
 **Behaviour change.** Scripts reading `logs` from `/api/jobs/{id}/logs` now receive the tail; check `truncated`, or use `?full=true`. Older `stroem-api` binaries print the tail without a note. WebSocket clients receive a tail as the first frame.
 
@@ -131,7 +131,7 @@ Real-time log streaming is available via WebSocket:
 GET /api/jobs/{id}/logs/stream
 ```
 
-On connect, the server sends the default tail (`read_tail`, see [Reading logs](#reading-logs)) as backfill, then streams new log chunks as they arrive from workers.
+On connect, the server sends the default tail (`read_tail`, see [Reading logs](#reading-logs)) as backfill, then streams new log chunks as they arrive from workers. For a finished job with an archive, that backfill waits for the archived tail — the gzip object is decompressed from its start — so connecting to a big finished job can take a moment before the first frame arrives.
 
 ```bash
 websocat ws://localhost:8080/api/jobs/JOB_ID/logs/stream

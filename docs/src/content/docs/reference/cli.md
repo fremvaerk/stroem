@@ -156,6 +156,8 @@ stroem-api logs <job-id> --tail-bytes 1048576
 
 `--full` and `--tail-bytes` are mutually exclusive.
 
+Against a server older than this release, `--full` receives the old full-log JSON body (no streaming) and holds it in memory before printing, instead of streaming NDJSON.
+
 ### `jobs`
 
 List recent jobs.
