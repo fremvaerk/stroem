@@ -140,7 +140,7 @@ describe("JobDetailPage — Re-run and Restart availability", () => {
     vi.mocked(getTaskStats).mockRejectedValue(new Error("no stats"));
     vi.mocked(listJobArtifacts).mockResolvedValue([]);
     vi.mocked(listWorkers).mockResolvedValue({ items: [], total: 0 });
-    vi.mocked(getStepLogs).mockResolvedValue({ logs: "" });
+    vi.mocked(getStepLogs).mockResolvedValue({ logs: "", truncated: false, total_bytes: 0, returned_bytes: 0 });
     mockGetTask.mockResolvedValue(task(true));
   });
 

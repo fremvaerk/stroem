@@ -17,6 +17,7 @@ import type {
   CreateApiKeyResponse,
   TaskStatsResponse,
 } from "./types";
+import { saveBlob } from "./download";
 
 // The refresh token is stored in an HttpOnly cookie managed by the server.
 // The browser sends it automatically on requests to /api/auth/* when
@@ -340,8 +341,8 @@ export async function getJob(id: string): Promise<JobDetail> {
 
 export async function getJobLogs(
   id: string,
-): Promise<{ logs: string }> {
-  return apiFetch<{ logs: string }>(`/api/jobs/${id}/logs`);
+): Promise<LogTail> {
+  return apiFetch<LogTail>(`/api/jobs/${id}/logs`);
 }
 
 // Artifacts
@@ -469,13 +470,65 @@ export async function restartJob(
   );
 }
 
-export async function getStepLogs(
+/** A bounded read of a log's end (spec 2026-09-22-log-tail-streaming § 3.1). */
+export interface LogTail {
+  logs: string;
+  /** Something that exists was left out; `false` is exact. */
+  truncated: boolean;
+  /** Upper bound on the size of the whole job log. */
+  total_bytes: number;
+  returned_bytes: number;
+}
+
+function stepLogsUrl(jobId: string, stepName: string): string {
+  return `/api/jobs/${jobId}/steps/${encodeURIComponent(stepName)}/logs`;
+}
+
+/** The end of a step's log. Older servers answer `{logs}` only; the
+ * missing fields then mean "complete". */
+export async function getStepLogs(jobId: string, stepName: string): Promise<LogTail> {
+  const data = await apiFetch<Partial<LogTail>>(stepLogsUrl(jobId, stepName));
+  const logs = data.logs ?? "";
+  return {
+    logs,
+    truncated: data.truncated ?? false,
+    total_bytes: data.total_bytes ?? logs.length,
+    returned_bytes: data.returned_bytes ?? logs.length,
+  };
+}
+
+/** The whole step log, streamed; `onProgress` gets the bytes received. */
+export async function getStepLogsFull(
   jobId: string,
   stepName: string,
-): Promise<{ logs: string }> {
-  return apiFetch<{ logs: string }>(
-    `/api/jobs/${jobId}/steps/${encodeURIComponent(stepName)}/logs`,
-  );
+  onProgress?: (bytes: number) => void,
+): Promise<string> {
+  const res = await apiFetchRaw(`${stepLogsUrl(jobId, stepName)}?full=true`);
+  if ((res.headers.get("content-type") ?? "").includes("application/json")) {
+    // A server without `full=true` answers with the tail envelope.
+    const body = (await res.json()) as { logs?: string };
+    return body.logs ?? "";
+  }
+  if (!res.body) return res.text();
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  const parts: string[] = [];
+  let received = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    received += value.byteLength;
+    parts.push(decoder.decode(value, { stream: true }));
+    onProgress?.(received);
+  }
+  parts.push(decoder.decode());
+  return parts.join("");
+}
+
+/** Save the whole step log as `<job8>-<step>.jsonl`. */
+export async function downloadStepLog(jobId: string, stepName: string): Promise<void> {
+  const res = await apiFetchRaw(`${stepLogsUrl(jobId, stepName)}?full=true`);
+  saveBlob(await res.blob(), `${jobId.slice(0, 8)}-${stepName}.jsonl`);
 }
 
 // API Keys
