@@ -175,6 +175,122 @@ describe("useStepLog", () => {
     expect(result.current.lines).toEqual(["a", "b", "c", "d"]);
   });
 
+  it("stitches every tail fetched during a load, in request order, across two polls", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    getStepLogs
+      .mockResolvedValueOnce(tail("c\nd\n", { truncated: true }))
+      .mockResolvedValueOnce(tail("d\ne\n", { truncated: true }))
+      .mockResolvedValue(tail("f\ng\n", { truncated: true }));
+    let resolveFull!: (text: string) => void;
+    const full = new Promise<string>((resolve) => {
+      resolveFull = resolve;
+    });
+    getStepLogsFull.mockReturnValueOnce(full);
+    const { result } = renderHook(() => useStepLog("j", "build", { enabled: true, pollMs: 2000 }));
+    await waitFor(() => expect(result.current.truncated).toBe(true));
+
+    act(() => {
+      result.current.loadFull();
+    });
+    expect(result.current.fullState).toBe("loading");
+
+    // Two polls land, back to back, while the full-log request is pending.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4100);
+    });
+    expect(getStepLogs.mock.calls.length).toBeGreaterThanOrEqual(3);
+
+    await act(async () => {
+      resolveFull("a\nb\nc\nd\n");
+      await full;
+    });
+    await waitFor(() => expect(result.current.fullState).toBe("loaded"));
+    // Both polls are kept (not just the last one) and in request order; they
+    // share no line with each other, so a gap marker separates them.
+    expect(result.current.lines).toEqual(["a", "b", "c", "d", "e", LOG_GAP_MARKER, "f", "g"]);
+  });
+
+  it("stitches every tail fetched during a RELOAD the same way, without touching the stale full view mid-load", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    getStepLogs.mockResolvedValue(tail("c\nd\n", { truncated: true }));
+    getStepLogsFull.mockResolvedValueOnce("a\nb\nc\nd\n");
+    const { result } = renderHook(() => useStepLog("j", "build", { enabled: true, pollMs: 2000 }));
+    await waitFor(() => expect(result.current.truncated).toBe(true));
+
+    // First load completes normally.
+    await act(async () => {
+      result.current.loadFull();
+    });
+    await waitFor(() => expect(result.current.fullState).toBe("loaded"));
+    expect(result.current.lines).toEqual(["a", "b", "c", "d"]);
+
+    // Reload: a new deferred full-log request, with two polls landing while
+    // it's pending — same shape as the first-load case above.
+    getStepLogs
+      .mockResolvedValueOnce(tail("d\ne\n", { truncated: true }))
+      .mockResolvedValue(tail("f\ng\n", { truncated: true }));
+    let resolveFull!: (text: string) => void;
+    const full = new Promise<string>((resolve) => {
+      resolveFull = resolve;
+    });
+    getStepLogsFull.mockReturnValueOnce(full);
+
+    act(() => {
+      result.current.loadFull();
+    });
+    expect(result.current.fullState).toBe("loading");
+    // The stale full view from the first load stays on screen untouched
+    // while the reload is in flight — the polls below must not append to it.
+    expect(result.current.lines).toEqual(["a", "b", "c", "d"]);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4100);
+    });
+
+    await act(async () => {
+      resolveFull("a\nb\nc\nd\n");
+      await full;
+    });
+    await waitFor(() => expect(result.current.fullState).toBe("loaded"));
+    expect(result.current.lines).toEqual(["a", "b", "c", "d", "e", LOG_GAP_MARKER, "f", "g"]);
+  });
+
+  it("does not reorder the snapshot when a poll that started before the load resolves, mid-load, with content already inside it", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let resolvePoll!: (value: ReturnType<typeof tail>) => void;
+    const pending = new Promise<ReturnType<typeof tail>>((resolve) => {
+      resolvePoll = resolve;
+    });
+    // The initial mount fetch stays pending — its request started BEFORE
+    // `loadFull` is ever called.
+    getStepLogs.mockReturnValueOnce(pending);
+    let resolveFull!: (text: string) => void;
+    const full = new Promise<string>((resolve) => {
+      resolveFull = resolve;
+    });
+    getStepLogsFull.mockReturnValueOnce(full);
+    const { result } = renderHook(() => useStepLog("j", "build", { enabled: true, pollMs: 2000 }));
+
+    act(() => {
+      result.current.loadFull();
+    });
+    expect(result.current.fullState).toBe("loading");
+
+    // The pre-load poll resolves DURING the load, with lines that sit in
+    // the MIDDLE of the eventual snapshot, not at its end.
+    await act(async () => {
+      resolvePoll(tail("b\nc\n"));
+      await pending;
+    });
+
+    await act(async () => {
+      resolveFull("a\nb\nc\nd\n");
+      await full;
+    });
+    await waitFor(() => expect(result.current.fullState).toBe("loaded"));
+    expect(result.current.lines).toEqual(["a", "b", "c", "d"]);
+  });
+
   it("adopts truncated and the larger bound from an empty poll once a body was seen", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     getStepLogs

@@ -42,14 +42,21 @@ export function useStepLog(jobId: string, stepName: string, { enabled, pollMs }:
   const [downloadError, setDownloadError] = useState(false);
   const hasLogsRef = useRef(false);
   const fullRef = useRef<string[] | null>(null);
-  // Every non-empty poll's split lines, so a tail that arrives while a full
-  // load is in flight can be stitched onto the snapshot once it resolves
-  // (a load in flight has no full view yet, so the ordinary "append to
-  // fullRef" branch below can't catch it). Cleared at the start of each
-  // `loadFull` call so a stale tail from BEFORE that load started — already
-  // reflected, or not, in whatever the load returns — is never replayed
-  // onto an unrelated later load.
-  const tailRef = useRef<string[] | null>(null);
+  // Monotonic counter over every `fetchTail`/`loadFull` REQUEST (assigned
+  // when it starts, not when it resolves), so completions can be ordered by
+  // when they were issued instead of by arrival order.
+  const requestSeqRef = useRef(0);
+  // The sequence number of the in-flight full load, or null when none is
+  // in flight. A poll whose request started after this (its own seq is
+  // greater) is one that ran DURING the load; accumulated in `pendingRef`
+  // instead of the ordinary "append to fullRef" path, because there may be
+  // no full view yet (first load) or only a now-superseded one (reload).
+  const loadSeqRef = useRef<number | null>(null);
+  // Every non-empty poll fetched during the in-flight load, stitched onto
+  // one another in request order as they arrive; `loadFull`'s completion
+  // stitches the whole accumulator onto its snapshot in one go, so nothing
+  // fetched during the load is lost. Reset whenever a load starts or ends.
+  const pendingRef = useRef<string[] | null>(null);
   const generationRef = useRef(0);
 
   // A different step (or job) starts from scratch.
@@ -57,7 +64,9 @@ export function useStepLog(jobId: string, stepName: string, { enabled, pollMs }:
     generationRef.current += 1;
     hasLogsRef.current = false;
     fullRef.current = null;
-    tailRef.current = null;
+    requestSeqRef.current = 0;
+    loadSeqRef.current = null;
+    pendingRef.current = null;
     setTail(null);
     setFullLines(null);
     setFullState("idle");
@@ -79,6 +88,7 @@ export function useStepLog(jobId: string, stepName: string, { enabled, pollMs }:
     async function fetchTail() {
       if (inFlight) return;
       inFlight = true;
+      const seq = ++requestSeqRef.current;
       try {
         const data = await getStepLogs(jobId, stepName);
         if (cancelled) return;
@@ -88,8 +98,12 @@ export function useStepLog(jobId: string, stepName: string, { enabled, pollMs }:
           hasLogsRef.current = true;
           setTail(data);
           const lines = splitLogLines(data.logs);
-          tailRef.current = lines;
-          if (fullRef.current) {
+          if (loadSeqRef.current !== null && seq > loadSeqRef.current) {
+            // Started after the in-flight load began: hold it rather than
+            // touch fullRef (stale during a reload, absent on a first
+            // load) — `loadFull` stitches every held tail on completion.
+            pendingRef.current = pendingRef.current ? appendTail(pendingRef.current, lines).lines : lines;
+          } else if (fullRef.current) {
             const { lines: stitched } = appendTail(fullRef.current, lines);
             fullRef.current = stitched;
             setFullLines(stitched);
@@ -137,27 +151,36 @@ export function useStepLog(jobId: string, stepName: string, { enabled, pollMs }:
       return;
     }
     const generation = generationRef.current;
+    // Requests (not responses) are what order this: a poll whose request
+    // starts after `loadSeq` ran DURING this load, whenever it resolves.
+    const loadSeq = ++requestSeqRef.current;
+    loadSeqRef.current = loadSeq;
+    pendingRef.current = null;
     setFullState("loading");
     setProgressBytes(0);
-    // Only a tail that arrives from here on belongs to THIS load.
-    tailRef.current = null;
     try {
       const text = await getStepLogsFull(jobId, stepName, (n) => {
         if (generationRef.current === generation) setProgressBytes(n);
       });
       if (generationRef.current !== generation) return;
       const lines = splitLogLines(text);
-      // A poll (or the pollMs -> null final fetch) can resolve while this
-      // request is in flight; the snapshot alone would silently drop
-      // whatever it fetched. appendTail is idempotent, so a tail already
-      // reflected in the snapshot is a no-op and a newer one appends
-      // exactly its new lines.
-      const stitched = tailRef.current ? appendTail(lines, tailRef.current).lines : lines;
+      // Stitch every tail that arrived during the load onto the snapshot in
+      // one go. appendTail is idempotent: a tail already reflected at the
+      // snapshot's end is a no-op, a newer one appends exactly its new
+      // lines, and a disjoint one adds a gap marker.
+      const stitched = pendingRef.current ? appendTail(lines, pendingRef.current).lines : lines;
       fullRef.current = stitched;
       setFullLines(stitched);
       setFullState("loaded");
     } catch {
       if (generationRef.current === generation) setFullState("error");
+    } finally {
+      // Guard against a stale, already-superseded load's cleanup clearing
+      // a newer load's (or a newer generation's) in-flight state.
+      if (loadSeqRef.current === loadSeq) {
+        loadSeqRef.current = null;
+        pendingRef.current = null;
+      }
     }
   }, [jobId, stepName, tail]);
 
