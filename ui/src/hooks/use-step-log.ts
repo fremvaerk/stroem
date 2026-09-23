@@ -8,8 +8,9 @@ import type { FullLogState } from "@/components/log-tail-banner";
 export const FULL_LOAD_CONFIRM_BYTES = 64 * 1024 * 1024;
 /** A tail poll that has not answered by then is given up on. */
 export const POLL_TIMEOUT_MS = 30_000;
-/** A full load with no progress for this long is given up on; a slow but
- * moving download is never cut (the timer restarts on every chunk). */
+/** A full load with no progress for this long is given up on; the stall
+ * timer never cuts a slow but moving download (it restarts on every chunk),
+ * though the pending-tail cap in `step-log-state.ts` can. */
 export const FULL_LOAD_STALL_MS = 60_000;
 
 export interface StepLog {
