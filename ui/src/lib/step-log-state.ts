@@ -14,10 +14,11 @@ import { splitLogLines } from "./log-lines";
  *  I1  Only a request this state saw start can change it. A completion
  *      whose seq is not in flight is ignored, and `reset` empties the
  *      in-flight sets, so nothing from an earlier generation ever lands.
- *  I2  `tail` is the newest-by-seq response that carried information: a
- *      body; the first answer before any body; an empty-but-truncated
- *      answer once a body was seen (C3). An older response never replaces
- *      a newer one, and a cold-replica "" carries nothing.
+ *  I2  `body` is the newest-by-seq NON-EMPTY tail; `meta` (truncated, the
+ *      size bound) is from the newest-by-seq response that is non-empty or
+ *      truncated. An empty, untruncated answer — a cold replica, or a truly
+ *      empty log — carries no information: it advances neither and never
+ *      blocks an older response. An older response never replaces a newer.
  *  I3  `full`, when present, is exactly the snapshot with seq `fullSeq`
  *      followed by every non-empty tail with a greater seq, folded with
  *      `appendTail` in ASCENDING seq order — whatever order they arrived
@@ -25,19 +26,46 @@ import { splitLogLines } from "./log-lines";
  *  I4  A non-empty tail is left out of the view only when a snapshot with a
  *      greater seq exists; that snapshot was taken after the tail's
  *      response and so contains it.
- *  I5  A snapshot is replaced only by a snapshot with a greater seq.
+ *  I5  A snapshot is replaced only by a snapshot with a greater seq, and at
+ *      most one load is in flight: starting a load retires every older one.
+ *  I6  History is bounded: `pending` holds only what some in-flight request
+ *      still needs, and past the hard cap the oldest in-flight request is
+ *      abandoned so pruning can advance.
  */
+
+/** Hard cap on `pending` (I6): past either bound the oldest in-flight
+ * request is abandoned. Entries are one per non-empty poll while an older
+ * request is in flight; chars count the retained line text in UTF-16 code
+ * units (bytes, for ASCII logs). */
+export const MAX_PENDING_ENTRIES = 64;
+export const MAX_PENDING_CHARS = 8 * 1024 * 1024;
 
 export interface TailEntry {
   seq: number;
   lines: string[];
+  /** Sum of `lines[i].length`, for the cap. */
+  chars: number;
+}
+
+export interface TailBody {
+  logs: string;
+  returned_bytes: number;
+}
+
+export interface TailMeta {
+  truncated: boolean;
+  total_bytes: number;
 }
 
 export interface StepLogState {
-  /** Newest informative tail response (I2), or null before the first. */
-  tail: LogTail | null;
-  /** Seq of the response `tail` reflects; 0 before any. */
-  tailSeq: number;
+  /** Newest non-empty tail body (I2), or null before the first. */
+  body: TailBody | null;
+  /** Seq of the response `body` reflects; 0 before any. */
+  bodySeq: number;
+  /** Truncation and size bound from the newest informative response (I2). */
+  meta: TailMeta | null;
+  /** Seq of the response `meta` reflects; 0 before any. */
+  metaSeq: number;
   /** The full view (snapshot ⊕ later tails), or null in tail mode. */
   full: string[] | null;
   /** Seq of the snapshot `full` is built on; 0 while `full` is null. */
@@ -69,12 +97,17 @@ export type StepLogEvent =
   | { type: "loadStarted"; seq: number }
   | { type: "loadDone"; seq: number; text: string }
   | { type: "loadFailed"; seq: number }
+  /** The request was given up on without a result (retired, aborted on
+   * unmount, evicted by the cap); not an error. */
+  | { type: "requestAbandoned"; seq: number }
   | { type: "reset" };
 
 export function initialState(): StepLogState {
   return {
-    tail: null,
-    tailSeq: 0,
+    body: null,
+    bodySeq: 0,
+    meta: null,
+    metaSeq: 0,
     full: null,
     fullSeq: 0,
     base: null,
@@ -94,8 +127,13 @@ export function reduce(state: StepLogState, event: StepLogEvent): StepLogState {
       return initialState();
     case "pollStarted":
       return { ...state, inFlightPolls: withSeq(state.inFlightPolls, event.seq) };
-    case "loadStarted":
-      return { ...state, inFlightLoads: withSeq(state.inFlightLoads, event.seq) };
+    case "loadStarted": {
+      // I5: the new load supersedes every older one still in flight — the
+      // newer snapshot would win anyway, so nothing they could deliver is
+      // needed. Retirement is not a failure.
+      const next = retireLoadsBefore(state, event.seq);
+      return prune({ ...next, inFlightLoads: withSeq(next.inFlightLoads, event.seq) });
+    }
     case "pollFailed": {
       if (!state.inFlightPolls.has(event.seq)) return state; // I1
       return prune({ ...state, inFlightPolls: withoutSeq(state.inFlightPolls, event.seq) });
@@ -106,13 +144,14 @@ export function reduce(state: StepLogState, event: StepLogEvent): StepLogState {
       next = applyTail(next, event.seq, event.tail);
       const lines = splitLogLines(event.tail.logs);
       if (lines.length > 0) next = receiveLines(next, event.seq, lines);
-      return prune(next);
+      return enforceCap(prune(next));
     }
     case "loadDone": {
       if (!state.inFlightLoads.has(event.seq)) return state; // I1
-      const next: StepLogState = { ...state, inFlightLoads: withoutSeq(state.inFlightLoads, event.seq) };
+      let next: StepLogState = { ...state, inFlightLoads: withoutSeq(state.inFlightLoads, event.seq) };
       // I5: a newer snapshot already landed; this one is stale.
       if (next.full !== null && event.seq < next.fullSeq) return prune(next);
+      next = retireLoadsBefore(next, event.seq);
       // I3/I4: the snapshot supersedes every tail requested before it and
       // is followed by every tail requested after it, in seq order.
       const base = splitLogLines(event.text);
@@ -129,6 +168,15 @@ export function reduce(state: StepLogState, event: StepLogEvent): StepLogState {
         failedLoadSeq: Math.max(state.failedLoadSeq, event.seq),
       });
     }
+    case "requestAbandoned": {
+      if (state.inFlightPolls.has(event.seq)) {
+        return prune({ ...state, inFlightPolls: withoutSeq(state.inFlightPolls, event.seq) });
+      }
+      if (state.inFlightLoads.has(event.seq)) {
+        return prune({ ...state, inFlightLoads: withoutSeq(state.inFlightLoads, event.seq) });
+      }
+      return state; // I1
+    }
   }
 }
 
@@ -141,23 +189,25 @@ export function fullStateOf(state: StepLogState): FullLogState {
   return state.full !== null ? "loaded" : "idle";
 }
 
-/** I2. Which responses carry information mirrors the pre-model hook: a body
- * always; an empty answer only before any body, or — once a body was seen —
- * when it says `truncated` (C3: adopt the flag and the larger bound, keep
- * the body). A cold-replica "" is ignored and does not advance `tailSeq`,
- * so an older in-flight body is not shadowed by it. */
+/** I2. Body and metadata are tracked separately by seq. A non-empty
+ * response carries both. An empty-but-truncated one (C3: a scan cap or an
+ * over-window newest line) raises `truncated` and the bound but leaves the
+ * body — and its seq — alone. An empty, untruncated one is ignored
+ * entirely, so it can never shadow an older body still in flight. */
 function applyTail(state: StepLogState, seq: number, data: LogTail): StepLogState {
-  if (seq <= state.tailSeq) return state;
-  const hasLogs = state.tail !== null && state.tail.logs !== "";
-  if (data.logs || !hasLogs) return { ...state, tail: data, tailSeq: seq };
-  if (data.truncated && state.tail) {
-    return {
-      ...state,
-      tail: { ...state.tail, truncated: true, total_bytes: Math.max(state.tail.total_bytes, data.total_bytes) },
-      tailSeq: seq,
-    };
+  const nonEmpty = data.logs !== "";
+  if (!nonEmpty && !data.truncated) return state;
+  let next = state;
+  if (nonEmpty && seq > state.bodySeq) {
+    next = { ...next, body: { logs: data.logs, returned_bytes: data.returned_bytes }, bodySeq: seq };
   }
-  return state;
+  if (seq > state.metaSeq) {
+    const meta: TailMeta = nonEmpty
+      ? { truncated: data.truncated, total_bytes: data.total_bytes }
+      : { truncated: true, total_bytes: Math.max(state.meta?.total_bytes ?? 0, data.total_bytes) };
+    next = { ...next, meta, metaSeq: seq };
+  }
+  return next;
 }
 
 /** I3/I4. A tail older than the snapshot is left out (the snapshot contains
@@ -167,7 +217,6 @@ function applyTail(state: StepLogState, seq: number, data: LogTail): StepLogStat
  * so the tails stay in request order. */
 function receiveLines(state: StepLogState, seq: number, lines: string[]): StepLogState {
   if (seq < state.fullSeq) return state;
-  const entry: TailEntry = { seq, lines };
   const last = state.pending[state.pending.length - 1];
   if (!last || last.seq < seq) {
     // A body identical to the previous entry of the same run (no in-flight
@@ -176,12 +225,12 @@ function receiveLines(state: StepLogState, seq: number, lines: string[]): StepLo
     // `pending` at one entry per run for a quiet step while a load is in
     // flight, instead of one per poll.
     if (last && sameLines(last.lines, lines) && !inFlightBetween(state, last.seq, seq)) return state;
-    const pending = [...state.pending, entry];
+    const pending = [...state.pending, entryOf(seq, lines)];
     const full = state.full === null ? null : appendTail(state.full, lines).lines;
     return { ...state, pending, full };
   }
   const at = state.pending.findIndex((e) => e.seq > seq);
-  const pending = [...state.pending.slice(0, at), entry, ...state.pending.slice(at)];
+  const pending = [...state.pending.slice(0, at), entryOf(seq, lines), ...state.pending.slice(at)];
   const full = state.full === null ? null : fold(state.base ?? [], pending);
   return { ...state, pending, full };
 }
@@ -201,6 +250,49 @@ function prune(state: StepLogState): StepLogState {
   return { ...state, base, pending: rest };
 }
 
+/** I6. While `pending` is over the cap, abandon the oldest in-flight
+ * request — the one pinning the history — and prune again. An abandoned
+ * poll is simply gone; an abandoned LOAD is what the user asked for and
+ * will now never arrive, so it counts as a failed load. */
+function enforceCap(state: StepLogState): StepLogState {
+  let next = state;
+  while (overCap(next.pending)) {
+    const oldest = oldestInFlight(next);
+    if (oldest === null) return next;
+    next =
+      oldest.kind === "poll"
+        ? { ...next, inFlightPolls: withoutSeq(next.inFlightPolls, oldest.seq) }
+        : {
+            ...next,
+            inFlightLoads: withoutSeq(next.inFlightLoads, oldest.seq),
+            failedLoadSeq: Math.max(next.failedLoadSeq, oldest.seq),
+          };
+    next = prune(next);
+  }
+  return next;
+}
+
+function overCap(pending: readonly TailEntry[]): boolean {
+  if (pending.length > MAX_PENDING_ENTRIES) return true;
+  let chars = 0;
+  for (const entry of pending) chars += entry.chars;
+  return chars > MAX_PENDING_CHARS;
+}
+
+function retireLoadsBefore(state: StepLogState, seq: number): StepLogState {
+  let loads: ReadonlySet<number> | null = null;
+  for (const s of state.inFlightLoads) {
+    if (s < seq) loads = withoutSeq(loads ?? state.inFlightLoads, s);
+  }
+  return loads === null ? state : { ...state, inFlightLoads: loads };
+}
+
+function entryOf(seq: number, lines: string[]): TailEntry {
+  let chars = 0;
+  for (const line of lines) chars += line.length;
+  return { seq, lines, chars };
+}
+
 function fold(base: string[], entries: readonly TailEntry[]): string[] {
   return entries.reduce((acc, entry) => appendTail(acc, entry.lines).lines, base);
 }
@@ -210,6 +302,13 @@ function minInFlight(state: StepLogState): number {
   for (const seq of state.inFlightPolls) if (seq < min) min = seq;
   for (const seq of state.inFlightLoads) if (seq < min) min = seq;
   return min;
+}
+
+function oldestInFlight(state: StepLogState): { seq: number; kind: "poll" | "load" } | null {
+  let oldest: { seq: number; kind: "poll" | "load" } | null = null;
+  for (const seq of state.inFlightPolls) if (!oldest || seq < oldest.seq) oldest = { seq, kind: "poll" };
+  for (const seq of state.inFlightLoads) if (!oldest || seq < oldest.seq) oldest = { seq, kind: "load" };
+  return oldest;
 }
 
 function inFlightBetween(state: StepLogState, lo: number, hi: number): boolean {

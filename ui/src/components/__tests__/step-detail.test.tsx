@@ -94,7 +94,7 @@ describe("StepDetail carried-over steps", () => {
   it("still fetches logs for a step that actually ran", async () => {
     renderDetail(makeStep({ carried_over: false }));
 
-    await waitFor(() => expect(getStepLogs).toHaveBeenCalledWith("job-1", "build"));
+    await waitFor(() => expect(getStepLogs).toHaveBeenCalledWith("job-1", "build", expect.any(AbortSignal)));
     expect(screen.queryByTestId("carried-over-notice")).not.toBeInTheDocument();
   });
 });
@@ -182,7 +182,9 @@ describe("StepDetail tail banner", () => {
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
     try {
       fireEvent.click(screen.getByRole("button", { name: "Load full log" }));
-      await waitFor(() => expect(getStepLogsFull).toHaveBeenCalledWith("job-1", "build", expect.any(Function)));
+      await waitFor(() =>
+        expect(getStepLogsFull).toHaveBeenCalledWith("job-1", "build", expect.any(Function), expect.any(AbortSignal)),
+      );
       await waitFor(() => expect(screen.getByTestId("log-tail-banner")).toHaveTextContent("Showing the full log"));
     } finally {
       confirmSpy.mockRestore();

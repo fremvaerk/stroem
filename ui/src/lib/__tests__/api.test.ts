@@ -432,4 +432,24 @@ describe("step log reads", () => {
     stubFetch(200, { logs: "old\n" }, { "content-type": "application/json" });
     expect(await getStepLogsFull("j", "build")).toBe("old\n");
   });
+
+  it("getStepLogs hands its signal to fetch", async () => {
+    setAccessToken("t");
+    const fetchMock = vi.fn().mockResolvedValue(makeMockResponse(200, { logs: "a\n" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new AbortController();
+    await getStepLogs("j", "build", controller.signal);
+    expect(fetchMock.mock.calls[0][1].signal).toBe(controller.signal);
+  });
+
+  it("getStepLogsFull hands its signal to fetch", async () => {
+    setAccessToken("t");
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response("a\n", { status: 200, headers: { "content-type": "application/x-ndjson" } }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new AbortController();
+    await getStepLogsFull("j", "build", undefined, controller.signal);
+    expect(fetchMock.mock.calls[0][1].signal).toBe(controller.signal);
+  });
 });

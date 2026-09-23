@@ -485,9 +485,9 @@ function stepLogsUrl(jobId: string, stepName: string): string {
 }
 
 /** The end of a step's log. Older servers answer `{logs}` only; the
- * missing fields then mean "complete". */
-export async function getStepLogs(jobId: string, stepName: string): Promise<LogTail> {
-  const data = await apiFetch<Partial<LogTail>>(stepLogsUrl(jobId, stepName));
+ * missing fields then mean "complete". `signal` aborts the request. */
+export async function getStepLogs(jobId: string, stepName: string, signal?: AbortSignal): Promise<LogTail> {
+  const data = await apiFetch<Partial<LogTail>>(stepLogsUrl(jobId, stepName), { signal });
   const logs = data.logs ?? "";
   return {
     logs,
@@ -497,13 +497,15 @@ export async function getStepLogs(jobId: string, stepName: string): Promise<LogT
   };
 }
 
-/** The whole step log, streamed; `onProgress` gets the bytes received. */
+/** The whole step log, streamed; `onProgress` gets the bytes received.
+ * `signal` aborts the request, including a stream already being read. */
 export async function getStepLogsFull(
   jobId: string,
   stepName: string,
   onProgress?: (bytes: number) => void,
+  signal?: AbortSignal,
 ): Promise<string> {
-  const res = await apiFetchRaw(`${stepLogsUrl(jobId, stepName)}?full=true`);
+  const res = await apiFetchRaw(`${stepLogsUrl(jobId, stepName)}?full=true`, { signal });
   if ((res.headers.get("content-type") ?? "").includes("application/json")) {
     // A server without `full=true` answers with the tail envelope.
     const body = (await res.json()) as { logs?: string };

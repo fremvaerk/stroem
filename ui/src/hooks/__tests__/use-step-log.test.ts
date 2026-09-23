@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { renderHook, act, waitFor } from "@testing-library/react";
-import { useStepLog } from "../use-step-log";
+import { FULL_LOAD_STALL_MS, POLL_TIMEOUT_MS, useStepLog } from "../use-step-log";
 import { LOG_GAP_MARKER } from "@/lib/log-lines";
 
 const getStepLogs = vi.fn();
@@ -386,12 +386,10 @@ describe("useStepLog", () => {
     expect(result.current.lines).toEqual(["a", "b", "c", "d"]);
   });
 
-  it.each([
-    ["the newer load completes first", "L2 then L1"],
-    ["the older load completes first", "L1 then L2"],
-  ])("two concurrent full loads: %s, the newer request's snapshot is what stays", async (_, order) => {
+  it("starting a reload retires the previous load: its signal is aborted and its result is ignored", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     getStepLogs.mockResolvedValueOnce(tail("c\nd\n", { truncated: true })).mockResolvedValue(tail("e\nf\n", { truncated: true }));
+    const signals: AbortSignal[] = [];
     let resolveL1!: (text: string) => void;
     const l1 = new Promise<string>((resolve) => {
       resolveL1 = resolve;
@@ -400,46 +398,228 @@ describe("useStepLog", () => {
     const l2 = new Promise<string>((resolve) => {
       resolveL2 = resolve;
     });
-    getStepLogsFull.mockReturnValueOnce(l1).mockReturnValueOnce(l2);
+    getStepLogsFull
+      .mockImplementationOnce((_j: string, _s: string, _p: unknown, signal: AbortSignal) => {
+        signals.push(signal);
+        return l1;
+      })
+      .mockImplementationOnce((_j: string, _s: string, _p: unknown, signal: AbortSignal) => {
+        signals.push(signal);
+        return l2;
+      });
     const { result } = renderHook(() => useStepLog("j", "build", { enabled: true, pollMs: 2000 }));
     await waitFor(() => expect(result.current.truncated).toBe(true));
 
     act(() => {
       result.current.loadFull();
     });
+    expect(signals[0].aborted).toBe(false);
     act(() => {
       result.current.loadFull();
     });
     expect(getStepLogsFull).toHaveBeenCalledTimes(2);
-    // A poll newer than both loads lands while they are in flight.
+    expect(signals[0].aborted).toBe(true);
+    expect(signals[1].aborted).toBe(false);
+    expect(result.current.fullState).toBe("loading");
+
+    // A poll newer than both loads lands while the second is in flight.
     await act(async () => {
       await vi.advanceTimersByTimeAsync(2100);
     });
 
-    const finishL1 = async () => {
-      await act(async () => {
-        resolveL1("a\nb\nc\nd\n");
-        await l1;
-      });
-    };
-    const finishL2 = async () => {
-      await act(async () => {
-        resolveL2("a\nb\nc\nd\ne\n");
-        await l2;
-      });
-    };
-    if (order === "L2 then L1") {
-      await finishL2();
-      expect(result.current.fullState).toBe("loading");
-      expect(result.current.lines).toEqual(["a", "b", "c", "d", "e", "f"]);
-      await finishL1();
-    } else {
-      await finishL1();
-      expect(result.current.lines).toEqual(["a", "b", "c", "d", LOG_GAP_MARKER, "e", "f"]);
-      await finishL2();
-    }
+    // The retired load's transport answers anyway: nothing changes.
+    await act(async () => {
+      resolveL1("x\ny\n");
+      await l1;
+    });
+    expect(result.current.fullState).toBe("loading");
+    expect(result.current.lines).toEqual(["e", "f"]);
+
+    await act(async () => {
+      resolveL2("a\nb\nc\nd\ne\n");
+      await l2;
+    });
     await waitFor(() => expect(result.current.fullState).toBe("loaded"));
     expect(result.current.lines).toEqual(["a", "b", "c", "d", "e", "f"]);
+  });
+
+  it("aborts a poll that never answers after 30 s and keeps polling", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let signal!: AbortSignal;
+    getStepLogs
+      .mockImplementationOnce((_j: string, _s: string, s: AbortSignal) => {
+        signal = s;
+        return new Promise(() => {});
+      })
+      .mockResolvedValue(tail("a\n"));
+    const { result } = renderHook(() => useStepLog("j", "build", { enabled: true, pollMs: 2000 }));
+    expect(signal).toBeInstanceOf(AbortSignal);
+
+    // Many intervals elapse while the first poll hangs: no overlap, no abort yet.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(POLL_TIMEOUT_MS - 1000);
+    });
+    expect(getStepLogs).toHaveBeenCalledTimes(1);
+    expect(signal.aborted).toBe(false);
+    expect(result.current.loading).toBe(true);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1100);
+    });
+    expect(signal.aborted).toBe(true);
+    expect(result.current.loading).toBe(false);
+
+    // Polling resumes on the next interval.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2100);
+    });
+    expect(getStepLogs.mock.calls.length).toBeGreaterThanOrEqual(2);
+    await waitFor(() => expect(result.current.lines).toEqual(["a"]));
+  });
+
+  it("fails a full load that makes no progress for 60 s", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    getStepLogs.mockResolvedValue(tail("a\n", { truncated: true }));
+    let signal!: AbortSignal;
+    getStepLogsFull.mockImplementationOnce((_j: string, _s: string, _p: unknown, s: AbortSignal) => {
+      signal = s;
+      return new Promise(() => {});
+    });
+    const { result } = renderHook(() => useStepLog("j", "build", { enabled: true, pollMs: null }));
+    await waitFor(() => expect(result.current.truncated).toBe(true));
+    act(() => {
+      result.current.loadFull();
+    });
+    expect(result.current.fullState).toBe("loading");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(FULL_LOAD_STALL_MS - 1000);
+    });
+    expect(signal.aborted).toBe(false);
+    expect(result.current.fullState).toBe("loading");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1100);
+    });
+    expect(signal.aborted).toBe(true);
+    await waitFor(() => expect(result.current.fullState).toBe("error"));
+    expect(result.current.lines).toEqual(["a"]);
+  });
+
+  it("does not abort a load that keeps making progress for longer than the stall timeout", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    getStepLogs.mockResolvedValue(tail("a\n", { truncated: true }));
+    let signal!: AbortSignal;
+    let onProgress!: (n: number) => void;
+    let resolveFull!: (text: string) => void;
+    const full = new Promise<string>((resolve) => {
+      resolveFull = resolve;
+    });
+    getStepLogsFull.mockImplementationOnce((_j: string, _s: string, p: (n: number) => void, s: AbortSignal) => {
+      signal = s;
+      onProgress = p;
+      return full;
+    });
+    const { result } = renderHook(() => useStepLog("j", "build", { enabled: true, pollMs: null }));
+    await waitFor(() => expect(result.current.truncated).toBe(true));
+    act(() => {
+      result.current.loadFull();
+    });
+
+    // A chunk every 10 s for 90 s: well past 60 s in total, never 60 s idle.
+    for (let i = 1; i <= 9; i++) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10_000);
+      });
+      act(() => {
+        onProgress(i * 1000);
+      });
+    }
+    expect(signal.aborted).toBe(false);
+    expect(result.current.fullState).toBe("loading");
+    expect(result.current.progressBytes).toBe(9000);
+
+    await act(async () => {
+      resolveFull("a\nb\n");
+      await full;
+    });
+    await waitFor(() => expect(result.current.fullState).toBe("loaded"));
+    expect(result.current.lines).toEqual(["a", "b"]);
+  });
+
+  it("aborts every in-flight request on unmount", async () => {
+    let pollSignal!: AbortSignal;
+    let loadSignal!: AbortSignal;
+    getStepLogs.mockImplementation((_j: string, _s: string, s: AbortSignal) => {
+      pollSignal = s;
+      return new Promise(() => {});
+    });
+    getStepLogsFull.mockImplementation((_j: string, _s: string, _p: unknown, s: AbortSignal) => {
+      loadSignal = s;
+      return new Promise(() => {});
+    });
+    const { result, unmount } = renderHook(() => useStepLog("j", "build", { enabled: true, pollMs: 2000 }));
+    act(() => {
+      result.current.loadFull();
+    });
+    expect(pollSignal.aborted).toBe(false);
+    expect(loadSignal.aborted).toBe(false);
+    unmount();
+    expect(pollSignal.aborted).toBe(true);
+    expect(loadSignal.aborted).toBe(true);
+  });
+
+  it("aborts the old step's requests when the step changes", async () => {
+    const signals = new Map<string, AbortSignal>();
+    getStepLogs.mockImplementation((_j: string, step: string, s: AbortSignal) => {
+      signals.set(step, s);
+      return step === "a" ? new Promise(() => {}) : Promise.resolve(tail("b-line\n"));
+    });
+    const { result, rerender } = renderHook(
+      ({ step }) => useStepLog("j", step, { enabled: true, pollMs: null }),
+      { initialProps: { step: "a" } },
+    );
+    expect(signals.get("a")?.aborted).toBe(false);
+    rerender({ step: "b" });
+    await waitFor(() => expect(result.current.lines).toEqual(["b-line"]));
+    expect(signals.get("a")?.aborted).toBe(true);
+    expect(signals.get("b")?.aborted).toBe(false);
+  });
+
+  it("accepts an older body that lands after an empty final poll from a cold replica", async () => {
+    let resolveFirst!: (value: ReturnType<typeof tail>) => void;
+    const first = new Promise<ReturnType<typeof tail>>((resolve) => {
+      resolveFirst = resolve;
+    });
+    // The first poll is pending when the step goes terminal; the final
+    // fetch lands on a replica without this job's chunks.
+    getStepLogs.mockReturnValueOnce(first).mockResolvedValue(tail(""));
+    const { result, rerender } = renderHook(
+      ({ pollMs }: { pollMs: number | null }) => useStepLog("j", "_server", { enabled: true, pollMs }),
+      { initialProps: { pollMs: 3000 as number | null } },
+    );
+    rerender({ pollMs: null });
+    await waitFor(() => expect(getStepLogs).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.lines).toEqual([]);
+
+    await act(async () => {
+      resolveFirst(tail("known log\n"));
+      await first;
+    });
+    expect(result.current.lines).toEqual(["known log"]);
+    expect(result.current.truncated).toBe(false);
+    expect(result.current.returnedBytes).toBe("known log\n".length);
+  });
+
+  it("shows nothing, and no truncation, for a truly empty log", async () => {
+    getStepLogs.mockResolvedValue(tail(""));
+    const { result } = renderHook(() => useStepLog("j", "build", { enabled: true, pollMs: null }));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.lines).toEqual([]);
+    expect(result.current.truncated).toBe(false);
+    expect(result.current.totalBytes).toBe(0);
+    expect(result.current.fullState).toBe("idle");
   });
 
   it("does not reorder the snapshot when a poll that started before the load resolves, mid-load, with content already inside it", async () => {
