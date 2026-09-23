@@ -83,6 +83,7 @@ export function LogViewer({ logs, isStreaming, header }: LogViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const probeRef = useRef<HTMLSpanElement>(null);
   const autoScrollRef = useRef(true);
+  const [following, setFollowing] = useState(true);
   const [charsPerRow, setCharsPerRow] = useState(DEFAULT_CHARS_PER_ROW);
   const lines = useMemo(() => (typeof logs === "string" ? splitLogLines(logs) : logs), [logs]);
 
@@ -123,7 +124,9 @@ export function LogViewer({ logs, isStreaming, header }: LogViewerProps) {
   function handleScroll() {
     const el = containerRef.current;
     if (!el) return;
-    autoScrollRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    autoScrollRef.current = atBottom;
+    setFollowing((prev) => (prev === atBottom ? prev : atBottom));
   }
 
   return (
@@ -147,7 +150,7 @@ export function LogViewer({ logs, isStreaming, header }: LogViewerProps) {
           onScroll={handleScroll}
           role="log"
           aria-label="Job execution logs"
-          aria-live="polite"
+          aria-live={following ? "polite" : "off"}
           className="relative max-h-[500px] min-h-[200px] overflow-auto rounded-lg bg-zinc-950 p-4 font-mono text-xs leading-relaxed"
         >
           <span ref={probeRef} aria-hidden="true" className="invisible absolute whitespace-pre">

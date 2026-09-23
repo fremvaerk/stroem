@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 import { LogViewer } from "../log-viewer";
 import { LOG_GAP_MARKER } from "@/lib/log-lines";
 
@@ -62,5 +62,22 @@ describe("LogViewer", () => {
     render(<LogViewer logs="" isStreaming header={<div>banner here</div>} />);
     expect(screen.getByText("banner here")).toBeInTheDocument();
     expect(screen.getByText("Log streaming is active")).toBeInTheDocument();
+  });
+
+  it("mutes the live region while the user has scrolled away from the end", () => {
+    const lines = Array.from({ length: 50 }, (_, i) => jsonl(i));
+    render(<LogViewer logs={lines} isStreaming={false} />);
+    const el = screen.getByRole("log");
+    expect(el).toHaveAttribute("aria-live", "polite");
+
+    Object.defineProperty(el, "scrollHeight", { configurable: true, value: 2000 });
+    Object.defineProperty(el, "clientHeight", { configurable: true, value: 500 });
+    Object.defineProperty(el, "scrollTop", { configurable: true, value: 0 });
+    fireEvent.scroll(el);
+    expect(el).toHaveAttribute("aria-live", "off");
+
+    Object.defineProperty(el, "scrollTop", { configurable: true, value: 1500 });
+    fireEvent.scroll(el);
+    expect(el).toHaveAttribute("aria-live", "polite");
   });
 });
