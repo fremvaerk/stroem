@@ -258,6 +258,14 @@ async fn line_ring_tail<R: tokio::io::AsyncBufRead + Unpin>(
                 }
                 let need = line.len() + 1;
                 if need > cap {
+                    // This match alone doesn't fit the window: an unfiltered
+                    // byte ring would have evicted everything before it too
+                    // (the same forward eviction the `else` branch below
+                    // performs when a smaller match doesn't fit next to
+                    // what's already held), so every match collected so far
+                    // is now behind a span wider than the whole budget and
+                    // must be dropped, not just this one line.
+                    ring.clear();
                     truncated = true;
                     continue;
                 }
@@ -429,6 +437,13 @@ mod tests {
             .collect()
     }
 
+    /// A JSONL line for `step` of exactly `len` bytes, newline excluded.
+    fn sized(step: &str, len: usize) -> String {
+        let base = format!(r#"{{"step":"{step}","line":""}}"#).len();
+        assert!(len >= base, "line too short for step {step}");
+        format!(r#"{{"step":"{step}","line":"{}"}}"#, "x".repeat(len - base))
+    }
+
     #[tokio::test]
     async fn unfiltered_tail_keeps_the_newest_whole_lines() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -510,6 +525,33 @@ mod tests {
         let t = tail(store, obj, Some("a"), 1 << 20, 100).await.unwrap();
         assert_eq!(t.logs, format!("{}\n", jl("a", "ok")));
         assert!(t.truncated);
+    }
+
+    #[tokio::test]
+    async fn filtered_tail_drops_older_matches_behind_a_match_larger_than_the_window() {
+        // A match that alone needs more than the whole window must evict
+        // everything collected before it, the same as the unfiltered byte
+        // ring: `[A, B(too big), C]` keeps only `C`, matching what a local
+        // scan (which stops entirely once a match can't fit) and the
+        // unfiltered ring (which would have overwritten `A` with the tail
+        // of `B`) both return.
+        let dir = tempfile::TempDir::new().unwrap();
+        let (a, b, c) = (sized("a", 30), sized("a", 200), sized("a", 30));
+        let content = format!("{a}\n{b}\n{c}\n");
+        let (store, obj) = put(&dir, gzip(content.as_bytes())).await;
+        let t = tail(store, obj, Some("a"), 100, 1024).await.unwrap();
+        assert_eq!(t.logs, format!("{c}\n"));
+        assert!(t.truncated);
+    }
+
+    #[tokio::test]
+    async fn filtered_tail_over_window_match_with_nothing_after_it_is_empty() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (a, b) = (sized("a", 30), sized("a", 200));
+        let content = format!("{a}\n{b}\n");
+        let (store, obj) = put(&dir, gzip(content.as_bytes())).await;
+        let t = tail(store, obj, Some("a"), 100, 1024).await.unwrap();
+        assert_eq!((t.logs.as_str(), t.truncated), ("", true));
     }
 
     #[tokio::test]

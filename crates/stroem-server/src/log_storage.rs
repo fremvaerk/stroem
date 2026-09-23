@@ -525,6 +525,15 @@ mod tests {
     use tempfile::TempDir;
     use tokio::sync::Mutex as TokioMutex;
 
+    /// A JSONL line for `step` of exactly `len` bytes, newline excluded --
+    /// mirrors `log_read::archive::tests::sized`, duplicated here since
+    /// there is no shared test module across files in this crate.
+    fn sized_step_line(step: &str, len: usize) -> String {
+        let base = format!(r#"{{"step":"{step}","line":""}}"#).len();
+        assert!(len >= base, "line too short for step {step}");
+        format!(r#"{{"step":"{step}","line":"{}"}}"#, "x".repeat(len - base))
+    }
+
     fn jsonl_line(step: &str, stream: &str, line: &str) -> String {
         serde_json::json!({
             "ts": "2025-02-12T10:00:00Z",
@@ -2043,6 +2052,45 @@ mod tests {
             ("a\n", LogSource::Local, true)
         );
         assert_eq!(tail.total_bytes, 2 + 2 + 2);
+    }
+
+    #[tokio::test]
+    async fn read_tail_terminal_step_tail_matches_local_across_an_oversize_match() {
+        // C4 regression: when the archive holds the same content as the
+        // local file, the archive's forward scan and the local backward
+        // scan must agree on which lines an over-window match evicts, or
+        // the union "recovers" an older line the local-only view would
+        // never show.
+        let tmp = TempDir::new().unwrap();
+        let (mock, storage) = mocked(&tmp);
+        let meta = test_meta();
+        let (a, b, c) = (
+            sized_step_line("a", 30),
+            sized_step_line("a", 200),
+            sized_step_line("a", 30),
+        );
+        let content = format!("{a}\n{b}\n{c}\n");
+
+        let local_only_job = Uuid::new_v4();
+        storage.append_log(local_only_job, &content).await.unwrap();
+        let local_tail = storage
+            .read_tail(local_only_job, &meta, false, StepFilter::Step("a"), 100)
+            .await
+            .unwrap();
+        assert_eq!(
+            (local_tail.logs.as_str(), local_tail.truncated),
+            (format!("{c}\n").as_str(), true)
+        );
+
+        let both_job = Uuid::new_v4();
+        storage.append_log(both_job, &content).await.unwrap();
+        seed_archive(&mock, both_job, &meta, &content).await;
+        let merged_tail = storage
+            .read_tail(both_job, &meta, true, StepFilter::Step("a"), 100)
+            .await
+            .unwrap();
+
+        assert_eq!(merged_tail.logs, local_tail.logs);
     }
 
     #[tokio::test]
