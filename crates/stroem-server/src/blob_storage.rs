@@ -287,7 +287,7 @@ impl BlobArchive for LocalBlobArchive {
 
     async fn open(&self, key: &str) -> Result<Option<ArchiveObject>> {
         let path = self.path_for(key)?;
-        let file = match fs::File::open(&path).await {
+        let mut file = match fs::File::open(&path).await {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e).with_context(|| format!("open {}", path.display())),
@@ -297,6 +297,14 @@ impl BlobArchive for LocalBlobArchive {
             .await
             .with_context(|| format!("stat {}", path.display()))?
             .len();
+        // tokio's `File` sizes its internal read buffer to the largest
+        // request it has served (up to `max_buf_size`) and keeps it for the
+        // handle's lifetime. `read_range` issues `RANGE` (1 MiB) requests,
+        // which would otherwise leave a second `RANGE`-sized buffer alive
+        // alongside the one spec § 3.4 already counts. Cap it at `CHUNK` (64
+        // KiB) so the held file contributes only the one buffer the formula
+        // names.
+        file.set_max_buf_size(crate::log_read::CHUNK);
         Ok(Some(ArchiveObject {
             key: key.to_string(),
             size,
