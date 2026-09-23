@@ -448,6 +448,52 @@ async fn run(large: bool) {
         );
     }
 
+    // MCP tail formatting: `format_logs` must not materialise a large
+    // unused field (C1). A local file with one ~4 MiB record holding an
+    // unused array sits inside the requested 4 MiB tail; `format_logs`
+    // must render it without allocating anywhere near the array's size.
+    #[cfg(feature = "mcp")]
+    {
+        use stroem_server::mcp::tools::format_logs;
+
+        let e = env_with(cfg);
+        let job = Uuid::new_v4();
+        let t4 = cfg.tail_max_bytes as usize;
+        let small1 = r#"{"ts":"2026-09-22T00:00:00Z","step":"s","line":"first"}"#;
+        let small2 = r#"{"ts":"2026-09-22T00:00:00Z","step":"s","line":"last"}"#;
+        let shell = r#"{"ts":"2026-09-22T00:00:00Z","step":"s","line":"x","blob":[]}"#;
+        let slack = 8 * KIB;
+        let overhead = small1.len() + 1 + small2.len() + 1 + shell.len() + 1 + slack;
+        let array_budget = t4 - overhead;
+        let mut blob = "0,".repeat(array_budget / 2 + 1);
+        blob.truncate(array_budget);
+        if blob.ends_with(',') {
+            blob.pop();
+        }
+        let big =
+            format!(r#"{{"ts":"2026-09-22T00:00:00Z","step":"s","line":"x","blob":[{blob}]}}"#);
+        let content = format!("{small1}\n{big}\n{small2}\n");
+        assert!(
+            content.len() < t4,
+            "fixture must fit the tail window untruncated"
+        );
+        e.local(job, "jsonl", content.as_bytes()).await;
+        let (_, p) = peak_of(async {
+            let tail = e
+                .storage
+                .read_tail(job, &meta(), false, StepFilter::All, t4 as u64)
+                .await
+                .unwrap();
+            drop(format_logs(&tail.logs));
+        })
+        .await;
+        report.check(
+            "MCP tail, one 4 MiB array record, formatted",
+            p,
+            tail_local(t4) + 2 * t4,
+        );
+    }
+
     // (e) One 15 MiB line under merge_max_lines = 2: the merger's
     // byte-based reservation, not its line count, dominates.
     {

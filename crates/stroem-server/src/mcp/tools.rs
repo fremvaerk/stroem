@@ -6,7 +6,10 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
 use rmcp::{tool, tool_router};
 use schemars::JsonSchema;
+use serde::de::{self, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
+use std::fmt;
 use stroem_db::{JobRepo, JobStepRepo};
 
 /// Max size of an artifact body returned via MCP `get_artifact`. Larger blobs
@@ -908,16 +911,169 @@ impl StromMcpHandler {
 // Log formatting
 // ---------------------------------------------------------------------------
 
+/// The four fields [`format_logs`] renders, borrowed from the line where
+/// possible (no escapes) and owned from serde_json's scratch buffer where
+/// not. Every other key is drained with `IgnoredAny` without being
+/// materialised -- same technique as `log_read::matcher`'s step visitor.
+#[derive(Default)]
+struct LogFields<'a> {
+    ts: Option<Cow<'a, str>>,
+    step: Option<Cow<'a, str>>,
+    stream: Option<Cow<'a, str>>,
+    line: Option<Cow<'a, str>>,
+}
+
+#[derive(Clone, Copy)]
+enum LogField {
+    Ts,
+    Step,
+    Stream,
+    Line,
+}
+
+/// Deserialises a map key and reports which (if any) of the four fields it
+/// names. Escaped and unescaped keys both arrive through `visit_str`
+/// (`Visitor`'s default `visit_borrowed_str` forwards to it).
+struct LogFieldKey;
+
+impl<'de> DeserializeSeed<'de> for LogFieldKey {
+    type Value = Option<LogField>;
+
+    fn deserialize<D: de::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
+        d.deserialize_str(self)
+    }
+}
+
+impl<'de> Visitor<'de> for LogFieldKey {
+    type Value = Option<LogField>;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a string key")
+    }
+
+    fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+        Ok(match v {
+            "ts" => Some(LogField::Ts),
+            "step" => Some(LogField::Step),
+            "stream" => Some(LogField::Stream),
+            "line" => Some(LogField::Line),
+            _ => None,
+        })
+    }
+}
+
+/// Deserialises a value that may or may not be a string: a string yields
+/// `Some` (borrowed when the source had no escape, owned from scratch when
+/// it did), anything else drains -- compound values via `IgnoredAny` -- and
+/// yields `None`, the same default a `.as_str()` on a `serde_json::Value`
+/// would have produced. Nothing here is materialised beyond one field's own
+/// decoded content: an oversize unrelated field costs only its own parse.
+struct MaybeStr;
+
+impl<'de> DeserializeSeed<'de> for MaybeStr {
+    type Value = Option<Cow<'de, str>>;
+
+    fn deserialize<D: de::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
+        d.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for MaybeStr {
+    type Value = Option<Cow<'de, str>>;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("any JSON value")
+    }
+
+    fn visit_borrowed_str<E: de::Error>(self, v: &'de str) -> Result<Self::Value, E> {
+        Ok(Some(Cow::Borrowed(v)))
+    }
+
+    fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+        Ok(Some(Cow::Owned(v.to_owned())))
+    }
+
+    fn visit_bool<E: de::Error>(self, _: bool) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+
+    fn visit_i64<E: de::Error>(self, _: i64) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+
+    fn visit_u64<E: de::Error>(self, _: u64) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+
+    fn visit_f64<E: de::Error>(self, _: f64) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+
+    fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+        Ok(None)
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        while seq.next_element::<IgnoredAny>()?.is_some() {}
+        Ok(None)
+    }
+}
+
+struct LogFieldsVisitor;
+
+impl<'de> Visitor<'de> for LogFieldsVisitor {
+    type Value = LogFields<'de>;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a JSON object")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut fields = LogFields::default();
+        while let Some(key) = map.next_key_seed(LogFieldKey)? {
+            match key {
+                Some(LogField::Ts) => fields.ts = map.next_value_seed(MaybeStr)?,
+                Some(LogField::Step) => fields.step = map.next_value_seed(MaybeStr)?,
+                Some(LogField::Stream) => fields.stream = map.next_value_seed(MaybeStr)?,
+                Some(LogField::Line) => fields.line = map.next_value_seed(MaybeStr)?,
+                None => {
+                    map.next_value::<IgnoredAny>()?;
+                }
+            }
+        }
+        Ok(fields)
+    }
+}
+
+/// Parse one JSONL line's `ts`/`step`/`stream`/`line` fields without
+/// materialising any other field. `None` when the line does not parse as a
+/// JSON object -- including a non-object root (array, string, number) and
+/// trailing garbage after the object -- so the caller falls back to
+/// printing the raw line, the same contract `format_logs` had via
+/// `serde_json::from_str::<Value>` returning `Err`.
+fn parse_log_fields(line: &str) -> Option<LogFields<'_>> {
+    let mut de = serde_json::Deserializer::from_str(line);
+    let fields = de::Deserializer::deserialize_map(&mut de, LogFieldsVisitor).ok()?;
+    de.end().ok()?;
+    Some(fields)
+}
+
 /// Format JSONL log lines into human-readable text.
-fn format_logs(raw: &str) -> String {
+pub fn format_logs(raw: &str) -> String {
     let mut output = String::new();
     for line in raw.lines() {
-        if let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) {
-            let step = entry["step"].as_str().unwrap_or("?");
-            let stream = entry["stream"].as_str().unwrap_or("stdout");
-            let text = entry["line"].as_str().unwrap_or("");
-            let ts = entry["ts"]
-                .as_str()
+        if let Some(fields) = parse_log_fields(line) {
+            let step = fields.step.as_deref().unwrap_or("?");
+            let stream = fields.stream.as_deref().unwrap_or("stdout");
+            let text = fields.line.as_deref().unwrap_or("");
+            let ts = fields
+                .ts
+                .as_deref()
                 .and_then(|s| {
                     let t_pos = s.find('T')?;
                     s.get(t_pos + 1..t_pos + 9)
@@ -1177,5 +1333,29 @@ another plain line
         );
         assert!(result.contains("this is plain text"), "got: {result}");
         assert!(result.contains("another plain line"), "got: {result}");
+    }
+
+    #[test]
+    fn test_format_logs_json_array_line_falls_back_to_plain_text() {
+        // A JSON array is valid JSON but not an object: `deserialize_map`
+        // rejects it, so the line is printed as-is rather than formatted
+        // with the old `Value`-based defaults (`entry["step"]` on an array
+        // silently indexed to `Value::Null` for every field).
+        let input = "[1,2]\n";
+        assert_eq!(format_logs(input), "[1,2]\n");
+    }
+
+    #[test]
+    fn format_logs_ignores_large_unused_fields() {
+        // A 100_000-element array in a field the formatter never reads
+        // must not change the output nor require materialising the array.
+        let base = r#"{"ts":"2025-01-01T12:30:45Z","step":"build","stream":"stdout","line":"compiling..."}"#;
+        let big_array: String = std::iter::repeat_n("0", 100_000)
+            .collect::<Vec<_>>()
+            .join(",");
+        let with_blob = format!(
+            r#"{{"ts":"2025-01-01T12:30:45Z","step":"build","stream":"stdout","line":"compiling...","blob":[{big_array}]}}"#
+        );
+        assert_eq!(format_logs(base), format_logs(&with_blob));
     }
 }

@@ -1,6 +1,9 @@
 pub(crate) mod auth;
 mod handler;
-mod tools;
+// `format_logs` is exercised from the peak-allocation test binary
+// (`tests/log_peak_alloc_test.rs`), which depends on this crate as an
+// external crate and so can only reach items on a `pub` path.
+pub mod tools;
 
 use auth::McpAuthContext;
 use axum::body::Body;
