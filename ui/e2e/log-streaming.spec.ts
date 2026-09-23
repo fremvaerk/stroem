@@ -80,4 +80,38 @@ test.describe("Log Streaming", () => {
     const logsFinal = await page.locator("pre").textContent();
     expect(logsFinal).not.toContain("Waiting for logs...");
   });
+
+  test("a large log shows a tail banner and loads the full log on demand", async ({ page, baseURL }) => {
+    test.setTimeout(120_000);
+    await login(page);
+    const jobId = await triggerJob(baseURL!, "big-log", {});
+    await page.goto(`/jobs/${jobId}`);
+    // Step details mount only when the step is expanded.
+    await page.getByText("print", { exact: true }).first().click();
+
+    const banner = page.getByTestId("log-tail-banner");
+    await expect(banner).toBeVisible({ timeout: 90_000 });
+    await banner.getByRole("button", { name: "Load full log" }).click();
+    await expect(banner).toBeHidden({ timeout: 60_000 });
+
+    const log = page.getByRole("log");
+    // The virtualiser follows the end of the newly loaded full log; assert
+    // that before scrolling to the top disturbs it (covers dynamic row
+    // measurement vs auto-follow, which jsdom unit tests cannot).
+    await expect
+      .poll(
+        () =>
+          log.evaluate(
+            (el) => el.scrollHeight - el.scrollTop - el.clientHeight,
+          ),
+        { timeout: 10_000 },
+      )
+      .toBeLessThanOrEqual(2);
+    await expect(log).toContainText("big log line 20000 padded");
+
+    await log.evaluate((el) => {
+      el.scrollTop = 0;
+    });
+    await expect(log).toContainText("big log line 1 padded", { timeout: 10_000 });
+  });
 });

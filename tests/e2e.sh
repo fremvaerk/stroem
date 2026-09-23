@@ -190,6 +190,21 @@ else
     fail "Logs missing shout step output ('HELLO E2E TEST') - step-to-step data flow broken"
 fi
 
+# Tail envelope and full stream (log-tail-streaming spec § 3.1)
+if [ "$(echo "$LOGS_RESP" | jq -r '.truncated')" != "false" ]; then
+    echo "$LOGS_RESP" | jq .
+    fail "A small log must not be reported as truncated"
+fi
+pass "Log tail envelope reports truncated=false for a small log"
+
+FULL_LOGS=$(acurl "$BASE_URL/api/jobs/$JOB_ID/logs?full=true")
+if echo "$FULL_LOGS" | grep -q "Hello E2E Test"; then
+    pass "Full log stream (?full=true) contains the greet output"
+else
+    echo "$FULL_LOGS"
+    fail "Full log stream (?full=true) is missing the greet output"
+fi
+
 # --- 7. Test list jobs endpoint ---
 info "Testing jobs list endpoint..."
 JOBS_RESP=$(acurl "$BASE_URL/api/jobs?limit=10")
