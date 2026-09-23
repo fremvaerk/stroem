@@ -1,12 +1,49 @@
 # Log reads: tail by default, streamed full log
 
-Status: revision 6, proposed (2026-09-22)
+Status: revision 7, proposed (2026-09-23)
 
 Companion of `docs/internal/TODO.md` § Performance ("Opening the job page of a
 job with a large log OOM-kills every server replica") and of the HA log
 mirroring record in TODO.md § "Review: HA Log Mirroring (2026-05-21)".
 
 ## Revision history
+
+**Revision 7 (2026-09-23, planning).** Ten amendments decided while turning
+this design into an executable task plan. Config keys are nested under
+`log_storage.read` (`STROEM__LOG_STORAGE__READ__TAIL_MAX_BYTES`), not flat
+under `log_storage`, because `LogStorageConfig` is built by struct literal
+in about 80 places and one nested field is one line per literal, while
+`#[serde(flatten)]` would break the `config` crate's env-string coercion.
+An escaped step VALUE does not match, exactly as today, since
+`line_matches_step` keeps its `line.contains(step_name)` fast guard and
+`"build"` does not contain `build`; § 5's fixture list is corrected
+accordingly, plus a companion case where the name also appears literally
+elsewhere in the line, which does match. Filtered stream output buffers
+are `K + L + 1` bytes, and a chunk is yielded once it reaches `K`, so a
+matching line (≤ L) always fits without the splitter having to hold a
+line back; filtered-full local peak becomes `5L + 4K`, and unfiltered-full
+local adds the backward newline scan buffer, `3K`. Full reads obey the
+torn-line rule for local `.jsonl` files — the stream stops at the last
+newline of the snapshot — the merged full read trims both inputs, and the
+single-source archive stream is served exactly as stored. The merged full
+read decompresses the archive through `take(isize + 1)` into a buffer of
+`isize + 33`; any size other than exactly `isize` abandons the merge
+before output, bounding the allocation by the real input instead of by
+`C − local_len`. The viewer parses only the rows it renders (virtualised),
+not the whole body up front; the row-height estimate uses the raw line
+length minus a fixed JSON overhead. There is no in-memory
+"version bump mid-read" test — the trait's default `open` holds a
+whole-object snapshot, consistent by construction, and the local backend
+(held descriptor) and S3 (`If-Match` → 412) carry the version tests
+instead. `appendTail` inserts the gap marker into its returned `lines`
+itself. Peak-test fixture (e) runs with `merge_max_lines = 2` so the
+one-line inputs still merge, fixture (f) is covered by a unit test on
+`merge_jsonl_logs`' capacity instead, and the S3 case lives in the peak
+binary, which runs serially, instead of `s3_integration_test.rs`, whose
+parallel tests would pollute a global counter. The unfiltered tail reads
+one byte before its window to decide whether the window's first line is
+complete, instead of always dropping through the first newline. Where the
+sections below differ, this paragraph wins.
 
 **Revision 6 (2026-09-22).** After the fifth Codex review (8 of 12
 round-four items resolved, 4 partial, 9 remaining, "none requires
@@ -670,15 +707,15 @@ tail_scan_max_bytes`, and `max_line_bytes > merge_max_bytes`:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `tail_default_bytes` | 262144 (256 KiB) | tail size when the request names none |
-| `tail_max_bytes` | 4194304 (4 MiB) | largest `tail_bytes` a request may ask for |
-| `tail_scan_max_bytes` | 67108864 (64 MiB) | how far back a step tail scans before giving up |
-| `max_line_bytes` | 1048576 (1 MiB) | longest single line a FILTERED read will carry; longer lines are skipped with a warning and set `truncated` |
-| `merge_max_bytes` | 16777216 (16 MiB) | sum of local length + archive decompressed length under which a terminal full read still merges in memory |
-| `merge_max_lines` | 131072 | most lines a union merge (tail or full) will hold; above it a single source is served |
+| `read.tail_default_bytes` | 262144 (256 KiB) | tail size when the request names none |
+| `read.tail_max_bytes` | 4194304 (4 MiB) | largest `tail_bytes` a request may ask for |
+| `read.tail_scan_max_bytes` | 67108864 (64 MiB) | how far back a step tail scans before giving up |
+| `read.max_line_bytes` | 1048576 (1 MiB) | longest single line a FILTERED read will carry; longer lines are skipped with a warning and set `truncated` |
+| `read.merge_max_bytes` | 16777216 (16 MiB) | sum of local length + archive decompressed length under which a terminal full read still merges in memory |
+| `read.merge_max_lines` | 131072 | most lines a union merge (tail or full) will hold; above it a single source is served |
 
 Env overrides follow the existing convention
-(`STROEM__LOG_STORAGE__TAIL_DEFAULT_BYTES`).
+(`STROEM__LOG_STORAGE__READ__TAIL_DEFAULT_BYTES`).
 
 ### 3.6 UI
 
@@ -923,9 +960,9 @@ Unit (`log_storage.rs`):
 - matcher: every existing fixture (`:768-930`, `:1478-1505`) unchanged; NEW
   fixtures — positional form `["build"]` does not match; duplicate `step`
   keys, last wins; a compound first `step` value followed by the real one
-  matches; non-string `step` does not match; escaped step VALUE — the
-  Rust literal `r#"{"step":"build"}"#`, i.e. the six characters
-  backslash, `u`, `0`, `0`, `6`, `9` on disk — matches `build`; escaped
+  matches; non-string `step` does not match; escaped step VALUE does not
+  match (the `contains` fast guard, as today); with the name also present
+  literally elsewhere in the line, it matches; escaped
   step KEY (`r#"{"step":"build"}"#`) matches; an unrelated escaped key
   (`r#"{"step":"build","a":0}"#`) does not break the match; trailing
   garbage after the object does not match; `step` absent; nested object

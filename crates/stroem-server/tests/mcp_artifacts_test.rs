@@ -63,6 +63,7 @@ async fn build_test_app() -> Result<TestApp> {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -602,6 +603,7 @@ mod acl_deny {
                 local_dir: log_dir.to_string_lossy().to_string(),
                 s3: None,
                 archive: None,
+                read: Default::default(),
             },
             workspaces: HashMap::from([(
                 "default".to_string(),

@@ -335,6 +335,7 @@ async fn setup_with_mcp() -> Result<(
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -395,6 +396,7 @@ async fn setup_mcp_disabled() -> Result<(
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -467,6 +469,7 @@ async fn setup_with_auth_and_mcp_cfg(
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -1746,6 +1749,7 @@ async fn test_mcp_created_jobs_fire_hooks() -> Result<()> {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::new(),
         libraries: HashMap::new(),

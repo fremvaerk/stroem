@@ -1251,6 +1251,7 @@ async fn setup() -> Result<(
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -1455,6 +1456,7 @@ async fn setup_two_workspaces() -> Result<(
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([
             (
@@ -1801,6 +1803,7 @@ async fn setup_shared_connections() -> Result<(
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([
             (
@@ -2423,6 +2426,7 @@ async fn setup_with_task_needing_missing_connection() -> Result<(
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -2790,6 +2794,7 @@ async fn setup_with_library_dotted_action() -> Result<(
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -3635,6 +3640,7 @@ async fn setup_cross_task_workspaces(
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([
             (
@@ -6225,6 +6231,7 @@ async fn test_task_detail_connections() -> Result<()> {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -8454,6 +8461,7 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -8729,6 +8737,7 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -8965,6 +8974,7 @@ async fn setup_with_auth() -> Result<(
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -11233,6 +11243,7 @@ async fn setup_multi_workspace_with(
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([
             (
@@ -11510,6 +11521,7 @@ async fn setup_with_auth_and_acl() -> Result<(
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([
             (
@@ -12169,6 +12181,7 @@ async fn test_workspace_tarball_download() -> Result<()> {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -12345,6 +12358,7 @@ async fn test_tarball_mismatched_etag_returns_200() -> Result<()> {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -12439,6 +12453,7 @@ async fn test_tarball_bare_etag_matches() -> Result<()> {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -12549,6 +12564,7 @@ async fn test_tarball_stale_etag_after_workspace_change() -> Result<()> {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -12694,6 +12710,7 @@ async fn test_tarball_etag_header_format() -> Result<()> {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -13598,6 +13615,7 @@ async fn test_config_returns_oidc_providers_with_auth() -> Result<()> {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -13681,6 +13699,7 @@ async fn test_config_returns_has_internal_auth_true() -> Result<()> {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -13758,6 +13777,7 @@ async fn test_config_returns_has_internal_auth_false_oidc_only() -> Result<()> {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -13972,6 +13992,7 @@ fn hook_test_state(pool: PgPool, workspace: &WorkspaceConfig) -> AppState {
             local_dir: temp_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::new(),
         libraries: HashMap::new(),
@@ -14016,6 +14037,7 @@ fn hook_test_state_with_default_step_timeout(
             local_dir: temp_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::new(),
         libraries: HashMap::new(),
@@ -16138,6 +16160,7 @@ async fn setup_recovery() -> Result<(
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -16643,6 +16666,7 @@ async fn test_recovery_propagates_to_parent() -> Result<()> {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -18422,6 +18446,7 @@ async fn test_connection_input_passthrough_at_claim() -> Result<()> {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -18789,6 +18814,7 @@ async fn setup_sync_webhook() -> Result<(
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -19357,6 +19383,7 @@ async fn test_scheduler_fires_cron_trigger() -> Result<()> {
             local_dir: std::env::temp_dir().to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::new(),
         libraries: HashMap::new(),
@@ -19448,6 +19475,7 @@ async fn test_scheduler_disabled_trigger_does_not_fire() -> Result<()> {
             local_dir: std::env::temp_dir().to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::new(),
         libraries: HashMap::new(),
@@ -19521,6 +19549,7 @@ async fn test_scheduler_passes_trigger_input_to_job() -> Result<()> {
             local_dir: std::env::temp_dir().to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::new(),
         libraries: HashMap::new(),
@@ -19600,6 +19629,7 @@ async fn test_scheduler_clean_shutdown() -> Result<()> {
             local_dir: std::env::temp_dir().to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::new(),
         libraries: HashMap::new(),
@@ -19990,6 +20020,7 @@ async fn test_multi_workspace_tarball_download() -> Result<()> {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([
             (
@@ -20245,6 +20276,7 @@ async fn setup_recovery_with_unmatched_timeout(
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -21626,6 +21658,7 @@ async fn test_scheduler_triggered_job_stores_revision() -> Result<()> {
             local_dir: std::env::temp_dir().to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::new(),
         libraries: HashMap::new(),
@@ -21830,6 +21863,7 @@ fn revision_test_state(pool: PgPool, workspace: WorkspaceConfig) -> AppState {
             local_dir: temp_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::new(),
         libraries: HashMap::new(),
@@ -22482,6 +22516,7 @@ async fn setup_with_workspace(
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -22543,6 +22578,7 @@ async fn setup_state_with_workspace(
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -23493,6 +23529,7 @@ async fn setup_event_source() -> Result<(
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -24009,6 +24046,7 @@ async fn test_emit_endpoint_disabled_trigger() -> Result<()> {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -24145,6 +24183,7 @@ async fn setup_event_source_with_workspace(
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -30243,6 +30282,7 @@ async fn setup_with_state_storage() -> Result<(
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),

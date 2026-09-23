@@ -1,4 +1,5 @@
 use crate::blob_storage::BlobArchive;
+use crate::config::LogReadConfig;
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use dashmap::DashMap;
@@ -107,6 +108,8 @@ pub struct LogStorage {
     archive: Option<Arc<dyn BlobArchive>>,
     /// Key prefix for archive objects.
     archive_prefix: String,
+    /// Read bounds (tail sizes, line and merge caps).
+    read: LogReadConfig,
 }
 
 impl LogStorage {
@@ -118,6 +121,7 @@ impl LogStorage {
             file_cache: Arc::new(DashMap::new()),
             archive: None,
             archive_prefix: String::new(),
+            read: LogReadConfig::default(),
         }
     }
 
@@ -126,6 +130,17 @@ impl LogStorage {
         self.archive = Some(archive);
         self.archive_prefix = prefix;
         self
+    }
+
+    /// Use `read` for this storage's read bounds (defaults otherwise).
+    pub fn with_read_config(mut self, read: LogReadConfig) -> Self {
+        self.read = read;
+        self
+    }
+
+    /// The read bounds this storage enforces.
+    pub fn read_config(&self) -> LogReadConfig {
+        self.read
     }
 
     /// Get the JSONL log file path for a job.
@@ -1362,6 +1377,7 @@ mod tests {
                 path: Some("/mnt/archive".to_string()),
                 prefix: "new/".to_string(),
             }),
+            read: Default::default(),
         };
         let effective = config.effective_archive().unwrap();
         assert_eq!(effective.archive_type, "local");
@@ -1375,6 +1391,7 @@ mod tests {
             local_dir: "/tmp/logs".to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         };
         assert!(config.effective_archive().is_none());
     }

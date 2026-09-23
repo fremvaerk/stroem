@@ -211,7 +211,8 @@ async fn async_main(worker_threads: usize) -> Result<()> {
 
     // Initialize log storage with optional archive backend.
     let log_storage = {
-        let base = LogStorage::new(&config.log_storage.local_dir);
+        let base = LogStorage::new(&config.log_storage.local_dir)
+            .with_read_config(config.log_storage.read);
         if let Some((archive, prefix)) = log_archive.clone() {
             base.with_archive(archive, prefix)
         } else {
