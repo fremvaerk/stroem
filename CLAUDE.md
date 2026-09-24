@@ -153,6 +153,7 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
   - `("script", "local")` → ShellRunner, `("script", "docker")` or `("docker", _)` → DockerRunner, `("script", "pod")` or `("pod", _)` → KubeRunner
 - **DockerRunner**: `WithWorkspace` bind-mounts at `/workspace:ro`; `NoWorkspace` runs standalone
 - **KubeRunner**: `WithWorkspace` uses init container + workspace volume; `NoWorkspace` runs directly
+- **Pod names and labels**: `KubeRunner::pod_name` (≤ 63 chars, a Strøm policy; trailing dash trimmed; an FNV-1a hash suffix when truncated, which lowers but does not rule out collisions) and `KubeRunner::step_labels` (job-id/step/task values through `sanitize_label_value`). A `for_each` instance is named `step[i]`, and `[`/`]` in a label value make the API server reject the pod (prod 2026-09-24). The raw step name goes in the `stroem.io/step-name` annotation, set AFTER the manifest merge so Strøm's value wins. Manifest `metadata` overrides are not validated and can still replace the default labels. Nothing in Strøm selects pods by label.
 - **Startup scripts**: `docker/entrypoint.sh` sources `*.sh` from `/etc/stroem/startup.d/`. DockerRunner bind-mounts this; KubeRunner uses ConfigMap via `runner_startup_configmap`.
 
 ### Capabilities, Tags, and Step Claiming
