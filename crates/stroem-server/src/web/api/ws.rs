@@ -137,9 +137,9 @@ pub async fn job_log_stream(
         .into_response()
 }
 
-async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>, job_id: Uuid, skip_backfill: bool) {
+async fn handle_ws(socket: WebSocket, state: Arc<AppState>, job_id: Uuid, skip_backfill: bool) {
     // 1. Subscribe, then read the backfill (see `subscribe_then_backfill`).
-    let (mut rx, backfill) = subscribe_then_backfill(&state.log_broadcast, job_id, || async {
+    let (rx, backfill) = subscribe_then_backfill(&state.log_broadcast, job_id, || async {
         if skip_backfill {
             None
         } else {
@@ -148,7 +148,21 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>, job_id: Uuid, sk
     })
     .await;
 
-    // 2. Send the backfill (existing log content).
+    // 2. Send the backfill, then forward live chunks. `forward` owns the receiver,
+    //    so it is dropped on EVERY exit before the cleanup below runs.
+    forward(socket, rx, backfill, job_id).await;
+
+    // 3. Remove the job's channel if this was its last viewer.
+    state.log_broadcast.remove_channel(job_id).await;
+}
+
+/// Send the backfill (if any), then forward live chunks until either side closes.
+async fn forward(
+    mut socket: WebSocket,
+    mut rx: tokio::sync::broadcast::Receiver<String>,
+    backfill: Option<String>,
+    job_id: Uuid,
+) {
     if let Some(logs) = backfill {
         if !logs.is_empty()
             && socket
@@ -160,7 +174,6 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>, job_id: Uuid, sk
         }
     }
 
-    // 3. Forward broadcast messages to the WebSocket
     loop {
         tokio::select! {
             result = rx.recv() => {
@@ -188,16 +201,14 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>, job_id: Uuid, sk
             }
         }
     }
-
-    // 4. Cleanup
-    state.log_broadcast.remove_channel(job_id).await;
 }
 
 /// Subscribe to the job's live chunks and read the backfill. The subscription comes
 /// FIRST: `LogBroadcast::broadcast` drops a chunk nobody is subscribed to, so reading
 /// first lost every chunk pushed between the backfill's read point and the subscribe.
-/// This order never loses one; a chunk pushed during the read may arrive twice (in the
-/// backfill and as a live frame).
+/// This closes that gap; a chunk pushed during the read may arrive twice (in the
+/// backfill and as a live frame). A viewer more than `CHANNEL_CAPACITY` chunks behind
+/// still skips the oldest (`RecvError::Lagged`).
 async fn subscribe_then_backfill<F, Fut>(
     broadcast: &LogBroadcast,
     job_id: Uuid,

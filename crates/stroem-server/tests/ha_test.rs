@@ -1304,6 +1304,90 @@ async fn double_leader_race_both_attempt_simultaneously() -> Result<()> {
     Ok(())
 }
 
+// ─── WebSocket viewer channel cleanup ─────────────────────────────────────────
+
+/// Serve `state` on a real port for WebSocket clients.
+async fn serve_ws(state: AppState) -> Result<(u16, tokio::task::JoinHandle<()>)> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let port = listener.local_addr()?.port();
+    let router = build_router(state, CancellationToken::new());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    Ok((port, server))
+}
+
+#[tokio::test]
+async fn ws_viewer_close_removes_job_channel() -> Result<()> {
+    // Regression: handle_ws called remove_channel while its own receiver was still
+    // alive, so the no-receivers check never passed and every job ever viewed kept
+    // its broadcast channel allocated for good.
+    let h = boot().await?;
+    let state = build_state(&h, Uuid::new_v4());
+    let broadcast = state.log_broadcast.clone();
+    let (port, server) = serve_ws(state).await?;
+    let job = Uuid::new_v4();
+
+    let url = format!("ws://127.0.0.1:{port}/api/jobs/{job}/logs/stream");
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await?;
+    assert!(
+        wait_for_async(Duration::from_secs(5), || broadcast.has_channel(job)).await,
+        "the viewer never subscribed"
+    );
+
+    ws.close(None).await?;
+    assert!(
+        wait_for_async(Duration::from_secs(5), || async {
+            !broadcast.has_channel(job).await
+        })
+        .await,
+        "channel left behind after the last viewer closed"
+    );
+
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn ws_viewer_dropped_with_backfill_pending_removes_job_channel() -> Result<()> {
+    // The handler subscribes before it reads and sends the backfill. A viewer whose
+    // connection is gone by then takes the early exit on the failed send, or the
+    // loop's exit on the closed socket — both must clean up like a normal close.
+    let h = boot().await?;
+    let state = build_state(&h, Uuid::new_v4());
+    let job = Uuid::new_v4();
+    let line = json!({"ts": "2026-09-24T12:00:00Z", "stream": "stdout", "step": "build", "line": "x".repeat(64 * 1024)});
+    for _ in 0..8 {
+        state
+            .log_storage
+            .append_log(job, &format!("{line}\n"))
+            .await?;
+    }
+    let broadcast = state.log_broadcast.clone();
+    let (port, server) = serve_ws(state).await?;
+
+    let url = format!("ws://127.0.0.1:{port}/api/jobs/{job}/logs/stream");
+    let (ws, _) = tokio_tungstenite::connect_async(&url).await?;
+    // Subscribing is the handler's first step, before the backfill is read or sent:
+    // wait for it, so the assertion below cannot pass on a handler that never subscribed.
+    assert!(
+        wait_for_async(Duration::from_secs(5), || broadcast.has_channel(job)).await,
+        "the viewer never subscribed"
+    );
+    drop(ws);
+
+    assert!(
+        wait_for_async(Duration::from_secs(5), || async {
+            !broadcast.has_channel(job).await
+        })
+        .await,
+        "channel left behind after a viewer dropped with a backfill pending"
+    );
+
+    server.abort();
+    Ok(())
+}
+
 // ─── Full HTTP-stack cross-replica log fan-out ────────────────────────────────
 
 /// Worker POSTs a log chunk to replica A's HTTP router; a log subscriber on

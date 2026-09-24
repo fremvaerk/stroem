@@ -471,7 +471,7 @@ Same parameters, envelope and header as **Get Job Logs**, filtered to one step. 
 GET /api/jobs/{id}/logs/stream
 ```
 
-Opens a WebSocket for live log streaming. On connect the server sends the last 256 KiB of the log (whole lines) as one frame, then streams new chunks. `?skip_backfill=true` skips that first frame. A chunk pushed while that first frame is being read can arrive twice, once inside the backfill and once as a live frame; no chunk is lost.
+Opens a WebSocket for live log streaming. On connect the server sends the last 256 KiB of the log (whole lines) as one frame, then streams new chunks. `?skip_backfill=true` skips that first frame. A chunk pushed while that first frame is being read can arrive twice, once inside the backfill and once as a live frame. Live delivery is best-effort: a client that falls more than 256 chunks behind skips the oldest, and in a multi-replica deployment a single log line over ~3.5 KB pushed through another replica is not streamed (it is in the stored log).
 
 ```bash
 websocat ws://localhost:8080/api/jobs/JOB_ID/logs/stream
