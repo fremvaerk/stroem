@@ -7,6 +7,8 @@ import {
   login,
   logout,
   getServerConfig,
+  getStepLogs,
+  getStepLogsFull,
 } from "../api";
 
 // ---------------------------------------------------------------------------
@@ -403,5 +405,51 @@ describe("getServerConfig", () => {
 
     const cfg = await getServerConfig();
     expect(cfg.oidcProviders).toEqual([]);
+  });
+});
+
+describe("step log reads", () => {
+  it("getStepLogs fills fields an older server does not send", async () => {
+    setAccessToken("t");
+    stubFetch(200, { logs: "a\n" });
+    expect(await getStepLogs("j", "build")).toEqual({ logs: "a\n", truncated: false, total_bytes: 2, returned_bytes: 2 });
+  });
+
+  it("getStepLogsFull reads an NDJSON stream and reports progress", async () => {
+    setAccessToken("t");
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response("a\nb\n", { status: 200, headers: { "content-type": "application/x-ndjson" } }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const progress: number[] = [];
+    expect(await getStepLogsFull("j", "build", (n) => progress.push(n))).toBe("a\nb\n");
+    expect(progress.at(-1)).toBe(4);
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/jobs/j/steps/build/logs?full=true");
+  });
+
+  it("getStepLogsFull reads the envelope of a server without full mode", async () => {
+    setAccessToken("t");
+    stubFetch(200, { logs: "old\n" }, { "content-type": "application/json" });
+    expect(await getStepLogsFull("j", "build")).toBe("old\n");
+  });
+
+  it("getStepLogs hands its signal to fetch", async () => {
+    setAccessToken("t");
+    const fetchMock = vi.fn().mockResolvedValue(makeMockResponse(200, { logs: "a\n" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new AbortController();
+    await getStepLogs("j", "build", controller.signal);
+    expect(fetchMock.mock.calls[0][1].signal).toBe(controller.signal);
+  });
+
+  it("getStepLogsFull hands its signal to fetch", async () => {
+    setAccessToken("t");
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response("a\n", { status: 200, headers: { "content-type": "application/x-ndjson" } }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new AbortController();
+    await getStepLogsFull("j", "build", undefined, controller.signal);
+    expect(fetchMock.mock.calls[0][1].signal).toBe(controller.signal);
   });
 });

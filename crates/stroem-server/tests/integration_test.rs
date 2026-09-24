@@ -21,7 +21,8 @@ use stroem_server::config::{
     AuthConfig, DbConfig, InitialUserConfig, JobDefaults, LogStorageConfig, RetentionConfig,
     ServerConfig, WorkspaceSourceDef,
 };
-use stroem_server::log_storage::LogStorage;
+use stroem_server::log_read::StepFilter;
+use stroem_server::log_storage::{archive_key, JobLogMeta, LogStorage};
 use stroem_server::state::AppState;
 use stroem_server::state_storage::StateStorage;
 use stroem_server::web::build_router;
@@ -32,6 +33,10 @@ use testcontainers_modules::postgres::Postgres;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 use uuid::Uuid;
+
+/// `read_tail`'s tail budget for tests that want the whole log — well above
+/// anything these fixtures write.
+const ALL: u64 = 16 * 1024 * 1024;
 
 // ─── Test helpers ───────────────────────────────────────────────────────
 
@@ -1251,6 +1256,7 @@ async fn setup() -> Result<(
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -1455,6 +1461,7 @@ async fn setup_two_workspaces() -> Result<(
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([
             (
@@ -1801,6 +1808,7 @@ async fn setup_shared_connections() -> Result<(
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([
             (
@@ -2423,6 +2431,7 @@ async fn setup_with_task_needing_missing_connection() -> Result<(
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -2505,6 +2514,47 @@ fn api_get(uri: &str) -> Request<Body> {
 async fn body_json(response: axum::response::Response) -> Value {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     serde_json::from_slice(&body).unwrap()
+}
+
+async fn body_bytes(response: axum::response::Response) -> Vec<u8> {
+    response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec()
+}
+
+fn jsonl_entry(step: &str, msg: &str) -> String {
+    format!(r#"{{"ts":"2026-09-22T00:00:00Z","stream":"stdout","step":"{step}","line":"{msg}"}}"#)
+}
+
+/// A pending job whose local log file holds `content`.
+async fn job_with_log(pool: &PgPool, tmp: &TempDir, content: &str) -> Result<Uuid> {
+    let job_id = JobRepo::create(
+        pool,
+        "default",
+        "hello-world",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+    std::fs::write(
+        tmp.path().join("logs").join(format!("{job_id}.jsonl")),
+        content,
+    )?;
+    Ok(job_id)
+}
+
+fn big_log(lines: usize) -> String {
+    (0..lines)
+        .map(|i| format!("{}\n", jsonl_entry("build", &format!("line {i:06}"))))
+        .collect()
 }
 
 /// Extract the `stroem_refresh` cookie value from a response's Set-Cookie headers.
@@ -2790,6 +2840,7 @@ async fn setup_with_library_dotted_action() -> Result<(
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -3635,6 +3686,7 @@ async fn setup_cross_task_workspaces(
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([
             (
@@ -6225,6 +6277,7 @@ async fn test_task_detail_connections() -> Result<()> {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -8454,6 +8507,7 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -8729,6 +8783,7 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -8965,6 +9020,7 @@ async fn setup_with_auth() -> Result<(
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -11233,6 +11289,7 @@ async fn setup_multi_workspace_with(
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([
             (
@@ -11510,6 +11567,7 @@ async fn setup_with_auth_and_acl() -> Result<(
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([
             (
@@ -12169,6 +12227,7 @@ async fn test_workspace_tarball_download() -> Result<()> {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -12345,6 +12404,7 @@ async fn test_tarball_mismatched_etag_returns_200() -> Result<()> {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -12439,6 +12499,7 @@ async fn test_tarball_bare_etag_matches() -> Result<()> {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -12549,6 +12610,7 @@ async fn test_tarball_stale_etag_after_workspace_change() -> Result<()> {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -12694,6 +12756,7 @@ async fn test_tarball_etag_header_format() -> Result<()> {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -13598,6 +13661,7 @@ async fn test_config_returns_oidc_providers_with_auth() -> Result<()> {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -13681,6 +13745,7 @@ async fn test_config_returns_has_internal_auth_true() -> Result<()> {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -13758,6 +13823,7 @@ async fn test_config_returns_has_internal_auth_false_oidc_only() -> Result<()> {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -13972,6 +14038,7 @@ fn hook_test_state(pool: PgPool, workspace: &WorkspaceConfig) -> AppState {
             local_dir: temp_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::new(),
         libraries: HashMap::new(),
@@ -14016,6 +14083,7 @@ fn hook_test_state_with_default_step_timeout(
             local_dir: temp_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::new(),
         libraries: HashMap::new(),
@@ -16138,6 +16206,7 @@ async fn setup_recovery() -> Result<(
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -16643,6 +16712,7 @@ async fn test_recovery_propagates_to_parent() -> Result<()> {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -18422,6 +18492,7 @@ async fn test_connection_input_passthrough_at_claim() -> Result<()> {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -18789,6 +18860,7 @@ async fn setup_sync_webhook() -> Result<(
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -19357,6 +19429,7 @@ async fn test_scheduler_fires_cron_trigger() -> Result<()> {
             local_dir: std::env::temp_dir().to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::new(),
         libraries: HashMap::new(),
@@ -19448,6 +19521,7 @@ async fn test_scheduler_disabled_trigger_does_not_fire() -> Result<()> {
             local_dir: std::env::temp_dir().to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::new(),
         libraries: HashMap::new(),
@@ -19521,6 +19595,7 @@ async fn test_scheduler_passes_trigger_input_to_job() -> Result<()> {
             local_dir: std::env::temp_dir().to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::new(),
         libraries: HashMap::new(),
@@ -19600,6 +19675,7 @@ async fn test_scheduler_clean_shutdown() -> Result<()> {
             local_dir: std::env::temp_dir().to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::new(),
         libraries: HashMap::new(),
@@ -19990,6 +20066,7 @@ async fn test_multi_workspace_tarball_download() -> Result<()> {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([
             (
@@ -20245,6 +20322,7 @@ async fn setup_recovery_with_unmatched_timeout(
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -21626,6 +21704,7 @@ async fn test_scheduler_triggered_job_stores_revision() -> Result<()> {
             local_dir: std::env::temp_dir().to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::new(),
         libraries: HashMap::new(),
@@ -21830,6 +21909,7 @@ fn revision_test_state(pool: PgPool, workspace: WorkspaceConfig) -> AppState {
             local_dir: temp_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::new(),
         libraries: HashMap::new(),
@@ -22482,6 +22562,7 @@ async fn setup_with_workspace(
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -22543,6 +22624,7 @@ async fn setup_state_with_workspace(
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -23493,6 +23575,7 @@ async fn setup_event_source() -> Result<(
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -24009,6 +24092,7 @@ async fn test_emit_endpoint_disabled_trigger() -> Result<()> {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -24145,6 +24229,7 @@ async fn setup_event_source_with_workspace(
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -29238,8 +29323,12 @@ async fn test_indirect_hook_cycle_is_bounded() -> Result<()> {
             task_name: job.task_name.clone(),
             created_at: job.created_at,
         };
-        if let Ok(text) = state.log_storage.get_log(job.job_id, &meta, false).await {
-            if text.contains("hook chain depth") {
+        if let Ok(tail) = state
+            .log_storage
+            .read_tail(job.job_id, &meta, false, StepFilter::All, ALL)
+            .await
+        {
+            if tail.logs.contains("hook chain depth") {
                 found = true;
                 break;
             }
@@ -29556,7 +29645,11 @@ async fn test_parent_dispatch_error_escapes_but_approvals_still_dispatch() -> Re
         task_name: parent.task_name.clone(),
         created_at: parent.created_at,
     };
-    let log = state.log_storage.get_log(parent_id, &meta, false).await?;
+    let log = state
+        .log_storage
+        .read_tail(parent_id, &meta, false, StepFilter::All, ALL)
+        .await?
+        .logs;
     assert!(
         log.contains("[orchestration] Failed to handle task steps:"),
         "the escaping dispatch error must be logged to the parent job: {log}"
@@ -30243,6 +30336,7 @@ async fn setup_with_state_storage() -> Result<(
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -31316,5 +31410,311 @@ async fn test_task_dispatch_failure_path_evaluates_when_against_task_state() -> 
         after.status, "skipped",
         "the failure cascade must see the snapshot: after=false skips"
     );
+    Ok(())
+}
+
+// ─── Bounded log reads: REST tail/full, WebSocket backfill ───────────
+
+#[tokio::test]
+async fn test_log_tail_envelope_and_source_header() -> Result<()> {
+    let (router, pool, tmp, _container) = setup().await?;
+    let content = format!(
+        "{}\n{}\n",
+        jsonl_entry("build", "one"),
+        jsonl_entry("build", "two")
+    );
+    let job_id = job_with_log(&pool, &tmp, &content).await?;
+    let response = router
+        .oneshot(api_get(&format!("/api/jobs/{job_id}/logs")))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-stroem-log-source"], "local");
+    let body = body_json(response).await;
+    assert_eq!(body["logs"], content);
+    assert_eq!(body["truncated"], false);
+    assert_eq!(body["total_bytes"], content.len());
+    assert_eq!(body["returned_bytes"], content.len());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_log_tail_is_bounded_and_flags_truncation() -> Result<()> {
+    let (router, pool, tmp, _container) = setup().await?;
+    let content = big_log(20_000);
+    let job_id = job_with_log(&pool, &tmp, &content).await?;
+    let body = body_json(
+        router
+            .clone()
+            .oneshot(api_get(&format!("/api/jobs/{job_id}/logs")))
+            .await?,
+    )
+    .await;
+    let logs = body["logs"].as_str().unwrap();
+    assert_eq!(body["truncated"], true);
+    assert!(
+        logs.len() <= 262_144,
+        "default tail is 256 KiB, got {}",
+        logs.len()
+    );
+    assert!(
+        content.ends_with(logs) && logs.starts_with('{'),
+        "whole lines from the end"
+    );
+    assert_eq!(body["total_bytes"], content.len());
+
+    let small = body_json(
+        router
+            .oneshot(api_get(&format!("/api/jobs/{job_id}/logs?tail_bytes=1024")))
+            .await?,
+    )
+    .await;
+    assert!(small["returned_bytes"].as_u64().unwrap() <= 1024);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_log_full_streams_ndjson_equal_to_the_file() -> Result<()> {
+    let (router, pool, tmp, _container) = setup().await?;
+    let content = big_log(20_000);
+    let job_id = job_with_log(&pool, &tmp, &content).await?;
+    let response = router
+        .oneshot(api_get(&format!("/api/jobs/{job_id}/logs?full=true")))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.headers()["content-type"]
+        .to_str()?
+        .starts_with("application/x-ndjson"));
+    assert_eq!(response.headers()["x-stroem-log-source"], "local");
+    assert_eq!(body_bytes(response).await, content.into_bytes());
+    Ok(())
+}
+
+/// Same workspace as `setup()` (task `hello-world` included), but with a
+/// `LogStorage` archive backend attached (a `LocalBlobArchive`) so a
+/// terminal job's archive path is reachable instead of always missing.
+async fn setup_with_log_archive() -> Result<(
+    Router,
+    PgPool,
+    TempDir,
+    Arc<dyn BlobArchive>,
+    testcontainers::ContainerAsync<Postgres>,
+)> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let temp_dir = TempDir::new()?;
+    let log_dir = temp_dir.path().join("logs");
+    std::fs::create_dir_all(&log_dir)?;
+    let archive_dir = temp_dir.path().join("log-archive");
+    std::fs::create_dir_all(&archive_dir)?;
+
+    let config = ServerConfig {
+        listen: "127.0.0.1:0".to_string(),
+        db: DbConfig { url },
+        log_storage: LogStorageConfig {
+            local_dir: log_dir.to_string_lossy().to_string(),
+            s3: None,
+            archive: None,
+            read: Default::default(),
+        },
+        workspaces: HashMap::from([(
+            "default".to_string(),
+            WorkspaceSourceDef::Folder {
+                triggers: true,
+                path: temp_dir.path().to_string_lossy().to_string(),
+            },
+        )]),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
+        worker_token: "test-token-secret".to_string(),
+        auth: None,
+        recovery: Default::default(),
+        retention: RetentionConfig::default(),
+        acl: None,
+        mcp: None,
+        metrics: None,
+        agents: None,
+        state_storage: None,
+        artifact_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
+        workspace_reload: Default::default(),
+    };
+
+    let workspace = test_workspace();
+    let mgr = WorkspaceManager::from_config("default", workspace);
+    let archive: Arc<dyn BlobArchive> = Arc::new(LocalBlobArchive::new(archive_dir));
+    let log_storage = LogStorage::new(&config.log_storage.local_dir)
+        .with_archive(Arc::clone(&archive), String::new());
+    let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None);
+    let router = build_router(state, CancellationToken::new());
+
+    Ok((router, pool, temp_dir, archive, container))
+}
+
+#[tokio::test]
+async fn test_log_full_archive_priming_failure_answers_empty_none() -> Result<()> {
+    // C6: a terminal job whose local log is gone and whose archive object
+    // exists but is not gzip (`open`/HEAD succeeds, the first range read +
+    // gzip header fails during priming) must answer an empty 200 with
+    // `source: none`, not a torn or hung body.
+    let (router, pool, _tmp, archive, _container) = setup_with_log_archive().await?;
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "hello-world",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+    sqlx::query("UPDATE job SET status = 'completed', completed_at = NOW() WHERE job_id = $1")
+        .bind(job_id)
+        .execute(&pool)
+        .await?;
+    let job = JobRepo::get(&pool, job_id).await?.expect("job exists");
+    let meta = JobLogMeta {
+        workspace: job.workspace,
+        task_name: job.task_name,
+        created_at: job.created_at,
+    };
+    archive
+        .put(
+            &archive_key("", job_id, &meta),
+            "application/octet-stream",
+            bytes::Bytes::from_static(b"not gzip data"),
+        )
+        .await?;
+
+    let response = router
+        .oneshot(api_get(&format!("/api/jobs/{job_id}/logs?full=true")))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-stroem-log-source"], "none");
+    assert!(body_bytes(response).await.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_log_query_validation() -> Result<()> {
+    let (router, pool, tmp, _container) = setup().await?;
+    let job_id = job_with_log(&pool, &tmp, "x\n").await?;
+    for q in [
+        "tail_bytes=0",
+        "tail_bytes=4194305",
+        "tail_bytes=abc",
+        "tail_bytes=10&full=true",
+        "full=yes",
+    ] {
+        for path in [
+            format!("/api/jobs/{job_id}/logs?{q}"),
+            format!("/api/jobs/{job_id}/steps/build/logs?{q}"),
+        ] {
+            let response = router.clone().oneshot(api_get(&path)).await?;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
+            assert!(
+                body_json(response).await["error"].is_string(),
+                "{path}: JSON error body"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_log_query_duplicate_param_is_json_bad_request() -> Result<()> {
+    // A `Query<LogQuery>` extractor rejection (axum can't deserialize a
+    // repeated key into one field) must answer our JSON 400, not axum's
+    // plain-text one.
+    let (router, pool, tmp, _container) = setup().await?;
+    let job_id = job_with_log(&pool, &tmp, "x\n").await?;
+    for path in [
+        format!("/api/jobs/{job_id}/logs?tail_bytes=1&tail_bytes=2"),
+        format!("/api/jobs/{job_id}/steps/build/logs?tail_bytes=1&tail_bytes=2"),
+    ] {
+        let response = router.clone().oneshot(api_get(&path)).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
+        assert!(
+            response.headers()["content-type"]
+                .to_str()?
+                .starts_with("application/json"),
+            "{path}: JSON content type"
+        );
+        assert!(
+            body_json(response).await["error"].is_string(),
+            "{path}: JSON error body"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_step_logs_are_filtered_in_both_modes() -> Result<()> {
+    let (router, pool, tmp, _container) = setup().await?;
+    let (b, t, s) = (
+        jsonl_entry("build", "b"),
+        jsonl_entry("test", "t"),
+        jsonl_entry("_server", "hook failed"),
+    );
+    let job_id = job_with_log(&pool, &tmp, &format!("{b}\n{t}\n{s}\n")).await?;
+    let tail = body_json(
+        router
+            .clone()
+            .oneshot(api_get(&format!("/api/jobs/{job_id}/steps/build/logs")))
+            .await?,
+    )
+    .await;
+    assert_eq!(tail["logs"], format!("{b}\n"));
+    let full = router
+        .clone()
+        .oneshot(api_get(&format!(
+            "/api/jobs/{job_id}/steps/test/logs?full=true"
+        )))
+        .await?;
+    assert_eq!(String::from_utf8(body_bytes(full).await)?, format!("{t}\n"));
+    let server = body_json(
+        router
+            .oneshot(api_get(&format!("/api/jobs/{job_id}/steps/_server/logs")))
+            .await?,
+    )
+    .await;
+    assert_eq!(server["logs"], format!("{s}\n"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_ws_backfill_is_a_tail() -> Result<()> {
+    let (router, pool, tmp, _container) = setup().await?;
+    let content = big_log(20_000);
+    let job_id = job_with_log(&pool, &tmp, &content).await?;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let url = format!(
+        "ws://127.0.0.1:{}/api/jobs/{}/logs/stream",
+        addr.port(),
+        job_id
+    );
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("connect");
+    use futures_util::StreamExt;
+    let text = ws.next().await.unwrap()?.into_text()?;
+    assert!(
+        text.len() <= 262_144,
+        "backfill is the default tail, got {}",
+        text.len()
+    );
+    assert!(content.ends_with(text.as_str()));
+    drop(ws);
+    server.abort();
     Ok(())
 }

@@ -78,6 +78,7 @@ async fn build_test_app_inner(job_days: u64, with_blob: bool) -> Result<TestApp>
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "ws1".to_string(),

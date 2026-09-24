@@ -302,6 +302,7 @@ pub(crate) fn test_app_state_with_workspaces(
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::new(),
         libraries: HashMap::new(),
@@ -333,8 +334,26 @@ pub(crate) fn test_app_state_with_workspaces(
 mod tests {
     use super::*;
     use crate::config::{DbConfig, LogStorageConfig, RecoveryConfig, RetentionConfig};
+    use crate::log_read::StepFilter;
     use crate::workspace::WorkspaceManager;
     use tempfile::TempDir;
+
+    /// The whole log in one read — test helper standing in for the removed
+    /// `get_log` / `get_step_log`.
+    async fn read_all(
+        storage: &LogStorage,
+        job: Uuid,
+        meta: &crate::log_storage::JobLogMeta,
+        terminal: bool,
+        filter: StepFilter<'_>,
+    ) -> String {
+        const ALL: u64 = 16 * 1024 * 1024;
+        storage
+            .read_tail(job, meta, terminal, filter, ALL)
+            .await
+            .unwrap()
+            .logs
+    }
 
     fn test_state(log_dir: &std::path::Path) -> AppState {
         let config = ServerConfig {
@@ -346,6 +365,7 @@ mod tests {
                 local_dir: log_dir.to_string_lossy().to_string(),
                 s3: None,
                 archive: None,
+                read: Default::default(),
             },
             workspaces: HashMap::new(),
             libraries: HashMap::new(),
@@ -407,11 +427,7 @@ mod tests {
             task_name: "test".to_string(),
             created_at: chrono::Utc::now(),
         };
-        let log = state
-            .log_storage
-            .get_log(job_id, &meta, false)
-            .await
-            .unwrap();
+        let log = read_all(&state.log_storage, job_id, &meta, false, StepFilter::All).await;
         let parsed: serde_json::Value = serde_json::from_str(log.trim()).unwrap();
         assert_eq!(parsed["step"], "_server");
         assert_eq!(parsed["stream"], "stderr");
@@ -440,11 +456,7 @@ mod tests {
             task_name: "test".to_string(),
             created_at: chrono::Utc::now(),
         };
-        let log = state
-            .log_storage
-            .get_log(job_id, &meta, false)
-            .await
-            .unwrap();
+        let log = read_all(&state.log_storage, job_id, &meta, false, StepFilter::All).await;
         let line_count = log.lines().filter(|l| !l.is_empty()).count();
         assert_eq!(
             line_count, 2,
@@ -497,20 +509,26 @@ mod tests {
         };
 
         // Regular step logs should not include _server entries
-        let build_logs = state
-            .log_storage
-            .get_step_log(job_id, "build", &meta, false)
-            .await
-            .unwrap();
+        let build_logs = read_all(
+            &state.log_storage,
+            job_id,
+            &meta,
+            false,
+            StepFilter::Step("build"),
+        )
+        .await;
         assert!(build_logs.contains("compiling..."));
         assert!(!build_logs.contains("Hook failed"));
 
         // _server logs should be retrievable separately
-        let server_logs = state
-            .log_storage
-            .get_step_log(job_id, "_server", &meta, false)
-            .await
-            .unwrap();
+        let server_logs = read_all(
+            &state.log_storage,
+            job_id,
+            &meta,
+            false,
+            StepFilter::Step("_server"),
+        )
+        .await;
         assert!(server_logs.contains("Hook failed"));
         assert!(!server_logs.contains("compiling..."));
     }
@@ -533,11 +551,14 @@ mod tests {
             task_name: "test".to_string(),
             created_at: chrono::Utc::now(),
         };
-        let server_logs = state
-            .log_storage
-            .get_step_log(job_id, "_server", &meta, false)
-            .await
-            .unwrap();
+        let server_logs = read_all(
+            &state.log_storage,
+            job_id,
+            &meta,
+            false,
+            StepFilter::Step("_server"),
+        )
+        .await;
         let lines: Vec<&str> = server_logs.trim().lines().collect();
         assert_eq!(lines.len(), 2);
 
@@ -562,16 +583,22 @@ mod tests {
             task_name: "test".to_string(),
             created_at: chrono::Utc::now(),
         };
-        let logs1 = state
-            .log_storage
-            .get_step_log(job1, "_server", &meta, false)
-            .await
-            .unwrap();
-        let logs2 = state
-            .log_storage
-            .get_step_log(job2, "_server", &meta, false)
-            .await
-            .unwrap();
+        let logs1 = read_all(
+            &state.log_storage,
+            job1,
+            &meta,
+            false,
+            StepFilter::Step("_server"),
+        )
+        .await;
+        let logs2 = read_all(
+            &state.log_storage,
+            job2,
+            &meta,
+            false,
+            StepFilter::Step("_server"),
+        )
+        .await;
 
         assert!(logs1.contains("error for job1"));
         assert!(!logs1.contains("error for job2"));

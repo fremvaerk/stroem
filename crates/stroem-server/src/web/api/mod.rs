@@ -2,6 +2,7 @@ pub mod api_keys;
 pub mod artifacts;
 pub mod auth;
 pub mod jobs;
+pub mod logs;
 pub mod middleware;
 #[cfg(feature = "mcp")]
 pub mod oauth_consent;
@@ -312,8 +313,8 @@ pub fn build_api_routes(state: Arc<AppState>) -> Router {
         .route("/jobs/{id}/cancel", post(jobs::cancel_job))
         .route("/jobs/{id}/restart", post(jobs::restart_job))
         .route("/jobs/{id}/steps/{step}/approve", post(jobs::approve_step))
-        .route("/jobs/{id}/logs", get(jobs::get_job_logs))
-        .route("/jobs/{id}/steps/{step}/logs", get(jobs::get_step_logs))
+        .route("/jobs/{id}/logs", get(logs::get_job_logs))
+        .route("/jobs/{id}/steps/{step}/logs", get(logs::get_step_logs))
         .route("/jobs/{id}/artifacts", get(artifacts::list_artifacts))
         .route(
             "/jobs/{id}/artifacts/{name}",

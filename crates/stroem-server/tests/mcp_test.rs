@@ -335,6 +335,7 @@ async fn setup_with_mcp() -> Result<(
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -395,6 +396,7 @@ async fn setup_mcp_disabled() -> Result<(
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -467,6 +469,7 @@ async fn setup_with_auth_and_mcp_cfg(
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -1746,6 +1749,7 @@ async fn test_mcp_created_jobs_fire_hooks() -> Result<()> {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::new(),
         libraries: HashMap::new(),
@@ -1791,5 +1795,83 @@ async fn test_mcp_created_jobs_fire_hooks() -> Result<()> {
     assert_eq!(hook_steps[0].action_name, "notify");
     assert_eq!(hook_steps[0].status, "ready");
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_mcp_get_job_logs_tail_bytes_and_truncation_trailer() -> Result<()> {
+    let (router, pool, tmp, _container) = setup_with_mcp().await?;
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "hello-world",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+    let content: String = (0..2_000)
+        .map(|i| format!(r#"{{"ts":"2026-09-22T00:00:00Z","stream":"stdout","step":"build","line":"line {i:05}"}}"#) + "\n")
+        .collect();
+    std::fs::write(
+        tmp.path().join("logs").join(format!("{job_id}.jsonl")),
+        &content,
+    )?;
+    let (router, session_id) = mcp_initialize(router).await;
+    let call = |id: u64, args: Value| {
+        json!({"jsonrpc": "2.0", "method": "tools/call", "id": id,
+               "params": {"name": "get_job_logs", "arguments": args}})
+    };
+
+    let resp = body_json(
+        router
+            .clone()
+            .oneshot(mcp_request(
+                session_id.as_deref(),
+                call(2, json!({"job_id": job_id.to_string()})),
+            ))
+            .await?,
+    )
+    .await;
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("line 01999") && text.contains("line 00000"));
+    assert!(
+        !text.contains("[truncated:"),
+        "under the default tail there is no trailer"
+    );
+
+    let resp = body_json(
+        router
+            .clone()
+            .oneshot(mcp_request(
+                session_id.as_deref(),
+                call(3, json!({"job_id": job_id.to_string(), "tail_bytes": 1000})),
+            ))
+            .await?,
+    )
+    .await;
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("line 01999") && !text.contains("line 00000"));
+    assert!(
+        text.trim_end().ends_with("earlier lines omitted]"),
+        "{text}"
+    );
+
+    let resp = body_json(
+        router
+            .oneshot(mcp_request(
+                session_id.as_deref(),
+                call(4, json!({"job_id": job_id.to_string(), "tail_bytes": 0})),
+            ))
+            .await?,
+    )
+    .await;
+    assert!(
+        resp.get("error").is_some(),
+        "tail_bytes 0 is invalid params: {resp}"
+    );
     Ok(())
 }

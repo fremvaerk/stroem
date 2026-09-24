@@ -1,4 +1,5 @@
 use crate::acl::{load_user_acl_context, make_task_path, TaskPermission};
+use crate::log_read::StepFilter;
 use crate::log_storage::JobLogMeta;
 use crate::state::AppState;
 use crate::web::api::parse_uuid_param;
@@ -161,10 +162,15 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>, job_id: Uuid, sk
             ),
         };
 
-        if let Ok(existing) = state.log_storage.get_log(job_id, &meta, is_terminal).await {
-            if !existing.is_empty()
+        let tail_bytes = state.config.log_storage.read.tail_default_bytes;
+        if let Ok(tail) = state
+            .log_storage
+            .read_tail(job_id, &meta, is_terminal, StepFilter::All, tail_bytes)
+            .await
+        {
+            if !tail.logs.is_empty()
                 && socket
-                    .send(axum::extract::ws::Message::Text(existing.into()))
+                    .send(axum::extract::ws::Message::Text(tail.logs.into()))
                     .await
                     .is_err()
             {

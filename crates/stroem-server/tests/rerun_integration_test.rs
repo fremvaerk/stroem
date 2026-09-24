@@ -220,6 +220,7 @@ async fn build_test_app(workspace_name: &str, workspace: WorkspaceConfig) -> Res
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             workspace_name.to_string(),

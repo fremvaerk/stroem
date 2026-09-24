@@ -1,5 +1,4 @@
 use crate::acl::{load_user_acl_context, make_task_path, AllowedScope, TaskPermission};
-use crate::log_storage::JobLogMeta;
 use crate::state::AppState;
 use crate::web::api::middleware::AuthUser;
 use crate::web::api::{default_limit, parse_uuid_param};
@@ -554,78 +553,6 @@ fn redact_response(response: &mut JobDetailResponse, secret_values: &[String]) {
             redact_json(retry_history, secret_values);
         }
     }
-}
-
-/// GET /api/jobs/:id/steps/:step/logs - Get per-step logs
-#[tracing::instrument(skip(state))]
-pub async fn get_step_logs(
-    State(state): State<Arc<AppState>>,
-    auth_user: Option<AuthUser>,
-    Path((id, step_name)): Path<(String, String)>,
-) -> Result<impl IntoResponse, AppError> {
-    let job_id = parse_uuid_param(&id, "job")?;
-
-    let job = JobRepo::get(&state.pool, job_id)
-        .await
-        .context("get job")?
-        .ok_or_else(|| AppError::not_found("Job"))?;
-
-    // ACL check
-    let perm = check_job_acl(&state, &auth_user, &job.workspace, &job.task_name).await?;
-    if matches!(perm, TaskPermission::Deny) {
-        return Err(AppError::not_found("Job"));
-    }
-
-    let is_terminal = stroem_common::models::job::is_terminal_status(&job.status);
-    let meta = JobLogMeta {
-        workspace: job.workspace,
-        task_name: job.task_name,
-        created_at: job.created_at,
-    };
-
-    let logs = state
-        .log_storage
-        .get_step_log(job_id, &step_name, &meta, is_terminal)
-        .await
-        .context("get step logs")?;
-
-    Ok(Json(json!({"logs": logs})))
-}
-
-/// GET /api/jobs/:id/logs - Get log file contents
-#[tracing::instrument(skip(state))]
-pub async fn get_job_logs(
-    State(state): State<Arc<AppState>>,
-    auth_user: Option<AuthUser>,
-    Path(id): Path<String>,
-) -> Result<impl IntoResponse, AppError> {
-    let job_id = parse_uuid_param(&id, "job")?;
-
-    let job = JobRepo::get(&state.pool, job_id)
-        .await
-        .context("get job")?
-        .ok_or_else(|| AppError::not_found("Job"))?;
-
-    // ACL check
-    let perm = check_job_acl(&state, &auth_user, &job.workspace, &job.task_name).await?;
-    if matches!(perm, TaskPermission::Deny) {
-        return Err(AppError::not_found("Job"));
-    }
-
-    let is_terminal = stroem_common::models::job::is_terminal_status(&job.status);
-    let meta = JobLogMeta {
-        workspace: job.workspace,
-        task_name: job.task_name,
-        created_at: job.created_at,
-    };
-
-    let logs = state
-        .log_storage
-        .get_log(job_id, &meta, is_terminal)
-        .await
-        .context("get job logs")?;
-
-    Ok(Json(json!({"logs": logs})))
 }
 
 /// POST /api/jobs/:id/cancel - Cancel a running or pending job

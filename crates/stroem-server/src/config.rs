@@ -55,6 +55,80 @@ pub struct LogStorageConfig {
     /// New pluggable archive config (takes precedence over `s3`).
     #[serde(default)]
     pub archive: Option<ArchiveConfig>,
+    /// Bounds on log reads (tail sizes, line and merge caps).
+    #[serde(default)]
+    pub read: LogReadConfig,
+}
+
+/// Bounds on log reads — `docs/superpowers/specs/2026-09-22-log-tail-streaming-design.md` § 3.5.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LogReadConfig {
+    /// Tail size when a request names none.
+    pub tail_default_bytes: u64,
+    /// Largest `tail_bytes` a request may ask for.
+    pub tail_max_bytes: u64,
+    /// How far back a step tail scans before giving up.
+    pub tail_scan_max_bytes: u64,
+    /// Longest single line a filtered read carries; longer lines are skipped.
+    pub max_line_bytes: usize,
+    /// Local length + archive decompressed length under which a terminal
+    /// full read still merges the two sources in memory.
+    pub merge_max_bytes: u64,
+    /// Most lines a union merge (tail or full) will hold.
+    pub merge_max_lines: usize,
+}
+
+impl Default for LogReadConfig {
+    fn default() -> Self {
+        Self {
+            tail_default_bytes: 256 * 1024,
+            tail_max_bytes: 4 * 1024 * 1024,
+            tail_scan_max_bytes: 64 * 1024 * 1024,
+            max_line_bytes: 1024 * 1024,
+            merge_max_bytes: 16 * 1024 * 1024,
+            merge_max_lines: 131_072,
+        }
+    }
+}
+
+impl LogReadConfig {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        for (name, value) in [
+            ("tail_default_bytes", self.tail_default_bytes),
+            ("tail_max_bytes", self.tail_max_bytes),
+            ("tail_scan_max_bytes", self.tail_scan_max_bytes),
+            ("max_line_bytes", self.max_line_bytes as u64),
+            ("merge_max_bytes", self.merge_max_bytes),
+            ("merge_max_lines", self.merge_max_lines as u64),
+        ] {
+            if value == 0 {
+                anyhow::bail!("log_storage.read.{name} must be greater than 0");
+            }
+        }
+        if self.tail_default_bytes > self.tail_max_bytes {
+            anyhow::bail!(
+                "log_storage.read.tail_default_bytes ({}) must not exceed tail_max_bytes ({})",
+                self.tail_default_bytes,
+                self.tail_max_bytes
+            );
+        }
+        if self.tail_max_bytes > self.tail_scan_max_bytes {
+            anyhow::bail!(
+                "log_storage.read.tail_max_bytes ({}) must not exceed tail_scan_max_bytes ({})",
+                self.tail_max_bytes,
+                self.tail_scan_max_bytes
+            );
+        }
+        if self.max_line_bytes as u64 > self.merge_max_bytes {
+            anyhow::bail!(
+                "log_storage.read.max_line_bytes ({}) must not exceed merge_max_bytes ({})",
+                self.max_line_bytes,
+                self.merge_max_bytes
+            );
+        }
+        Ok(())
+    }
 }
 
 impl LogStorageConfig {
@@ -639,6 +713,7 @@ impl ServerConfig {
         if self.recovery.unmatched_step_timeout_secs < 5 {
             anyhow::bail!("unmatched_step_timeout_secs must be at least 5");
         }
+        self.log_storage.read.validate()?;
         if let Some(hours) = self.retention.worker_hours {
             if hours < 1 {
                 anyhow::bail!("retention.worker_hours must be at least 1");
@@ -2654,6 +2729,7 @@ worker_token: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 local_dir: "/tmp".to_string(),
                 s3: None,
                 archive: None,
+                read: Default::default(),
             },
             workspaces: std::collections::HashMap::new(),
             libraries: std::collections::HashMap::new(),
@@ -2832,5 +2908,94 @@ worker_token: "0123456789abcdef0123456789abcdef"
         c.workspace_reload.load_timeout_secs = 86_400;
         c.workspace_reload.max_backoff_secs = 86_400;
         assert!(c.validate().is_ok(), "{:?}", c.validate());
+    }
+
+    #[test]
+    fn log_read_defaults_when_absent() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://x"
+log_storage:
+  local_dir: /tmp/logs
+worker_token: "0123456789abcdef0123456789abcdef"
+"#;
+        let cfg: ServerConfig = serde_yaml::from_str(yaml).unwrap();
+        let r = cfg.log_storage.read;
+        assert_eq!(r.tail_default_bytes, 262_144);
+        assert_eq!(r.tail_max_bytes, 4_194_304);
+        assert_eq!(r.tail_scan_max_bytes, 67_108_864);
+        assert_eq!(r.max_line_bytes, 1_048_576);
+        assert_eq!(r.merge_max_bytes, 16_777_216);
+        assert_eq!(r.merge_max_lines, 131_072);
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn log_read_overrides_parse_and_unknown_keys_are_rejected() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://x"
+log_storage:
+  local_dir: /tmp/logs
+  read:
+    tail_max_bytes: 1048576
+worker_token: "0123456789abcdef0123456789abcdef"
+"#;
+        let cfg: ServerConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.log_storage.read.tail_max_bytes, 1_048_576);
+        assert_eq!(cfg.log_storage.read.tail_default_bytes, 262_144);
+        cfg.validate().unwrap();
+
+        let bad = yaml.replace("tail_max_bytes", "tail_maxx_bytes");
+        assert!(serde_yaml::from_str::<ServerConfig>(&bad).is_err());
+    }
+
+    #[test]
+    fn log_read_validation_rejects_zero_and_inverted_limits() {
+        let base = minimal_config();
+        for mutate in [
+            (|c: &mut ServerConfig| c.log_storage.read.tail_default_bytes = 0)
+                as fn(&mut ServerConfig),
+            |c| c.log_storage.read.tail_max_bytes = 0,
+            |c| c.log_storage.read.tail_scan_max_bytes = 0,
+            |c| c.log_storage.read.max_line_bytes = 0,
+            |c| c.log_storage.read.merge_max_bytes = 0,
+            |c| c.log_storage.read.merge_max_lines = 0,
+            |c| c.log_storage.read.tail_default_bytes = c.log_storage.read.tail_max_bytes + 1,
+            |c| c.log_storage.read.tail_max_bytes = c.log_storage.read.tail_scan_max_bytes + 1,
+            |c| c.log_storage.read.max_line_bytes = c.log_storage.read.merge_max_bytes as usize + 1,
+        ] {
+            let mut c = base.clone();
+            mutate(&mut c);
+            let err = c.validate().unwrap_err().to_string();
+            assert!(err.contains("log_storage.read"), "unexpected error: {err}");
+        }
+    }
+
+    #[test]
+    fn log_read_env_override_coerces_strings() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://placeholder:5432/stroem"
+log_storage:
+  local_dir: "./logs"
+worker_token: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+"#;
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut file, yaml.as_bytes()).unwrap();
+        std::io::Write::flush(&mut file).unwrap();
+        // SAFETY: test-only, serialized by ENV_MUTEX
+        unsafe {
+            std::env::set_var("STROEM__LOG_STORAGE__READ__TAIL_MAX_BYTES", "1048576");
+        }
+        let config = load_config(file.path().to_str().unwrap());
+        unsafe {
+            std::env::remove_var("STROEM__LOG_STORAGE__READ__TAIL_MAX_BYTES");
+        }
+        assert_eq!(config.unwrap().log_storage.read.tail_max_bytes, 1_048_576);
     }
 }

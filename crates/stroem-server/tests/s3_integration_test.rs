@@ -4,12 +4,17 @@ use anyhow::Result;
 use bytes::Bytes;
 use std::sync::Arc;
 use stroem_server::blob_storage::{BlobArchive, S3BlobArchive};
+use stroem_server::log_read::StepFilter;
 use stroem_server::log_storage::{JobLogMeta, LogStorage};
 use tempfile::TempDir;
 use testcontainers::runners::AsyncRunner;
 use testcontainers::ImageExt;
 use testcontainers_modules::minio::MinIO;
 use uuid::Uuid;
+
+/// `read_tail`'s tail budget for tests that want the whole log — well above
+/// anything these fixtures write.
+const ALL: u64 = 16 * 1024 * 1024;
 
 // ─── Helpers ────────────────────────────────────────────────────────────
 
@@ -140,7 +145,10 @@ async fn test_s3_read_fallback_when_local_missing() -> Result<()> {
     // get_log should fall back to S3 — is_terminal=true because the
     // archive is only consulted for terminal jobs (pre-terminal archive
     // reads are guaranteed 404s — the upload happens at terminal time).
-    let log = storage.get_log(job_id, &meta, true).await?;
+    let log = storage
+        .read_tail(job_id, &meta, true, StepFilter::All, ALL)
+        .await?
+        .logs;
     assert_eq!(log, content);
 
     Ok(())
@@ -185,7 +193,10 @@ async fn test_s3_local_preferred_over_s3() -> Result<()> {
         .await?;
 
     // get_log should return local content (preferred over S3)
-    let log = storage.get_log(job_id, &meta, false).await?;
+    let log = storage
+        .read_tail(job_id, &meta, false, StepFilter::All, ALL)
+        .await?
+        .logs;
     assert_eq!(log, local_content);
 
     Ok(())
@@ -253,10 +264,16 @@ async fn test_s3_get_step_log_falls_back_to_s3() -> Result<()> {
 
     // get_step_log should filter from S3 content (is_terminal=true so the
     // archive is consulted).
-    let build_logs = storage.get_step_log(job_id, "build", &meta, true).await?;
+    let build_logs = storage
+        .read_tail(job_id, &meta, true, StepFilter::Step("build"), ALL)
+        .await?
+        .logs;
     assert_eq!(build_logs, format!("{}\n", build_line));
 
-    let test_logs = storage.get_step_log(job_id, "test", &meta, true).await?;
+    let test_logs = storage
+        .read_tail(job_id, &meta, true, StepFilter::Step("test"), ALL)
+        .await?
+        .logs;
     assert_eq!(test_logs, format!("{}\n", test_line));
 
     Ok(())
@@ -393,5 +410,44 @@ async fn s3_delete_prefix_surfaces_partial_failures() -> Result<()> {
     );
 
     server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn s3_open_and_read_range_are_bounded_and_version_pinned() -> Result<()> {
+    let (_container, endpoint) = setup_minio().await?;
+    let bucket = format!("test-{}", Uuid::new_v4());
+    let client = test_s3_client(&endpoint);
+    create_bucket(&client, &bucket).await?;
+    let archive = S3BlobArchive::from_client(client.clone(), bucket.clone());
+
+    assert!(archive.open("missing").await?.is_none());
+    archive
+        .put("k", "text/plain", Bytes::from_static(b"0123456789"))
+        .await?;
+    let obj = archive.open("k").await?.unwrap();
+    assert_eq!(obj.size, 10);
+
+    let mut v = Vec::with_capacity(64);
+    archive.read_range(&obj, 2, 3, &mut v).await?;
+    assert_eq!(v, b"234");
+    v.clear();
+    archive.read_range(&obj, 8, 10, &mut v).await?;
+    assert_eq!(v, b"89");
+    v.clear();
+    archive.read_range(&obj, 10, 5, &mut v).await?;
+    assert!(v.is_empty());
+
+    archive
+        .put("k", "text/plain", Bytes::from_static(b"replaced!!"))
+        .await?;
+    let err = archive
+        .read_range(&obj, 0, 5, &mut Vec::new())
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{err:#}").contains("changed since it was opened"),
+        "{err:#}"
+    );
     Ok(())
 }

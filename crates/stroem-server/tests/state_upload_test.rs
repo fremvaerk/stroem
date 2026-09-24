@@ -144,6 +144,7 @@ async fn build_test_app_inner(
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             workspace_name.to_string(),
@@ -706,6 +707,7 @@ async fn build_test_app_with_auth(
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         },
         workspaces: HashMap::from([(
             workspace_name.to_string(),

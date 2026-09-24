@@ -5,6 +5,10 @@ use std::time::Duration;
 use stroem_common::secret::Secret;
 use uuid::Uuid;
 
+/// `/worker/jobs/{id}/logs` keeps axum's default 2 MiB request body limit; keep every push
+/// comfortably under it so a fast step's buffered lines are never rejected with 413 and lost.
+const LOG_PUSH_MAX_BYTES: usize = 1024 * 1024;
+
 /// HTTP client for communicating with the Strøm server
 #[derive(Clone)]
 pub struct ServerClient {
@@ -791,7 +795,13 @@ impl ServerClient {
         Ok(())
     }
 
-    /// Push log lines to the server
+    /// Push log lines to the server.
+    ///
+    /// A step's buffered lines can arrive here all at once (e.g. a fast step's final flush,
+    /// which never hits the periodic 1s pusher) — sent as a single request, that can exceed the
+    /// server's default 2 MiB body limit and be rejected with 413, silently dropping the whole
+    /// batch. Split into sequential requests of at most `LOG_PUSH_MAX_BYTES` each instead; a
+    /// single entry larger than the cap is sent alone (the server may still reject it).
     #[tracing::instrument(skip(self, lines))]
     pub async fn push_logs(
         &self,
@@ -802,8 +812,6 @@ impl ServerClient {
         if lines.is_empty() {
             return Ok(());
         }
-
-        let url = format!("{}/worker/jobs/{}/logs", self.base_url, job_id);
 
         // Build structured log line entries for the server
         let structured_lines: Vec<serde_json::Value> = lines
@@ -817,11 +825,68 @@ impl ServerClient {
             })
             .collect();
 
+        // Envelope skeleton `{"lines":[...],"step_name":"..."}`, everything
+        // except the lines and the step name's own bytes, is exactly 25
+        // bytes: `{"lines":[` (10) + `]` (1) + `,"step_name":` (13) + `}`
+        // (1). The step name must be measured by its escaped, QUOTED JSON
+        // length — the same bytes `send_log_chunk`'s `.json(&..)` puts on
+        // the wire — not its raw `.len()`: a name full of characters that
+        // expand under JSON escaping (`"`, `\`, control bytes) otherwise
+        // undercounts the envelope and can push a tightly packed chunk's
+        // real body over the cap. This makes "never over cap" exactly true
+        // (not just generous): +8 bytes of slack for anything this count
+        // missed still leaves the real body strictly under the cap (see
+        // `test_push_logs_envelope_counts_escaped_step_name`).
+        const ENVELOPE_SKELETON_BYTES: usize = 25;
+        let step_name_json_len = serde_json::to_string(step_name)
+            .context("Failed to measure step name size")?
+            .len();
+        let envelope_overhead = step_name_json_len + ENVELOPE_SKELETON_BYTES + 8;
+
+        let mut chunks: Vec<Vec<serde_json::Value>> = Vec::new();
+        let mut current: Vec<serde_json::Value> = Vec::new();
+        let mut current_bytes = envelope_overhead;
+
+        for entry in structured_lines {
+            let entry_bytes = serde_json::to_vec(&entry)
+                .context("Failed to measure log entry size")?
+                .len()
+                + 1; // separating comma
+            if !current.is_empty() && current_bytes + entry_bytes > LOG_PUSH_MAX_BYTES {
+                chunks.push(std::mem::take(&mut current));
+                current_bytes = envelope_overhead;
+            }
+            current_bytes += entry_bytes;
+            current.push(entry);
+        }
+        if !current.is_empty() {
+            chunks.push(current);
+        }
+
+        let total = chunks.len();
+        for (idx, chunk) in chunks.into_iter().enumerate() {
+            self.send_log_chunk(job_id, step_name, chunk)
+                .await
+                .with_context(|| format!("chunk {} of {}", idx + 1, total))?;
+        }
+
+        Ok(())
+    }
+
+    /// Send one `push_logs` request (a chunk of already-structured entries).
+    async fn send_log_chunk(
+        &self,
+        job_id: Uuid,
+        step_name: &str,
+        lines: Vec<serde_json::Value>,
+    ) -> Result<()> {
+        let url = format!("{}/worker/jobs/{}/logs", self.base_url, job_id);
+
         let response = self
             .client
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.token))
-            .json(&serde_json::json!({ "lines": structured_lines, "step_name": step_name }))
+            .json(&serde_json::json!({ "lines": lines, "step_name": step_name }))
             .send()
             .await
             .context("Failed to send logs request")?;
@@ -1041,5 +1106,271 @@ mod tests {
             resp.revision.is_none(),
             "missing revision field must default to None for backward compat"
         );
+    }
+
+    // --- push_logs chunking (regression for the big-log 413, 2026-09-23) ---
+
+    /// A batch too big for one request must be split into multiple requests, each within
+    /// `LOG_PUSH_MAX_BYTES`, and the concatenated `lines` across requests must equal the
+    /// input in order — this is what protects a fast step's final flush from a silent 413.
+    #[tokio::test]
+    async fn test_push_logs_chunks_large_batch_under_cap() {
+        use wiremock::matchers::{method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"/worker/jobs/.+/logs"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&mock)
+            .await;
+
+        let client = ServerClient::new(&mock.uri(), "t", Some(5), Some(30));
+        let job_id = Uuid::new_v4();
+
+        // ~1 KB lines; enough entries to build a ~3 MiB batch (> 3x the 1 MiB cap).
+        let line_text = "x".repeat(1000);
+        let n = 3200;
+        let lines: Vec<serde_json::Value> = (0..n)
+            .map(|i| {
+                serde_json::json!({
+                    "timestamp": "2026-01-01T00:00:00Z",
+                    "stream": "stdout",
+                    "line": format!("{line_text}-{i}"),
+                })
+            })
+            .collect();
+
+        client
+            .push_logs(job_id, "print", lines)
+            .await
+            .expect("push_logs should succeed across all chunks");
+
+        let received = mock.received_requests().await.unwrap();
+        assert!(
+            received.len() >= 3,
+            "expected at least 3 chunked requests for a ~3 MiB batch, got {}",
+            received.len()
+        );
+
+        let mut all_lines: Vec<String> = Vec::new();
+        for req in &received {
+            assert!(
+                req.body.len() <= LOG_PUSH_MAX_BYTES,
+                "request body {} bytes exceeds cap {}",
+                req.body.len(),
+                LOG_PUSH_MAX_BYTES
+            );
+            let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+            assert_eq!(
+                body["step_name"], "print",
+                "every chunk must carry step_name"
+            );
+            for entry in body["lines"].as_array().unwrap() {
+                all_lines.push(entry["line"].as_str().unwrap().to_string());
+            }
+        }
+
+        let expected: Vec<String> = (0..n).map(|i| format!("{line_text}-{i}")).collect();
+        assert_eq!(
+            all_lines, expected,
+            "concatenated chunk lines must equal the input, in order"
+        );
+    }
+
+    /// A small batch is unchanged: exactly one request.
+    #[tokio::test]
+    async fn test_push_logs_small_batch_is_one_request() {
+        use wiremock::matchers::{method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"/worker/jobs/.+/logs"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let client = ServerClient::new(&mock.uri(), "t", Some(5), Some(30));
+        let lines = vec![serde_json::json!({
+            "timestamp": "2026-01-01T00:00:00Z",
+            "stream": "stdout",
+            "line": "hello",
+        })];
+
+        client
+            .push_logs(Uuid::new_v4(), "step", lines)
+            .await
+            .expect("a small batch must still succeed");
+        // wiremock verifies `expect(1)` on drop.
+    }
+
+    /// A failure partway through must stop immediately (no further chunks sent) and the
+    /// returned error must name which chunk failed.
+    #[tokio::test]
+    async fn test_push_logs_stops_at_first_failed_chunk() {
+        use wiremock::matchers::{method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock = MockServer::start().await;
+        // Call 1 succeeds; call 2 fails. A would-be call 3 has no matching mock, so if
+        // push_logs wrongly kept going after the failure, `received_requests` below would
+        // show 3 entries instead of 2.
+        Mock::given(method("POST"))
+            .and(path_regex(r"/worker/jobs/.+/logs"))
+            .respond_with(ResponseTemplate::new(200))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"/worker/jobs/.+/logs"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .up_to_n_times(1)
+            .with_priority(2)
+            .mount(&mock)
+            .await;
+
+        let client = ServerClient::new(&mock.uri(), "t", Some(5), Some(30));
+        let line_text = "x".repeat(1000);
+        let n = 3200;
+        let lines: Vec<serde_json::Value> = (0..n)
+            .map(|i| {
+                serde_json::json!({
+                    "timestamp": "2026-01-01T00:00:00Z",
+                    "stream": "stdout",
+                    "line": format!("{line_text}-{i}"),
+                })
+            })
+            .collect();
+
+        let result = client.push_logs(Uuid::new_v4(), "print", lines).await;
+        let err = result.expect_err("second chunk failure must propagate");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("chunk 2 of"),
+            "error should name the failing chunk, got: {msg}"
+        );
+
+        let received = mock.received_requests().await.unwrap();
+        assert_eq!(
+            received.len(),
+            2,
+            "must stop after the failing chunk and never send a third, got {} requests",
+            received.len()
+        );
+    }
+
+    /// A single entry larger than the cap is sent in a chunk of its own, isolated from its
+    /// neighbours (the server may still reject it — tracked as a residual gap in TODO.md).
+    #[tokio::test]
+    async fn test_push_logs_oversized_entry_sent_alone() {
+        use wiremock::matchers::{method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"/worker/jobs/.+/logs"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&mock)
+            .await;
+
+        let client = ServerClient::new(&mock.uri(), "t", Some(5), Some(30));
+        let huge_line = "y".repeat(LOG_PUSH_MAX_BYTES + 1024);
+        let lines = vec![
+            serde_json::json!({"timestamp": "t", "stream": "stdout", "line": "small-before"}),
+            serde_json::json!({"timestamp": "t", "stream": "stdout", "line": huge_line.clone()}),
+            serde_json::json!({"timestamp": "t", "stream": "stdout", "line": "small-after"}),
+        ];
+
+        client
+            .push_logs(Uuid::new_v4(), "print", lines)
+            .await
+            .expect("push_logs should still succeed (server accepts this mock's oversized body)");
+
+        let received = mock.received_requests().await.unwrap();
+        assert_eq!(
+            received.len(),
+            3,
+            "the oversized entry must split into its own chunk, got {} requests",
+            received.len()
+        );
+
+        let bodies: Vec<serde_json::Value> = received
+            .iter()
+            .map(|r| serde_json::from_slice(&r.body).unwrap())
+            .collect();
+        let mid_lines = bodies[1]["lines"].as_array().unwrap();
+        assert_eq!(
+            mid_lines.len(),
+            1,
+            "the oversized entry's chunk must contain only itself"
+        );
+        assert_eq!(mid_lines[0]["line"].as_str().unwrap(), huge_line);
+    }
+
+    /// A step name that expands under JSON escaping must be counted by its
+    /// escaped, quoted length, not its raw one — an underestimate here packs
+    /// lines tightly enough that the real (escaped) envelope can push a
+    /// request over `LOG_PUSH_MAX_BYTES` (C8/C9 regression: 64 `"`
+    /// characters raw-len 64 but escaped-quoted-len 130).
+    #[tokio::test]
+    async fn test_push_logs_envelope_counts_escaped_step_name() {
+        use wiremock::matchers::{method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"/worker/jobs/.+/logs"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&mock)
+            .await;
+
+        let client = ServerClient::new(&mock.uri(), "t", Some(5), Some(30));
+        let job_id = Uuid::new_v4();
+
+        // 64 `"` characters: each escapes to `\"` (2 bytes), so the quoted
+        // step name is 2 + 64*2 = 130 bytes — far more than its raw 64,
+        // which is exactly what the old `step_name.len() + 32` missed.
+        let step_name = "\"".repeat(64);
+
+        // Small, uniform lines so the packer's greedy boundary lands within
+        // a few bytes of the cap on every chunk but the last — any gap the
+        // escaped-name fix leaves unaccounted for shows up as an
+        // over-cap request.
+        let line_text = "x".repeat(40);
+        let n = 40_000;
+        let lines: Vec<serde_json::Value> = (0..n)
+            .map(|i| {
+                serde_json::json!({
+                    "timestamp": "2026-01-01T00:00:00Z",
+                    "stream": "stdout",
+                    "line": format!("{line_text}-{i}"),
+                })
+            })
+            .collect();
+
+        client
+            .push_logs(job_id, &step_name, lines)
+            .await
+            .expect("push_logs should succeed across all chunks");
+
+        let received = mock.received_requests().await.unwrap();
+        assert!(
+            received.len() >= 2,
+            "expected multiple chunks, got {}",
+            received.len()
+        );
+        for req in &received {
+            assert!(
+                req.body.len() <= LOG_PUSH_MAX_BYTES,
+                "request body {} bytes exceeds cap {} with an escaped step name",
+                req.body.len(),
+                LOG_PUSH_MAX_BYTES
+            );
+            let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+            assert_eq!(body["step_name"], step_name);
+        }
     }
 }

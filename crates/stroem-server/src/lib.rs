@@ -10,6 +10,7 @@ pub mod job_completion;
 pub mod job_creator;
 pub mod leader;
 pub mod log_broadcast;
+pub mod log_read;
 pub mod log_storage;
 #[cfg(feature = "mcp")]
 pub mod mcp;

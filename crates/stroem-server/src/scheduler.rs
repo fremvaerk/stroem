@@ -1163,6 +1163,7 @@ mod tests {
                 local_dir: "/tmp/test-logs".to_string(),
                 s3: None,
                 archive: None,
+                read: Default::default(),
             },
             workspaces: HashMap::new(),
             libraries: HashMap::new(),

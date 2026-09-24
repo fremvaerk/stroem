@@ -1,0 +1,16 @@
+actions:
+  print-many-lines:
+    type: script
+    script: |
+      i=1
+      while [ $i -le 20000 ]; do
+        echo "big log line $i padded so that the whole log is well over the default tail"
+        i=$((i + 1))
+      done
+
+tasks:
+  big-log:
+    mode: distributed
+    flow:
+      print:
+        action: print-many-lines

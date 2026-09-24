@@ -1,12 +1,17 @@
 use crate::blob_storage::BlobArchive;
+use crate::config::LogReadConfig;
+use crate::log_read::archive::{self as archive_read, ArchiveTail};
+use crate::log_read::local::{self as local_read, LocalTail};
+use crate::log_read::{bytes_stream, count_lines, cut_front_to_lines, LogSource, StepFilter, Tail};
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use dashmap::DashMap;
+use futures_core::stream::BoxStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::fs::{self, File, OpenOptions};
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
+use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -47,7 +52,8 @@ pub(crate) fn merge_jsonl_logs(a: &str, b: &str) -> String {
 
     lines.sort_by(|a, b| extract_ts(a).cmp(&extract_ts(b)));
 
-    let mut out = String::with_capacity(a.len() + b.len());
+    // +2: each input's last line gains a '\n' if it had none.
+    let mut out = String::with_capacity(a.len() + b.len() + 2);
     for line in lines {
         out.push_str(line);
         out.push('\n');
@@ -83,6 +89,52 @@ pub fn archive_key(prefix: &str, job_id: Uuid, meta: &JobLogMeta) -> String {
     )
 }
 
+/// Spec § 3.3: the union of a local and an archive tail when it fits
+/// `max_lines`, cut back to `t`; otherwise the single source there is.
+/// `total_bytes` is an upper bound: a union is at most the sum of its
+/// inputs, plus the newline each input's last line may gain.
+fn combine_tails(
+    local: Option<LocalTail>,
+    archive: Option<ArchiveTail>,
+    t: u64,
+    max_lines: usize,
+) -> Tail {
+    match (local, archive) {
+        (None, None) => Tail::empty(),
+        (Some(l), None) => Tail {
+            logs: l.logs,
+            truncated: l.truncated,
+            total_bytes: l.len,
+            source: LogSource::Local,
+        },
+        (None, Some(a)) => Tail {
+            logs: a.logs,
+            truncated: a.truncated,
+            total_bytes: a.decompressed,
+            source: LogSource::Archive,
+        },
+        (Some(l), Some(a)) => {
+            let total_bytes = l.len + a.decompressed + 2;
+            if count_lines(l.logs.as_bytes()) + count_lines(a.logs.as_bytes()) > max_lines {
+                return Tail {
+                    logs: l.logs,
+                    truncated: true,
+                    total_bytes,
+                    source: LogSource::Local,
+                };
+            }
+            let merged = merge_jsonl_logs(&l.logs, &a.logs);
+            let (logs, cut) = cut_front_to_lines(merged, t);
+            Tail {
+                logs,
+                truncated: l.truncated || a.truncated || cut,
+                total_bytes,
+                source: LogSource::Merged,
+            }
+        }
+    }
+}
+
 // ─── LogStorage ──────────────────────────────────────────────────────────
 
 /// A cached, buffered file handle for a single job's log file.
@@ -107,6 +159,8 @@ pub struct LogStorage {
     archive: Option<Arc<dyn BlobArchive>>,
     /// Key prefix for archive objects.
     archive_prefix: String,
+    /// Read bounds (tail sizes, line and merge caps).
+    read: LogReadConfig,
 }
 
 impl LogStorage {
@@ -118,6 +172,7 @@ impl LogStorage {
             file_cache: Arc::new(DashMap::new()),
             archive: None,
             archive_prefix: String::new(),
+            read: LogReadConfig::default(),
         }
     }
 
@@ -126,6 +181,17 @@ impl LogStorage {
         self.archive = Some(archive);
         self.archive_prefix = prefix;
         self
+    }
+
+    /// Use `read` for this storage's read bounds (defaults otherwise).
+    pub fn with_read_config(mut self, read: LogReadConfig) -> Self {
+        self.read = read;
+        self
+    }
+
+    /// The read bounds this storage enforces.
+    pub fn read_config(&self) -> LogReadConfig {
+        self.read
     }
 
     /// Get the JSONL log file path for a job.
@@ -297,266 +363,164 @@ impl LogStorage {
         Ok(())
     }
 
-    /// Download a job's log from the archive (gzip-compressed). Returns `None` if
-    /// the key doesn't exist or no archive is configured.
-    async fn get_log_from_archive(
-        &self,
-        job_id: Uuid,
-        meta: &JobLogMeta,
-    ) -> Result<Option<String>> {
-        if let Some(ref archive) = self.archive {
-            let key = archive_key(&self.archive_prefix, job_id, meta);
-            if let Some(blob) = archive.get(&key).await? {
-                use flate2::read::GzDecoder;
-                use std::io::Read;
-
-                let mut decoder = GzDecoder::new(blob.bytes.as_ref());
-                let mut content = String::new();
-                decoder
-                    .read_to_string(&mut content)
-                    .context("Failed to gzip-decompress archive log content")?;
-
-                return Ok(Some(content));
-            }
-        }
-        Ok(None)
-    }
-
-    /// Get the full log contents for a job.
-    ///
-    /// Strategy:
-    /// * If `is_terminal` is `true` AND an archive is configured, fetch the
-    ///   archive blob in addition to the local file and return their
-    ///   line-level union sorted by timestamp. This recovers chunks that were
-    ///   lost in HA cross-replica mirroring: each replica's local file may
-    ///   only hold the subset of chunks worker calls happened to route there,
-    ///   so for terminal jobs the union of (local on this replica) + (archive
-    ///   uploaded by the orchestrating replica) is the most complete view.
-    /// * If the archive read errors transiently (e.g. S3 5xx), fall through
-    ///   to local-only rather than 500ing the caller — the local file alone
-    ///   is strictly better than nothing.
-    /// * Otherwise: local `.jsonl` → legacy `.log`, returning the first that
-    ///   exists. Archive is consulted only for terminal jobs because the
-    ///   upload happens at terminal time; pre-terminal archive reads are
-    ///   guaranteed 404s.
-    pub async fn get_log(
-        &self,
-        job_id: Uuid,
-        meta: &JobLogMeta,
-        is_terminal: bool,
-    ) -> Result<String> {
-        let local_content = self.read_local_log(job_id).await?;
-
-        // Single archive read regardless of which downstream branch consumes
-        // it — eliminates the previous double-fetch on the "terminal + key
-        // missing + local missing" path. Archive errors degrade to None +
-        // warning rather than propagating so the local-only fallback works
-        // when S3 has a transient blip.
-        let archive_content = if is_terminal && self.archive.is_some() {
-            match self.get_log_from_archive(job_id, meta).await {
-                Ok(opt) => opt,
-                Err(e) => {
-                    tracing::warn!(
-                        "archive read failed for terminal job {}, returning local-only: {:#}",
-                        job_id,
-                        e
-                    );
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        match (local_content, archive_content) {
-            (local, Some(archive)) => {
-                Ok(merge_jsonl_logs(local.as_deref().unwrap_or(""), &archive))
-            }
-            (Some(local), None) => Ok(local),
-            (None, None) => Ok(String::new()),
-        }
-    }
-
-    /// Read the local `.jsonl` (preferred) or legacy `.log` if either exists.
-    /// Returns `None` when neither file is present. Uses error-kind detection
-    /// rather than `path.exists()` so a TOCTOU race with `delete_local_log`
-    /// (which can fire during retention sweeps mid-request) doesn't surface
-    /// as a 500 — a vanished file becomes `Ok(None)` and the caller falls
-    /// through to the archive.
-    async fn read_local_log(&self, job_id: Uuid) -> Result<Option<String>> {
-        if let Some(content) = Self::read_file_if_present(&self.log_path(job_id)).await? {
-            return Ok(Some(content));
-        }
-        Self::read_file_if_present(&self.legacy_log_path(job_id)).await
-    }
-
-    /// `Some(content)` if the file exists and is readable, `None` if it does
-    /// not exist (the only error kind translated to None). All other I/O
-    /// errors — permission denied, mid-read I/O failure, invalid UTF-8 —
-    /// propagate.
-    async fn read_file_if_present(path: &Path) -> Result<Option<String>> {
-        let mut file = match fs::File::open(path).await {
-            Ok(f) => f,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => {
-                return Err(e).with_context(|| format!("Failed to open log file: {path:?}"));
-            }
-        };
-
-        let mut contents = String::new();
-        file.read_to_string(&mut contents)
-            .await
-            .context("Failed to read log file")?;
-
-        Ok(Some(contents))
-    }
-
-    /// Get log lines for a specific step within a job.
-    ///
-    /// Strategy mirrors [`Self::get_log`]: for terminal jobs with an archive
-    /// configured, merge the step-filtered local and archive views to recover
-    /// chunks lost in HA mirroring. Archive errors degrade to local-only
-    /// rather than 500ing the caller. Pre-terminal jobs never touch the
-    /// archive (no upload exists yet).
-    pub async fn get_step_log(
-        &self,
-        job_id: Uuid,
-        step_name: &str,
-        meta: &JobLogMeta,
-        is_terminal: bool,
-    ) -> Result<String> {
-        let local = self.read_local_step_log(job_id, step_name).await?;
-
-        let archive_content = if is_terminal && self.archive.is_some() {
-            match self
-                .get_step_log_from_archive(job_id, step_name, meta)
-                .await
-            {
-                Ok(opt) => opt,
-                Err(e) => {
-                    tracing::warn!(
-                        "archive read failed for terminal job {} step '{}', returning local-only: {:#}",
-                        job_id,
-                        step_name,
-                        e
-                    );
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        match (local, archive_content) {
-            (local, Some(archive)) => {
-                Ok(merge_jsonl_logs(local.as_deref().unwrap_or(""), &archive))
-            }
-            (Some(local), None) => Ok(local),
-            (None, None) => Ok(String::new()),
-        }
-    }
-
-    /// Filter local `.jsonl` (preferred) or legacy `.log` for a step's lines.
-    /// Returns `None` when neither file is present. Same TOCTOU-safe error
-    /// handling as `read_local_log`.
-    async fn read_local_step_log(&self, job_id: Uuid, step_name: &str) -> Result<Option<String>> {
-        let path = self.log_path(job_id);
-        if let Some(c) = self
-            .filter_step_from_file_if_present(&path, step_name)
-            .await?
-        {
-            return Ok(Some(c));
-        }
-        let legacy_path = self.legacy_log_path(job_id);
-        self.filter_step_from_file_if_present(&legacy_path, step_name)
-            .await
-    }
-
-    async fn filter_step_from_file_if_present(
-        &self,
-        path: &Path,
-        step_name: &str,
-    ) -> Result<Option<String>> {
-        use tokio::io::{AsyncBufReadExt, BufReader};
-
-        let file = match fs::File::open(path).await {
-            Ok(f) => f,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => {
-                return Err(e).with_context(|| format!("Failed to open log file: {path:?}"));
-            }
-        };
-
-        let reader = BufReader::new(file);
-        let mut lines = reader.lines();
-        let mut result = String::new();
-
-        while let Some(line) = lines.next_line().await.context("Failed to read log line")? {
-            if Self::line_matches_step(&line, step_name) {
-                result.push_str(&line);
-                result.push('\n');
-            }
-        }
-
-        Ok(Some(result))
-    }
-
-    /// Check if a JSONL line belongs to the given step.
-    ///
-    /// Uses a fast-path `contains` check to avoid JSON parsing for lines that
-    /// cannot possibly match — the vast majority of lines in a multi-step job.
-    fn line_matches_step(line: &str, step_name: &str) -> bool {
-        // Fast path: if the step name doesn't appear anywhere in the line there
-        // is no need to parse the JSON at all.
-        if !line.contains(step_name) {
-            return false;
-        }
-        // Parse only when the step name is present in the raw string.
-        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line) {
-            parsed.get("step").and_then(|s| s.as_str()) == Some(step_name)
-        } else {
-            false
-        }
-    }
-
-    /// Download from archive, decompress, and return only lines matching `step_name`.
-    async fn get_step_log_from_archive(
-        &self,
-        job_id: Uuid,
-        step_name: &str,
-        meta: &JobLogMeta,
-    ) -> Result<Option<String>> {
-        let Some(ref archive) = self.archive else {
-            return Ok(None);
-        };
-
-        let key = archive_key(&self.archive_prefix, job_id, meta);
-        match archive.get(&key).await? {
-            Some(blob) => {
-                use flate2::read::GzDecoder;
-                use std::io::{BufRead, BufReader};
-
-                let decoder = GzDecoder::new(blob.bytes.as_ref());
-                let reader = BufReader::new(decoder);
-                let mut result = String::new();
-
-                for line_result in reader.lines() {
-                    let line = line_result.context("Failed to read gzip line")?;
-                    if Self::line_matches_step(&line, step_name) {
-                        result.push_str(&line);
-                        result.push('\n');
-                    }
-                }
-
-                Ok(Some(result))
-            }
-            None => Ok(None),
-        }
-    }
-
     /// Get the log file path as a string (for storing in database).
     pub fn get_log_path(&self, job_id: Uuid) -> String {
         self.log_path(job_id).to_string_lossy().to_string()
+    }
+
+    /// A bounded read of the log's end (spec § 3.2–3.3). The local tail
+    /// always; for a terminal job also the archive tail, merged with the
+    /// local one when the union fits `merge_max_lines`. Archive errors
+    /// degrade to local: the archive tail is complete before this returns.
+    pub async fn read_tail(
+        &self,
+        job_id: Uuid,
+        meta: &JobLogMeta,
+        is_terminal: bool,
+        filter: StepFilter<'_>,
+        tail_bytes: u64,
+    ) -> Result<Tail> {
+        let read = self.read;
+        let local =
+            match local_read::open_local(&self.log_path(job_id), &self.legacy_log_path(job_id))
+                .await
+                .context("open local log")?
+            {
+                None => None,
+                Some(mut f) => Some(
+                    match filter {
+                        StepFilter::All => local_read::tail_unfiltered(&mut f, tail_bytes).await,
+                        StepFilter::Step(step) => {
+                            local_read::tail_step(
+                                &mut f,
+                                step,
+                                tail_bytes,
+                                read.max_line_bytes,
+                                read.tail_scan_max_bytes,
+                            )
+                            .await
+                        }
+                    }
+                    .context("read local log tail")?,
+                ),
+            };
+        let archive = if is_terminal {
+            self.archive_tail(job_id, meta, filter, tail_bytes).await
+        } else {
+            None
+        };
+        Ok(combine_tails(
+            local,
+            archive,
+            tail_bytes,
+            read.merge_max_lines,
+        ))
+    }
+
+    async fn archive_tail(
+        &self,
+        job_id: Uuid,
+        meta: &JobLogMeta,
+        filter: StepFilter<'_>,
+        tail_bytes: u64,
+    ) -> Option<ArchiveTail> {
+        let archive = self.archive.as_ref()?;
+        let key = archive_key(&self.archive_prefix, job_id, meta);
+        let result: Result<Option<ArchiveTail>> = async {
+            let Some(obj) = archive.open(&key).await? else {
+                return Ok(None);
+            };
+            let tail = archive_read::tail(
+                Arc::clone(archive),
+                Arc::new(obj),
+                filter.step(),
+                tail_bytes,
+                self.read.max_line_bytes,
+            )
+            .await?;
+            Ok(Some(tail))
+        }
+        .await;
+        result.unwrap_or_else(|e| {
+            tracing::warn!(
+                "archive read failed for terminal job {job_id}, serving local only: {e:#}"
+            );
+            None
+        })
+    }
+
+    /// The whole log as a stream (spec § 3.2–3.3). For a terminal job: the
+    /// in-memory union when both sources fit the caps, else ONE source —
+    /// local first, the archive only when there is no local file.
+    pub async fn stream_full(
+        &self,
+        job_id: Uuid,
+        meta: &JobLogMeta,
+        is_terminal: bool,
+        filter: StepFilter<'_>,
+    ) -> Result<(LogSource, BoxStream<'static, std::io::Result<Bytes>>)> {
+        let read = self.read;
+        let step = filter.step().map(str::to_owned);
+        let mut local =
+            local_read::open_local(&self.log_path(job_id), &self.legacy_log_path(job_id))
+                .await
+                .context("open local log")?;
+        if let (true, Some(archive)) = (is_terminal, self.archive.as_ref()) {
+            let key = archive_key(&self.archive_prefix, job_id, meta);
+            match archive.open(&key).await {
+                Err(e) => tracing::warn!(
+                    "archive open failed for terminal job {job_id}, serving local only: {e:#}"
+                ),
+                Ok(None) => {}
+                Ok(Some(obj)) => {
+                    let obj = Arc::new(obj);
+                    match local.as_mut() {
+                        None => {
+                            match archive_read::full_stream(
+                                Arc::clone(archive),
+                                obj,
+                                step.clone(),
+                                read.max_line_bytes,
+                            )
+                            .await
+                            {
+                                Ok(stream) => return Ok((LogSource::Archive, stream)),
+                                Err(e) => tracing::warn!(
+                                    "archive stream priming failed for terminal job {job_id}, serving local only: {e:#}"
+                                ),
+                            }
+                        }
+                        Some(lf) => match archive_read::read_merged_full(
+                            lf,
+                            Arc::clone(archive),
+                            obj,
+                            filter.step(),
+                            &read,
+                        )
+                        .await
+                        {
+                            Ok(Some(merged)) => return Ok((LogSource::Merged, bytes_stream(merged))),
+                            Ok(None) => {}
+                            Err(e) => tracing::warn!(
+                                "merging the archive of terminal job {job_id} failed, serving local only: {e:#}"
+                            ),
+                        },
+                    }
+                }
+            }
+        }
+        match local {
+            Some(f) => Ok((
+                LogSource::Local,
+                local_read::full_stream(f, step, read.max_line_bytes)
+                    .await
+                    .context("stream local log")?,
+            )),
+            None => Ok((
+                LogSource::None,
+                Box::pin(futures_util::stream::empty::<std::io::Result<Bytes>>()),
+            )),
+        }
     }
 }
 
@@ -566,6 +530,15 @@ mod tests {
     use std::collections::HashMap;
     use tempfile::TempDir;
     use tokio::sync::Mutex as TokioMutex;
+
+    /// A JSONL line for `step` of exactly `len` bytes, newline excluded --
+    /// mirrors `log_read::archive::tests::sized`, duplicated here since
+    /// there is no shared test module across files in this crate.
+    fn sized_step_line(step: &str, len: usize) -> String {
+        let base = format!(r#"{{"step":"{step}","line":""}}"#).len();
+        assert!(len >= base, "line too short for step {step}");
+        format!(r#"{{"step":"{step}","line":"{}"}}"#, "x".repeat(len - base))
+    }
 
     fn jsonl_line(step: &str, stream: &str, line: &str) -> String {
         serde_json::json!({
@@ -719,7 +692,7 @@ mod tests {
         // Flush before reading so BufWriter contents are on disk.
         storage.close_log(job_id).await;
 
-        let log = storage.get_log(job_id, &test_meta(), false).await.unwrap();
+        let log = read_all(&storage, job_id, &test_meta(), false, StepFilter::All).await;
         assert_eq!(log, format!("{}\n{}\n", line1, line2));
     }
 
@@ -729,7 +702,7 @@ mod tests {
         let storage = LogStorage::new(temp_dir.path());
 
         let job_id = Uuid::new_v4();
-        let log = storage.get_log(job_id, &test_meta(), false).await.unwrap();
+        let log = read_all(&storage, job_id, &test_meta(), false, StepFilter::All).await;
         assert_eq!(log, "");
     }
 
@@ -757,8 +730,8 @@ mod tests {
         storage.close_log(job2).await;
 
         let meta = test_meta();
-        let log1 = storage.get_log(job1, &meta, false).await.unwrap();
-        let log2 = storage.get_log(job2, &meta, false).await.unwrap();
+        let log1 = read_all(&storage, job1, &meta, false, StepFilter::All).await;
+        let log2 = read_all(&storage, job2, &meta, false, StepFilter::All).await;
 
         assert_eq!(log1, format!("{}\n", l1));
         assert_eq!(log2, format!("{}\n", l2));
@@ -782,16 +755,10 @@ mod tests {
         storage.close_log(job_id).await;
 
         let meta = test_meta();
-        let build_logs = storage
-            .get_step_log(job_id, "build", &meta, false)
-            .await
-            .unwrap();
+        let build_logs = read_all(&storage, job_id, &meta, false, StepFilter::Step("build")).await;
         assert_eq!(build_logs, format!("{}\n{}\n", build1, build2));
 
-        let test_logs = storage
-            .get_step_log(job_id, "test", &meta, false)
-            .await
-            .unwrap();
+        let test_logs = read_all(&storage, job_id, &meta, false, StepFilter::Step("test")).await;
         assert_eq!(test_logs, format!("{}\n", test1));
     }
 
@@ -809,10 +776,14 @@ mod tests {
 
         storage.close_log(job_id).await;
 
-        let logs = storage
-            .get_step_log(job_id, "deploy", &test_meta(), false)
-            .await
-            .unwrap();
+        let logs = read_all(
+            &storage,
+            job_id,
+            &test_meta(),
+            false,
+            StepFilter::Step("deploy"),
+        )
+        .await;
         assert_eq!(logs, "");
     }
 
@@ -834,10 +805,14 @@ mod tests {
 
         storage.close_log(job_id).await;
 
-        let logs = storage
-            .get_step_log(job_id, "build", &test_meta(), false)
-            .await
-            .unwrap();
+        let logs = read_all(
+            &storage,
+            job_id,
+            &test_meta(),
+            false,
+            StepFilter::Step("build"),
+        )
+        .await;
         assert_eq!(logs, format!("{}\n", valid));
     }
 
@@ -847,10 +822,14 @@ mod tests {
         let storage = LogStorage::new(temp_dir.path());
         let job_id = Uuid::new_v4();
 
-        let logs = storage
-            .get_step_log(job_id, "build", &test_meta(), false)
-            .await
-            .unwrap();
+        let logs = read_all(
+            &storage,
+            job_id,
+            &test_meta(),
+            false,
+            StepFilter::Step("build"),
+        )
+        .await;
         assert_eq!(logs, "");
     }
 
@@ -880,7 +859,7 @@ mod tests {
             .await
             .unwrap();
 
-        let log = storage.get_log(job_id, &test_meta(), false).await.unwrap();
+        let log = read_all(&storage, job_id, &test_meta(), false, StepFilter::All).await;
         assert_eq!(log, "legacy line 1\nlegacy line 2\n");
     }
 
@@ -904,7 +883,7 @@ mod tests {
 
         storage.close_log(job_id).await;
 
-        let log = storage.get_log(job_id, &test_meta(), false).await.unwrap();
+        let log = read_all(&storage, job_id, &test_meta(), false, StepFilter::All).await;
         assert!(log.contains("new content"));
         assert!(!log.contains("legacy content"));
     }
@@ -930,10 +909,14 @@ mod tests {
         storage.close_log(job_id).await;
 
         // Both stdout and stderr for "build" should be returned
-        let build_logs = storage
-            .get_step_log(job_id, "build", &test_meta(), false)
-            .await
-            .unwrap();
+        let build_logs = read_all(
+            &storage,
+            job_id,
+            &test_meta(),
+            false,
+            StepFilter::Step("build"),
+        )
+        .await;
         assert_eq!(build_logs, format!("{}\n{}\n", stdout_line, stderr_line));
     }
 
@@ -1249,7 +1232,7 @@ mod tests {
         // get_log should fall back to archive. Pass is_terminal=true because
         // archive is only consulted for terminal jobs (pre-terminal archive
         // reads are guaranteed 404s — the upload happens at terminal time).
-        let log = storage.get_log(job_id, &meta, true).await.unwrap();
+        let log = read_all(&storage, job_id, &meta, true, StepFilter::All).await;
         assert_eq!(log, content);
     }
 
@@ -1284,16 +1267,10 @@ mod tests {
 
         // Step log should filter from archived data. is_terminal=true
         // because archive is gated to terminal jobs (see test_archive_read_fallback).
-        let build_logs = storage
-            .get_step_log(job_id, "build", &meta, true)
-            .await
-            .unwrap();
+        let build_logs = read_all(&storage, job_id, &meta, true, StepFilter::Step("build")).await;
         assert_eq!(build_logs, format!("{}\n", build_line));
 
-        let test_logs = storage
-            .get_step_log(job_id, "test", &meta, true)
-            .await
-            .unwrap();
+        let test_logs = read_all(&storage, job_id, &meta, true, StepFilter::Step("test")).await;
         assert_eq!(test_logs, format!("{}\n", test_line));
     }
 
@@ -1362,6 +1339,7 @@ mod tests {
                 path: Some("/mnt/archive".to_string()),
                 prefix: "new/".to_string(),
             }),
+            read: Default::default(),
         };
         let effective = config.effective_archive().unwrap();
         assert_eq!(effective.archive_type, "local");
@@ -1375,6 +1353,7 @@ mod tests {
             local_dir: "/tmp/logs".to_string(),
             s3: None,
             archive: None,
+            read: Default::default(),
         };
         assert!(config.effective_archive().is_none());
     }
@@ -1418,10 +1397,7 @@ mod tests {
 
         // is_terminal=true to exercise the merge path. Corrupt archive
         // must not propagate — local content is returned instead.
-        let result = storage
-            .get_log(job_id, &meta, true)
-            .await
-            .expect("corrupt archive must degrade to local-only, not error");
+        let result = read_all(&storage, job_id, &meta, true, StepFilter::All).await;
         assert!(result.contains("local-bytes"));
     }
 
@@ -1461,14 +1437,11 @@ mod tests {
 
         // Read should fall back to local archive. is_terminal=true because
         // archive is only consulted for terminal jobs.
-        let log = storage.get_log(job_id, &meta, true).await.unwrap();
+        let log = read_all(&storage, job_id, &meta, true, StepFilter::All).await;
         assert_eq!(log, content);
 
         // Step log should also work from archive
-        let step_log = storage
-            .get_step_log(job_id, "build", &meta, true)
-            .await
-            .unwrap();
+        let step_log = read_all(&storage, job_id, &meta, true, StepFilter::Step("build")).await;
         assert_eq!(step_log, content);
     }
 
@@ -1491,17 +1464,25 @@ mod tests {
         storage.close_log(job_id).await;
 
         // "build" must NOT match "build-notify" lines
-        let build_logs = storage
-            .get_step_log(job_id, "build", &test_meta(), false)
-            .await
-            .unwrap();
+        let build_logs = read_all(
+            &storage,
+            job_id,
+            &test_meta(),
+            false,
+            StepFilter::Step("build"),
+        )
+        .await;
         assert_eq!(build_logs, format!("{}\n", build_line));
 
         // "build-notify" must NOT match "build" lines
-        let notify_logs = storage
-            .get_step_log(job_id, "build-notify", &test_meta(), false)
-            .await
-            .unwrap();
+        let notify_logs = read_all(
+            &storage,
+            job_id,
+            &test_meta(),
+            false,
+            StepFilter::Step("build-notify"),
+        )
+        .await;
         assert_eq!(notify_logs, format!("{}\n", build_notify_line));
     }
 
@@ -1626,6 +1607,15 @@ mod tests {
     }
 
     #[test]
+    fn merge_jsonl_logs_reserves_room_for_two_missing_newlines() {
+        // Each input's last line gains a '\n' it did not have; the output
+        // must be reserved for that, not reallocated.
+        let merged = merge_jsonl_logs("AAAA", "BBBB");
+        assert_eq!(merged, "AAAA\nBBBB\n");
+        assert_eq!(merged.capacity(), merged.len(), "output reallocated");
+    }
+
+    #[test]
     fn extract_ts_pulls_top_level_field() {
         let line = ts_line("2026-06-10T05:00:01Z", "build", "hello");
         assert_eq!(extract_ts(&line), Some("2026-06-10T05:00:01Z"));
@@ -1680,12 +1670,12 @@ mod tests {
             .unwrap();
 
         // Non-terminal: only local returned (back-compat path).
-        let non_term = storage.get_log(job_id, &meta, false).await.unwrap();
+        let non_term = read_all(&storage, job_id, &meta, false, StepFilter::All).await;
         assert!(non_term.contains("from-local"));
         assert!(!non_term.contains("from-archive"));
 
         // Terminal: merged view contains both.
-        let term = storage.get_log(job_id, &meta, true).await.unwrap();
+        let term = read_all(&storage, job_id, &meta, true, StepFilter::All).await;
         assert!(term.contains("from-local"));
         assert!(term.contains("from-archive"));
         // Sorted by ts: local's 05:00:01 comes before archive's 05:00:02.
@@ -1719,10 +1709,7 @@ mod tests {
             .await
             .unwrap();
 
-        let merged = storage
-            .get_step_log(job_id, "build", &meta, true)
-            .await
-            .unwrap();
+        let merged = read_all(&storage, job_id, &meta, true, StepFilter::Step("build")).await;
         assert!(merged.contains("local-line"));
         assert!(merged.contains("archive-line"));
     }
@@ -1743,7 +1730,7 @@ mod tests {
             .await
             .unwrap();
 
-        let term = storage.get_log(job_id, &meta, true).await.unwrap();
+        let term = read_all(&storage, job_id, &meta, true, StepFilter::All).await;
         assert!(term.contains("only-archive"));
     }
 
@@ -1764,7 +1751,7 @@ mod tests {
         storage.append_log(job_id, &local).await.unwrap();
         // Mock archive is intentionally empty.
 
-        let result = storage.get_log(job_id, &meta, true).await.unwrap();
+        let result = read_all(&storage, job_id, &meta, true, StepFilter::All).await;
         assert!(result.contains("only-local"));
         assert_eq!(
             mock.get_call_count().await,
@@ -1789,10 +1776,7 @@ mod tests {
         let local = format!("{}\n", ts_line("2026-06-10T05:00:01Z", "s", "only-local"));
         storage.append_log(job_id, &local).await.unwrap();
 
-        let result = storage
-            .get_log(job_id, &meta, true)
-            .await
-            .expect("transient archive error must not propagate");
+        let result = read_all(&storage, job_id, &meta, true, StepFilter::All).await;
         assert!(result.contains("only-local"));
     }
 
@@ -1811,10 +1795,7 @@ mod tests {
         );
         storage.append_log(job_id, &local).await.unwrap();
 
-        let result = storage
-            .get_step_log(job_id, "build", &meta, true)
-            .await
-            .unwrap();
+        let result = read_all(&storage, job_id, &meta, true, StepFilter::Step("build")).await;
         assert!(result.contains("only-local"));
     }
 
@@ -1833,10 +1814,7 @@ mod tests {
         );
         storage.append_log(job_id, &local).await.unwrap();
 
-        let result = storage
-            .get_step_log(job_id, "build", &meta, true)
-            .await
-            .expect("transient archive error must not propagate");
+        let result = read_all(&storage, job_id, &meta, true, StepFilter::Step("build")).await;
         assert!(result.contains("only-local"));
     }
 
@@ -1854,8 +1832,8 @@ mod tests {
         let meta = test_meta();
 
         // Write the legacy .log file directly (not via append_log, which
-        // always writes .jsonl). filter_step_from_file_if_present sees it
-        // because the .jsonl path doesn't exist.
+        // always writes .jsonl). `local_read::open_local` reads it because
+        // no .jsonl file exists for this job.
         let legacy_path = tmp.path().join(format!("{job_id}.log"));
         tokio::fs::create_dir_all(tmp.path()).await.unwrap();
         let legacy_line = ts_line("2026-06-10T05:00:01Z", "build", "from-legacy");
@@ -1872,10 +1850,7 @@ mod tests {
             .await
             .unwrap();
 
-        let result = storage
-            .get_step_log(job_id, "build", &meta, true)
-            .await
-            .unwrap();
+        let result = read_all(&storage, job_id, &meta, true, StepFilter::Step("build")).await;
         assert!(result.contains("from-legacy"));
         assert!(result.contains("from-archive"));
     }
@@ -1901,6 +1876,44 @@ mod tests {
         }
     }
 
+    /// `BlobArchive` impl whose `open` succeeds but whose `read_range`
+    /// always fails — simulates a ranged GET that 404s or 412s after a
+    /// successful HEAD (C6: the first read after a good `open`, not `open`
+    /// itself).
+    struct RangeErrorArchive;
+
+    #[async_trait::async_trait]
+    impl BlobArchive for RangeErrorArchive {
+        async fn put(&self, _: &str, _: &str, _: Bytes) -> Result<()> {
+            Ok(())
+        }
+        async fn get(&self, _: &str) -> Result<Option<crate::blob_storage::Blob>> {
+            Ok(None)
+        }
+        async fn delete(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn delete_prefix(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn open(&self, key: &str) -> Result<Option<crate::blob_storage::ArchiveObject>> {
+            Ok(Some(crate::blob_storage::ArchiveObject {
+                key: key.to_string(),
+                size: 100,
+                version: crate::blob_storage::ArchiveVersion::Snapshot(Bytes::new()),
+            }))
+        }
+        async fn read_range(
+            &self,
+            _obj: &crate::blob_storage::ArchiveObject,
+            _offset: u64,
+            _len: u64,
+            _into: &mut Vec<u8>,
+        ) -> Result<()> {
+            anyhow::bail!("simulated range read failure")
+        }
+    }
+
     fn gzip(s: &str) -> Vec<u8> {
         use flate2::write::GzEncoder;
         use flate2::Compression;
@@ -1908,5 +1921,362 @@ mod tests {
         let mut enc = GzEncoder::new(Vec::new(), Compression::default());
         enc.write_all(s.as_bytes()).unwrap();
         enc.finish().unwrap()
+    }
+
+    // ─── read_tail / stream_full (spec § 3.2–3.3) ────────────────────────
+
+    use crate::log_read::{LogSource, StepFilter};
+
+    const ALL: u64 = 16 * 1024 * 1024;
+
+    /// The whole log in one read — test helper standing in for the removed
+    /// `get_log` / `get_step_log`.
+    async fn read_all(
+        storage: &LogStorage,
+        job: Uuid,
+        meta: &JobLogMeta,
+        terminal: bool,
+        filter: StepFilter<'_>,
+    ) -> String {
+        storage
+            .read_tail(job, meta, terminal, filter, ALL)
+            .await
+            .unwrap()
+            .logs
+    }
+
+    async fn full_text(
+        storage: &LogStorage,
+        job: Uuid,
+        meta: &JobLogMeta,
+        terminal: bool,
+        filter: StepFilter<'_>,
+    ) -> (LogSource, String) {
+        use futures_util::TryStreamExt;
+        let (source, stream) = storage
+            .stream_full(job, meta, terminal, filter)
+            .await
+            .unwrap();
+        let chunks: Vec<Bytes> = stream.try_collect().await.unwrap();
+        (source, String::from_utf8(chunks.concat()).unwrap())
+    }
+
+    fn mocked(tmp: &TempDir) -> (Arc<MockArchive>, LogStorage) {
+        let mock = Arc::new(MockArchive::new());
+        let storage = LogStorage::new(tmp.path())
+            .with_archive(Arc::clone(&mock) as Arc<dyn BlobArchive>, String::new());
+        (mock, storage)
+    }
+
+    async fn seed_archive(mock: &MockArchive, job: Uuid, meta: &JobLogMeta, content: &str) {
+        mock.put(
+            &archive_key("", job, meta),
+            "application/gzip",
+            Bytes::from(gzip(content)),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_tail_non_terminal_never_touches_the_archive() {
+        let tmp = TempDir::new().unwrap();
+        let (mock, storage) = mocked(&tmp);
+        let (job, meta) = (Uuid::new_v4(), test_meta());
+        let local = format!("{}\n", ts_line("2026-06-10T05:00:01Z", "s", "local"));
+        storage.append_log(job, &local).await.unwrap();
+        seed_archive(
+            &mock,
+            job,
+            &meta,
+            &format!("{}\n", ts_line("2026-06-10T05:00:02Z", "s", "arch")),
+        )
+        .await;
+        let tail = storage
+            .read_tail(job, &meta, false, StepFilter::All, ALL)
+            .await
+            .unwrap();
+        assert_eq!((tail.logs, tail.source), (local, LogSource::Local));
+        assert_eq!(mock.get_call_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn read_tail_terminal_merges_both_tails() {
+        let tmp = TempDir::new().unwrap();
+        let (mock, storage) = mocked(&tmp);
+        let (job, meta) = (Uuid::new_v4(), test_meta());
+        let local = format!("{}\n", ts_line("2026-06-10T05:00:01Z", "s", "from-local"));
+        let arch = format!("{}\n", ts_line("2026-06-10T05:00:02Z", "s", "from-archive"));
+        storage.append_log(job, &local).await.unwrap();
+        seed_archive(&mock, job, &meta, &arch).await;
+        let tail = storage
+            .read_tail(job, &meta, true, StepFilter::All, ALL)
+            .await
+            .unwrap();
+        assert_eq!(tail.logs, format!("{local}{arch}"));
+        assert_eq!(tail.source, LogSource::Merged);
+        assert!(!tail.truncated);
+        assert_eq!(tail.total_bytes, (local.len() + arch.len() + 2) as u64);
+        assert!(tail.returned_bytes() <= tail.total_bytes);
+        assert_eq!(mock.get_call_count().await, 1, "one archive fetch");
+    }
+
+    #[tokio::test]
+    async fn read_tail_terminal_cuts_the_union_back_to_the_budget() {
+        let tmp = TempDir::new().unwrap();
+        let (mock, storage) = mocked(&tmp);
+        let (job, meta) = (Uuid::new_v4(), test_meta());
+        let (a, b) = (
+            ts_line("2026-06-10T05:00:01Z", "s", "older"),
+            ts_line("2026-06-10T05:00:02Z", "s", "newer"),
+        );
+        storage.append_log(job, &format!("{a}\n")).await.unwrap();
+        seed_archive(&mock, job, &meta, &format!("{b}\n")).await;
+        let tail = storage
+            .read_tail(job, &meta, true, StepFilter::All, b.len() as u64 + 1)
+            .await
+            .unwrap();
+        assert_eq!((tail.logs, tail.truncated), (format!("{b}\n"), true));
+    }
+
+    #[tokio::test]
+    async fn read_tail_terminal_degrades_and_falls_back() {
+        // Archive error → local.
+        let tmp = TempDir::new().unwrap();
+        let storage = LogStorage::new(tmp.path()).with_archive(
+            Arc::new(ErroringArchive) as Arc<dyn BlobArchive>,
+            String::new(),
+        );
+        let (job, meta) = (Uuid::new_v4(), test_meta());
+        storage.append_log(job, "a\n").await.unwrap();
+        let tail = storage
+            .read_tail(job, &meta, true, StepFilter::All, ALL)
+            .await
+            .unwrap();
+        assert_eq!((tail.logs.as_str(), tail.source), ("a\n", LogSource::Local));
+
+        // Local missing → archive; neither → empty.
+        let tmp2 = TempDir::new().unwrap();
+        let (mock, storage2) = mocked(&tmp2);
+        seed_archive(&mock, job, &meta, "b\n").await;
+        let tail = storage2
+            .read_tail(job, &meta, true, StepFilter::All, ALL)
+            .await
+            .unwrap();
+        assert_eq!(
+            (tail.logs.as_str(), tail.source),
+            ("b\n", LogSource::Archive)
+        );
+        let none = storage2
+            .read_tail(Uuid::new_v4(), &meta, true, StepFilter::All, ALL)
+            .await
+            .unwrap();
+        assert_eq!(none, crate::log_read::Tail::empty());
+    }
+
+    #[tokio::test]
+    async fn read_tail_serves_local_when_the_union_exceeds_the_line_cap() {
+        let tmp = TempDir::new().unwrap();
+        let mock = Arc::new(MockArchive::new());
+        let storage = LogStorage::new(tmp.path())
+            .with_archive(Arc::clone(&mock) as Arc<dyn BlobArchive>, String::new())
+            .with_read_config(crate::config::LogReadConfig {
+                merge_max_lines: 1,
+                ..Default::default()
+            });
+        let (job, meta) = (Uuid::new_v4(), test_meta());
+        storage.append_log(job, "a\n").await.unwrap();
+        seed_archive(&mock, job, &meta, "b\n").await;
+        let tail = storage
+            .read_tail(job, &meta, true, StepFilter::All, ALL)
+            .await
+            .unwrap();
+        assert_eq!(
+            (tail.logs.as_str(), tail.source, tail.truncated),
+            ("a\n", LogSource::Local, true)
+        );
+        assert_eq!(tail.total_bytes, 2 + 2 + 2);
+    }
+
+    #[tokio::test]
+    async fn read_tail_terminal_step_tail_matches_local_across_an_oversize_match() {
+        // C4 regression: when the archive holds the same content as the
+        // local file, the archive's forward scan and the local backward
+        // scan must agree on which lines an over-window match evicts, or
+        // the union "recovers" an older line the local-only view would
+        // never show.
+        let tmp = TempDir::new().unwrap();
+        let (mock, storage) = mocked(&tmp);
+        let meta = test_meta();
+        let (a, b, c) = (
+            sized_step_line("a", 30),
+            sized_step_line("a", 200),
+            sized_step_line("a", 30),
+        );
+        let content = format!("{a}\n{b}\n{c}\n");
+
+        let local_only_job = Uuid::new_v4();
+        storage.append_log(local_only_job, &content).await.unwrap();
+        let local_tail = storage
+            .read_tail(local_only_job, &meta, false, StepFilter::Step("a"), 100)
+            .await
+            .unwrap();
+        assert_eq!(
+            (local_tail.logs.as_str(), local_tail.truncated),
+            (format!("{c}\n").as_str(), true)
+        );
+
+        let both_job = Uuid::new_v4();
+        storage.append_log(both_job, &content).await.unwrap();
+        seed_archive(&mock, both_job, &meta, &content).await;
+        let merged_tail = storage
+            .read_tail(both_job, &meta, true, StepFilter::Step("a"), 100)
+            .await
+            .unwrap();
+
+        assert_eq!(merged_tail.logs, local_tail.logs);
+    }
+
+    #[tokio::test]
+    async fn stream_full_chooses_merged_local_archive_or_none() {
+        let meta = test_meta();
+        let (a, b) = (
+            ts_line("2026-06-10T05:00:01Z", "s", "local"),
+            ts_line("2026-06-10T05:00:02Z", "s", "arch"),
+        );
+        // Under the caps → merged.
+        let tmp = TempDir::new().unwrap();
+        let (mock, storage) = mocked(&tmp);
+        let job = Uuid::new_v4();
+        storage.append_log(job, &format!("{a}\n")).await.unwrap();
+        seed_archive(&mock, job, &meta, &format!("{b}\n")).await;
+        assert_eq!(
+            full_text(&storage, job, &meta, true, StepFilter::All).await,
+            (LogSource::Merged, format!("{a}\n{b}\n"))
+        );
+        // Over the byte cap with local present → local.
+        let small = storage
+            .clone()
+            .with_read_config(crate::config::LogReadConfig {
+                merge_max_bytes: 8,
+                max_line_bytes: 8,
+                ..Default::default()
+            });
+        assert_eq!(
+            full_text(&small, job, &meta, true, StepFilter::All).await,
+            (LogSource::Local, format!("{a}\n"))
+        );
+        // Over the cap, local missing → archive.
+        tokio::fs::remove_file(storage.log_path(job)).await.unwrap();
+        assert_eq!(
+            full_text(&small, job, &meta, true, StepFilter::All).await,
+            (LogSource::Archive, format!("{b}\n"))
+        );
+        // Neither → none.
+        assert_eq!(
+            full_text(&storage, Uuid::new_v4(), &meta, true, StepFilter::All).await,
+            (LogSource::None, String::new())
+        );
+        // Non-terminal never merges.
+        let job2 = Uuid::new_v4();
+        storage.append_log(job2, &format!("{a}\n")).await.unwrap();
+        seed_archive(&mock, job2, &meta, &format!("{b}\n")).await;
+        assert_eq!(
+            full_text(&storage, job2, &meta, false, StepFilter::All).await,
+            (LogSource::Local, format!("{a}\n"))
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_full_archive_error_falls_back_to_local() {
+        let tmp = TempDir::new().unwrap();
+        let storage = LogStorage::new(tmp.path()).with_archive(
+            Arc::new(ErroringArchive) as Arc<dyn BlobArchive>,
+            String::new(),
+        );
+        let (job, meta) = (Uuid::new_v4(), test_meta());
+        storage.append_log(job, "a\n").await.unwrap();
+        assert_eq!(
+            full_text(&storage, job, &meta, true, StepFilter::All).await,
+            (LogSource::Local, "a\n".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_full_archive_first_read_failure_answers_empty_none() {
+        // `open` succeeds (the object exists) but its bytes are not gzip:
+        // priming's gzip-header read fails, and with no local file the
+        // response is an empty 200 with `source: none`, not a torn body.
+        let tmp = TempDir::new().unwrap();
+        let (mock, storage) = mocked(&tmp);
+        let (job, meta) = (Uuid::new_v4(), test_meta());
+        mock.put(
+            &archive_key("", job, &meta),
+            "application/octet-stream",
+            Bytes::from_static(b"not gzip data"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            full_text(&storage, job, &meta, true, StepFilter::All).await,
+            (LogSource::None, String::new())
+        );
+
+        // A good `open` whose ranged reads always fail behaves the same
+        // way: the failure surfaces at the first read, not at `open`.
+        let tmp2 = TempDir::new().unwrap();
+        let storage2 = LogStorage::new(tmp2.path()).with_archive(
+            Arc::new(RangeErrorArchive) as Arc<dyn BlobArchive>,
+            String::new(),
+        );
+        assert_eq!(
+            full_text(&storage2, Uuid::new_v4(), &meta, true, StepFilter::All).await,
+            (LogSource::None, String::new())
+        );
+
+        // With a local file present, the same priming failure falls back
+        // to it instead of answering empty.
+        let tmp3 = TempDir::new().unwrap();
+        let (mock3, storage3) = mocked(&tmp3);
+        let job3 = Uuid::new_v4();
+        storage3.append_log(job3, "a\n").await.unwrap();
+        mock3
+            .put(
+                &archive_key("", job3, &meta),
+                "application/octet-stream",
+                Bytes::from_static(b"not gzip data"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            full_text(&storage3, job3, &meta, true, StepFilter::All).await,
+            (LogSource::Local, "a\n".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn step_filter_applies_to_both_modes() {
+        let tmp = TempDir::new().unwrap();
+        let (_mock, storage) = mocked(&tmp);
+        let (job, meta) = (Uuid::new_v4(), test_meta());
+        let (b, t) = (
+            jsonl_line("build", "stdout", "b"),
+            jsonl_line("test", "stdout", "t"),
+        );
+        storage
+            .append_log(job, &format!("{b}\n{t}\n"))
+            .await
+            .unwrap();
+        let tail = storage
+            .read_tail(job, &meta, false, StepFilter::Step("build"), ALL)
+            .await
+            .unwrap();
+        assert_eq!(tail.logs, format!("{b}\n"));
+        assert_eq!(
+            full_text(&storage, job, &meta, false, StepFilter::Step("test"))
+                .await
+                .1,
+            format!("{t}\n")
+        );
     }
 }

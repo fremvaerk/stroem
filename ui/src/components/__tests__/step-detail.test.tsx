@@ -5,12 +5,14 @@ import { StepDetail } from "../step-detail";
 import type { JobStep } from "@/lib/types";
 
 const getStepLogs = vi.fn();
+const getStepLogsFull = vi.fn();
 
 vi.mock("@/lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/api")>();
   return {
     ...actual,
     getStepLogs: (...args: unknown[]) => getStepLogs(...args),
+    getStepLogsFull: (...args: unknown[]) => getStepLogsFull(...args),
   };
 });
 
@@ -61,6 +63,7 @@ function renderDetail(
 beforeEach(() => {
   getStepLogs.mockReset();
   getStepLogs.mockResolvedValue({ logs: "hello" });
+  getStepLogsFull.mockReset();
 });
 
 describe("StepDetail carried-over steps", () => {
@@ -91,7 +94,7 @@ describe("StepDetail carried-over steps", () => {
   it("still fetches logs for a step that actually ran", async () => {
     renderDetail(makeStep({ carried_over: false }));
 
-    await waitFor(() => expect(getStepLogs).toHaveBeenCalledWith("job-1", "build"));
+    await waitFor(() => expect(getStepLogs).toHaveBeenCalledWith("job-1", "build", expect.any(AbortSignal)));
     expect(screen.queryByTestId("carried-over-notice")).not.toBeInTheDocument();
   });
 });
@@ -154,5 +157,37 @@ describe("StepDetail skipped steps", () => {
     const notice = await screen.findByTestId("skipped-notice");
     expect(notice.textContent).toContain("upstream step failed");
     expect(getStepLogs).not.toHaveBeenCalled();
+  });
+});
+
+describe("StepDetail tail banner", () => {
+  it("offers the full log when the tail is truncated", async () => {
+    getStepLogs.mockResolvedValue({
+      logs: JSON.stringify({ ts: "2026-09-22T06:00:00Z", stream: "stdout", step: "build", line: "last" }) + "\n",
+      truncated: true,
+      total_bytes: 87_325_871,
+      returned_bytes: 70,
+    });
+    getStepLogsFull.mockResolvedValue(
+      JSON.stringify({ ts: "2026-09-22T05:00:00Z", stream: "stdout", step: "build", line: "first" }) + "\n",
+    );
+    renderDetail(makeStep());
+    const banner = await screen.findByTestId("log-tail-banner");
+    expect(banner).toHaveTextContent("83.3 MiB");
+    // total_bytes is above FULL_LOAD_CONFIRM_BYTES (64 MiB), so loadFull asks
+    // first; jsdom's unmocked window.confirm is "not implemented" (falsy),
+    // so it must be stubbed here or the click would silently no-op. Restore
+    // it in `finally` so a failing assertion above can't leak the stub into
+    // later tests.
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "Load full log" }));
+      await waitFor(() =>
+        expect(getStepLogsFull).toHaveBeenCalledWith("job-1", "build", expect.any(Function), expect.any(AbortSignal)),
+      );
+      await waitFor(() => expect(screen.getByTestId("log-tail-banner")).toHaveTextContent("Showing the full log"));
+    } finally {
+      confirmSpy.mockRestore();
+    }
   });
 });

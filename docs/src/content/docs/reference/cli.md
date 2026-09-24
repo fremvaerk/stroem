@@ -137,11 +137,26 @@ stroem-api status <job-id>
 
 ### `logs`
 
-View the logs of a job.
+View the logs of a job. Prints the last 256 KiB of the log (whole lines) by default and, when the log is longer, a note on stderr:
+
+```
+note: showing the last 256.0 KiB of up to 83.3 MiB; use --full for the whole log
+```
 
 ```bash
+# Tail (default: last 256 KiB)
 stroem-api logs <job-id>
+
+# Stream the whole log
+stroem-api logs <job-id> --full
+
+# Ask for a different tail size (max log_storage.read.tail_max_bytes, 4 MiB by default)
+stroem-api logs <job-id> --tail-bytes 1048576
 ```
+
+`--full` and `--tail-bytes` are mutually exclusive.
+
+Against a server older than this release, `--full` receives the old full-log JSON body (no streaming) and holds it in memory before printing, instead of streaming NDJSON.
 
 ### `jobs`
 
