@@ -16,7 +16,8 @@ use tokio_util::sync::CancellationToken;
 
 use stroem_common::constants::{DEFAULT_INIT_IMAGE, DEFAULT_RUNNER_IMAGE};
 
-/// Kubernetes caps both pod names (DNS-1123 labels) and label values at 63 characters.
+/// Kubernetes caps label values at 63 characters. Pod names may be longer DNS
+/// subdomains, but Strøm keeps them to a 63-char DNS-1123 label for compatibility.
 const K8S_NAME_MAX: usize = 63;
 
 /// Annotation carrying the step's exact name. The `stroem.io/step` label only holds a
@@ -446,22 +447,23 @@ impl KubeRunner {
     }
 
     /// Generate a pod name from job_id, step_name, and task_name.
-    /// Format: `stroem-{job_id_8chars}-{task}-{step}`, truncated to 63 chars.
-    /// The job_id prefix is placed early to guarantee uniqueness even when
-    /// long task/step names cause truncation.
+    /// Format: `stroem-{job_id_8chars}-{task}-{step}`, at most 63 chars. The job_id
+    /// prefix comes first so truncation never drops it; a truncated name ends in a
+    /// hash of the untruncated inputs.
     fn pod_name(job_id: &str, step_name: &str, task_name: &str) -> String {
         let job_short: String = job_id.chars().take(8).collect();
         let task_sanitized = Self::sanitize_k8s_name(task_name);
         let step_sanitized = Self::sanitize_k8s_name(step_name);
 
-        // K8s name max 63 chars, must be DNS-1123 label
+        // Kept to a DNS-1123 label of at most K8S_NAME_MAX chars (see the constant)
         let name = if task_sanitized.is_empty() {
             format!("stroem-{}-{}", job_short, step_sanitized)
         } else {
             format!("stroem-{}-{}-{}", job_short, task_sanitized, step_sanitized)
         };
         if name.len() <= K8S_NAME_MAX {
-            return name;
+            // A step that sanitizes to empty leaves a trailing dash.
+            return name.trim_end_matches('-').to_string();
         }
         // Truncation cuts the end of the name, which is where a for_each instance index
         // lives: a hash of the untruncated inputs keeps `step[10]` and `step[11]` apart.
@@ -1582,6 +1584,72 @@ mod tests {
         assert_eq!(
             a,
             KubeRunner::pod_name("64cbab91-b444", "ml-traffic-impressions[10]", task)
+        );
+    }
+
+    #[test]
+    fn test_pod_name_step_sanitizing_to_empty_has_no_trailing_dash() {
+        for step in ["", "[]", "!@#$"] {
+            let name = KubeRunner::pod_name("12345678", step, "task");
+            assert_eq!(name, "stroem-12345678-task", "step {step:?}");
+        }
+    }
+
+    #[test]
+    fn test_pod_name_63_64_char_boundary() {
+        // "stroem-12345678-" is 16 chars and "t-" another 2: a 45-char step makes 63.
+        let at_limit = KubeRunner::pod_name("12345678", &"s".repeat(45), "t");
+        assert_eq!(at_limit.len(), 63);
+        assert_eq!(at_limit, format!("stroem-12345678-t-{}", "s".repeat(45)));
+
+        let over = KubeRunner::pod_name("12345678", &"s".repeat(46), "t");
+        assert!(is_valid_dns1123_label(&over), "invalid pod name {over:?}");
+        assert!(over.len() <= 63);
+        assert_ne!(over, at_limit);
+    }
+
+    #[test]
+    fn test_pod_name_hash_head_cut_on_dash_stays_valid() {
+        // "stroem-12345678-" (16) + a 37-char task puts the task/step '-' at the
+        // 54th char, exactly where the head is cut before the 9-char hash suffix.
+        let task = "a".repeat(37);
+        let name = KubeRunner::pod_name("12345678", &"b".repeat(20), &task);
+        assert!(is_valid_dns1123_label(&name), "invalid pod name {name:?}");
+        assert!(!name.contains("--"), "double dash in {name:?}");
+    }
+
+    #[test]
+    fn test_sanitize_label_value_keeps_63_char_value() {
+        let v63 = format!("A{}Z9", "b_c.-".repeat(12));
+        assert_eq!(v63.len(), 63);
+        assert_eq!(KubeRunner::sanitize_label_value(&v63), v63);
+    }
+
+    #[test]
+    fn test_step_name_annotation_survives_manifest_merge() {
+        // The annotation is added after manifest overrides are merged: a manifest's own
+        // annotations are kept, and Strøm's key wins over a manifest value for it.
+        let runner = make_runner();
+        let config = make_pod_config(Some(serde_json::json!({
+            "metadata": {
+                "annotations": {
+                    "team": "data",
+                    STEP_NAME_ANNOTATION: "spoofed",
+                }
+            }
+        })));
+        let labels = KubeRunner::step_labels("12345678", "task", "ml-impressions[0]");
+        let mut pod = runner
+            .build_pod_spec("test-pod", &config, "default", labels)
+            .unwrap();
+        KubeRunner::annotate_step_name(&mut pod, "ml-impressions[0]");
+
+        let annotations = pod.metadata.annotations.clone().unwrap();
+        assert_eq!(annotations[STEP_NAME_ANNOTATION], "ml-impressions[0]");
+        assert_eq!(annotations["team"], "data");
+        assert_eq!(
+            pod.metadata.labels.unwrap()["stroem.io/step"],
+            "ml-impressions-0"
         );
     }
 
