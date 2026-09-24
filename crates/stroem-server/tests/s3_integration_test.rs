@@ -7,6 +7,7 @@ use stroem_server::blob_storage::{BlobArchive, S3BlobArchive};
 use stroem_server::log_read::StepFilter;
 use stroem_server::log_storage::{JobLogMeta, LogStorage};
 use tempfile::TempDir;
+use testcontainers::core::ContainerPort;
 use testcontainers::runners::AsyncRunner;
 use testcontainers::ImageExt;
 use testcontainers_modules::minio::MinIO;
@@ -38,11 +39,18 @@ fn test_meta() -> JobLogMeta {
     }
 }
 
+/// MinIO image for the S3 tests — keep in sync with `log_peak_alloc_test.rs`.
+const MINIO_IMAGE: &str = "cgr.dev/chainguard/minio";
+const MINIO_TAG: &str = "latest";
+
 async fn setup_minio() -> Result<(testcontainers::ContainerAsync<MinIO>, String)> {
-    // Docker Hub no longer serves minio/minio (404 since 2026-09); quay.io carries
-    // the same tags, so override the registry while keeping the module's pinned tag.
+    // Neither Docker Hub (404 since 2026-09) nor quay.io (401 since 2026-09-24) serves
+    // minio/minio any more; Chainguard's build of the same server does (`latest` only).
     let container = MinIO::default()
-        .with_name("quay.io/minio/minio")
+        .with_name(MINIO_IMAGE)
+        .with_tag(MINIO_TAG)
+        // The image declares no EXPOSE; host port 0 = a free port Docker picks.
+        .with_mapped_port(0, ContainerPort::Tcp(9000))
         .start()
         .await?;
     let port = container.get_host_port_ipv4(9000).await?;

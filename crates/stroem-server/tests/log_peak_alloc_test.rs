@@ -546,8 +546,12 @@ async fn s3_cases(report: &mut Report, cfg: LogReadConfig) {
     use testcontainers::ImageExt;
     use testcontainers_modules::minio::MinIO;
 
+    // Same image as s3_integration_test.rs (minio/minio is gone from Docker Hub and quay.io).
     let container = MinIO::default()
-        .with_name("quay.io/minio/minio")
+        .with_name("cgr.dev/chainguard/minio")
+        .with_tag("latest")
+        // The image declares no EXPOSE; host port 0 = a free port Docker picks.
+        .with_mapped_port(0, testcontainers::core::ContainerPort::Tcp(9000))
         .start()
         .await
         .unwrap();
