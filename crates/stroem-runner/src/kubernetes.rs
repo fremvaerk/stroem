@@ -16,6 +16,21 @@ use tokio_util::sync::CancellationToken;
 
 use stroem_common::constants::{DEFAULT_INIT_IMAGE, DEFAULT_RUNNER_IMAGE};
 
+/// Kubernetes caps both pod names (DNS-1123 labels) and label values at 63 characters.
+const K8S_NAME_MAX: usize = 63;
+
+/// Annotation carrying the step's exact name. The `stroem.io/step` label only holds a
+/// sanitized form (`step[0]` → `step-0`); annotation values have no character restrictions.
+const STEP_NAME_ANNOTATION: &str = "stroem.io/step-name";
+
+/// FNV-1a (32-bit): a tiny hash that is stable across processes and Rust versions,
+/// which `DefaultHasher` does not promise.
+fn fnv1a_32(bytes: impl IntoIterator<Item = u8>) -> u32 {
+    bytes.into_iter().fold(0x811c_9dc5, |h, b| {
+        (h ^ u32::from(b)).wrapping_mul(0x0100_0193)
+    })
+}
+
 /// Kubernetes runner that executes commands inside Kubernetes pods
 pub struct KubeRunner {
     namespace: String,
@@ -445,9 +460,69 @@ impl KubeRunner {
         } else {
             format!("stroem-{}-{}-{}", job_short, task_sanitized, step_sanitized)
         };
-        // Truncate to 63 chars, trim trailing dash if truncation left one
-        let truncated: String = name.chars().take(63).collect();
-        truncated.trim_end_matches('-').to_string()
+        if name.len() <= K8S_NAME_MAX {
+            return name;
+        }
+        // Truncation cuts the end of the name, which is where a for_each instance index
+        // lives: a hash of the untruncated inputs keeps `step[10]` and `step[11]` apart.
+        let hash = fnv1a_32([job_id, task_name, step_name].join("\0").into_bytes());
+        let suffix = format!("-{hash:08x}");
+        let head: String = name.chars().take(K8S_NAME_MAX - suffix.len()).collect();
+        format!("{}{}", head.trim_end_matches('-'), suffix)
+    }
+
+    /// Sanitize a string for use as a Kubernetes label value: characters outside
+    /// `[-A-Za-z0-9_.]` become dashes, then the result is capped at 63 chars and trimmed
+    /// to start and end with an alphanumeric. A value that was already valid comes back
+    /// unchanged, so existing label selectors keep matching.
+    fn sanitize_label_value(s: &str) -> String {
+        let not_alnum = |c: char| !c.is_ascii_alphanumeric();
+        let mapped: String = s
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        let capped: String = mapped
+            .trim_start_matches(not_alnum)
+            .chars()
+            .take(K8S_NAME_MAX)
+            .collect();
+        capped.trim_end_matches(not_alnum).to_string()
+    }
+
+    /// Labels identifying the job, task and step a pod runs. Strøm never selects pods by
+    /// them, but every value must pass the API server's label-value validation or the pod
+    /// is rejected before it exists (a for_each instance is named `step[i]`).
+    fn step_labels(job_id: &str, task_name: &str, step_name: &str) -> HashMap<String, String> {
+        let mut labels = HashMap::new();
+        labels.insert("app".to_string(), "stroem-step".to_string());
+        labels.insert(
+            "stroem.io/job-id".to_string(),
+            Self::sanitize_label_value(job_id),
+        );
+        labels.insert(
+            "stroem.io/step".to_string(),
+            Self::sanitize_label_value(step_name),
+        );
+        // The task label has always used the DNS-1123 form; keep it, capped in length.
+        let task_label = Self::sanitize_label_value(&Self::sanitize_k8s_name(task_name));
+        if !task_label.is_empty() {
+            labels.insert("stroem.io/task".to_string(), task_label);
+        }
+        labels
+    }
+
+    /// Record the step's exact, unsanitized name on the pod (see [`STEP_NAME_ANNOTATION`]).
+    fn annotate_step_name(pod: &mut Pod, step_name: &str) {
+        pod.metadata
+            .annotations
+            .get_or_insert_with(Default::default)
+            .insert(STEP_NAME_ANNOTATION.to_string(), step_name.to_string());
     }
 
     /// Extract workspace name from the workdir or env
@@ -1055,19 +1130,12 @@ impl Runner for KubeRunner {
             .unwrap_or_else(|| "step".to_string());
 
         let pod_name = Self::pod_name(&job_id, &step_name, &task_name);
-        let task_label = Self::sanitize_k8s_name(&task_name);
+        let labels = Self::step_labels(&job_id, &task_name, &step_name);
 
-        let mut labels = HashMap::new();
-        labels.insert("app".to_string(), "stroem-step".to_string());
-        labels.insert("stroem.io/job-id".to_string(), job_id.clone());
-        labels.insert("stroem.io/step".to_string(), step_name.clone());
-        if !task_label.is_empty() {
-            labels.insert("stroem.io/task".to_string(), task_label);
-        }
-
-        let pod_spec = self
+        let mut pod_spec = self
             .build_pod_spec(&pod_name, &config, &workspace_name, labels)
             .context("Failed to build pod spec")?;
+        Self::annotate_step_name(&mut pod_spec, &step_name);
 
         // Use namespace from pod spec (set via manifest override) or fall back to configured default
         let ns = pod_spec
@@ -1397,6 +1465,131 @@ impl Runner for KubeRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Kubernetes label-value rule: empty, or at most 63 chars of `[-A-Za-z0-9_.]`
+    /// starting and ending with an alphanumeric.
+    fn is_valid_label_value(v: &str) -> bool {
+        v.is_empty()
+            || (v.len() <= 63
+                && v.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+                && v.starts_with(|c: char| c.is_ascii_alphanumeric())
+                && v.ends_with(|c: char| c.is_ascii_alphanumeric()))
+    }
+
+    /// DNS-1123 label rule for pod names: 1-63 chars of `[a-z0-9-]`,
+    /// starting and ending with an alphanumeric.
+    fn is_valid_dns1123_label(v: &str) -> bool {
+        !v.is_empty()
+            && v.len() <= 63
+            && v.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+            && !v.starts_with('-')
+            && !v.ends_with('-')
+    }
+
+    #[test]
+    fn test_step_labels_for_each_instance_are_valid() {
+        // Regression: prod job 64cbab91 — the raw instance name "ml-impressions[0]"
+        // went into the `stroem.io/step` label and the API server rejected the pod (422).
+        let labels = KubeRunner::step_labels(
+            "64cbab91-b444-4690-9b2c-9832263971bc",
+            "backfill",
+            "ml-impressions[0]",
+        );
+        for (key, value) in &labels {
+            assert!(
+                is_valid_label_value(value),
+                "label {key}={value:?} is not a valid Kubernetes label value"
+            );
+        }
+        assert_eq!(labels["stroem.io/step"], "ml-impressions-0");
+        assert_eq!(
+            labels["stroem.io/job-id"],
+            "64cbab91-b444-4690-9b2c-9832263971bc"
+        );
+        assert_eq!(labels["stroem.io/task"], "backfill");
+        assert_eq!(labels["app"], "stroem-step");
+    }
+
+    #[test]
+    fn test_step_labels_long_names_are_capped() {
+        let long = "x".repeat(100);
+        let labels = KubeRunner::step_labels("12345678", &long, &format!("{long}[12]"));
+        for (key, value) in &labels {
+            assert!(
+                is_valid_label_value(value),
+                "label {key}={value:?} is not a valid Kubernetes label value"
+            );
+        }
+    }
+
+    #[test]
+    fn test_step_labels_task_sanitizing_to_empty_is_omitted() {
+        let labels = KubeRunner::step_labels("12345678", "!@#$", "deploy");
+        assert!(!labels.contains_key("stroem.io/task"));
+    }
+
+    #[test]
+    fn test_sanitize_label_value_keeps_valid_values_unchanged() {
+        // A value that was already valid must not change — existing selectors keep working.
+        for v in ["deploy", "Deploy_API.v2-step", "a", "123"] {
+            assert_eq!(KubeRunner::sanitize_label_value(v), v);
+        }
+    }
+
+    #[test]
+    fn test_sanitize_label_value_edge_cases() {
+        assert_eq!(KubeRunner::sanitize_label_value("step[0]"), "step-0");
+        assert_eq!(KubeRunner::sanitize_label_value("[0]"), "0");
+        assert_eq!(KubeRunner::sanitize_label_value("_.-step-._"), "step");
+        assert_eq!(KubeRunner::sanitize_label_value("dëploy"), "d-ploy");
+        assert_eq!(KubeRunner::sanitize_label_value("!@#$"), "");
+        assert_eq!(KubeRunner::sanitize_label_value(""), "");
+        // Truncation must not leave a trailing non-alphanumeric.
+        let v = KubeRunner::sanitize_label_value(&format!("{}-{}", "a".repeat(62), "b"));
+        assert_eq!(v, "a".repeat(62));
+        assert!(is_valid_label_value(&v));
+    }
+
+    #[test]
+    fn test_annotate_step_name_keeps_raw_name_and_manifest_annotations() {
+        let mut pod = Pod::default();
+        pod.metadata.annotations = Some(
+            [("team".to_string(), "data".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        KubeRunner::annotate_step_name(&mut pod, "ml-impressions[0]");
+        let annotations = pod.metadata.annotations.unwrap();
+        assert_eq!(annotations[STEP_NAME_ANNOTATION], "ml-impressions[0]");
+        assert_eq!(annotations["team"], "data");
+    }
+
+    #[test]
+    fn test_pod_name_for_each_instances_with_long_names_stay_distinct() {
+        // Truncation cuts the END of the name, which is where the instance index lives:
+        // without a disambiguating suffix `[10]` and `[11]` became the same pod name.
+        let task = "ai-traffic-model-historical-backfill";
+        let a = KubeRunner::pod_name("64cbab91-b444", "ml-traffic-impressions[10]", task);
+        let b = KubeRunner::pod_name("64cbab91-b444", "ml-traffic-impressions[11]", task);
+        assert_ne!(a, b);
+        for name in [&a, &b] {
+            assert!(is_valid_dns1123_label(name), "invalid pod name {name:?}");
+            assert!(name.starts_with("stroem-64cbab91-"));
+        }
+        // Deterministic for the same inputs.
+        assert_eq!(
+            a,
+            KubeRunner::pod_name("64cbab91-b444", "ml-traffic-impressions[10]", task)
+        );
+    }
+
+    #[test]
+    fn test_pod_name_for_each_instance_short_name_unchanged() {
+        let name = KubeRunner::pod_name("64cbab91-b444", "ml-impressions[0]", "backfill");
+        assert_eq!(name, "stroem-64cbab91-backfill-ml-impressions-0");
+    }
 
     #[test]
     fn test_pod_name_with_task() {

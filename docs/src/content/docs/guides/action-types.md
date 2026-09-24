@@ -321,6 +321,21 @@ actions:
 Pods that remain in `Pending` state for more than 10 minutes are automatically terminated and the step is marked as failed. This prevents jobs from hanging indefinitely when pods can't be scheduled (e.g., insufficient resources, node affinity failures, image pull errors). The error message includes the pod's status reason when available.
 :::
 
+### Pod names and labels
+
+Both pod runners (`type: pod` and `runner: pod`) name the pod `stroem-{first 8 chars of job id}-{task}-{step}`, lowercased with every other character replaced by `-`. A name longer than 63 characters is cut short and ends in an 8-character hash, so the instances of a long-named `for_each` step (`step[10]`, `step[11]`) keep distinct pod names.
+
+Every step pod carries these labels, for use with `kubectl -l`:
+
+| Label | Value |
+|---|---|
+| `app` | `stroem-step` |
+| `stroem.io/job-id` | the job id |
+| `stroem.io/task` | the task name, in the same lowercased form as the pod name |
+| `stroem.io/step` | the step name with characters Kubernetes does not allow in a label replaced by `-` (`deploy[0]` → `deploy-0`) |
+
+Label values are capped at 63 characters. The exact step name is in the `stroem.io/step-name` annotation.
+
 ## Task actions
 
 Actions of `type: task` reference another task by name. When a step using a task action becomes ready, the server creates a child job that runs the referenced task's full flow.
