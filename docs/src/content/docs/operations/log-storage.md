@@ -131,7 +131,7 @@ Real-time log streaming is available via WebSocket:
 GET /api/jobs/{id}/logs/stream
 ```
 
-On connect, the server sends the default tail (`read_tail`, see [Reading logs](#reading-logs)) as backfill, then streams new log chunks as they arrive from workers. For a finished job with an archive, that backfill waits for the archived tail — the gzip object is decompressed from its start — so connecting to a big finished job can take a moment before the first frame arrives.
+On connect, the server subscribes to the job's live chunks, then sends the default tail (`read_tail`, see [Reading logs](#reading-logs)) as backfill, then streams new log chunks as they arrive from workers. Because the subscription comes first, a chunk that arrives while the backfill is read is never lost, but it can appear both in the backfill and as a live frame. For a finished job with an archive, that backfill waits for the archived tail — the gzip object is decompressed from its start — so connecting to a big finished job can take a moment before the first frame arrives.
 
 ```bash
 websocat ws://localhost:8080/api/jobs/JOB_ID/logs/stream

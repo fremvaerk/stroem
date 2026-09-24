@@ -480,6 +480,7 @@ Everything a job owes after one of its steps moves (or a job was created, or can
 
 ### WebSocket Log Streaming
 - `GET /api/jobs/{id}/logs/stream` — backfill = the default tail (`read_tail`), then live via `tokio::sync::broadcast`
+- Subscribe BEFORE reading the backfill (`ws.rs::subscribe_then_backfill`): `LogBroadcast::broadcast` drops a chunk nobody is subscribed to, so read-then-subscribe lost every chunk pushed in between (CI flake on v0.16.6, widened by `read_tail` pinning the file length at open). The price is a possible duplicate, never a loss. The UI does not use this endpoint (its last caller, `use-job-logs.ts`, was deleted as dead code in 89ec614); it serves external clients.
 
 ### Task Duration Stats
 - `GET /api/workspaces/{ws}/tasks/{name}/stats?limit=50` — p50/p95/avg/min/max + recent durations + per-step breakdown over last N **completed** runs (View permission sufficient). Failed/cancelled runs excluded; `for_each` instance rows excluded from per-step breakdown.

@@ -1,4 +1,5 @@
 use crate::acl::{load_user_acl_context, make_task_path, TaskPermission};
+use crate::log_broadcast::LogBroadcast;
 use crate::log_read::StepFilter;
 use crate::log_storage::JobLogMeta;
 use crate::state::AppState;
@@ -10,6 +11,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::Deserialize;
+use std::future::Future;
 use std::sync::Arc;
 use stroem_common::models::auth::Claims;
 use stroem_db::JobRepo;
@@ -136,51 +138,27 @@ pub async fn job_log_stream(
 }
 
 async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>, job_id: Uuid, skip_backfill: bool) {
-    // 1. Send backfill (existing log content) unless skip_backfill is set
-    if !skip_backfill {
-        let (meta, is_terminal) = match JobRepo::get(&state.pool, job_id).await {
-            Ok(Some(job)) => {
-                let is_terminal = stroem_common::models::job::is_terminal_status(&job.status);
-                (
-                    JobLogMeta {
-                        workspace: job.workspace,
-                        task_name: job.task_name,
-                        created_at: job.created_at,
-                    },
-                    is_terminal,
-                )
-            }
-            _ => (
-                // If job not found, use dummy meta (local file lookup still works by job_id).
-                // Treat as non-terminal — no archive lookup to attempt anyway without a real meta.
-                JobLogMeta {
-                    workspace: String::new(),
-                    task_name: String::new(),
-                    created_at: chrono::Utc::now(),
-                },
-                false,
-            ),
-        };
+    // 1. Subscribe, then read the backfill (see `subscribe_then_backfill`).
+    let (mut rx, backfill) = subscribe_then_backfill(&state.log_broadcast, job_id, || async {
+        if skip_backfill {
+            None
+        } else {
+            read_backfill(&state, job_id).await
+        }
+    })
+    .await;
 
-        let tail_bytes = state.config.log_storage.read.tail_default_bytes;
-        if let Ok(tail) = state
-            .log_storage
-            .read_tail(job_id, &meta, is_terminal, StepFilter::All, tail_bytes)
-            .await
+    // 2. Send the backfill (existing log content).
+    if let Some(logs) = backfill {
+        if !logs.is_empty()
+            && socket
+                .send(axum::extract::ws::Message::Text(logs.into()))
+                .await
+                .is_err()
         {
-            if !tail.logs.is_empty()
-                && socket
-                    .send(axum::extract::ws::Message::Text(tail.logs.into()))
-                    .await
-                    .is_err()
-            {
-                return;
-            }
+            return;
         }
     }
-
-    // 2. Subscribe to live broadcast
-    let mut rx = state.log_broadcast.subscribe(job_id).await;
 
     // 3. Forward broadcast messages to the WebSocket
     loop {
@@ -213,4 +191,91 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>, job_id: Uuid, sk
 
     // 4. Cleanup
     state.log_broadcast.remove_channel(job_id).await;
+}
+
+/// Subscribe to the job's live chunks and read the backfill. The subscription comes
+/// FIRST: `LogBroadcast::broadcast` drops a chunk nobody is subscribed to, so reading
+/// first lost every chunk pushed between the backfill's read point and the subscribe.
+/// This order never loses one; a chunk pushed during the read may arrive twice (in the
+/// backfill and as a live frame).
+async fn subscribe_then_backfill<F, Fut>(
+    broadcast: &LogBroadcast,
+    job_id: Uuid,
+    read_backfill: F,
+) -> (tokio::sync::broadcast::Receiver<String>, Option<String>)
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Option<String>>,
+{
+    let rx = broadcast.subscribe(job_id).await;
+    let backfill = read_backfill().await;
+    (rx, backfill)
+}
+
+/// The default tail of the job's log, or `None` when it cannot be read.
+async fn read_backfill(state: &AppState, job_id: Uuid) -> Option<String> {
+    let (meta, is_terminal) = match JobRepo::get(&state.pool, job_id).await {
+        Ok(Some(job)) => {
+            let is_terminal = stroem_common::models::job::is_terminal_status(&job.status);
+            (
+                JobLogMeta {
+                    workspace: job.workspace,
+                    task_name: job.task_name,
+                    created_at: job.created_at,
+                },
+                is_terminal,
+            )
+        }
+        _ => (
+            // If job not found, use dummy meta (local file lookup still works by job_id).
+            // Treat as non-terminal — no archive lookup to attempt anyway without a real meta.
+            JobLogMeta {
+                workspace: String::new(),
+                task_name: String::new(),
+                created_at: chrono::Utc::now(),
+            },
+            false,
+        ),
+    };
+
+    let tail_bytes = state.config.log_storage.read.tail_default_bytes;
+    state
+        .log_storage
+        .read_tail(job_id, &meta, is_terminal, StepFilter::All, tail_bytes)
+        .await
+        .ok()
+        .map(|tail| tail.logs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn chunk_pushed_while_backfill_is_read_is_delivered_live() {
+        // Regression: CI on v0.16.6 (test_ws_live_log_streaming). A worker push that
+        // lands after the backfill's read point but before the subscribe was in neither
+        // the backfill nor the live stream.
+        let broadcast = LogBroadcast::new();
+        let job_id = Uuid::new_v4();
+        let (mut rx, backfill) = subscribe_then_backfill(&broadcast, job_id, || async {
+            broadcast.broadcast(job_id, "live line\n".to_string()).await;
+            Some("old line\n".to_string())
+        })
+        .await;
+
+        assert_eq!(backfill.as_deref(), Some("old line\n"));
+        assert_eq!(rx.try_recv().expect("chunk was lost"), "live line\n");
+    }
+
+    #[tokio::test]
+    async fn skipped_backfill_still_subscribes() {
+        let broadcast = LogBroadcast::new();
+        let job_id = Uuid::new_v4();
+        let (mut rx, backfill) =
+            subscribe_then_backfill(&broadcast, job_id, || async { None }).await;
+        assert!(backfill.is_none());
+        broadcast.broadcast(job_id, "after\n".to_string()).await;
+        assert_eq!(rx.try_recv().unwrap(), "after\n");
+    }
 }
