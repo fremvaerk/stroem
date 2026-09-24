@@ -42,6 +42,11 @@ impl LogBroadcast {
         }
     }
 
+    /// Whether a channel exists for the job (diagnostics and tests).
+    pub async fn has_channel(&self, job_id: Uuid) -> bool {
+        self.channels.read().await.contains_key(&job_id)
+    }
+
     /// Remove a channel when no subscribers remain.
     pub async fn remove_channel(&self, job_id: Uuid) {
         let mut channels = self.channels.write().await;
