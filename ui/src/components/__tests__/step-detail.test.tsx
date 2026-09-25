@@ -3,6 +3,7 @@ import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 import { StepDetail } from "../step-detail";
 import type { JobStep } from "@/lib/types";
+import { installVirtualizerLayout } from "@/test/virtualizer-layout";
 
 const getStepLogs = vi.fn();
 const getStepLogsFull = vi.fn();
@@ -189,5 +190,42 @@ describe("StepDetail tail banner", () => {
     } finally {
       confirmSpy.mockRestore();
     }
+  });
+});
+
+describe("StepDetail log timestamps", () => {
+  installVirtualizerLayout();
+
+  const line = (ts: string, text: string) =>
+    JSON.stringify({ ts, stream: "stdout", step: "build", line: text });
+
+  beforeEach(() => localStorage.clear());
+
+  it("measures each line from the start of its own attempt", async () => {
+    getStepLogs.mockResolvedValue({
+      logs: `${line("2024-06-15T09:50:03Z", "first try")}\n${line("2024-06-15T10:00:07Z", "second try")}\n`,
+    });
+    renderDetail(
+      makeStep({
+        started_at: "2024-06-15T10:00:00Z",
+        retry_attempt: 1,
+        retry_history: [
+          { attempt: 0, error: "boom", started_at: "2024-06-15T09:50:00Z", failed_at: "2024-06-15T09:51:00Z" },
+        ],
+      }),
+    );
+    await screen.findByText("second try");
+
+    fireEvent.click(screen.getByRole("button", { name: "Elapsed" }));
+
+    expect(screen.getByText("+00:03")).toBeInTheDocument();
+    expect(screen.getByText("+00:07")).toBeInTheDocument();
+  });
+
+  it("offers no elapsed mode for a step that has not started", async () => {
+    getStepLogs.mockResolvedValue({ logs: `${line("2024-06-15T10:00:07Z", "early")}\n` });
+    renderDetail(makeStep({ status: "pending", started_at: null, completed_at: null }));
+    await screen.findByText("early");
+    expect(screen.queryByRole("button", { name: "Elapsed" })).toBeNull();
   });
 });

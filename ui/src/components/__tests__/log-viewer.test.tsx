@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { LogViewer } from "../log-viewer";
 import { LOG_GAP_MARKER } from "@/lib/log-lines";
@@ -6,8 +6,15 @@ import { installVirtualizerLayout } from "@/test/virtualizer-layout";
 
 installVirtualizerLayout();
 
+const TS = "2026-09-22T06:01:04.123Z";
+/** TS in Europe/Oslo (CEST, UTC+2), the zone the timestamp tests pin. */
+const TS_OSLO = "08:01:04";
+const STARTS = [Date.parse("2026-09-22T06:01:00Z")];
+
 const jsonl = (i: number, stream = "stdout") =>
-  JSON.stringify({ ts: "2026-09-22T06:01:04.123Z", stream, step: "s", line: `line ${i}` });
+  JSON.stringify({ ts: TS, stream, step: "s", line: `line ${i}` });
+
+beforeEach(() => localStorage.clear());
 
 describe("LogViewer", () => {
   it("shows a placeholder for an empty log", () => {
@@ -60,5 +67,58 @@ describe("LogViewer", () => {
     Object.defineProperty(el, "scrollTop", { configurable: true, value: 1500 });
     fireEvent.scroll(el);
     expect(el).toHaveAttribute("aria-live", "polite");
+  });
+
+  describe("timestamps", () => {
+    // A non-UTC zone, so a UTC rendering fails here too (CI runs in UTC).
+    beforeEach(() => vi.stubEnv("TZ", "Europe/Oslo"));
+    afterEach(() => vi.unstubAllEnvs());
+
+    it("shows local clock time without milliseconds", () => {
+      render(<LogViewer logs={[jsonl(1)]} isStreaming={false} />);
+      expect(screen.getByText(TS_OSLO)).toBeInTheDocument();
+      expect(screen.queryByText(/\.123$/)).toBeNull();
+    });
+
+    it("offers no elapsed mode without attempt starts", () => {
+      render(<LogViewer logs={[jsonl(1)]} isStreaming={false} />);
+      expect(screen.queryByRole("button", { name: "Elapsed" })).toBeNull();
+    });
+
+    it("ignores a saved elapsed mode when there is nothing to count from", () => {
+      localStorage.setItem("stroem_log_time_mode", "elapsed");
+      render(<LogViewer logs={[jsonl(1)]} isStreaming={false} />);
+      expect(screen.getByText(TS_OSLO)).toBeInTheDocument();
+    });
+
+    it("switches to time since the attempt started", () => {
+      render(<LogViewer logs={[jsonl(1)]} isStreaming={false} attemptStarts={STARTS} />);
+      expect(screen.getByRole("button", { name: "Clock" })).toHaveAttribute("aria-pressed", "true");
+
+      fireEvent.click(screen.getByRole("button", { name: "Elapsed" }));
+
+      expect(screen.getByText("+00:04")).toBeInTheDocument();
+      expect(screen.queryByText(TS_OSLO)).toBeNull();
+      expect(screen.getByRole("button", { name: "Elapsed" })).toHaveAttribute("aria-pressed", "true");
+    });
+
+    it("remembers the chosen mode across mounts", () => {
+      const { unmount } = render(
+        <LogViewer logs={[jsonl(1)]} isStreaming={false} attemptStarts={STARTS} />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Elapsed" }));
+      unmount();
+
+      render(<LogViewer logs={[jsonl(1)]} isStreaming={false} attemptStarts={STARTS} />);
+      expect(screen.getByText("+00:04")).toBeInTheDocument();
+    });
+
+    it("shows the other format on hover", () => {
+      render(<LogViewer logs={[jsonl(1)]} isStreaming={false} attemptStarts={STARTS} />);
+      expect(screen.getByText(TS_OSLO)).toHaveAttribute("title", "+00:04");
+
+      fireEvent.click(screen.getByRole("button", { name: "Elapsed" }));
+      expect(screen.getByText("+00:04")).toHaveAttribute("title", TS_OSLO);
+    });
   });
 });

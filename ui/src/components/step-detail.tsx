@@ -13,6 +13,7 @@ import { JsonViewer } from "@/components/json-viewer";
 import { ApprovalCard } from "@/components/approval-card";
 import { useStepLog } from "@/hooks/use-step-log";
 import { formatTime } from "@/lib/formatting";
+import { attemptStarts } from "@/lib/log-time";
 import { isTerminalJobStatus } from "@/lib/job-status";
 import type { JobStep } from "@/lib/types";
 import { skipExplanation } from "@/lib/skip-reason";
@@ -157,6 +158,7 @@ export function StepDetail({
             <LogViewer
               logs={log.lines}
               isStreaming={isStreaming}
+              attemptStarts={attemptStarts(step)}
               header={
                 showBanner ? (
                   <LogTailBanner

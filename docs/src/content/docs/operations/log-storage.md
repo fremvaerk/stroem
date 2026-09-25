@@ -70,6 +70,12 @@ Each log line is a JSON object in JSONL format:
 | `step` | Step name that produced this line |
 | `line` | The log line content |
 
+### Timestamps in the UI
+
+The job page shows each line's `ts` as `HH:MM:SS` in your browser's time zone; the stored value and the API response keep full precision. On a step's **Logs** tab, the **Clock | Elapsed** switch shows instead the time since the step started — `+04:12`, or `+1:02:03` past an hour. The browser remembers the choice. Agent steps have no **Elapsed** mode: resuming one (after `ask_user` or a task tool) moves its recorded start, so its earlier lines have nothing to count from.
+
+A retried step keeps the lines of every attempt, and each line is measured from the start of its own attempt. The worker stamps `ts` and the server stamps the step's start when a worker claims it, so the first line's elapsed time includes the worker's preparation (workspace download, image pull), and a worker clock that lags the server's can make a line read slightly negative (`-00:01`).
+
 ## Log archival
 
 When an archive backend is configured, logs are uploaded when a job reaches a terminal state (completed/failed). The upload happens **after** hooks fire, so server events from hook execution are included in the archive.
