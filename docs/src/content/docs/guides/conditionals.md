@@ -182,7 +182,7 @@ Every skipped step records why it was skipped. The job detail page shows it as a
 |---|---|
 | `condition` | the step's own `when` rendered falsy |
 | `empty` | the step's `for_each` produced no items |
-| `cascade` | every dependency was skipped, all of them by choice |
+| `cascade` | a dependency was skipped by choice and does not carry `continue_when_skipped` (no dependency failed) |
 | `unreachable` | a dependency failed or was cancelled, or a dependency was itself skipped `unreachable` — or a dependency's skip reason is missing/unrecognized (read conservatively as a failure) |
 
 `unreachable` travels down a chain: if `a` fails, `b` is skipped `unreachable` unless `a` itself has `continue_on_failure`, and so is anything that depends on `b` unless `b` itself has the flag — **even a step whose other dependencies completed**, because a failure verdict always wins over a completed one (strict AND, [Overview](#overview)). A merge after three parallel branches does not run when one branch failed upstream and that branch (or something below it) has no `continue_on_failure`, and neither does anything after the merge — an uncaught failure fails the job even if it never shows up as a `failed` row past that point. `continue_when_skipped` never reaches past an `unreachable` skip; only `continue_on_failure`, set on the failing (or intervening) step itself, does.
@@ -307,7 +307,7 @@ Note: In this pattern, `summary` also skips because its only dependency (`advanc
 
 ### Optional step (skip if not needed)
 
-An optional step in a linear pipeline. Use a shared root dependency so the downstream step has at least one completed dep:
+An optional step in a linear pipeline. Set `continue_when_skipped` on the optional step so its dependents run whether it runs or is skipped:
 
 ```yaml
 tasks:
@@ -423,7 +423,7 @@ tasks:
 ```
 
 This workflow:
-1. Optionally runs the pre-check based on input. `verify` carries `continue_when_skipped`, so a skip does not cascade-block `fast` and `slow` — without it, both would be skipped `cascade` and `finish` would never see a Pass.
+1. Optionally runs the pre-check based on input. `verify` carries `continue_when_skipped`, so a skip does not cascade-block `fast` and `slow` — without it, `fast` and `slow` would be skipped `cascade` without evaluating their own `when` — and because they carry `continue_when_skipped`, `finish` would still run, just with neither branch processed.
 2. When `verify` runs (or is skipped), branches into fast or slow path based on input.
 3. Converges at `finish` — exactly one of `fast` / `slow` runs, the other is skipped `condition`; both carry `continue_when_skipped`, so `finish` sees every dependency as satisfied.
 

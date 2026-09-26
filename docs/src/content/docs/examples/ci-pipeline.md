@@ -39,12 +39,12 @@ actions:
   notify-ci:
     type: script
     script: |
-      echo "CI result: {{ input.status }} for {{ input.ref }}"
+      echo "CI result: {{ input.status }} for job {{ input.job_id }}"
       # In production, call Slack/Teams/GitHub API here
 
     input:
       status: { type: string }
-      ref: { type: string }
+      job_id: { type: string }
 
 tasks:
   ci-pipeline:
@@ -64,12 +64,12 @@ tasks:
       - action: notify-ci
         input:
           status: "success"
-          ref: "{{ input.body.ref }}"
+          job_id: "{{ hook.job_id }}"
     on_error:
       - action: notify-ci
         input:
           status: "failed: {{ hook.error_message }}"
-          ref: "{{ input.body.ref }}"
+          job_id: "{{ hook.job_id }}"
 
 triggers:
   github-push:
@@ -100,7 +100,7 @@ test  ──┘
 - **Docker runner**: `runner: docker` runs steps inside containers with workspace at `/workspace`
 - **Hooks, not a dependent step**: notifying after success or failure is an `on_success` / `on_error` hook, not a flow step with `continue_on_failure` — that flag only ever decides whether a step's *own* dependents run and whether *its own* failure fails the job, never whether it itself runs
 - **Webhook trigger**: External systems (GitHub) can trigger the pipeline via `POST /hooks/github-ci`
-- **Webhook input**: `{{ input.body.ref }}` accesses the parsed JSON body from the webhook request
+- **Webhook input**: `input.body.*` (e.g. `{{ input.body.ref }}`) accesses the parsed JSON body from the webhook request inside flow step templates — hook templates don't see it, only `hook.*` / `secret.*` (see [Hooks](/guides/hooks/))
 
 ## Setting up the GitHub webhook
 

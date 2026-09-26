@@ -42,7 +42,7 @@ Supports:
 - Masked step context for downstream templates: a completed step's output, `null` for a skipped one, `null` plus `error` for a failed one — a failed loop's partial array is never exposed to a step that reads it
 - `Ctrl+C` graceful cancellation (still aborts the run and exits non-zero — there is no step-level cancellation locally)
 - `OUTPUT: {json}` parsing for step outputs
-- Exit code reflects the run's outcome, not a raw failure count: `0` when every failure was caught by `continue_on_failure` somewhere on its path, `1` when at least one escaped uncaught. Caught failures print as tolerated in the summary
+- Exit code reflects the run's outcome, not a raw failure count: `0` when every failure is caught by `continue_on_failure` — on the failing step or on every path below it — `1` when at least one escaped uncaught. Caught failures print as tolerated in the summary
 
 Limitations:
 - Steps execute sequentially, even when the DAG allows parallelism

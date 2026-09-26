@@ -63,6 +63,14 @@ author wants: the comment on that step says "a failed prediction still skips
 impressions", and 0.17 is the first release where the server actually
 behaves that way.
 
+## Hook payload
+
+Three related changes to the `hook.*` template context (see [Hooks](/guides/hooks/)):
+
+- `hook.failed_steps[]` gains a new field, `tolerated: bool` — `true` when that failure is caught by `continue_on_failure`, on the failing step itself or on every path below it.
+- A loop instance row's `continue_on_failure` in `hook.failed_steps[]` now reports its **placeholder's** flag, not a hardcoded `false` as before — a failed `p[0]` under a placeholder `p` that has `continue_on_failure` now shows `continue_on_failure: true`.
+- `on_success` hooks can now see a non-empty `hook.failed_steps` — a job that completed with a caught failure fires `on_success`, and that failure is still listed (with `tolerated: true`) so the hook can report it.
+
 ## Checklist
 
 - [ ] Move `continue_on_failure` from cleanup/notify steps to `on_error` (or `on_cancel`) hooks. There is no dependent-side "run even if upstream failed" flow step — see [Hooks](/guides/hooks/#cleanup-and-notification-after-a-failure).
