@@ -521,7 +521,8 @@ tasks:
 
       process:
         action: transform-item
-        for_each: "{{ fetch-items.output.items }}"
+        depends_on: [fetch-items]
+        for_each: "{{ fetch_items.output.items | json_encode() }}"
         retry:
           max_attempts: 3
           delay: "10s"

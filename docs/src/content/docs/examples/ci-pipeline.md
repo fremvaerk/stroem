@@ -98,7 +98,7 @@ test  ──┘
 
 - **Parallel steps**: `lint` and `test` have no mutual dependencies, so they run concurrently
 - **Docker runner**: `runner: docker` runs steps inside containers with workspace at `/workspace`
-- **Hooks, not a dependent step**: notifying after success or failure is an `on_success` / `on_error` hook, not a flow step with `continue_on_failure` — that flag only ever decides whether a step's *own* dependents run and whether *its own* failure fails the job, never whether it itself runs
+- **Hooks, not a dependent step**: notifying after success or failure is an `on_success` / `on_error` hook, not a flow step with `continue_on_failure`. That flag decides whether a step's *own* dependents run, and it catches every failure reaching it — its own, and any upstream failure whose only path runs through it — so the job no longer fails; it never decides whether the flagged step itself runs. A 0.16-style `notify` step depending on `build` with `continue_on_failure` would, under 0.17's rule, catch a failed `build` and turn the whole pipeline **green** — the opposite of a CI notification's job. That is why this page puts notification in hooks instead.
 - **Webhook trigger**: External systems (GitHub) can trigger the pipeline via `POST /hooks/github-ci`
 - **Webhook input**: `input.body.*` (e.g. `{{ input.body.ref }}`) accesses the parsed JSON body from the webhook request inside flow step templates — hook templates don't see it, only `hook.*` / `secret.*` (see [Hooks](/guides/hooks/))
 

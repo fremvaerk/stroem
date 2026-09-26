@@ -134,6 +134,11 @@ tasks:
 Inline steps support all action fields (`type`, `script`, `source`, `image`, `runner`, `env`, `tags`, etc.) plus all step fields (`depends_on`, `input`, `continue_on_failure`, `timeout`, [`when`](/guides/conditionals/)):
 
 ```yaml
+actions:
+  notify:
+    type: script
+    script: "curl -X POST $SLACK_WEBHOOK -d message=\"{{ input.message }}\""
+
 tasks:
   deploy:
     input:

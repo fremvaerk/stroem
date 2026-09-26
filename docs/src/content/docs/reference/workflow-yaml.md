@@ -791,7 +791,7 @@ Each entry in `hook.failed_steps`:
 | `action_name` | string | Action that was executed |
 | `error_message` | string/null | The step's error message |
 | `continue_on_failure` | bool | Whether this row's own flow step has `continue_on_failure` set. A loop instance row reports its placeholder's flag |
-| `tolerated` | bool | Whether this failure was caught by `continue_on_failure` — on this step or on every path below it — so the job still completed |
+| `tolerated` | bool | Whether this failure was caught by `continue_on_failure` — on this step or on every path below it — this failure does not contribute to failing the job; other failures or a cancellation can still decide the outcome |
 
 ```yaml
 tasks:

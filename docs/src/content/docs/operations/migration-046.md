@@ -9,6 +9,10 @@ column. Alongside it, release 0.16.2 changes one behaviour of
 
 ## What changes on upgrade
 
+This describes the 0.16.2 meaning of the flags; both have since moved again
+in 0.17 — see the [0.17 upgrade guide](/operations/upgrade-0-17-dependency-flags/)
+before relying on anything below.
+
 Before 0.16.2, `continue_on_failure: true` also let a step run when **all** of
 its dependencies were skipped. That was undocumented. From 0.16.2,
 `continue_on_failure` is failure-only: it lets a step run when a **direct**
@@ -25,8 +29,12 @@ one). Steps with at least one dependency that always runs are not affected.
 ## The fix
 
 Add `continue_when_skipped: true` to the DEPENDENCY that can be skipped (the
-step with the `when`). To keep the exact old behaviour ("run no matter
-what"), also add `continue_on_failure: true` on that same dependency.
+step with the `when`). To also let the dependent run when that same
+dependency fails or is cancelled, add `continue_on_failure: true` on that
+dependency too — as of 0.17 this does more than let the dependent run: it
+also catches the dependency's own failure so it no longer fails the job (see
+the [0.17 upgrade guide](/operations/upgrade-0-17-dependency-flags/)), which
+was not true of `continue_on_failure`'s pre-0.16.2 meaning.
 
 0.16.3 moved `continue_when_skipped` from the dependent to the skipped step;
 0.16.2 placement on the dependent has no effect from 0.16.3. As of 0.17,

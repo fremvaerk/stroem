@@ -13,7 +13,9 @@ automatically.
 ## The rule
 
 > **`continue_on_failure`** on a step: if this step fails, is cancelled, or is skipped because something above it failed, the steps that depend on it still run, and the failure does not fail the job. It never makes the step itself run.
+>
 > **`continue_when_skipped`** on a step: if this step is skipped by its own `when`, an empty `for_each`, or because a step above it was skipped the same way, the steps that depend on it still run.
+>
 > A step runs only when **every** dependency lets it through (completed, or not completed but carrying the matching flag). A failure fails the job unless a `continue_on_failure` catches it — on the failing step or on every path below it.
 
 Both flags are read **only from the dependency**, never from the dependent — a step's own flags never make *it* run. There is no automatic convergence: a dependency skipped by choice blocks its dependents even when a sibling dependency completed. An if/else merge needs `continue_when_skipped` on **each** branch step.
@@ -44,6 +46,36 @@ even though its dependents are skipped `unreachable`. Skipped rows never
 decide job status, whatever their reason; only `failed` and `cancelled` rows
 do.
 
+The 0.16 docs' own examples were already written in exactly the shape of row 2
+above (`a` fails, `b` (or the docs' `notify`/`cleanup` step) depends on `a`
+with `continue_on_failure`): the `ci-pipeline` example's `notify` step, the
+`workflow-basics` guide's `notify` step, and the `event-sources` guide's
+`cleanup` step. All three now catch the upstream failure and end the job
+`completed` instead of `failed` — see the checklist below.
+
+### Event source consumers
+
+A 0.16-style `consume → cleanup (continue_on_failure)` event-source flow is
+affected the same way, with a worse consequence than a wrongly-green job: on
+a consumer crash, `cleanup` now catches the failure and the **consumer job**
+itself ends `completed` instead of `failed`. `restart_policy: on_failure`
+then never restarts it (the job didn't fail), and `restart_policy: always`
+restarts it after the trigger's base `backoff_secs` every time — the
+exponential backoff only doubles on a *failed* job, so a crash-looping
+consumer against a down broker becomes a tight restart loop instead of
+backing off. Fix: move `cleanup` to an `on_error` hook, as
+[Event Sources](/guides/event-sources/) now shows, so the job still fails and
+the backoff still works.
+
+### `stroem run` exit code
+
+On 0.16.x, `stroem run` exited `1` whenever any step failed, even one
+tolerated by its own `continue_on_failure` (a mismatch with the server, which
+already completed such a job). On 0.17, the CLI's exit code follows the same
+job-outcome rule as the server: `0` only when every failure is caught
+somewhere on its path to the end of the flow, `1` if any failure escapes
+uncaught. An interrupted run (Ctrl-C) still exits non-zero unchanged.
+
 ## Worked example: prod job `9691df79`
 
 `jobs/recalc-pipeline`, 2026-09-25. Flow shape:
@@ -69,7 +101,7 @@ Three related changes to the `hook.*` template context (see [Hooks](/guides/hook
 
 - `hook.failed_steps[]` gains a new field, `tolerated: bool` — `true` when that failure is caught by `continue_on_failure`, on the failing step itself or on every path below it.
 - A loop instance row's `continue_on_failure` in `hook.failed_steps[]` now reports its **placeholder's** flag, not a hardcoded `false` as before — a failed `p[0]` under a placeholder `p` that has `continue_on_failure` now shows `continue_on_failure: true`.
-- `on_success` hooks can now see a non-empty `hook.failed_steps` — a job that completed with a caught failure fires `on_success`, and that failure is still listed (with `tolerated: true`) so the hook can report it.
+- An `on_success` hook seeing a non-empty `hook.failed_steps` was already possible in 0.16.x, for a failure tolerated by its own `continue_on_failure` (the failing step catching itself). 0.17 adds a second way to get there: a failure caught **downstream**, by some step below it rather than the failing step's own flag — that failure is listed too (with `tolerated: true`) so the hook can still report it.
 
 ## Checklist
 

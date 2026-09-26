@@ -130,7 +130,7 @@ tasks:
         depends_on: [fast-check, slow-check]
 ```
 
-**How it works**: each dependency is judged on its own — completed is always a Pass; a choice-skip is a Pass only with `continue_when_skipped` on that same step. `process-results` runs only when both verdicts are Pass. Drop `continue_when_skipped` from either branch step and the merge is skipped `cascade` instead of running — `stroem validate` warns about exactly this shape ("step 'process-results' will be skipped whenever 'fast-check' is skipped (add continue_when_skipped: true to 'fast-check' to let process-results run)").
+**How it works**: each dependency is judged on its own — completed is always a Pass; a choice-skip is a Pass only with `continue_when_skipped` on that same step. `process-results` runs only when both verdicts are Pass. The flag belongs on the step the merge depends on **directly** — here, the last step of each branch (`fast-check`, `slow-check`) — not on `process-results` itself. If either branch step loses `continue_when_skipped` and *that* branch is the one skipped by its `when`, `process-results` is skipped `cascade` instead of running (the other branch's flag doesn't help, because only one branch is ever skipped at a time). `stroem validate` warns about exactly this shape, for a direct dependency like these or a transitively skippable one further up the chain: `Task 't' step 'process-results' will be skipped whenever 'fast-check' is skipped (add continue_when_skipped: true to 'fast-check' to let 'process-results' run)`.
 
 ## Running After a Skipped Branch
 
@@ -172,6 +172,8 @@ A skipped dependency renders as `null` in templates, and a template error fails 
 
 Both flags are read from `last-step` itself, never from `cleanup` — a step's own flags never make *it* run. See [Migration Guide: 0.17](/operations/upgrade-0-17-dependency-flags/) if your workflows still put `continue_on_failure` on the dependent (the 0.16.x placement) or rely on automatic convergence.
 
+`continue_on_failure` on `last-step` does more than let `cleanup` run: it also **catches** `last-step`'s own failure and any upstream failure whose only path to the end of the flow runs through `last-step` — the job ends `completed` and `on_success` fires, not `on_error` (see the [0.17 upgrade guide](/operations/upgrade-0-17-dependency-flags/)). If `cleanup` must run after a failure *without* hiding that failure from the job's outcome — so the job still ends `failed` and `on_error` fires — don't reach for a dependent-side flag: put `cleanup` in an [`on_error` / `on_cancel` hook](/guides/hooks/) instead.
+
 A dependent's own `when` is still evaluated on its own terms once the gate is open: a dependency's flags decide whether the dependent is even considered, not what its own condition renders to.
 
 ## Skip Reasons
@@ -188,7 +190,9 @@ Every skipped step records why it was skipped. The job detail page shows it as a
 `unreachable` travels down a chain: if `a` fails, `b` is skipped `unreachable` unless `a` itself has `continue_on_failure`, and so is anything that depends on `b` unless `b` itself has the flag — **even a step whose other dependencies completed**, because a failure verdict always wins over a completed one (strict AND, [Overview](#overview)). A merge after three parallel branches does not run when one branch failed upstream and that branch (or something below it) has no `continue_on_failure`, and neither does anything after the merge — an uncaught failure fails the job even if it never shows up as a `failed` row past that point. `continue_when_skipped` never reaches past an `unreachable` skip; only `continue_on_failure`, set on the failing (or intervening) step itself, does.
 
 :::note[Changed in 0.17]
-Before 0.17, whether a dependent ran after a failure or a choice-skip was decided partly by the dependent's *own* `continue_on_failure`, and a choice-skip with at least one completed sibling converged automatically. Now every dependency is judged only by its own flags, strict AND applies with no exception, and there is no automatic convergence — see the [0.17 upgrade guide](/operations/upgrade-0-17-dependency-flags/). A skipped step with no recorded reason, or an unrecognized one (jobs from before 0.16.2, or carried into a restart), is still read as `unreachable`, as since 0.16.5.
+Before 0.17, whether a dependent ran after a failure or a choice-skip was decided partly by the dependent's *own* `continue_on_failure`, and a choice-skip with at least one completed sibling converged automatically. Now every dependency is judged only by its own flags, strict AND applies with no exception, and there is no automatic convergence — see the [0.17 upgrade guide](/operations/upgrade-0-17-dependency-flags/).
+
+The two edge-case skip reasons are not both new: a skipped step with **no recorded reason** (jobs from before migration 046, or carried into a restart) has always been read as `unreachable`, unchanged since 0.16.5. A skipped step with a recorded but **unrecognized** reason, however, was read as untainted in 0.16.x — its dependents proceeded as if it had completed — and is now read as `unreachable` too; this part *is* new in 0.17, since an unrecognized reason is now conservatively treated as a failure like every other unresolved case.
 :::
 
 ## Root Step Conditions
@@ -268,7 +272,9 @@ tasks:
         # Exactly one branch runs, the other is skipped `condition`.
         # Both branch steps carry continue_when_skipped, so merge sees
         # every dependency as satisfied either way. Drop the flag from
-        # either branch and merge is skipped `cascade` instead.
+        # one branch and merge is skipped `cascade` instead, but only
+        # when THAT branch is the one skipped — the other branch's flag
+        # doesn't cover for it.
 ```
 
 ### Multi-step branch with cascade
@@ -300,7 +306,7 @@ tasks:
       summary:
         action: generate-report
         depends_on: [advanced-step-2]
-        # Skips if advanced-step-2 is skipped (all-deps-skipped rule)
+        # Skips if advanced-step-2 is skipped
 ```
 
 Note: In this pattern, `summary` also skips because its only dependency (`advanced-step-2`) is skipped when the branch is disabled. If you want `summary` to run even when the whole branch was skipped, set `continue_when_skipped: true` on `advanced-step-2` itself (see [Running After a Skipped Branch](#running-after-a-skipped-branch)).
