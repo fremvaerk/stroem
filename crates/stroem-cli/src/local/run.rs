@@ -1,8 +1,10 @@
 use anyhow::{bail, Context, Result};
 use serde_json::json;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 use stroem_common::dag;
+use stroem_common::gate::{caught_steps, gate, DepOutcome, Gate};
+use stroem_common::models::job::SkipReason;
 use stroem_common::models::workflow::{ActionDef, FlowStep, TaskDef, WorkspaceConfig};
 use stroem_common::template::{
     evaluate_condition, merge_defaults, prepare_action_input, render_env_map, render_input_map,
@@ -81,14 +83,47 @@ pub async fn cmd_run(task_name: &str, path: &str, input: Option<&str>) -> Result
         "\n{} completed, {} skipped, {} failed",
         summary.completed, summary.skipped, summary.failed
     );
+    if summary.outcome == RunOutcome::Completed && summary.failed > 0 {
+        eprintln!("Every failure was caught by continue_on_failure.");
+    }
 
-    Ok(summary.failed == 0)
+    Ok(summary.outcome == RunOutcome::Completed)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunOutcome {
+    Completed,
+    Failed,
 }
 
 struct RunSummary {
     completed: usize,
     skipped: usize,
     failed: usize,
+    outcome: RunOutcome,
+}
+
+fn skip_label(reason: SkipReason) -> &'static str {
+    match reason {
+        SkipReason::Condition => "condition false",
+        SkipReason::Empty => "empty for_each",
+        SkipReason::Cascade => "a dependency was skipped",
+        SkipReason::Unreachable => "an upstream step failed",
+    }
+}
+
+/// A failed step: its output is masked for templates and `error` exposed,
+/// as on the server (render_context.rs:282-289).
+fn record_failure(
+    outcomes: &mut HashMap<String, DepOutcome>,
+    outputs: &mut HashMap<String, Option<serde_json::Value>>,
+    errors: &mut HashMap<String, String>,
+    step: &str,
+    msg: String,
+) {
+    outcomes.insert(step.to_string(), DepOutcome::Failed);
+    outputs.insert(step.to_string(), None);
+    errors.insert(step.to_string(), msg);
 }
 
 /// Validate that all actions referenced by the task flow are `type: script` with local runner.
@@ -135,83 +170,99 @@ async fn run_dag(
     cancel_token: &CancellationToken,
 ) -> Result<RunSummary> {
     let runner = ShellRunner::new();
-    let mut completed: HashSet<String> = HashSet::new();
-    let mut skipped: HashSet<String> = HashSet::new();
+    let mut outcomes: HashMap<String, DepOutcome> = HashMap::new();
     let mut outputs: HashMap<String, Option<serde_json::Value>> = HashMap::new();
-    let mut failed = false;
+    let mut errors: HashMap<String, String> = HashMap::new();
     let mut failed_count: usize = 0;
 
     loop {
         if cancel_token.is_cancelled() {
             bail!("Cancelled by user");
         }
-
-        let mut ready = dag::ready_steps(&task.flow, &completed);
-        if ready.is_empty() {
+        // Steps the gate can decide now (spec 2026-09-26 §2.3). A skip that
+        // is decided while a sibling is still pending is final.
+        let mut decidable: Vec<(String, Gate)> = task
+            .flow
+            .iter()
+            .filter(|(name, _)| !outcomes.contains_key(*name))
+            .filter_map(|(name, fs)| {
+                let g = gate(&fs.depends_on, &task.flow, |d| {
+                    outcomes.get(d).copied().unwrap_or(DepOutcome::Pending)
+                });
+                (g != Gate::Wait).then(|| (name.clone(), g))
+            })
+            .collect();
+        if decidable.is_empty() {
             break;
         }
-        ready.sort(); // deterministic order
+        decidable.sort_by(|a, b| a.0.cmp(&b.0));
 
-        for step_name in ready {
+        for (step_name, g) in decidable {
             if cancel_token.is_cancelled() {
                 bail!("Cancelled by user");
             }
-
+            if let Gate::Skip(reason) = g {
+                eprintln!(
+                    "--- Step: {} [SKIPPED] ({}) ---",
+                    step_name,
+                    skip_label(reason)
+                );
+                outcomes.insert(step_name.clone(), DepOutcome::Skipped(Some(reason)));
+                outputs.insert(step_name, None);
+                continue;
+            }
             let step = &task.flow[&step_name];
             let action = &config.actions[&step.action];
-            let ctx = build_render_context(input, &outputs, &config.secrets);
+            let ctx = build_render_context(input, &outputs, &errors, &config.secrets);
 
-            // Evaluate `when` condition
             if let Some(ref when_expr) = step.when {
-                let should_run = evaluate_condition(when_expr, &ctx).with_context(|| {
-                    format!("Step '{}': failed to evaluate when condition", step_name)
-                })?;
-                if !should_run {
-                    eprintln!("--- Step: {} [SKIPPED] (condition false) ---", step_name);
-                    skipped.insert(step_name.clone());
-                    completed.insert(step_name.clone());
-                    outputs.insert(step_name.clone(), None);
-                    // Cascade-skip: check if downstream steps have all deps skipped
-                    cascade_skip(&task.flow, &mut completed, &mut skipped, &mut outputs);
-                    continue;
+                match evaluate_condition(when_expr, &ctx) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        eprintln!(
+                            "--- Step: {} [SKIPPED] ({}) ---",
+                            step_name,
+                            skip_label(SkipReason::Condition)
+                        );
+                        outcomes.insert(
+                            step_name.clone(),
+                            DepOutcome::Skipped(Some(SkipReason::Condition)),
+                        );
+                        outputs.insert(step_name, None);
+                        continue;
+                    }
+                    Err(e) => {
+                        let msg = format!("when condition error: {:#}", e);
+                        eprintln!("Step '{}' failed: {}", step_name, msg);
+                        failed_count += 1;
+                        record_failure(&mut outcomes, &mut outputs, &mut errors, &step_name, msg);
+                        continue;
+                    }
                 }
             }
 
-            // Check all-deps-skipped cascade (spec 2026-09-09 §2.5, revision 3:
-            // the CLI never produces `unreachable`, so the flag alone decides —
-            // read from each skipped dependency's own definition, not from
-            // this step)
-            if !step.depends_on.is_empty()
-                && step.depends_on.iter().all(|d| skipped.contains(d))
-                && !step.depends_on.iter().all(|d| {
-                    task.flow
-                        .get(d)
-                        .map(|f| f.continue_when_skipped)
-                        .unwrap_or(false)
-                })
-            {
-                eprintln!(
-                    "--- Step: {} [SKIPPED] (all dependencies skipped) ---",
-                    step_name
-                );
-                skipped.insert(step_name.clone());
-                completed.insert(step_name.clone());
-                outputs.insert(step_name.clone(), None);
-                cascade_skip(&task.flow, &mut completed, &mut skipped, &mut outputs);
-                continue;
-            }
-
-            // Handle for_each
             if let Some(ref for_each_expr) = step.for_each {
-                let items = evaluate_for_each(for_each_expr, &ctx).with_context(|| {
-                    format!("Step '{}': failed to evaluate for_each", step_name)
-                })?;
-
+                let items = match evaluate_for_each(for_each_expr, &ctx) {
+                    Ok(items) => items,
+                    Err(e) => {
+                        let msg = format!("for_each expression error: {:#}", e);
+                        eprintln!("Step '{}' failed: {}", step_name, msg);
+                        failed_count += 1;
+                        record_failure(&mut outcomes, &mut outputs, &mut errors, &step_name, msg);
+                        continue;
+                    }
+                };
                 if items.is_empty() {
-                    eprintln!("--- Step: {} [SKIPPED] (empty for_each) ---", step_name);
-                    skipped.insert(step_name.clone());
-                    completed.insert(step_name.clone());
-                    outputs.insert(step_name.clone(), None);
+                    eprintln!(
+                        "--- Step: {} [SKIPPED] ({}) ---",
+                        step_name,
+                        skip_label(SkipReason::Empty)
+                    );
+                    outcomes.insert(
+                        step_name.clone(),
+                        DepOutcome::Skipped(Some(SkipReason::Empty)),
+                    );
+                    outputs.insert(step_name, None);
                     continue;
                 }
 
@@ -279,19 +330,22 @@ async fn run_dag(
                     }
                 }
 
-                completed.insert(step_name.clone());
-                outputs.insert(step_name.clone(), Some(json!(iter_outputs)));
-
                 if any_failed && !step.continue_on_failure {
-                    failed = true;
-                    break;
+                    record_failure(
+                        &mut outcomes,
+                        &mut outputs,
+                        &mut errors,
+                        &step_name,
+                        "for_each loop failed".to_string(),
+                    );
+                } else {
+                    outcomes.insert(step_name.clone(), DepOutcome::Completed);
+                    outputs.insert(step_name, Some(json!(iter_outputs)));
                 }
                 continue;
             }
 
-            // Normal step execution
             eprintln!("--- Step: {} (action: {}) ---", step_name, step.action);
-
             match execute_step(
                 &step_name,
                 step,
@@ -304,53 +358,60 @@ async fn run_dag(
             )
             .await
             {
+                Ok(result) if result.success() => {
+                    outcomes.insert(step_name.clone(), DepOutcome::Completed);
+                    outputs.insert(step_name, result.output);
+                }
                 Ok(result) => {
-                    if result.success() {
-                        completed.insert(step_name.clone());
-                        outputs.insert(step_name.clone(), result.output);
-                    } else {
-                        eprintln!(
-                            "Step '{}' failed (exit code {})",
-                            step_name, result.exit_code
-                        );
-                        if !result.stderr.is_empty() {
-                            eprintln!("stderr: {}", result.stderr);
-                        }
-                        failed_count += 1;
-                        completed.insert(step_name.clone());
-                        outputs.insert(step_name.clone(), result.output);
-                        if !step.continue_on_failure {
-                            failed = true;
-                            break;
-                        }
+                    eprintln!(
+                        "Step '{}' failed (exit code {})",
+                        step_name, result.exit_code
+                    );
+                    let mut msg = format!("Exit code: {}", result.exit_code);
+                    if !result.stderr.is_empty() {
+                        eprintln!("stderr: {}", result.stderr);
+                        msg.push_str(&format!("\nStderr: {}", result.stderr));
                     }
+                    failed_count += 1;
+                    record_failure(&mut outcomes, &mut outputs, &mut errors, &step_name, msg);
                 }
                 Err(e) => {
                     eprintln!("Step '{}' error: {:#}", step_name, e);
                     failed_count += 1;
-                    completed.insert(step_name.clone());
-                    outputs.insert(step_name.clone(), None);
-                    if !step.continue_on_failure {
-                        failed = true;
-                        break;
-                    }
+                    record_failure(
+                        &mut outcomes,
+                        &mut outputs,
+                        &mut errors,
+                        &step_name,
+                        format!("{:#}", e),
+                    );
                 }
             }
         }
-
-        if failed {
-            break;
-        }
     }
 
-    let completed_count = completed
+    // Counts are diagnostic and keep 0.16's arithmetic (spec §6).
+    let skipped = outcomes
+        .values()
+        .filter(|o| matches!(o, DepOutcome::Skipped(_)))
+        .count();
+    let completed = outcomes
         .len()
-        .saturating_sub(skipped.len())
+        .saturating_sub(skipped)
         .saturating_sub(failed_count);
+    let caught = caught_steps(&task.flow);
+    let uncaught = outcomes
+        .iter()
+        .any(|(name, o)| *o == DepOutcome::Failed && !caught.contains(name));
     Ok(RunSummary {
-        completed: completed_count,
-        skipped: skipped.len(),
+        completed,
+        skipped,
         failed: failed_count,
+        outcome: if uncaught {
+            RunOutcome::Failed
+        } else {
+            RunOutcome::Completed
+        },
     })
 }
 
@@ -429,6 +490,7 @@ async fn execute_step(
 fn build_render_context(
     input: &serde_json::Value,
     outputs: &HashMap<String, Option<serde_json::Value>>,
+    errors: &HashMap<String, String>,
     secrets: &HashMap<String, serde_json::Value>,
 ) -> serde_json::Value {
     let mut ctx = serde_json::Map::new();
@@ -436,8 +498,12 @@ fn build_render_context(
 
     for (step_name, output) in outputs {
         let sanitized = step_name.replace('-', "_");
-        let output_val = output.clone().unwrap_or(json!(null));
-        ctx.insert(sanitized, json!({ "output": output_val }));
+        let mut entry = serde_json::Map::new();
+        entry.insert("output".into(), output.clone().unwrap_or(json!(null)));
+        if let Some(err) = errors.get(step_name) {
+            entry.insert("error".into(), json!(err));
+        }
+        ctx.insert(sanitized, serde_json::Value::Object(entry));
     }
 
     ctx.insert(
@@ -565,47 +631,6 @@ fn evaluate_for_each(
     Ok(arr)
 }
 
-/// Cascade-skip steps whose dependencies are all skipped.
-fn cascade_skip(
-    flow: &HashMap<String, FlowStep>,
-    completed: &mut HashSet<String>,
-    skipped: &mut HashSet<String>,
-    outputs: &mut HashMap<String, Option<serde_json::Value>>,
-) {
-    loop {
-        let mut newly_skipped = Vec::new();
-        for (name, step) in flow {
-            if completed.contains(name) || step.depends_on.is_empty() {
-                continue;
-            }
-            // All deps must be in completed, and all must be skipped
-            let all_deps_completed = step.depends_on.iter().all(|d| completed.contains(d));
-            let all_deps_skipped = step.depends_on.iter().all(|d| skipped.contains(d));
-            if !all_deps_completed || !all_deps_skipped {
-                continue;
-            }
-            // spec 2026-09-09 §2.5 (revision 3): the flag is read from each
-            // skipped dependency's own definition, not from this step.
-            let all_deps_cws = step.depends_on.iter().all(|d| {
-                flow.get(d)
-                    .map(|f| f.continue_when_skipped)
-                    .unwrap_or(false)
-            });
-            if !all_deps_cws {
-                newly_skipped.push(name.clone());
-            }
-        }
-        if newly_skipped.is_empty() {
-            break;
-        }
-        for name in newly_skipped {
-            skipped.insert(name.clone());
-            completed.insert(name.clone());
-            outputs.insert(name, None);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -678,7 +703,7 @@ mod tests {
         outputs.insert("step1".to_string(), Some(json!({"result": "ok"})));
         let secrets = HashMap::new();
 
-        let ctx = build_render_context(&input, &outputs, &secrets);
+        let ctx = build_render_context(&input, &outputs, &HashMap::new(), &secrets);
         assert_eq!(ctx["input"]["env"], "staging");
         assert_eq!(ctx["step1"]["output"]["result"], "ok");
     }
@@ -690,7 +715,7 @@ mod tests {
         outputs.insert("say-hello".to_string(), Some(json!({"greeting": "hi"})));
         let secrets = HashMap::new();
 
-        let ctx = build_render_context(&input, &outputs, &secrets);
+        let ctx = build_render_context(&input, &outputs, &HashMap::new(), &secrets);
         // Hyphenated name is sanitized to underscore
         assert_eq!(ctx["say_hello"]["output"]["greeting"], "hi");
     }
@@ -702,7 +727,7 @@ mod tests {
         let mut secrets = HashMap::new();
         secrets.insert("api_key".to_string(), json!("secret123"));
 
-        let ctx = build_render_context(&input, &outputs, &secrets);
+        let ctx = build_render_context(&input, &outputs, &HashMap::new(), &secrets);
         assert_eq!(ctx["secret"]["api_key"], "secret123");
     }
 
@@ -713,7 +738,7 @@ mod tests {
         outputs.insert("skipped_step".to_string(), None);
         let secrets = HashMap::new();
 
-        let ctx = build_render_context(&input, &outputs, &secrets);
+        let ctx = build_render_context(&input, &outputs, &HashMap::new(), &secrets);
         assert!(ctx["skipped_step"]["output"].is_null());
     }
 
@@ -941,77 +966,143 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // --- cascade_skip tests ---
+    // --- run_dag / dependency-gate tests ---
 
-    #[test]
-    fn test_cascade_skip_simple() {
-        let mut flow = HashMap::new();
-        flow.insert("a".to_string(), make_step("act", vec![]));
-        flow.insert("b".to_string(), make_step("act", vec!["a"]));
-        flow.insert("c".to_string(), make_step("act", vec!["b"]));
-
-        let mut completed = HashSet::new();
-        let mut skipped = HashSet::new();
-        let mut outputs = HashMap::new();
-
-        // Mark "a" as skipped
-        completed.insert("a".to_string());
-        skipped.insert("a".to_string());
-        outputs.insert("a".to_string(), None);
-
-        cascade_skip(&flow, &mut completed, &mut skipped, &mut outputs);
-
-        // b and c should be cascade-skipped
-        assert!(skipped.contains("b"));
-        assert!(skipped.contains("c"));
+    async fn run_yaml(yaml: &str, task: &str) -> RunSummary {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("test.yaml"), yaml).unwrap();
+        let (config, _) = workspace_loader::load_workspace(dir.path()).unwrap();
+        run_dag(
+            &config.tasks[task],
+            &config,
+            &json!({}),
+            dir.path(),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap()
     }
 
-    #[test]
-    fn test_cascade_skip_partial() {
-        let mut flow = HashMap::new();
-        flow.insert("a".to_string(), make_step("act", vec![]));
-        flow.insert("b".to_string(), make_step("act", vec![]));
-        flow.insert("c".to_string(), make_step("act", vec!["a", "b"]));
-
-        let mut completed = HashSet::new();
-        let mut skipped = HashSet::new();
-        let mut outputs = HashMap::new();
-
-        // Only "a" skipped, "b" not completed yet
-        completed.insert("a".to_string());
-        skipped.insert("a".to_string());
-        outputs.insert("a".to_string(), None);
-
-        cascade_skip(&flow, &mut completed, &mut skipped, &mut outputs);
-
-        // c should NOT be cascade-skipped because b is not completed
-        assert!(!skipped.contains("c"));
+    #[tokio::test]
+    async fn test_run_independent_branch_continues_after_failure() {
+        let s = run_yaml(
+            r#"
+actions:
+  fail: { type: script, script: exit 1 }
+  ok: { type: script, script: echo ok }
+tasks:
+  t:
+    flow:
+      a: { action: fail }
+      b: { action: ok, depends_on: [a] }
+      z: { action: ok }
+"#,
+            "t",
+        )
+        .await;
+        assert_eq!((s.completed, s.skipped, s.failed), (1, 1, 1));
+        assert_eq!(s.outcome, RunOutcome::Failed);
     }
 
-    #[test]
-    fn test_cascade_skip_respects_continue_when_skipped() {
-        // The flag lives on the skipped dependency ("a"), not on the
-        // dependent ("b") — spec 2026-09-09 revision 3.
-        let mut flow = HashMap::new();
-        let mut a = make_step("act", vec![]);
-        a.continue_when_skipped = true;
-        flow.insert("a".to_string(), a);
-        flow.insert("b".to_string(), make_step("act", vec!["a"]));
-        flow.insert("c".to_string(), make_step("act", vec!["b"]));
+    #[tokio::test]
+    async fn test_run_failure_caught_downstream_completes() {
+        let s = run_yaml(
+            r#"
+actions:
+  fail: { type: script, script: exit 1 }
+  ok: { type: script, script: echo ok }
+tasks:
+  t:
+    flow:
+      a: { action: fail }
+      b: { action: ok, depends_on: [a], continue_on_failure: true }
+      c: { action: ok, depends_on: [b] }
+"#,
+            "t",
+        )
+        .await;
+        assert_eq!((s.completed, s.skipped, s.failed), (1, 1, 1));
+        assert_eq!(s.outcome, RunOutcome::Completed);
+    }
 
-        let mut completed = HashSet::new();
-        let mut skipped = HashSet::new();
-        let mut outputs = HashMap::new();
-        completed.insert("a".to_string());
-        skipped.insert("a".to_string());
-        outputs.insert("a".to_string(), None);
+    #[tokio::test]
+    async fn test_run_merge_needs_cws_on_skipped_branch() {
+        let yaml = |cws: bool| {
+            format!(
+                r#"
+actions:
+  ok: {{ type: script, script: echo ok }}
+tasks:
+  t:
+    flow:
+      x: {{ action: ok }}
+      y: {{ action: ok, when: "false", continue_when_skipped: {cws} }}
+      m: {{ action: ok, depends_on: [x, y] }}
+"#
+            )
+        };
+        let without = run_yaml(&yaml(false), "t").await;
+        assert_eq!(
+            (without.completed, without.skipped),
+            (1, 2),
+            "m cascade-skipped"
+        );
+        let with = run_yaml(&yaml(true), "t").await;
+        assert_eq!((with.completed, with.skipped), (2, 1), "m runs");
+    }
 
-        cascade_skip(&flow, &mut completed, &mut skipped, &mut outputs);
+    #[tokio::test]
+    async fn test_run_when_error_fails_the_step_not_the_run() {
+        let s = run_yaml(
+            r#"
+actions:
+  ok: { type: script, script: echo ok }
+tasks:
+  t:
+    flow:
+      bad: { action: ok, when: "{{ nope.nope }}" }
+      z: { action: ok }
+"#,
+            "t",
+        )
+        .await;
+        assert_eq!((s.completed, s.failed), (1, 1));
+    }
 
-        assert!(!skipped.contains("b"), "b opted in to run after a skip");
-        assert!(
-            !skipped.contains("c"),
-            "c waits for b, which has not completed"
+    #[tokio::test]
+    async fn test_run_failed_loop_output_is_masked_but_own_flag_loop_is_not() {
+        // L (no flag) fails → B (cof) unreachable → C reads L.output: null.
+        // K (own cof) completes with [null, null] and D reads its length.
+        // Step input reaches the action script as `{{ input.x }}`
+        // (execute_step inserts the prepared action input as `input`).
+        let s = run_yaml(
+            r#"
+actions:
+  ok: { type: script, script: "true" }
+  item: { type: script, script: "test '{{ each.item }}' = good" }
+  check:
+    type: script
+    input:
+      c: { type: string }
+      want: { type: string }
+    script: "test '{{ input.c }}' = '{{ input.want }}'"
+tasks:
+  t:
+    flow:
+      L: { action: item, for_each: ["bad", "good"] }
+      B: { action: ok, depends_on: [L], continue_on_failure: true }
+      C: { action: check, depends_on: [B], input: { c: "{{ L.output | json_encode() }}", want: "null" } }
+      K: { action: item, for_each: ["bad", "good"], continue_on_failure: true }
+      D: { action: check, depends_on: [K], input: { c: "{{ K.output | length }}", want: "2" } }
+"#,
+            "t",
+        )
+        .await;
+        // L's failure is caught at B; C and D fail (uncaught) if their check fails.
+        assert_eq!(
+            s.outcome,
+            RunOutcome::Completed,
+            "C and D must both pass their checks"
         );
     }
 
@@ -1299,37 +1390,6 @@ tasks:
         assert!(
             result.unwrap_err().to_string().contains("max 10000"),
             "error should mention 'max 10000'"
-        );
-    }
-
-    // --- Additional cascade_skip tests ---
-
-    #[test]
-    fn test_cascade_skip_diamond() {
-        // Diamond topology: A→B, A→C, B+C→D.
-        // Skipping A should cascade-skip B, C, and D.
-        let mut flow = HashMap::new();
-        flow.insert("a".to_string(), make_step("act", vec![]));
-        flow.insert("b".to_string(), make_step("act", vec!["a"]));
-        flow.insert("c".to_string(), make_step("act", vec!["a"]));
-        flow.insert("d".to_string(), make_step("act", vec!["b", "c"]));
-
-        let mut completed = HashSet::new();
-        let mut skipped = HashSet::new();
-        let mut outputs = HashMap::new();
-
-        // Mark "a" as skipped
-        completed.insert("a".to_string());
-        skipped.insert("a".to_string());
-        outputs.insert("a".to_string(), None);
-
-        cascade_skip(&flow, &mut completed, &mut skipped, &mut outputs);
-
-        assert!(skipped.contains("b"), "b should be cascade-skipped");
-        assert!(skipped.contains("c"), "c should be cascade-skipped");
-        assert!(
-            skipped.contains("d"),
-            "d should be cascade-skipped (all deps skipped)"
         );
     }
 
