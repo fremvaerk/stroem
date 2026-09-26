@@ -327,7 +327,7 @@ export function JobDetailPage() {
             <TriangleAlert className="h-4 w-4 shrink-0 text-yellow-600 dark:text-yellow-400" />
             <p className="text-sm text-yellow-800 dark:text-yellow-200">
               {job.steps.filter((s) => s.status === "failed").length} step(s)
-              failed with continue_on_failure:{" "}
+              failed; the failures were caught by continue_on_failure:{" "}
               {job.steps
                 .filter((s) => s.status === "failed")
                 .map((s) => s.step_name)

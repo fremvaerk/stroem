@@ -19,8 +19,9 @@ describe("skipExplanation", () => {
   it("explains each reason in one sentence", () => {
     expect(skipExplanation("condition")).toContain("when condition was false");
     expect(skipExplanation("empty")).toContain("no items");
-    expect(skipExplanation("cascade")).toContain("every dependency was skipped");
+    expect(skipExplanation("cascade")).toContain("a dependency was skipped");
     expect(skipExplanation("unreachable")).toContain("upstream step failed");
+    expect(skipExplanation("unreachable")).toContain("did not let its dependents run");
     expect(skipExplanation(null)).toBe("Skipped.");
   });
 });

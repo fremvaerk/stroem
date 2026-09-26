@@ -27,9 +27,9 @@ export function skipExplanation(reason: SkipReason | null): string {
     case "empty":
       return "Skipped: for_each produced no items.";
     case "cascade":
-      return "Skipped: every dependency was skipped.";
+      return "Skipped: a dependency was skipped and did not let its dependents run (continue_when_skipped).";
     case "unreachable":
-      return "Skipped: an upstream step failed or was cancelled, or was skipped with no recorded reason (jobs from before 0.16.2).";
+      return "Skipped: an upstream step failed or was cancelled and did not let its dependents run (continue_on_failure), or the row has no recorded reason (jobs from before 0.16.2).";
     default:
       return "Skipped.";
   }
