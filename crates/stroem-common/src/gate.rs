@@ -421,12 +421,13 @@ mod tests {
         assert!(!c.contains("x") && !c.contains("y"));
 
         // x → y → x, y has continue_on_failure: y is caught (its own flag),
-        // x is not (its only dependent, y, does not depend on x being caught).
+        // and so is x — its only dependent, y, is caught.
         let f2 = flow(vec![
             ("x", fs(&["y"], false, false)),
             ("y", fs(&["x"], true, false)),
         ]);
         let c2 = caught_steps(&f2);
         assert!(c2.contains("y"));
+        assert!(c2.contains("x"));
     }
 }

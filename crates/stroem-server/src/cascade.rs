@@ -2708,8 +2708,10 @@ mod tests {
     #[test]
     fn unreachable_propagates_through_a_chain_in_one_run() {
         // a failed → b (cws, no cof of its own) → c: b unreachable (R3),
-        // c unreachable (R1, tainted) — b carries the flag but c still needs
-        // its OWN continue_on_failure to tolerate the taint.
+        // c unreachable (R1) — b's own continue_when_skipped does not help
+        // here (b was never skipped by choice), and b has no
+        // continue_on_failure of its own, so b's BlockFail verdict passes
+        // straight through to c.
         let t = task(vec![
             ("a", fs(&[])),
             ("b", fs_cws(&["a"])),
