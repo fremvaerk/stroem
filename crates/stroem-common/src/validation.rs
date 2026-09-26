@@ -312,6 +312,22 @@ fn validate_workflow_config_inner(
                 ));
             }
 
+            // Strict AND (spec 2026-09-26 §2.3): a merge is skipped whenever a
+            // dependency that can be skipped by choice is skipped, unless that
+            // dependency carries continue_when_skipped.
+            if step.depends_on.len() >= 2 {
+                for dep in &step.depends_on {
+                    if let Some(d) = task.flow.get(dep) {
+                        if (d.when.is_some() || d.for_each.is_some()) && !d.continue_when_skipped {
+                            warnings.push(format!(
+                                "Task '{}' step '{}' will be skipped whenever '{}' is skipped (add continue_when_skipped: true to '{}' to let '{}' run)",
+                                task_name, step_name, dep, dep, step_name
+                            ));
+                        }
+                    }
+                }
+            }
+
             // Validate step timeout (cap is shared with ServerConfig.default_step_timeout)
             if let Some(ref timeout) = step.timeout {
                 if timeout.as_secs() > MAX_STEP_TIMEOUT_SECS {
@@ -6478,6 +6494,62 @@ tasks:
             "unexpected warning: {:?}",
             warnings
         );
+    }
+
+    #[test]
+    fn test_merge_after_conditional_dep_without_cws_warns() {
+        let yaml = r#"
+actions:
+  a: { type: script, script: "true" }
+tasks:
+  t:
+    flow:
+      x: { action: a }
+      y: { action: a, when: "{{ input.go }}" }
+      m: { action: a, depends_on: [x, y] }
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let warnings = validate_workflow_config(&config).unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("'m' will be skipped whenever 'y' is skipped")),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn test_merge_after_conditional_dep_with_cws_or_single_dep_does_not_warn() {
+        for yaml in [
+            r#"
+actions:
+  a: { type: script, script: "true" }
+tasks:
+  t:
+    flow:
+      x: { action: a }
+      y: { action: a, when: "{{ input.go }}", continue_when_skipped: true }
+      m: { action: a, depends_on: [x, y] }
+"#,
+            r#"
+actions:
+  a: { type: script, script: "true" }
+tasks:
+  t:
+    flow:
+      y: { action: a, when: "{{ input.go }}" }
+      m: { action: a, depends_on: [y] }
+"#,
+        ] {
+            let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+            let warnings = validate_workflow_config(&config).unwrap();
+            assert!(
+                warnings
+                    .iter()
+                    .all(|w| !w.contains("will be skipped whenever")),
+                "{warnings:?}"
+            );
+        }
     }
 
     #[test]
