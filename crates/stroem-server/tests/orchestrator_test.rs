@@ -1483,7 +1483,7 @@ async fn test_multi_step_branch_cascade_skip() -> Result<()> {
 /// A second job where A lacks `continue_when_skipped` shows the strict-AND
 /// default: C is cascade-skipped even though B's failure is caught.
 #[tokio::test]
-async fn test_mixed_skipped_and_failed_dep_runs_with_cof() -> Result<()> {
+async fn test_mixed_skipped_and_failed_dep_runs_when_both_deps_pass() -> Result<()> {
     let (pool, _container) = setup_db().await?;
 
     let mut flow = HashMap::new();
