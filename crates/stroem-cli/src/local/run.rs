@@ -742,6 +742,22 @@ mod tests {
         assert!(ctx["skipped_step"]["output"].is_null());
     }
 
+    #[test]
+    fn test_build_render_context_failed_step_exposes_error_not_output() {
+        let input = json!({});
+        let mut outputs = HashMap::new();
+        outputs.insert("s".to_string(), None);
+        outputs.insert("ok_step".to_string(), Some(json!({"result": "done"})));
+        let mut errors = HashMap::new();
+        errors.insert("s".to_string(), "boom".to_string());
+        let secrets = HashMap::new();
+
+        let ctx = build_render_context(&input, &outputs, &errors, &secrets);
+        assert!(ctx["s"]["output"].is_null());
+        assert_eq!(ctx["s"]["error"], "boom");
+        assert!(ctx["ok_step"].get("error").is_none());
+    }
+
     // --- build_run_config tests ---
 
     #[test]
