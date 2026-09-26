@@ -10532,7 +10532,7 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
                 description: None,
                 depends_on: vec![],
                 input: HashMap::new(),
-                continue_on_failure: false,
+                continue_on_failure: true,
                 continue_when_skipped: false,
                 timeout: None,
                 when: None,
@@ -10550,7 +10550,7 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
                 description: None,
                 depends_on: vec!["step1".to_string()],
                 input: HashMap::new(),
-                continue_on_failure: true,
+                continue_on_failure: false,
                 continue_when_skipped: false,
                 timeout: None,
                 when: None,
@@ -10651,7 +10651,8 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
     JobStepRepo::mark_failed(&pool, job_id, "step1", "Command failed").await?;
     after_step(&pool, job_id, &task).await?;
 
-    // step2 should be promoted to ready (continue_on_failure = true)
+    // step2 should be promoted to ready (step1's own continue_on_failure
+    // catches step1's failure)
     let mid_steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
     let step2 = mid_steps.iter().find(|s| s.step_name == "step2").unwrap();
     assert_eq!(step2.status, "ready");
@@ -10661,9 +10662,10 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
     JobStepRepo::mark_completed(&pool, job_id, "step2", None).await?;
     after_step(&pool, job_id, &task).await?;
 
-    // Job should be failed (step1 failed)
+    // Job should be completed: step1's failure is caught by its own
+    // continue_on_failure, so it no longer counts against the job (§2.4).
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
-    assert_eq!(job.status, "failed");
+    assert_eq!(job.status, "completed");
 
     Ok(())
 }
@@ -25673,8 +25675,9 @@ async fn test_step_retry_claim_respects_retry_at() -> Result<()> {
     Ok(())
 }
 
-/// Test 4: a downstream step with `continue_on_failure: true` is only promoted
-/// after the retried upstream step reaches a terminal state.
+/// Test 4: a downstream step is only promoted after the retried upstream
+/// step reaches a terminal state; the upstream step's own
+/// `continue_on_failure` then catches its exhausted-retry failure.
 #[tokio::test]
 async fn test_step_retry_with_continue_on_failure() -> Result<()> {
     use stroem_common::duration::HumanDuration;
@@ -25771,7 +25774,7 @@ async fn test_step_retry_with_continue_on_failure() -> Result<()> {
             description: None,
             depends_on: vec![],
             input: HashMap::new(),
-            continue_on_failure: false,
+            continue_on_failure: true,
             continue_when_skipped: false,
             timeout: None,
             when: None,
@@ -25794,7 +25797,7 @@ async fn test_step_retry_with_continue_on_failure() -> Result<()> {
             description: None,
             depends_on: vec!["step-a".to_string()],
             input: HashMap::new(),
-            continue_on_failure: true,
+            continue_on_failure: false,
             continue_when_skipped: false,
             timeout: None,
             when: None,
@@ -25891,7 +25894,7 @@ async fn test_step_retry_with_continue_on_failure() -> Result<()> {
         .await?;
 
     // step-a is now permanently failed; step-b should be promoted to ready
-    // because continue_on_failure = true.
+    // because step-a's own continue_on_failure catches step-a's failure.
     let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
     let step_a = steps.iter().find(|s| s.step_name == "step-a").unwrap();
     assert_eq!(
@@ -25901,7 +25904,7 @@ async fn test_step_retry_with_continue_on_failure() -> Result<()> {
     let step_b = steps.iter().find(|s| s.step_name == "step-b").unwrap();
     assert_eq!(
         step_b.status, "ready",
-        "step-b should be promoted to ready via continue_on_failure"
+        "step-b should be promoted to ready: step-a's own continue_on_failure catches it"
     );
 
     Ok(())
@@ -31341,13 +31344,14 @@ async fn test_task_dispatch_failure_path_evaluates_when_against_task_state() -> 
     seed_task_state_for(&pool, "other-task", json!({"after": false})).await?;
 
     // `spawn` is a type: task step naming a task that does not exist, so its
-    // dispatch fails and `fail_task_step` re-cascades. `after` tolerates the
-    // failure, so its `when:` is evaluated by THAT cascade.
+    // dispatch fails and `fail_task_step` re-cascades. `spawn`'s own
+    // `continue_on_failure` catches that failure, so `after` runs and its
+    // `when:` is evaluated by THAT cascade.
     let task = task_with_flow(vec![
-        ("spawn", guarded_flow_step(&[], None, false)),
+        ("spawn", guarded_flow_step(&[], None, true)),
         (
             "after",
-            guarded_flow_step(&["spawn"], Some("{{ state.after }}"), true),
+            guarded_flow_step(&["spawn"], Some("{{ state.after }}"), false),
         ),
     ]);
     let mut ws = test_workspace();

@@ -224,6 +224,16 @@ async fn step_statuses(pool: &PgPool, job_id: Uuid) -> HashMap<String, String> {
         .collect()
 }
 
+/// Fetch a single step's `skip_reason` column.
+async fn skip_reason(pool: &PgPool, job_id: Uuid, step: &str) -> Option<String> {
+    sqlx::query_scalar("SELECT skip_reason FROM job_step WHERE job_id = $1 AND step_name = $2")
+        .bind(job_id)
+        .bind(step)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
 // ─── Test 1: Linear DAG (A → B → C) ────────────────────────────────────────
 
 /// Completing A promotes B to ready; completing B promotes C; completing C
@@ -442,19 +452,17 @@ async fn test_failed_branch_stops_merge_with_completed_siblings() -> Result<()> 
 
 // ─── Test 4: continue_on_failure promotes dependent despite failure ───────────
 
-/// `continue_on_failure` is a property of a step B that says "run me even if
-/// my dependency A failed".  When A fails and B has `continue_on_failure:
-/// true`, B must be promoted to ready rather than skipped.
+/// `continue_on_failure` on A lets its dependents run when A fails.
 #[tokio::test]
 async fn test_continue_on_failure_promotes_dependent() -> Result<()> {
     let (pool, _container) = setup_db().await?;
     let worker_id = register_worker(&pool).await;
 
     let mut flow = HashMap::new();
-    // A is a normal step (no continue_on_failure)
-    flow.insert("a".to_string(), flow_step(vec![]));
-    // B opts in to running even when A failed
-    flow.insert("b".to_string(), flow_step_cof(vec!["a"]));
+    // A opts in to letting dependents run even when it fails
+    flow.insert("a".to_string(), flow_step_cof(vec![]));
+    // B is a normal step (no flags of its own)
+    flow.insert("b".to_string(), flow_step(vec!["a"]));
     let task = make_task(flow);
 
     let job_id = create_job(&pool).await;
@@ -892,25 +900,26 @@ async fn test_all_conditional_steps_false_job_completes() -> Result<()> {
 
 // ─── Test 14: skipped dep treated as satisfied + truthy when ──────────────────
 
-/// Steps: A (ready), B (pending, depends on A, `when: "{{ a.output.deploy }}"`),
-/// C (pending, depends on B, `when: "true"`).
-/// When A completes with `{"deploy": false}`, B is skipped by condition.
-/// C's skipped dep B is treated as satisfied (not all deps skipped since B is
-/// the only dep and it IS skipped — but C also has a truthy `when`).
-/// Wait — C only has B as dep and B is skipped, so ALL deps are skipped → C
-/// should cascade-skip too.
+/// Steps: A (ready), B (pending, depends on A, `when: "{{ a.output.deploy }}"`,
+/// `continue_when_skipped: true`), C (pending, depends on A and B, `when:
+/// "true"`). When A completes with `{"deploy": false}`, B is skipped by
+/// condition. Because B opts its own skip into being tolerated
+/// (`continue_when_skipped`), C's mixed deps (A completed, B skipped-tolerated)
+/// are satisfied and `when: "true"` promotes C to ready.
 ///
-/// Updated: C depends on both A and B. A completed, B skipped → mixed deps →
-/// C proceeds. `when: "true"` is truthy, so C must be promoted to ready.
+/// A second job with the same shape but B WITHOUT `continue_when_skipped`
+/// shows the strict-AND default: C is cascade-skipped (`skip_reason =
+/// "cascade"`) even though its own `when` is truthy.
 #[tokio::test]
 async fn test_skipped_dep_treated_as_satisfied_with_truthy_when() -> Result<()> {
     let (pool, _container) = setup_db().await?;
 
+    // Job 1: B has continue_when_skipped — C proceeds.
     let mut flow = HashMap::new();
     flow.insert("a".to_string(), flow_step(vec![]));
     flow.insert(
         "b".to_string(),
-        flow_step_when(vec!["a"], "{{ a.output.deploy }}"),
+        flow_step_when_cws(vec!["a"], "{{ a.output.deploy }}"),
     );
     flow.insert(
         "c".to_string(),
@@ -951,7 +960,59 @@ async fn test_skipped_dep_treated_as_satisfied_with_truthy_when() -> Result<()> 
     );
     assert_eq!(
         statuses["c"], "ready",
-        "C must be promoted: skipped dep B treated as satisfied (A completed), when:true is truthy"
+        "C must be promoted: B's own continue_when_skipped tolerates its skip, when:true is truthy"
+    );
+
+    // Job 2: B has no continue_when_skipped — strict AND cascade-skips C.
+    let mut flow_no_cws = HashMap::new();
+    flow_no_cws.insert("a".to_string(), flow_step(vec![]));
+    flow_no_cws.insert(
+        "b".to_string(),
+        flow_step_when(vec!["a"], "{{ a.output.deploy }}"),
+    );
+    flow_no_cws.insert(
+        "c".to_string(),
+        FlowStep {
+            when: Some("true".to_string()),
+            ..flow_step(vec!["a", "b"])
+        },
+    );
+    let task_no_cws = make_task(flow_no_cws);
+
+    let job_id_no_cws = create_job(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            step(job_id_no_cws, "a", "ready"),
+            step_when(job_id_no_cws, "b", "pending", "{{ a.output.deploy }}"),
+            step_when(job_id_no_cws, "c", "pending", "true"),
+        ],
+    )
+    .await?;
+
+    JobStepRepo::mark_completed(&pool, job_id_no_cws, "a", Some(json!({"deploy": false}))).await?;
+    stroem_server::settlement::cascade_and_settle(
+        &pool,
+        job_id_no_cws,
+        &task_no_cws,
+        &ws,
+        &stroem_server::render_context::Snapshots::default(),
+    )
+    .await?;
+
+    let statuses_no_cws = step_statuses(&pool, job_id_no_cws).await;
+    assert_eq!(
+        statuses_no_cws["b"], "skipped",
+        "B must be skipped when condition is false"
+    );
+    assert_eq!(
+        statuses_no_cws["c"], "skipped",
+        "C must be cascade-skipped: B's skip is not tolerated without continue_when_skipped"
+    );
+    assert_eq!(
+        skip_reason(&pool, job_id_no_cws, "c").await,
+        Some("cascade".to_string()),
+        "C's skip reason must be 'cascade'"
     );
 
     Ok(())
@@ -1159,8 +1220,9 @@ async fn test_all_deps_skipped_cascade_skip() -> Result<()> {
 // ─── Test 18: Convergence without continue_on_failure ────────────────────────
 
 /// Classic if/else convergence: A → B(when:true), A → C(when:false), D depends
-/// on [B, C]. D should run without `continue_on_failure` because skipped deps
-/// are treated as satisfied and at least one dep (B) completed.
+/// on [B, C]. Strict AND: there is no automatic convergence — C's
+/// choice-skip (no `continue_when_skipped`) blocks D even though B
+/// completed, so D is cascade-skipped.
 #[tokio::test]
 async fn test_convergence_without_continue_on_failure() -> Result<()> {
     let (pool, _container) = setup_db().await?;
@@ -1239,7 +1301,100 @@ async fn test_convergence_without_continue_on_failure() -> Result<()> {
         "D still pending — B hasn't completed yet"
     );
 
-    // B completes → D should be promoted (B completed + C skipped = deps met)
+    // B completes → D is still blocked: C's skip is not tolerated (no cws)
+    JobStepRepo::mark_completed(&pool, job_id, "b", None).await?;
+    stroem_server::settlement::cascade_and_settle(
+        &pool,
+        job_id,
+        &task,
+        &ws,
+        &stroem_server::render_context::Snapshots::default(),
+    )
+    .await?;
+
+    let statuses = step_statuses(&pool, job_id).await;
+    assert_eq!(
+        statuses["d"], "skipped",
+        "D must be cascade-skipped: C's skip is not tolerated without continue_when_skipped"
+    );
+    assert_eq!(
+        skip_reason(&pool, job_id, "d").await,
+        Some("cascade".to_string()),
+        "D's skip reason must be 'cascade'"
+    );
+
+    Ok(())
+}
+
+// ─── Test 18b: Convergence WITH continue_when_skipped on both branches ───────
+
+/// Same if/else shape as above, but both branch steps carry
+/// `continue_when_skipped`. Now the merge D runs: B completed (Pass) and C's
+/// tolerated skip (Pass) both satisfy the gate.
+#[tokio::test]
+async fn test_convergence_with_cws_on_branches() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let mut flow = HashMap::new();
+    flow.insert("a".to_string(), flow_step(vec![]));
+    flow.insert(
+        "b".to_string(),
+        flow_step_when_cws(vec!["a"], "{{ input.use_fast }}"),
+    );
+    flow.insert(
+        "c".to_string(),
+        flow_step_when_cws(vec!["a"], "{% if not input.use_fast %}true{% endif %}"),
+    );
+    // D depends on both branches — no flags of its own
+    flow.insert("d".to_string(), flow_step(vec!["b", "c"]));
+    let task = make_task(flow);
+
+    let job_id = create_job(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            step(job_id, "a", "ready"),
+            step_when(job_id, "b", "pending", "{{ input.use_fast }}"),
+            step_when(
+                job_id,
+                "c",
+                "pending",
+                "{% if not input.use_fast %}true{% endif %}",
+            ),
+            step(job_id, "d", "pending"),
+        ],
+    )
+    .await?;
+
+    let ws = WorkspaceConfig::new();
+
+    // A completes — the job's stored input carries use_fast = true
+    JobStepRepo::mark_completed(&pool, job_id, "a", None).await?;
+    sqlx::query("UPDATE job SET input = '{\"use_fast\": true}'::jsonb WHERE job_id = $1")
+        .bind(job_id)
+        .execute(&pool)
+        .await?;
+    stroem_server::settlement::cascade_and_settle(
+        &pool,
+        job_id,
+        &task,
+        &ws,
+        &stroem_server::render_context::Snapshots::default(),
+    )
+    .await?;
+
+    let statuses = step_statuses(&pool, job_id).await;
+    assert_eq!(statuses["b"], "ready", "B must be ready (use_fast=true)");
+    assert_eq!(
+        statuses["c"], "skipped",
+        "C must be skipped (use_fast=true)"
+    );
+    assert_eq!(
+        statuses["d"], "pending",
+        "D still pending — B hasn't completed yet"
+    );
+
+    // B completes → D should be promoted: B completed + C's tolerated skip
     JobStepRepo::mark_completed(&pool, job_id, "b", None).await?;
     stroem_server::settlement::cascade_and_settle(
         &pool,
@@ -1253,7 +1408,7 @@ async fn test_convergence_without_continue_on_failure() -> Result<()> {
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(
         statuses["d"], "ready",
-        "D must be promoted: B completed + C skipped (treated as satisfied)"
+        "D must be promoted: B completed + C's continue_when_skipped tolerated skip"
     );
 
     Ok(())
@@ -1320,8 +1475,13 @@ async fn test_multi_step_branch_cascade_skip() -> Result<()> {
 
 // ─── Test 21: Mixed skipped + failed dep with continue_on_failure ─────────────
 
-/// A(skipped) + B(failed) → C(cof:true) — C runs because cof tolerates both
-/// skipped and failed deps.
+/// A(skipped, cws) + B(failed, cof) → C (no flags of its own) — C runs
+/// because each dependency's OWN flag tolerates its own outcome: A's
+/// `continue_when_skipped` tolerates its choice-skip, B's
+/// `continue_on_failure` tolerates its failure.
+///
+/// A second job where A lacks `continue_when_skipped` shows the strict-AND
+/// default: C is cascade-skipped even though B's failure is caught.
 #[tokio::test]
 async fn test_mixed_skipped_and_failed_dep_runs_with_cof() -> Result<()> {
     let (pool, _container) = setup_db().await?;
@@ -1330,10 +1490,10 @@ async fn test_mixed_skipped_and_failed_dep_runs_with_cof() -> Result<()> {
     flow.insert("root".to_string(), flow_step(vec![]));
     flow.insert(
         "a".to_string(),
-        flow_step_when(vec!["root"], "false"), // will be skipped
+        flow_step_when_cws(vec!["root"], "false"), // will be skipped, tolerated
     );
-    flow.insert("b".to_string(), flow_step(vec!["root"])); // will fail
-    flow.insert("c".to_string(), flow_step_cof(vec!["a", "b"]));
+    flow.insert("b".to_string(), flow_step_cof(vec!["root"])); // will fail, caught
+    flow.insert("c".to_string(), flow_step(vec!["a", "b"]));
     let task = make_task(flow);
 
     let job_id = create_job(&pool).await;
@@ -1366,7 +1526,8 @@ async fn test_mixed_skipped_and_failed_dep_runs_with_cof() -> Result<()> {
     assert_eq!(statuses["a"], "skipped");
     assert_eq!(statuses["b"], "ready");
 
-    // B fails → C should still run (cof:true accepts skipped A + failed B)
+    // B fails (caught by its own cof) → C should still run (A's own cws
+    // tolerates its skip too)
     JobStepRepo::mark_running(&pool, job_id, "b", worker_id).await?;
     JobStepRepo::mark_failed(&pool, job_id, "b", "boom").await?;
     after_step(&pool, job_id, &task).await?;
@@ -1374,7 +1535,56 @@ async fn test_mixed_skipped_and_failed_dep_runs_with_cof() -> Result<()> {
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(
         statuses["c"], "ready",
-        "C must be promoted: cof accepts skipped A + failed B"
+        "C must be promoted: A's own cws + B's own cof both tolerate their outcomes"
+    );
+
+    // Variant: A has no continue_when_skipped — strict AND blocks C even
+    // though B's failure is caught.
+    let mut flow_no_cws = HashMap::new();
+    flow_no_cws.insert("root".to_string(), flow_step(vec![]));
+    flow_no_cws.insert(
+        "a".to_string(),
+        flow_step_when(vec!["root"], "false"), // will be skipped, NOT tolerated
+    );
+    flow_no_cws.insert("b".to_string(), flow_step_cof(vec!["root"])); // will fail, caught
+    flow_no_cws.insert("c".to_string(), flow_step(vec!["a", "b"]));
+    let task_no_cws = make_task(flow_no_cws);
+
+    let job_id_no_cws = create_job(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            step(job_id_no_cws, "root", "ready"),
+            step_when(job_id_no_cws, "a", "pending", "false"),
+            step(job_id_no_cws, "b", "pending"),
+            step(job_id_no_cws, "c", "pending"),
+        ],
+    )
+    .await?;
+
+    JobStepRepo::mark_completed(&pool, job_id_no_cws, "root", None).await?;
+    stroem_server::settlement::cascade_and_settle(
+        &pool,
+        job_id_no_cws,
+        &task_no_cws,
+        &ws,
+        &stroem_server::render_context::Snapshots::default(),
+    )
+    .await?;
+
+    JobStepRepo::mark_running(&pool, job_id_no_cws, "b", worker_id).await?;
+    JobStepRepo::mark_failed(&pool, job_id_no_cws, "b", "boom").await?;
+    after_step(&pool, job_id_no_cws, &task_no_cws).await?;
+
+    let statuses_no_cws = step_statuses(&pool, job_id_no_cws).await;
+    assert_eq!(
+        statuses_no_cws["c"], "skipped",
+        "C must be cascade-skipped: A's skip is not tolerated without continue_when_skipped"
+    );
+    assert_eq!(
+        skip_reason(&pool, job_id_no_cws, "c").await,
+        Some("cascade".to_string()),
+        "C's skip reason must be 'cascade'"
     );
 
     Ok(())
@@ -1382,7 +1592,8 @@ async fn test_mixed_skipped_and_failed_dep_runs_with_cof() -> Result<()> {
 
 // ─── Test 22: Single completed + single skipped dep — convergence ─────────────
 
-/// Classic if/else: A(completed) + B(skipped) → C runs without cof.
+/// Classic if/else: A(completed) + B(skipped, cws) → C runs because B's own
+/// `continue_when_skipped` tolerates its choice-skip.
 #[tokio::test]
 async fn test_single_completed_plus_single_skipped_convergence() -> Result<()> {
     let (pool, _container) = setup_db().await?;
@@ -1392,9 +1603,9 @@ async fn test_single_completed_plus_single_skipped_convergence() -> Result<()> {
     flow.insert("a".to_string(), flow_step(vec!["root"]));
     flow.insert(
         "b".to_string(),
-        flow_step_when(vec!["root"], "false"), // always skipped
+        flow_step_when_cws(vec!["root"], "false"), // always skipped, tolerated
     );
-    // C depends on both — no continue_on_failure
+    // C depends on both — no flags of its own
     flow.insert("c".to_string(), flow_step(vec!["a", "b"]));
     let task = make_task(flow);
 
@@ -1428,7 +1639,7 @@ async fn test_single_completed_plus_single_skipped_convergence() -> Result<()> {
     assert_eq!(statuses["a"], "ready");
     assert_eq!(statuses["b"], "skipped");
 
-    // A completes → C should be promoted (A completed + B skipped = deps met)
+    // A completes → C should be promoted (A completed + B's tolerated skip)
     JobStepRepo::mark_running(&pool, job_id, "a", worker_id).await?;
     JobStepRepo::mark_completed(&pool, job_id, "a", None).await?;
     stroem_server::settlement::cascade_and_settle(
@@ -1443,7 +1654,61 @@ async fn test_single_completed_plus_single_skipped_convergence() -> Result<()> {
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(
         statuses["c"], "ready",
-        "C must be promoted: A completed + B skipped (treated as satisfied)"
+        "C must be promoted: A completed + B's own continue_when_skipped tolerates its skip"
+    );
+
+    // Variant: B has no continue_when_skipped — strict AND blocks C.
+    let mut flow_no_cws = HashMap::new();
+    flow_no_cws.insert("root".to_string(), flow_step(vec![]));
+    flow_no_cws.insert("a".to_string(), flow_step(vec!["root"]));
+    flow_no_cws.insert(
+        "b".to_string(),
+        flow_step_when(vec!["root"], "false"), // always skipped, NOT tolerated
+    );
+    flow_no_cws.insert("c".to_string(), flow_step(vec!["a", "b"]));
+    let task_no_cws = make_task(flow_no_cws);
+
+    let job_id_no_cws = create_job(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            step(job_id_no_cws, "root", "ready"),
+            step(job_id_no_cws, "a", "pending"),
+            step_when(job_id_no_cws, "b", "pending", "false"),
+            step(job_id_no_cws, "c", "pending"),
+        ],
+    )
+    .await?;
+
+    JobStepRepo::mark_completed(&pool, job_id_no_cws, "root", None).await?;
+    stroem_server::settlement::cascade_and_settle(
+        &pool,
+        job_id_no_cws,
+        &task_no_cws,
+        &ws,
+        &stroem_server::render_context::Snapshots::default(),
+    )
+    .await?;
+    JobStepRepo::mark_running(&pool, job_id_no_cws, "a", worker_id).await?;
+    JobStepRepo::mark_completed(&pool, job_id_no_cws, "a", None).await?;
+    stroem_server::settlement::cascade_and_settle(
+        &pool,
+        job_id_no_cws,
+        &task_no_cws,
+        &ws,
+        &stroem_server::render_context::Snapshots::default(),
+    )
+    .await?;
+
+    let statuses_no_cws = step_statuses(&pool, job_id_no_cws).await;
+    assert_eq!(
+        statuses_no_cws["c"], "skipped",
+        "C must be cascade-skipped: B's skip is not tolerated without continue_when_skipped"
+    );
+    assert_eq!(
+        skip_reason(&pool, job_id_no_cws, "c").await,
+        Some("cascade".to_string()),
+        "C's skip reason must be 'cascade'"
     );
 
     Ok(())
@@ -1486,6 +1751,48 @@ async fn test_cancelled_dep_blocks_without_cof() -> Result<()> {
     assert_eq!(
         statuses["c"], "skipped",
         "C must be skipped: B is cancelled and C has no continue_on_failure"
+    );
+
+    Ok(())
+}
+
+// ─── Test 23b: Cancelled dep with its own cof lets dependent run ──────────────
+
+/// Same shape, but B (the cancelled dependency) carries its own
+/// `continue_on_failure` — its cancellation is caught, so C runs.
+#[tokio::test]
+async fn test_cancelled_dep_with_its_own_cof_lets_dependent_run() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+    let worker_id = register_worker(&pool).await;
+
+    let mut flow = HashMap::new();
+    flow.insert("a".to_string(), flow_step(vec![]));
+    flow.insert("b".to_string(), flow_step_cof(vec![]));
+    flow.insert("c".to_string(), flow_step(vec!["a", "b"]));
+    let task = make_task(flow);
+
+    let job_id = create_job(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            step(job_id, "a", "ready"),
+            step(job_id, "b", "ready"),
+            step(job_id, "c", "pending"),
+        ],
+    )
+    .await?;
+
+    // A completes, B is marked running then cancelled
+    JobStepRepo::mark_running(&pool, job_id, "a", worker_id).await?;
+    JobStepRepo::mark_completed(&pool, job_id, "a", None).await?;
+    JobStepRepo::mark_running(&pool, job_id, "b", worker_id).await?;
+    JobStepRepo::mark_cancelled(&pool, job_id, "b").await?;
+    after_step(&pool, job_id, &task).await?;
+
+    let statuses = step_statuses(&pool, job_id).await;
+    assert_eq!(
+        statuses["c"], "ready",
+        "C must be promoted: B's own continue_on_failure catches its cancellation"
     );
 
     Ok(())
@@ -1537,6 +1844,69 @@ async fn test_all_deps_skipped_with_cof_alone_is_cascade_skipped() -> Result<()>
     assert_eq!(
         statuses["b"], "skipped",
         "B must be cascade-skipped: cof:true alone does not bypass the all-deps-skipped rule"
+    );
+
+    let rows: HashMap<_, _> = JobStepRepo::get_steps_for_job(&pool, job_id)
+        .await?
+        .into_iter()
+        .map(|s| (s.step_name.clone(), s))
+        .collect();
+    assert_eq!(rows["a"].skip_reason.as_deref(), Some("condition"));
+    assert_eq!(rows["b"].skip_reason.as_deref(), Some("cascade"));
+
+    Ok(())
+}
+
+// ─── Test 25b: continue_on_failure on the skipped dep itself is still cascade ─
+
+/// Same shape as above, but `continue_on_failure` is on A (the skipped
+/// dependency) rather than B. `continue_on_failure` is failure-only (§2.2) —
+/// it has no bearing on a choice-skip — so B is still cascade-skipped.
+#[tokio::test]
+async fn test_all_deps_skipped_with_cof_on_the_skipped_dep_is_still_cascade_skipped() -> Result<()>
+{
+    let (pool, _container) = setup_db().await?;
+
+    let mut flow = HashMap::new();
+    flow.insert("root".to_string(), flow_step(vec![]));
+    flow.insert(
+        "a".to_string(),
+        FlowStep {
+            continue_on_failure: true,
+            ..flow_step_when(vec!["root"], "false")
+        },
+    );
+    flow.insert("b".to_string(), flow_step(vec!["a"]));
+    let task = make_task(flow);
+
+    let job_id = create_job(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            step(job_id, "root", "ready"),
+            step_when(job_id, "a", "pending", "false"),
+            step(job_id, "b", "pending"),
+        ],
+    )
+    .await?;
+
+    let ws = WorkspaceConfig::new();
+
+    JobStepRepo::mark_completed(&pool, job_id, "root", None).await?;
+    stroem_server::settlement::cascade_and_settle(
+        &pool,
+        job_id,
+        &task,
+        &ws,
+        &stroem_server::render_context::Snapshots::default(),
+    )
+    .await?;
+
+    let statuses = step_statuses(&pool, job_id).await;
+    assert_eq!(statuses["a"], "skipped", "A must be skipped (when: false)");
+    assert_eq!(
+        statuses["b"], "skipped",
+        "B must be cascade-skipped: A's continue_on_failure does not tolerate a choice-skip"
     );
 
     let rows: HashMap<_, _> = JobStepRepo::get_steps_for_job(&pool, job_id)
@@ -1611,9 +1981,13 @@ async fn test_truthy_when_overridden_by_all_deps_skipped_cascade() -> Result<()>
 
 // ─── Test 27: Three-dep fan-in — 1 completed + 2 skipped → converges ─────────
 
-/// Root → A(no when), Root → B(when:false), Root → C(when:false),
-/// D depends on [A, B, C].  A completes, B and C skip.
-/// D must be promoted because not ALL deps are skipped (A completed).
+/// Root → A(no when), Root → B(when:false, cws), Root → C(when:false, cws),
+/// D depends on [A, B, C]. A completes, B and C skip. D must be promoted
+/// because each of B and C carries its own `continue_when_skipped`.
+///
+/// A second job where only B has `continue_when_skipped` (C does not) shows
+/// strict AND: D is cascade-skipped even though A completed and B's skip is
+/// tolerated — every dependency's verdict must be Pass.
 #[tokio::test]
 async fn test_three_dep_fan_in_one_completed_two_skipped_converges() -> Result<()> {
     let (pool, _container) = setup_db().await?;
@@ -1622,8 +1996,8 @@ async fn test_three_dep_fan_in_one_completed_two_skipped_converges() -> Result<(
     let mut flow = HashMap::new();
     flow.insert("root".to_string(), flow_step(vec![]));
     flow.insert("a".to_string(), flow_step(vec!["root"]));
-    flow.insert("b".to_string(), flow_step_when(vec!["root"], "false"));
-    flow.insert("c".to_string(), flow_step_when(vec!["root"], "false"));
+    flow.insert("b".to_string(), flow_step_when_cws(vec!["root"], "false"));
+    flow.insert("c".to_string(), flow_step_when_cws(vec!["root"], "false"));
     flow.insert("d".to_string(), flow_step(vec!["a", "b", "c"]));
     let task = make_task(flow);
 
@@ -1662,7 +2036,7 @@ async fn test_three_dep_fan_in_one_completed_two_skipped_converges() -> Result<(
         "D still pending — A has not completed yet"
     );
 
-    // A completes → D should be promoted (A completed + B skipped + C skipped)
+    // A completes → D should be promoted (A completed + B's and C's own cws)
     JobStepRepo::mark_running(&pool, job_id, "a", worker_id).await?;
     JobStepRepo::mark_completed(&pool, job_id, "a", None).await?;
     stroem_server::settlement::cascade_and_settle(
@@ -1677,7 +2051,61 @@ async fn test_three_dep_fan_in_one_completed_two_skipped_converges() -> Result<(
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(
         statuses["d"], "ready",
-        "D must be promoted: 1 completed (A) + 2 skipped (B, C) — not all deps skipped"
+        "D must be promoted: A completed + B's own cws + C's own cws — all Pass"
+    );
+
+    // Variant: only B has continue_when_skipped, C does not — strict AND
+    // blocks D even though A completed and B's skip is tolerated.
+    let mut flow_partial = HashMap::new();
+    flow_partial.insert("root".to_string(), flow_step(vec![]));
+    flow_partial.insert("a".to_string(), flow_step(vec!["root"]));
+    flow_partial.insert("b".to_string(), flow_step_when_cws(vec!["root"], "false"));
+    flow_partial.insert("c".to_string(), flow_step_when(vec!["root"], "false"));
+    flow_partial.insert("d".to_string(), flow_step(vec!["a", "b", "c"]));
+    let task_partial = make_task(flow_partial);
+
+    let job_id_partial = create_job(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            step(job_id_partial, "root", "ready"),
+            step(job_id_partial, "a", "pending"),
+            step_when(job_id_partial, "b", "pending", "false"),
+            step_when(job_id_partial, "c", "pending", "false"),
+            step(job_id_partial, "d", "pending"),
+        ],
+    )
+    .await?;
+
+    JobStepRepo::mark_completed(&pool, job_id_partial, "root", None).await?;
+    stroem_server::settlement::cascade_and_settle(
+        &pool,
+        job_id_partial,
+        &task_partial,
+        &ws,
+        &stroem_server::render_context::Snapshots::default(),
+    )
+    .await?;
+    JobStepRepo::mark_running(&pool, job_id_partial, "a", worker_id).await?;
+    JobStepRepo::mark_completed(&pool, job_id_partial, "a", None).await?;
+    stroem_server::settlement::cascade_and_settle(
+        &pool,
+        job_id_partial,
+        &task_partial,
+        &ws,
+        &stroem_server::render_context::Snapshots::default(),
+    )
+    .await?;
+
+    let statuses_partial = step_statuses(&pool, job_id_partial).await;
+    assert_eq!(
+        statuses_partial["d"], "skipped",
+        "D must be cascade-skipped: C's skip is not tolerated (only B has cws)"
+    );
+    assert_eq!(
+        skip_reason(&pool, job_id_partial, "d").await,
+        Some("cascade".to_string()),
+        "D's skip reason must be 'cascade'"
     );
 
     Ok(())
@@ -1869,10 +2297,11 @@ async fn test_failed_dep_skips_for_each_placeholder_directly_downstream() -> Res
     Ok(())
 }
 
-/// With `continue_on_failure: true` the placeholder must still be considered
-/// for expansion after a failed dependency (unchanged behaviour) — here the
-/// template reads `a.output` which is null for a failed step, so expansion
-/// fails the placeholder rather than skipping it, and the job settles.
+/// With `continue_on_failure: true` on the failed dependency `a` (its own
+/// flag catches its failure), the placeholder must still be considered for
+/// expansion (unchanged behaviour) — here the template reads `a.output`
+/// which is null for a failed step, so expansion fails the placeholder
+/// rather than skipping it, and the job settles.
 #[tokio::test]
 async fn test_failed_dep_with_continue_on_failure_does_not_skip_for_each_placeholder() -> Result<()>
 {
@@ -1880,15 +2309,8 @@ async fn test_failed_dep_with_continue_on_failure_does_not_skip_for_each_placeho
 
     let expr = "{{ a.output.items | json_encode() }}";
     let mut flow = HashMap::new();
-    flow.insert("a".to_string(), flow_step(vec![]));
-    flow.insert(
-        "b".to_string(),
-        FlowStep {
-            continue_on_failure: true,
-            continue_when_skipped: false,
-            ..flow_step_for_each(vec!["a"], expr)
-        },
-    );
+    flow.insert("a".to_string(), flow_step_cof(vec![]));
+    flow.insert("b".to_string(), flow_step_for_each(vec!["a"], expr));
     let task = make_task(flow);
 
     let job_id = create_job(&pool).await;
@@ -2338,6 +2760,61 @@ async fn test_continue_when_skipped_does_not_run_after_upstream_failure() -> Res
     assert_eq!(rows["c"].skip_reason.as_deref(), Some("unreachable"));
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
     assert_eq!(job.status, "failed");
+    Ok(())
+}
+
+/// Same shape (A fails → B skipped unreachable → C), but B carries its own
+/// `continue_on_failure` instead of `continue_when_skipped`. B is still
+/// skipped `unreachable` (A has no cof, so A's failure is not caught), but
+/// B's own `continue_on_failure` tolerates an unreachable skip (§2.2 — the
+/// `failed`/`cancelled`/`unreachable` row of the verdict table), so C runs.
+#[tokio::test]
+async fn test_continue_on_failure_on_unreachable_dep_lets_dependent_run() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let mut flow = HashMap::new();
+    flow.insert("a".to_string(), flow_step(vec![]));
+    flow.insert("b".to_string(), flow_step_cof(vec!["a"]));
+    flow.insert("c".to_string(), flow_step(vec!["b"]));
+    let task = make_task(flow);
+
+    let job_id = create_job(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            step(job_id, "a", "ready"),
+            step(job_id, "b", "pending"),
+            step(job_id, "c", "pending"),
+        ],
+    )
+    .await?;
+    let ws = WorkspaceConfig::new();
+
+    JobStepRepo::mark_failed(&pool, job_id, "a", "boom").await?;
+    stroem_server::settlement::cascade_and_settle(
+        &pool,
+        job_id,
+        &task,
+        &ws,
+        &stroem_server::render_context::Snapshots::default(),
+    )
+    .await?;
+
+    let rows: HashMap<_, _> = JobStepRepo::get_steps_for_job(&pool, job_id)
+        .await?
+        .into_iter()
+        .map(|s| (s.step_name.clone(), s))
+        .collect();
+    assert_eq!(
+        rows["b"].status, "skipped",
+        "B must still be skipped: A has no continue_on_failure of its own"
+    );
+    assert_eq!(rows["b"].skip_reason.as_deref(), Some("unreachable"));
+    assert_eq!(
+        rows["c"].status, "ready",
+        "C must be promoted: B's own continue_on_failure catches B's unreachable skip"
+    );
+
     Ok(())
 }
 
