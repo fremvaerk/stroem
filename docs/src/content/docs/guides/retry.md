@@ -526,18 +526,18 @@ tasks:
           max_attempts: 3
           delay: "10s"
           backoff: exponential
+        continue_on_failure: true
         input:
           item: "{{ each.item }}"
 
       aggregate:
         action: combine-results
         depends_on: [process]
-        continue_on_failure: true
         input:
           results: "{{ process.output }}"
 ```
 
-Each item is processed with step retry; `aggregate` runs even if some items exhaust retries.
+Each item is processed with step retry. `continue_on_failure` on `process` itself means an item that exhausts retries doesn't fail the loop's rollup — the loop still completes, with `null` for any exhausted item — so `aggregate` runs and sees the partial array. The flag is read from `process`, the dependency; putting it on `aggregate` would have no effect.
 
 ## Troubleshooting
 

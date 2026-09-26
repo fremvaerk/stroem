@@ -37,14 +37,18 @@ Supports:
 - Template rendering (`{{ input.* }}`, `{{ step.output.* }}`, `{{ secret.* }}`)
 - `when` conditions (skip steps based on expressions)
 - `for_each` loops (iterate over arrays)
-- Cascade-skip (downstream steps skipped when all dependencies are skipped)
-- `Ctrl+C` graceful cancellation
+- The same dependency gate as the server: a step runs only when every dependency lets it through (completed, or not completed but carrying the matching `continue_on_failure` / `continue_when_skipped` flag on itself). An untolerated failure no longer aborts the whole run — independent branches keep going, and unreached dependents are skipped `unreachable`, matching server jobs
+- A `when` or `for_each` evaluation error fails that step, same as the server, instead of aborting the run
+- Masked step context for downstream templates: a completed step's output, `null` for a skipped one, `null` plus `error` for a failed one — a failed loop's partial array is never exposed to a step that reads it
+- `Ctrl+C` graceful cancellation (still aborts the run and exits non-zero — there is no step-level cancellation locally)
 - `OUTPUT: {json}` parsing for step outputs
+- Exit code reflects the run's outcome, not a raw failure count: `0` when every failure was caught by `continue_on_failure` somewhere on its path, `1` when at least one escaped uncaught. Caught failures print as tolerated in the summary
 
 Limitations:
 - Steps execute sequentially, even when the DAG allows parallelism
 - `for_each` iterations always run sequentially regardless of the `sequential` setting
 - Only `type: script` with local runner is supported — docker, pod, task, agent, and approval steps are rejected
+- Summary counts are diagnostic only: a successful loop counts as one step in the tally, while a failed loop's instances are each counted individually
 
 ### `validate`
 
@@ -66,6 +70,7 @@ The validator checks:
 - DAG cycle detection
 - Trigger cron expression syntax
 - Hook action references
+- Warns when a merge step depends on a step with `when` or `for_each` that lacks `continue_when_skipped` — that dependency's skip would otherwise cascade-skip the merge (see [Conditionals](/guides/conditionals/))
 
 ### `tasks`
 

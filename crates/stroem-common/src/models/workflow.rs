@@ -394,12 +394,19 @@ pub struct FlowStep {
     pub depends_on: Vec<String>,
     #[serde(default)]
     pub input: HashMap<String, serde_json::Value>,
+    /// If this step fails, is cancelled, or is skipped because something
+    /// above it failed, the steps that depend on it still run, and the
+    /// failure does not fail the job. It never makes the step itself run.
+    /// Read only from this step (the dependency), never from a dependent.
+    /// See spec 2026-09-26 (dependency gate) §2.1, §2.4.
     #[serde(default)]
     pub continue_on_failure: bool,
-    /// When true, the step is not cascade-skipped when all of its dependencies
-    /// were skipped by choice (`when` false, empty `for_each`). A dependency
-    /// skipped because an upstream step failed still skips this step unless
-    /// `continue_on_failure` is also set. See spec 2026-09-09 §2.3.
+    /// If this step is skipped by its own `when`, an empty `for_each`, or
+    /// because a step above it was skipped the same way, the steps that
+    /// depend on it still run. Read only from this step (the dependency),
+    /// never from a dependent. Does not cover a failure-class skip
+    /// (`unreachable`) — that needs `continue_on_failure` on the same step.
+    /// See spec 2026-09-26 (dependency gate) §2.1, §2.3.
     #[serde(default)]
     pub continue_when_skipped: bool,
     /// Step-level timeout: kill this step after the specified duration.

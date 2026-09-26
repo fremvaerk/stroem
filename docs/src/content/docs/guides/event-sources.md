@@ -576,10 +576,12 @@ tasks:
       consume:
         action: poll-kafka
         depends_on: [setup]
-      cleanup:
-        action: cleanup-on-exit
-        depends_on: [consume]
-        continue_on_failure: true
+    on_success:
+      - action: cleanup-on-exit
+    on_error:
+      - action: cleanup-on-exit
+    on_cancel:
+      - action: cleanup-on-exit
 
   process-kafka-event:
     flow:
@@ -602,7 +604,7 @@ triggers:
     max_in_flight: 20
 ```
 
-The `poll-kafka` step runs indefinitely while emitting `OUTPUT: ` lines. When the consumer process exits, the `cleanup` step runs (with `continue_on_failure: true` to ensure it always executes), and the restart policy determines whether the entire consumer task restarts.
+The `poll-kafka` step runs indefinitely while emitting `OUTPUT: ` lines. There is no dependent-side "run even if upstream failed" flow step for this: `continue_on_failure` is read from `consume` itself, and setting it there would also change how the consumer's own failure interacts with `restart_policy` (see [Restart policies](#restart-policies) below) — not what a cleanup step needs. Instead, `cleanup-on-exit` runs as an `on_success` / `on_error` / `on_cancel` hook, so it always fires exactly once when the job reaches a terminal state, whatever that state is, and the restart policy independently determines whether the consumer task restarts.
 
 ## Comparison with other triggers
 

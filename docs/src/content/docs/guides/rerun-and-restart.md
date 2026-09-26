@@ -32,7 +32,7 @@ Clicking it opens a confirmation dialog built from a dry-run preview (`POST /api
 
 The preview is computed when you open the dialog and the create request recomputes it, so a workspace reload in between can change what actually runs. The `restart_steps` in the create response is the authoritative list.
 
-If any carried-over step ended failed and the current flow does not tolerate it (no `continue_on_failure`), the dialog adds a warning that the new job will still end failed, and suggests restarting from an earlier step to rerun those failures too.
+If any carried-over step ended failed and that failure is not caught by `continue_on_failure` under the current flow — on that step itself, or on every path below it — the dialog adds a warning that the new job will still end failed, and suggests restarting from an earlier step to rerun those failures too.
 
 ### What gets rerun vs. carried over
 
@@ -50,7 +50,7 @@ Carried-over steps show a muted **carried over** badge in the step timeline. The
 
 The new job runs through the normal creation, promotion, and dispatch pipeline for its rerun steps. If the rerun set collapses immediately (for example every rerun step is unreachable because a carried dependency is `failed` and not tolerated), the job settles right away, and hooks and metrics still fire exactly once for that outcome — same as any other job that finishes at creation time.
 
-A carried `failed` step whose current flow step is `continue_on_failure: true` does not fail the job. A carried `cancelled` step with no failures ends the job `cancelled`, not `completed`.
+A carried `failed` step whose failure is caught under the current flow — `continue_on_failure` on that step or on every path below it — does not fail the job. A carried `cancelled` step with no failures ends the job `cancelled`, not `completed` (skipped rows never decide job status).
 
 ## Limitations
 

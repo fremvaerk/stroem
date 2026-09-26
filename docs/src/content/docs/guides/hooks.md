@@ -55,7 +55,8 @@ Each entry in `hook.failed_steps` contains:
 | `step_name` | string | Name of the failed step |
 | `action_name` | string | Action that was executed |
 | `error_message` | string/null | The step's error message |
-| `continue_on_failure` | bool | Whether the step had `continue_on_failure` set |
+| `continue_on_failure` | bool | Whether this row's own flow step has `continue_on_failure` set. A loop instance row reports its placeholder's flag |
+| `tolerated` | bool | Whether this failure was caught by `continue_on_failure` — on this step or on every path below it — so the job still completed rather than failed |
 | `carried_over` | bool | `true` if this failure was carried forward from the source run by a job restart rather than produced by this job |
 
 ## on_cancel hooks
@@ -250,6 +251,22 @@ tasks:
 - Workspace hooks only fire for **top-level jobs** (source type `api` — programmatic calls, `user` — authenticated API calls, `trigger` — cron triggers, `webhook` — webhook triggers, `mcp` — MCP tool invocations, `retry` — server-initiated retries, `rerun` — a user clicking **Re-run** on a past job, or `restart` — a user clicking **Restart from a step**; see [Re-running and Restarting Jobs](/stroem/guides/rerun-and-restart)). Child jobs from `type: task` actions do not trigger workspace hooks.
 - If multiple YAML files define workspace-level hooks, they are merged (extended, not replaced).
 - The same `hook.*` template context and `secret.*` variables are available as in task-level hooks.
+
+## Cleanup and notification after a failure
+
+There is no dependent-side "run even if upstream failed" — a step's own flags never make it run (see [Conditionals](/guides/conditionals/)). A step that must run after a failure while the job still fails — cleanup, notifying on-call, tearing down partial resources — belongs in an `on_error` (or `on_cancel`) hook, not in the flow:
+
+```yaml
+tasks:
+  deploy:
+    flow:
+      deploy:
+        action: deploy-app
+    on_error:
+      - action: run-cleanup
+        input:
+          env: "{{ hook.workspace }}"
+```
 
 ## Task actions in hooks
 

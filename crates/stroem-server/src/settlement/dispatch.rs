@@ -39,9 +39,11 @@ pub async fn handle_task_steps(
     snapshots: &Snapshots,
 ) -> Result<()> {
     // A dispatch failure re-runs the orchestrator, which may promote further
-    // `type: task` steps (e.g. `continue_on_failure` dependents) that this
-    // pass's snapshot never saw — so loop until a pass fails nothing. Bounded
-    // by the flow size: every failing pass retires at least one step.
+    // `type: task` steps (e.g. dependents of a failed step whose dependency
+    // gate passes because that failed step itself carries
+    // `continue_on_failure`) that this pass's snapshot never saw — so loop
+    // until a pass fails nothing. Bounded by the flow size: every failing
+    // pass retires at least one step.
     for _ in 0..(task.flow.len() + 1) {
         let failed_any = handle_task_steps_pass(
             workspaces,

@@ -48,6 +48,8 @@ pub struct FailedStepInfo {
     pub step_name: String,
     pub action_name: String,
     pub error_message: Option<String>,
+    /// `true` when this row's own flow step has `continue_on_failure`; a
+    /// loop instance reads its placeholder's flag.
     pub continue_on_failure: bool,
     /// `true` when this failure is caught by `continue_on_failure` on this
     /// step or on every path below it (spec 2026-09-26 §2.4); a loop instance

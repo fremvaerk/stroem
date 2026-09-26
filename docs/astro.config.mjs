@@ -76,6 +76,10 @@ export default defineConfig({
               label: "Migration 046 — Skip Reasons",
               slug: "operations/migration-046",
             },
+            {
+              label: "Upgrading to 0.17 — Dependency Flags",
+              slug: "operations/upgrade-0-17-dependency-flags",
+            },
           ],
         },
         {

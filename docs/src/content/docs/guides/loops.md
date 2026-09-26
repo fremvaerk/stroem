@@ -173,6 +173,8 @@ Each instance creates a full child job with its own steps, logs, and lifecycle. 
 | Instance failure (`continue_on_failure: true`) | Placeholder completes; failed instance output is `null` in array |
 | Template error in `for_each` expression | Step fails with error |
 
+`continue_on_failure` is read from the loop's own placeholder — not from whatever depends on it. A loop with its own flag set rolls up `completed` (not `failed`) despite the failed instance, so its dependents see a completed dependency and run normally; without the flag, the placeholder fails and its dependents are skipped `unreachable` unless they themselves carry `continue_on_failure`.
+
 ## Limits
 
 - Maximum 10,000 items per `for_each` expression

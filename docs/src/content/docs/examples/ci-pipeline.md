@@ -60,12 +60,15 @@ tasks:
       build:
         action: build
         depends_on: [lint, test]
-      notify:
-        action: notify-ci
-        depends_on: [build]
-        continue_on_failure: true
+    on_success:
+      - action: notify-ci
         input:
           status: "success"
+          ref: "{{ input.body.ref }}"
+    on_error:
+      - action: notify-ci
+        input:
+          status: "failed: {{ hook.error_message }}"
           ref: "{{ input.body.ref }}"
 
 triggers:
@@ -81,13 +84,13 @@ triggers:
 
 1. **`lint`** and **`test`** run in parallel (no dependency between them)
 2. **`build`** waits for both lint and test to complete
-3. **`notify`** sends a notification after build, with `continue_on_failure: true` so it runs even if build fails
+3. An `on_success` hook notifies when the whole pipeline passes; an `on_error` hook notifies when any step fails — there is no dependent-side "run even if upstream failed" step; that belongs in a hook (see [Hooks](/guides/hooks/))
 
 The DAG looks like:
 
 ```
 lint  ──┐
-        ├──> build ──> notify
+        ├──> build
 test  ──┘
 ```
 
@@ -95,7 +98,7 @@ test  ──┘
 
 - **Parallel steps**: `lint` and `test` have no mutual dependencies, so they run concurrently
 - **Docker runner**: `runner: docker` runs steps inside containers with workspace at `/workspace`
-- **`continue_on_failure`**: The notify step runs regardless of build success/failure
+- **Hooks, not a dependent step**: notifying after success or failure is an `on_success` / `on_error` hook, not a flow step with `continue_on_failure` — that flag only ever decides whether a step's *own* dependents run and whether *its own* failure fails the job, never whether it itself runs
 - **Webhook trigger**: External systems (GitHub) can trigger the pipeline via `POST /hooks/github-ci`
 - **Webhook input**: `{{ input.body.ref }}` accesses the parsed JSON body from the webhook request
 
@@ -156,10 +159,8 @@ actions:
     type: script
     script: |
       echo "CI result: {{ input.status }}"
-      echo "Test results: {{ input.results }}"
     input:
       status: { type: string }
-      results: { type: string }
 
 tasks:
   ci-matrix:
@@ -178,32 +179,14 @@ tasks:
       build:
         action: build
         depends_on: [lint, test]
-      notify:
-        action: notify-ci
-        depends_on: [build]
-        continue_on_failure: true
-        input:
-          status: "success"
-          results: "{{ test.output }}"
-```
-
-This creates `test[0]` (Node 18), `test[1]` (Node 20), `test[2]` (Node 22) — all running in parallel alongside lint. The `test-version` action uses `type: docker` to run each Node.js version's image directly — note that `type: docker` does **not** mount workspace files, so the application source must be baked into the image. The `lint` and `build` actions use `type: script` + `runner: docker` instead, which mounts the workspace at `/workspace`. The notify step receives `test.output` as an aggregated array of results.
-
-## Adding error hooks
-
-```yaml
-tasks:
-  ci-pipeline:
-    flow:
-      # ... steps as above
-    on_error:
-      - action: notify-ci
-        input:
-          status: "FAILED: {{ hook.error_message }}"
-          ref: "unknown"
     on_success:
       - action: notify-ci
         input:
-          status: "All checks passed"
-          ref: "{{ hook.task_name }}"
+          status: "success"
+    on_error:
+      - action: notify-ci
+        input:
+          status: "failed: {{ hook.error_message }}"
 ```
+
+This creates `test[0]` (Node 18), `test[1]` (Node 20), `test[2]` (Node 22) — all running in parallel alongside lint. The `test-version` action uses `type: docker` to run each Node.js version's image directly — note that `type: docker` does **not** mount workspace files, so the application source must be baked into the image. The `lint` and `build` actions use `type: script` + `runner: docker` instead, which mounts the workspace at `/workspace`. Hooks only see the `hook.*` / `secret.*` template context, not individual step outputs — `hook.error_message` and `hook.failed_steps` cover the failure case; to notify with a step's own output, add a step to the flow instead of a hook.

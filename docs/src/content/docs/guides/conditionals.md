@@ -11,9 +11,8 @@ The `when` field provides runtime control flow without explicit step branching:
 
 - **Condition evaluation**: When a step's dependencies are met, the `when` expression is evaluated
 - **Truthy/falsy**: If the result is truthy (non-empty, not "false", not "0"), the step runs. Otherwise it's skipped
-- **Cascade**: If ALL of a step's dependencies are skipped, the step is also skipped (mid-branch cascade), unless every one of those dependencies sets `continue_when_skipped: true` on itself (see [Running After a Skipped Branch](#running-after-a-skipped-branch)). If at least one dependency completed and no other dependency failed, was cancelled, or was skipped as [`unreachable`](#skip-reasons), the step proceeds normally.
-- **Convergence**: When conditional branches merge, convergence steps run automatically — no `continue_on_failure` needed.
-- **Validation**: `when` syntax is validated at YAML parse time (syntax errors are caught early)
+- **Strict AND**: A step runs only when **every** dependency lets it through — completed, or not completed but carrying the matching flag **on itself**. A dependency skipped by choice (its own `when`, an empty `for_each`) needs `continue_when_skipped: true` on itself; a failed or cancelled dependency needs `continue_on_failure: true` on itself. There is no automatic convergence — a completed sibling never makes up for an unflagged skipped dependency (see [Skip Reasons](#skip-reasons))
+- **Validation**: `when` syntax is validated at YAML parse time (syntax errors are caught early); `stroem validate` also warns when a merge depends on a skippable step that lacks `continue_when_skipped`
 
 ## YAML Syntax
 
@@ -30,12 +29,15 @@ tasks:
         action: validate-input
         depends_on: [setup]
         when: "{{ input.run_checks }}"
+        continue_when_skipped: true
+        # Lets `process` through when this step is skipped by its own `when`.
 
       process:
         action: process-data
         depends_on: [setup, check-data]
-        # Runs whether check-data completed or was skipped
-        # (setup completed → not all deps skipped → step proceeds)
+        # Runs when setup completed AND check-data either completed
+        # or was skipped (its continue_when_skipped lets it through).
+        # Without that flag on check-data, process would be skipped `cascade`.
 ```
 
 ## Truthiness Rules
@@ -99,7 +101,7 @@ tasks:
 
 ## Convergence Pattern
 
-When multiple branches converge back to a single step, the merge step runs automatically because skipped dependencies from conditional `when` expressions are treated as satisfied.
+When multiple branches converge back to a single step, the merge runs only if **every** dependency lets it through. A dependency that completed always does; a dependency that was skipped *by choice* — its own `when` was false, its `for_each` produced nothing, or it was itself skipped `cascade` — only does if it carries `continue_when_skipped: true` **on itself**. There is no automatic convergence: a completed sibling branch does not make up for an unflagged skipped one.
 
 ```yaml
 tasks:
@@ -111,26 +113,28 @@ tasks:
       fast-check:
         action: quick-validation
         when: "{{ input.use_fast_path }}"
+        continue_when_skipped: true
 
       # Branch 2: slow path
       slow-check:
         action: comprehensive-validation
         when: "{{ not input.use_fast_path }}"
+        continue_when_skipped: true
 
       # Convergence: merge branches
-      # One of fast-check or slow-check ran, one was skipped
-      # Since skipped deps are treated as satisfied, process-results runs automatically
+      # Exactly one of fast-check / slow-check runs; the other is skipped
+      # `condition`. Both carry continue_when_skipped, so either way
+      # process-results sees every dependency as satisfied.
       process-results:
         action: handle-checks
         depends_on: [fast-check, slow-check]
-        # Proceeds whether both ran, or one was skipped
 ```
 
-**How it works**: A dependency that was skipped *by choice* — its own `when` was false, its `for_each` produced nothing, or it was cascade-skipped — counts as satisfied. A convergence step runs as long as at least one of its dependencies completed and none of them was skipped because of an upstream failure (see [skip reasons](#skip-reasons) below). If **all** dependencies are skipped, the step is skipped too (mid-branch cascade) — unless every one of them sets `continue_when_skipped: true` on itself, see below.
+**How it works**: each dependency is judged on its own — completed is always a Pass; a choice-skip is a Pass only with `continue_when_skipped` on that same step. `process-results` runs only when both verdicts are Pass. Drop `continue_when_skipped` from either branch step and the merge is skipped `cascade` instead of running — `stroem validate` warns about exactly this shape ("step 'process-results' will be skipped whenever 'fast-check' is skipped (add continue_when_skipped: true to 'fast-check' to let process-results run)").
 
 ## Running After a Skipped Branch
 
-Sometimes a step should run even when the only step it depends on was skipped — a report after an optional check, or a merge after an if/else where both arms may be off. Set `continue_when_skipped: true` on the step that may be skipped; steps that depend only on it are then not cascade-skipped. When a step has several skipped dependencies, every one of them must carry the flag.
+Sometimes a step should run even when the only step it depends on was skipped — a report after an optional check, or a merge after an if/else where both arms may be off. Set `continue_when_skipped: true` on the step that may be skipped; steps that depend only on it are then not cascade-skipped. When a step has several skipped dependencies, every one of them must carry the flag — there is no convergence shortcut.
 
 ```yaml
 tasks:
@@ -152,23 +156,23 @@ tasks:
 
 A skipped dependency renders as `null` in templates, and a template error fails the step. So in a step whose skipped dependency you're tolerating, guard any reference into that dependency's output: use `{% if check.output %}…{% endif %}` or `{{ check.output.count | default(value=0) }}` rather than `{{ check.output.count }}`.
 
-The flag covers skips **by choice** only: a `when` that rendered false, an empty `for_each`, or a chain of such skips. If a dependency was skipped because an upstream step **failed** or was cancelled, the step is still skipped. To run after failures as well, set `continue_on_failure: true` on the dependent too:
+`continue_when_skipped` covers skips **by choice** only: a `when` that rendered false, an empty `for_each`, or a chain of such skips. If the dependency was instead skipped because an upstream step **failed** or was cancelled (`unreachable`), or it failed itself, the dependent needs `continue_on_failure` on that same dependency. To run no matter what happened upstream — skipped by choice, failed, or cancelled — set **both** flags on the dependency:
 
 ```yaml
       last-step:
         action: do-something
         continue_when_skipped: true
+        continue_on_failure: true
 
       cleanup:
         action: remove-temp-files
         depends_on: [last-step]
-        continue_on_failure: true
-        # Runs no matter what happened upstream.
+        # Runs no matter what happened to last-step: completed, skipped, or failed.
 ```
 
-`continue_on_failure` on its own lets a step run when a **direct** dependency failed; it does not lift the all-dependencies-skipped rule. This is a change in 0.16.2; see [Migration 046](/operations/migration-046/) if you relied on the old behaviour. As of 0.16.3, `continue_when_skipped` itself lives on the dependency rather than the dependent — see [Migration 046](/operations/migration-046/) for that move too.
+Both flags are read from `last-step` itself, never from `cleanup` — a step's own flags never make *it* run. See [Migration Guide: 0.17](/operations/upgrade-0-17-dependency-flags/) if your workflows still put `continue_on_failure` on the dependent (the 0.16.x placement) or rely on automatic convergence.
 
-A dependent's own `when` is still evaluated on its own terms: a skipped dependency's `continue_when_skipped` only lifts the all-deps-skipped cascade rule, it doesn't override the dependent's own condition.
+A dependent's own `when` is still evaluated on its own terms once the gate is open: a dependency's flags decide whether the dependent is even considered, not what its own condition renders to.
 
 ## Skip Reasons
 
@@ -179,12 +183,12 @@ Every skipped step records why it was skipped. The job detail page shows it as a
 | `condition` | the step's own `when` rendered falsy |
 | `empty` | the step's `for_each` produced no items |
 | `cascade` | every dependency was skipped, all of them by choice |
-| `unreachable` | a dependency failed or was cancelled, or a dependency was itself unreachable |
+| `unreachable` | a dependency failed or was cancelled, or a dependency was itself skipped `unreachable` — or a dependency's skip reason is missing/unrecognized (read conservatively as a failure) |
 
-`unreachable` travels down a chain: if `a` fails, `b` is unreachable and so is anything that depends on `b` — **including a step whose other dependencies completed**. A merge after three parallel branches does not run when one branch failed upstream, and neither does anything after the merge. That is what stops a step from running after a failure, even when its skipped dependency carries `continue_when_skipped`. If a step should run regardless, set `continue_on_failure: true` on it — the same flag that tolerates a directly failed dependency. One exception: when *every* dependency of the step is skipped, `continue_on_failure` is not enough on its own — each of those dependencies must also set `continue_when_skipped: true` (see [Running After a Skipped Branch](#running-after-a-skipped-branch)).
+`unreachable` travels down a chain: if `a` fails, `b` is skipped `unreachable` unless `a` itself has `continue_on_failure`, and so is anything that depends on `b` unless `b` itself has the flag — **even a step whose other dependencies completed**, because a failure verdict always wins over a completed one (strict AND, [Overview](#overview)). A merge after three parallel branches does not run when one branch failed upstream and that branch (or something below it) has no `continue_on_failure`, and neither does anything after the merge — an uncaught failure fails the job even if it never shows up as a `failed` row past that point. `continue_when_skipped` never reaches past an `unreachable` skip; only `continue_on_failure`, set on the failing (or intervening) step itself, does.
 
-:::note[Changed in 0.16.5]
-Before 0.16.5 an `unreachable` dependency only mattered when *every* dependency was skipped: with at least one completed dependency the step ran, so a healthy branch could carry a pipeline past another branch's failure. A skipped step with no recorded reason (jobs from before 0.16.2, for example one carried into a restart) is treated as `unreachable`.
+:::note[Changed in 0.17]
+Before 0.17, whether a dependent ran after a failure or a choice-skip was decided partly by the dependent's *own* `continue_on_failure`, and a choice-skip with at least one completed sibling converged automatically. Now every dependency is judged only by its own flags, strict AND applies with no exception, and there is no automatic convergence — see the [0.17 upgrade guide](/operations/upgrade-0-17-dependency-flags/). A skipped step with no recorded reason, or an unrecognized one (jobs from before 0.16.2, or carried into a restart), is still read as `unreachable`, as since 0.16.5.
 :::
 
 ## Root Step Conditions
@@ -251,16 +255,20 @@ tasks:
       fast-path:
         action: quick-process
         when: "{{ input.mode == 'fast' }}"
+        continue_when_skipped: true
 
       slow-path:
         action: thorough-process
         when: "{{ input.mode == 'slow' }}"
+        continue_when_skipped: true
 
       merge:
         action: finalize
         depends_on: [fast-path, slow-path]
-        # Runs automatically: one branch ran, one was skipped
-        # Skipped deps are treated as satisfied
+        # Exactly one branch runs, the other is skipped `condition`.
+        # Both branch steps carry continue_when_skipped, so merge sees
+        # every dependency as satisfied either way. Drop the flag from
+        # either branch and merge is skipped `cascade` instead.
 ```
 
 ### Multi-step branch with cascade
@@ -317,12 +325,13 @@ tasks:
         action: validate-data
         depends_on: [prepare]
         when: "{{ not input.skip_validation }}"
+        continue_when_skipped: true
 
       process:
         action: use-data
         depends_on: [prepare, validate]
-        # Runs whether validate completed or was skipped
-        # (prepare completed → not all deps skipped → step proceeds)
+        # Runs when prepare completed AND validate either completed or
+        # was skipped (its own continue_when_skipped lets it through).
 ```
 
 ### Condition based on step output
@@ -390,28 +399,32 @@ tasks:
       verify:
         action: pre-check
         when: "{{ not input.skip_pre_check }}"
+        continue_when_skipped: true
 
       # Conditional branches based on input
       fast:
         action: fast-process
         depends_on: [verify]
         when: "{{ input.use_fast }}"
+        continue_when_skipped: true
 
       slow:
         action: slow-process
         depends_on: [verify]
         when: "{{ not input.use_fast }}"
+        continue_when_skipped: true
 
       # Convergence: merge branches
       finish:
         action: cleanup
         depends_on: [fast, slow]
-        # Runs automatically: at least one branch completes
+        # Runs because fast and slow each either complete or are skipped
+        # `condition` with continue_when_skipped set on themselves.
 ```
 
 This workflow:
-1. Optionally runs the pre-check based on input (if skipped, the entire downstream cascade is skipped)
-2. When verify runs, branches into fast or slow path based on input
-3. Converges at finish — one branch completed, one skipped → finish runs automatically
+1. Optionally runs the pre-check based on input. `verify` carries `continue_when_skipped`, so a skip does not cascade-block `fast` and `slow` — without it, both would be skipped `cascade` and `finish` would never see a Pass.
+2. When `verify` runs (or is skipped), branches into fast or slow path based on input.
+3. Converges at `finish` — exactly one of `fast` / `slow` runs, the other is skipped `condition`; both carry `continue_when_skipped`, so `finish` sees every dependency as satisfied.
 
-**When do you still need `continue_on_failure`?** Only when you want a step to run even if its dependency **failed** (error, crash) — or was skipped because something upstream of it failed (`unreachable`). Skipped dependencies from `when` conditions are handled automatically as long as at least one dependency completes; if all of them are skipped, have those dependencies set [`continue_when_skipped`](#running-after-a-skipped-branch) on themselves instead.
+**When do you still need `continue_on_failure`?** When you want a step's dependents to run even though it **failed** (error, crash), was cancelled, or was itself skipped `unreachable` — set the flag on that step, not on the dependent. `continue_when_skipped` never covers a failure-class skip, only a choice-skip; and there is no automatic convergence, so every choice-skipped dependency of a merge needs the flag on itself, not just one of them.

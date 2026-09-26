@@ -156,7 +156,7 @@ Reports step completion or failure. Triggers the orchestrator to promote depende
 }
 ```
 
-When a step completes, the orchestrator checks downstream dependencies. When a step fails, dependent steps are skipped (unless they have `continue_on_failure: true`).
+When a step completes, the orchestrator checks downstream dependencies. When a step fails, dependent steps are skipped `unreachable` unless the failed step itself has `continue_on_failure: true` — the flag is read from the dependency, not from the dependents.
 
 ## Push Logs
 

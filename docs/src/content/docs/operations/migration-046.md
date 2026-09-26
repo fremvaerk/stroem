@@ -26,10 +26,15 @@ one). Steps with at least one dependency that always runs are not affected.
 
 Add `continue_when_skipped: true` to the DEPENDENCY that can be skipped (the
 step with the `when`). To keep the exact old behaviour ("run no matter
-what"), also keep `continue_on_failure: true` on the dependent.
+what"), also add `continue_on_failure: true` on that same dependency.
 
-0.16.3 moved the flag from the dependent to the skipped step; 0.16.2
-placement on the dependent has no effect from 0.16.3.
+0.16.3 moved `continue_when_skipped` from the dependent to the skipped step;
+0.16.2 placement on the dependent has no effect from 0.16.3. As of 0.17,
+`continue_on_failure` has moved the same way — it is read from the
+dependency, never from the dependent, and there is no automatic convergence
+for choice-skips either. If you are upgrading from 0.16.x, read the
+[0.17 upgrade guide](/operations/upgrade-0-17-dependency-flags/) before
+relying on either flag's old placement.
 
 ## The column
 

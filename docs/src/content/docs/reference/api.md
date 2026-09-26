@@ -415,8 +415,8 @@ permission on the task. The source job must be terminal, must be a **top-level**
 |-------|-------------|
 | `restart_steps` | Steps that will run (or ran) again under the current flow, sorted by name. |
 | `carried_over` | Steps copied forward from the source job without re-executing. |
-| `carried_failed` | Carried-over steps that ended `failed` and are **not** tolerated by the current flow's `continue_on_failure` — the new job will end `failed`. |
-| `carried_failed_tolerated` | Carried-over steps that ended `failed` but are tolerated (`continue_on_failure: true` on the current flow step). Dry-run only. |
+| `carried_failed` | Carried-over steps that ended `failed` and are **not** caught by `continue_on_failure` anywhere under the current flow — the new job will end `failed`. |
+| `carried_failed_tolerated` | Carried-over steps that ended `failed` but are caught by `continue_on_failure` under the current flow (on that step itself, or on every path below it). Dry-run only. |
 
 **Error responses:**
 

@@ -1,5 +1,7 @@
 # `continue_when_skipped` and Skip Reasons — Design
 
+Superseded in part by 2026-09-26-dependency-gate-design.md (§2.3, §2.4, Revision 4).
+
 Status: revision 4, shipped (0.16.2 shipped revision 2's placement; 0.16.3
 flips it — see "Revision 3"; 0.16.5 reverses the mixed-dependency decision —
 see "Revision 4")

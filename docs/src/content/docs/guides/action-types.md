@@ -632,7 +632,7 @@ curl -X POST "http://localhost:8080/api/jobs/{job_id}/steps/{step_name}/approve"
   -d '{"approved": false, "rejection_reason": "Version mismatch — need to use 2.0 instead"}'
 ```
 
-The `rejection_reason` is optional but recommended for audit trails. When rejected, the step fails and the job stops unless the step has `continue_on_failure: true`.
+The `rejection_reason` is optional but recommended for audit trails. When rejected, the step fails. Steps after a rejected approval run only if the approval step itself has `continue_on_failure: true` — otherwise they're skipped `unreachable` and the failure fails the job unless something below it catches it.
 
 ### Timeout behavior
 
@@ -646,7 +646,7 @@ actions:
     timeout: 24h  # Max 24 hours — default is no timeout
 ```
 
-Timed-out steps fail with a message like `"Approval step timed out after 24h"`. The job stops unless the step has `continue_on_failure: true`.
+Timed-out steps fail with a message like `"Approval step timed out after 24h"`. Steps after it run only if the approval step itself has `continue_on_failure: true` — otherwise they're skipped `unreachable` and the failure fails the job unless something below it catches it.
 
 ### Using on_suspended hooks
 

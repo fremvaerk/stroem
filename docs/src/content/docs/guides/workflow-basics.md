@@ -150,11 +150,10 @@ tasks:
         depends_on: [build]
         input:
           env: "{{ input.env }}"
-      notify:
-        type: script
-        script: "echo Done"
-        depends_on: [deploy]
-        continue_on_failure: true
+    on_error:
+      - action: notify
+        input:
+          message: "Deploy failed: {{ hook.error_message }}"
 ```
 
 Use inline actions for steps that are unique to a single task. Use named actions when the same action is shared across multiple tasks or steps.
@@ -224,7 +223,7 @@ flow:
     depends_on: [build]
 ```
 
-When a step times out, it is marked as `failed` with the error "Step timed out". Downstream steps that depend on it are skipped (unless they have `continue_on_failure: true`). The worker also enforces the timeout client-side by cancelling the running process.
+When a step times out, it is marked as `failed` with the error "Step timed out". Downstream steps that depend on it are skipped `unreachable` unless the timed-out step itself has `continue_on_failure: true`. The worker also enforces the timeout client-side by cancelling the running process.
 
 **Task timeout** — cancels the entire job if it runs too long (max 7d):
 
@@ -261,30 +260,42 @@ To opt one task out of the global default — i.e., to make it genuinely unbound
 
 ### Handling step failures
 
-By default, when a step fails, all downstream steps that depend on it are automatically **skipped**. The job is marked as `failed` once all steps reach a terminal state.
+By default, when a step fails, all downstream steps that depend on it are automatically skipped `unreachable`. The job is marked as `failed` once all steps reach a terminal state.
 
-Note: **skipped** dependencies (from conditional `when` expressions) are treated differently from **failed** dependencies. A step with a skipped dependency proceeds normally as long as at least one dependency completed; if every dependency was skipped, the step is skipped too unless the skipped dependencies set `continue_when_skipped: true` on themselves. See the [Conditionals guide](/guides/conditionals/) for branching patterns and skip reasons.
+A step runs only when **every** dependency lets it through — completed, or not completed but carrying the matching flag **on itself**:
 
-If you want a step to run even when its dependency fails (e.g., cleanup steps, notifications), use `continue_on_failure: true`:
+- **`continue_on_failure`** on a step: if this step fails, is cancelled, or is skipped because something above it failed, the steps that depend on it still run, and the failure does not fail the job. It never makes the step itself run.
+- **`continue_when_skipped`** on a step: if this step is skipped by its own `when`, an empty `for_each`, or because a step above it was skipped the same way, the steps that depend on it still run.
+
+Both flags are read from the dependency, never from the dependent — a step's own flags never make *it* run. There is no automatic convergence either: a skipped dependency without `continue_when_skipped` blocks its dependents even when a sibling dependency completed. See the [Conditionals guide](/guides/conditionals/) for branching patterns, the merge/if-else pattern, and skip reasons.
+
+A failure fails the job unless a `continue_on_failure` catches it — on the failing step itself, or on every path below it:
 
 ```yaml
 flow:
   deploy:
     action: deploy-app
-  notify:
-    action: send-notification
+    continue_on_failure: true   # deploy's dependents run even if deploy fails; the job still completes
+  verify:
+    action: verify-deploy
     depends_on: [deploy]
-    continue_on_failure: true
-    input:
-      status: "deploy finished"
 ```
 
-The `continue_on_failure` flag has dual semantics (similar to GitHub Actions' `continue-on-error`):
+There is no dependent-side "run even if upstream failed" field. A step that must run after a failure while the job still fails — cleanup, paging on-call, tearing down partial resources — belongs in an `on_error` (or `on_cancel`) hook, not in the flow:
 
-1. **Failure tolerance**: The step runs even if its dependencies **fail** or are **cancelled**.
-2. **Job tolerance**: If the step itself fails, its failure is considered *tolerable* — the job can still be marked `completed` as long as all non-tolerable steps succeed.
+```yaml
+tasks:
+  deploy:
+    flow:
+      deploy:
+        action: deploy-app
+    on_error:
+      - action: notify
+        input:
+          message: "Deploy failed: {{ hook.error_message }}"
+```
 
-`continue_on_failure` is about failures only, and it lives on the dependent. To run a step whose dependencies were all skipped, set `continue_when_skipped: true` on those dependencies instead; to run a step no matter what happened upstream, combine `continue_on_failure` on the dependent with `continue_when_skipped` on its dependency. This is a change in 0.16.2 (and the flag's placement moved again in 0.16.3); see [Migration 046](/operations/migration-046/) if you relied on the old behaviour.
+See [Hooks](/guides/hooks/) for the full `on_success` / `on_error` / `on_cancel` reference.
 
 ### Loops (for_each)
 

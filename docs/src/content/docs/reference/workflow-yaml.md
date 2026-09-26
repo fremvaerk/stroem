@@ -403,8 +403,8 @@ Each entry in a task's `flow` map defines a step. Steps can reference a named ac
 | `description` | string | — | What this step does |
 | `depends_on` | list | `[]` | Steps that must complete before this one starts |
 | `input` | map | `{}` | Input values passed to the action. Values support Tera templates |
-| `continue_on_failure` | bool | `false` | Run even if a direct dependency fails or is cancelled; mark own failure as tolerable |
-| `continue_when_skipped` | bool | `false` | Set on a step that may be skipped by a `when` or empty `for_each`: steps depending only on it still run instead of being cascade-skipped. Read from the skipped dependency, not from the dependent (since 0.16.3). Does not cover skips caused by an upstream failure — the dependent needs `continue_on_failure` for that |
+| `continue_on_failure` | bool | `false` | On a step: if this step fails, is cancelled, or is skipped because something above it failed, the steps that depend on it still run, and the failure does not fail the job. It never makes the step itself run |
+| `continue_when_skipped` | bool | `false` | On a step: if this step is skipped by its own `when`, an empty `for_each`, or because a step above it was skipped the same way, the steps that depend on it still run |
 | `timeout` | duration | — | Step execution timeout. Max `24h` (86400s) |
 | `when` | string | — | Tera condition. Falsy values: empty string, `"false"`, `"0"`, `"null"`, `"none"` (case-insensitive) |
 | `for_each` | string or list | — | Tera expression or literal JSON array. Creates one instance per item |
@@ -439,9 +439,9 @@ flow:
     depends_on: [a, b]    # waits for both a and b
 ```
 
-Steps without `depends_on` start immediately. Failed dependencies cause downstream steps to be skipped unless `continue_on_failure: true`.
+Steps without `depends_on` start immediately. A step runs only when **every** dependency lets it through (completed, or not completed but carrying the matching flag). A failed or cancelled dependency lets its dependents through only if that dependency itself has `continue_on_failure: true` — otherwise they are skipped `unreachable`.
 
-Skipped dependencies (from `when` conditions or empty loops) are treated as satisfied — downstream steps still run as long as at least one dependency completed. A step whose dependencies were **all** skipped is skipped too, unless every one of those skipped dependencies sets `continue_when_skipped: true` (the flag lives on the step that gets skipped, not on the dependent; since 0.16.3). Every skipped step records a `skip_reason` (`condition`, `empty`, `cascade`, `unreachable`); see the [Conditionals guide](/guides/conditionals/#skip-reasons).
+A dependency skipped by choice (its own `when`, an empty `for_each`) lets its dependents through only if that dependency itself sets `continue_when_skipped: true`. There is no automatic convergence: a completed sibling does not make up for an unflagged skipped one, so an if/else merge needs `continue_when_skipped` on **each** branch step, not just one. Every skipped step records a `skip_reason` (`condition`, `empty`, `cascade`, `unreachable`); see the [Conditionals guide](/guides/conditionals/#skip-reasons).
 
 ### Conditional steps (`when`)
 
@@ -529,7 +529,7 @@ tasks:
 - Attempt 1 fails
 - Wait 10s, then retry (Attempt 2)
 - If Attempt 2 fails, wait 20s, then retry (Attempt 3)
-- If Attempt 3 fails, the step fails and downstream steps are skipped (unless `continue_on_failure: true`)
+- If Attempt 3 fails, the step fails; its dependents run only if this step itself has `continue_on_failure: true` — otherwise they're skipped `unreachable`
 - All data from previous attempts is discarded; output is only captured from the final attempt
 
 **Step-level vs. action-level:** If both action and step define retry, the step's configuration takes precedence:
@@ -790,7 +790,8 @@ Each entry in `hook.failed_steps`:
 | `step_name` | string | Name of the failed step |
 | `action_name` | string | Action that was executed |
 | `error_message` | string/null | The step's error message |
-| `continue_on_failure` | bool | Whether the step had `continue_on_failure` set |
+| `continue_on_failure` | bool | Whether this row's own flow step has `continue_on_failure` set. A loop instance row reports its placeholder's flag |
+| `tolerated` | bool | Whether this failure was caught by `continue_on_failure` — on this step or on every path below it — so the job still completed |
 
 ```yaml
 tasks:
