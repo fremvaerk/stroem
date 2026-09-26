@@ -10,6 +10,8 @@ use stroem_common::models::workflow::{FlowStep, TaskDef, WorkspaceConfig};
 use stroem_db::{JobRepo, JobRow, JobStepRepo, JobStepRow, NewJobStep};
 use uuid::Uuid;
 
+pub use stroem_common::models::job::SkipReason;
+
 /// One state transition the cascade wants applied. Closed enum.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Change {
@@ -31,32 +33,6 @@ pub enum Change {
         placeholder: String,
         outcome: RollupOutcome,
     },
-}
-
-/// Why a step was skipped (spec 2026-09-09 §2.2). Persisted verbatim as
-/// `job_step.skip_reason`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SkipReason {
-    /// The step's own `when` rendered falsy.
-    Condition,
-    /// The step's `for_each` produced zero items.
-    Empty,
-    /// All dependencies skipped, none of them unreachable.
-    Cascade,
-    /// A dependency failed or was cancelled without `continue_on_failure`, or a
-    /// dependency was itself unreachable (propagation).
-    Unreachable,
-}
-
-impl SkipReason {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            SkipReason::Condition => "condition",
-            SkipReason::Empty => "empty",
-            SkipReason::Cascade => "cascade",
-            SkipReason::Unreachable => "unreachable",
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

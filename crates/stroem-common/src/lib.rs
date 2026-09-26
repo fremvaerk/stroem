@@ -3,6 +3,7 @@ pub mod constants;
 pub mod dag;
 pub mod duration;
 pub mod format;
+pub mod gate;
 pub mod language;
 pub mod models;
 pub mod secret;

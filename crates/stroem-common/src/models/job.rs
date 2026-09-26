@@ -129,6 +129,46 @@ impl std::str::FromStr for StepStatus {
     }
 }
 
+/// Why a step was skipped (spec 2026-09-09 §2.2). Persisted verbatim as
+/// `job_step.skip_reason`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SkipReason {
+    /// The step's own `when` rendered falsy.
+    Condition,
+    /// The step's `for_each` produced zero items.
+    Empty,
+    /// A dependency was skipped by choice and does not carry
+    /// `continue_when_skipped` (spec 2026-09-26 §2.3).
+    Cascade,
+    /// A dependency failed, was cancelled, or was itself skipped
+    /// `unreachable`, and does not carry `continue_on_failure`.
+    Unreachable,
+}
+
+impl SkipReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SkipReason::Condition => "condition",
+            SkipReason::Empty => "empty",
+            SkipReason::Cascade => "cascade",
+            SkipReason::Unreachable => "unreachable",
+        }
+    }
+}
+
+impl std::str::FromStr for SkipReason {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "condition" => Ok(Self::Condition),
+            "empty" => Ok(Self::Empty),
+            "cascade" => Ok(Self::Cascade),
+            "unreachable" => Ok(Self::Unreachable),
+            other => anyhow::bail!("unknown skip reason '{other}'"),
+        }
+    }
+}
+
 /// Source that triggered a job
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
