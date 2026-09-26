@@ -726,6 +726,12 @@ CWS_PLAIN=$(echo "$CWS_DETAIL" | jq -r '.steps[] | select(.step_name == "plain-c
 [ "$CWS_FOLLOW" = "skipped/cascade" ] || { echo "$CWS_DETAIL" | jq .steps; fail "follow-up expected skipped/cascade, got $CWS_FOLLOW"; }
 pass "continue_when_skipped: dependent of a flagged skip ran, dependent of an unflagged skip cascaded"
 
+CWS_PMERGE=$(echo "$CWS_DETAIL" | jq -r '.steps[] | select(.step_name == "plain-merge") | "\(.status)/\(.skip_reason)"')
+CWS_CMERGE=$(echo "$CWS_DETAIL" | jq -r '.steps[] | select(.step_name == "cws-merge") | "\(.status)/\(.skip_reason)"')
+[ "$CWS_PMERGE" = "skipped/cascade" ] || { echo "$CWS_DETAIL" | jq .steps; fail "plain-merge expected skipped/cascade, got $CWS_PMERGE"; }
+[ "$CWS_CMERGE" = "completed/null" ] || { echo "$CWS_DETAIL" | jq .steps; fail "cws-merge expected completed/null, got $CWS_CMERGE"; }
+pass "strict AND: merge with an unflagged skipped branch skipped, flagged branch ran"
+
 # --- 19. Cross-workspace type: task action ---
 # xtask (in "default") calls test.xtask-target; the child must run as a
 # "test" job (its files and its secret), and its output must reach the

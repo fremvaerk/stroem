@@ -30,3 +30,14 @@ tasks:
       follow-up:
         action: say
         depends_on: [plain-check]
+
+      # Strict AND (0.17): a merge of a completed step and an unflagged skip
+      # is skipped; with the flag on the skipped branch it runs.
+      always:
+        action: say
+      plain-merge:
+        action: say
+        depends_on: [always, plain-check]
+      cws-merge:
+        action: say
+        depends_on: [always, optional-check]

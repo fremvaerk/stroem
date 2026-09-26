@@ -39,9 +39,9 @@ tasks:
     flow:
       step-fail:
         action: always-fail
+        continue_on_failure: true
       step-after:
         action: simple-greet
         depends_on: [step-fail]
-        continue_on_failure: true
         input:
           name: "{{ input.name }}"

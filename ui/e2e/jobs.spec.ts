@@ -209,7 +209,7 @@ test.describe("Jobs", () => {
     ).toBeVisible();
   });
 
-  test("continue_on_failure allows step to run after failed dependency", async ({
+  test("continue_on_failure on a failing step lets its dependents run", async ({
     page,
     baseURL,
   }) => {
@@ -217,14 +217,14 @@ test.describe("Jobs", () => {
       name: "continue-test",
     });
 
-    // Wait for job to complete (fail)
+    // Wait for job to complete
     await waitForJob(baseURL!, jobId);
 
     const token = await getAuthToken(baseURL!);
     const apiRes = await apiFetch(baseURL!, `/api/jobs/${jobId}`, token);
     const apiData = await apiRes.json();
-    // Job should be failed (step-fail failed), but step-after should have run
-    expect(apiData.status).toBe("failed");
+    // step-fail's failure is caught by its own flag
+    expect(apiData.status).toBe("completed");
 
     const stepFail = apiData.steps.find(
       (s: { step_name: string }) => s.step_name === "step-fail",
