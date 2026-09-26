@@ -1,7 +1,7 @@
 use crate::dag;
-use crate::models::workflow::{ActionDef, ConnectionTypeDef, WorkspaceConfig};
+use crate::models::workflow::{ActionDef, ConnectionTypeDef, TaskDef, WorkspaceConfig};
 use anyhow::{bail, Result};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Maximum allowed `FlowStep.timeout` (24h, in seconds).
 ///
@@ -147,6 +147,11 @@ fn validate_workflow_config_inner(
 
     // Validate each task
     for (task_name, task) in &config.tasks {
+        // Memoized per task: whether a step can be skipped "by choice" (its
+        // own when/for_each, or transitively through such a dependency that
+        // doesn't carry continue_when_skipped). Used by the merge warning
+        // below.
+        let mut skippable_memo: HashMap<&str, bool> = HashMap::new();
         // Validate that flow steps reference existing actions
         for (step_name, step) in &task.flow {
             let action_ref = &step.action;
@@ -313,12 +318,21 @@ fn validate_workflow_config_inner(
             }
 
             // Strict AND (spec 2026-09-26 §2.3): a merge is skipped whenever a
-            // dependency that can be skipped by choice is skipped, unless that
-            // dependency carries continue_when_skipped.
+            // dependency that can be skipped by choice — directly (its own
+            // when/for_each) or transitively through one of ITS dependencies
+            // — is skipped, unless that dependency carries
+            // continue_when_skipped.
             if step.depends_on.len() >= 2 {
                 for dep in &step.depends_on {
                     if let Some(d) = task.flow.get(dep) {
-                        if (d.when.is_some() || d.for_each.is_some()) && !d.continue_when_skipped {
+                        let mut visiting: HashSet<&str> = HashSet::new();
+                        let skippable = is_transitively_skippable(
+                            task,
+                            dep.as_str(),
+                            &mut skippable_memo,
+                            &mut visiting,
+                        );
+                        if skippable && !d.continue_when_skipped {
                             warnings.push(format!(
                                 "Task '{}' step '{}' will be skipped whenever '{}' is skipped (add continue_when_skipped: true to '{}' to let '{}' run)",
                                 task_name, step_name, dep, dep, step_name
@@ -1095,6 +1109,46 @@ fn resolve_json_path(value: &serde_json::Value, path: &str) -> bool {
         }
         None => false,
     }
+}
+
+/// Whether `name` (a step in `task.flow`) can be skipped "by choice": it has
+/// its own `when` or `for_each`, or any of ITS OWN dependencies is itself
+/// skippable by choice and does not carry `continue_when_skipped` (spec
+/// 2026-09-26 §2.3, §7). Recursive and memoized per task; `visiting` guards
+/// against a cycle (validation rejects cycles elsewhere, but this helper
+/// must not loop if one somehow reaches it).
+fn is_transitively_skippable<'a>(
+    task: &'a TaskDef,
+    name: &'a str,
+    memo: &mut HashMap<&'a str, bool>,
+    visiting: &mut HashSet<&'a str>,
+) -> bool {
+    if let Some(&cached) = memo.get(name) {
+        return cached;
+    }
+    if !visiting.insert(name) {
+        // Cycle: treat as not skippable to break the recursion.
+        return false;
+    }
+    let result = match task.flow.get(name) {
+        None => false,
+        Some(step) => {
+            step.when.is_some()
+                || step.for_each.is_some()
+                || step.depends_on.iter().any(|d| {
+                    let dep_skippable = is_transitively_skippable(task, d.as_str(), memo, visiting);
+                    let dep_has_cws = task
+                        .flow
+                        .get(d.as_str())
+                        .map(|s| s.continue_when_skipped)
+                        .unwrap_or(false);
+                    dep_skippable && !dep_has_cws
+                })
+        }
+    };
+    visiting.remove(name);
+    memo.insert(name, result);
+    result
 }
 
 /// Checks whether `action_name` is a task action that references back to `task_name` (self-reference).
@@ -6550,6 +6604,121 @@ tasks:
                 "{warnings:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_merge_after_transitively_conditional_dep_warns_naming_direct_dep() {
+        // x (when) → y → m ← z: y itself carries no when/for_each, but it is
+        // transitively skippable through x, which has none of its own.
+        let yaml = r#"
+actions:
+  a: { type: script, script: "true" }
+tasks:
+  t:
+    flow:
+      x: { action: a, when: "{{ input.go }}" }
+      y: { action: a, depends_on: [x] }
+      z: { action: a }
+      m: { action: a, depends_on: [y, z] }
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let warnings = validate_workflow_config(&config).unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("'m' will be skipped whenever 'y' is skipped")),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn test_merge_after_transitively_conditional_dep_with_cws_on_direct_dep_does_not_warn() {
+        // Same shape, but continue_when_skipped sits on y (the merge's direct
+        // dependency) — that suppresses the warning even though y is only
+        // skippable because of x.
+        let yaml = r#"
+actions:
+  a: { type: script, script: "true" }
+tasks:
+  t:
+    flow:
+      x: { action: a, when: "{{ input.go }}" }
+      y: { action: a, depends_on: [x], continue_when_skipped: true }
+      z: { action: a }
+      m: { action: a, depends_on: [y, z] }
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let warnings = validate_workflow_config(&config).unwrap();
+        assert!(
+            warnings
+                .iter()
+                .all(|w| !w.contains("will be skipped whenever")),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn test_merge_after_for_each_dep_without_cws_warns() {
+        let yaml = r#"
+actions:
+  a: { type: script, script: "true" }
+tasks:
+  t:
+    flow:
+      x: { action: a, for_each: ["1", "2"] }
+      z: { action: a }
+      m: { action: a, depends_on: [x, z] }
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let warnings = validate_workflow_config(&config).unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("'m' will be skipped whenever 'x' is skipped")),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn test_merge_with_two_conditional_deps_yields_exactly_two_warnings() {
+        let yaml = r#"
+actions:
+  a: { type: script, script: "true" }
+tasks:
+  t:
+    flow:
+      x: { action: a, when: "{{ input.go }}" }
+      y: { action: a, when: "{{ input.go2 }}" }
+      m: { action: a, depends_on: [x, y] }
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let warnings = validate_workflow_config(&config).unwrap();
+        let matching: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.contains("will be skipped whenever"))
+            .collect();
+        assert_eq!(matching.len(), 2, "{warnings:?}");
+    }
+
+    #[test]
+    fn test_transitively_skippable_helper_terminates_on_a_cycle() {
+        // x → y → x (both plain, no when/for_each): dag::validate_dag would
+        // reject this, but the merge-warning check runs before that bail, so
+        // the recursive skippability helper must not hang on the cycle.
+        let task: TaskDef = serde_yaml::from_str(
+            r#"
+flow:
+  x: { action: a, depends_on: [y] }
+  y: { action: a, depends_on: [x] }
+  m: { action: a, depends_on: [x, y] }
+"#,
+        )
+        .unwrap();
+        let mut memo: HashMap<&str, bool> = HashMap::new();
+        let mut visiting: HashSet<&str> = HashSet::new();
+        // Must return promptly rather than looping forever.
+        let result = is_transitively_skippable(&task, "x", &mut memo, &mut visiting);
+        assert!(!result);
     }
 
     #[test]
