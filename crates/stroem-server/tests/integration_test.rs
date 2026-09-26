@@ -31722,3 +31722,536 @@ async fn test_ws_backfill_is_a_tail() -> Result<()> {
     server.abort();
     Ok(())
 }
+
+// ─── Dependency gate: full settlement (spec 2026-09-26 §12.3) ───────────
+
+fn gate_workspace(extra_flow: &str, max_attempts: u32) -> WorkspaceConfig {
+    let yaml = format!(
+        r#"
+actions:
+  ok: {{ type: script, script: "true" }}
+  hook-ok: {{ type: script, script: "true" }}
+  hook-err: {{ type: script, script: "true" }}
+  hook-cancel: {{ type: script, script: "true" }}
+tasks:
+  pipe:
+    retry: {{ max_attempts: {max_attempts} }}
+    on_success: [{{ action: hook-ok, input: {{ tolerated: "{{{{ hook.failed_steps | map(attribute='tolerated') | join(sep=',') }}}}" }} }}]
+    on_error: [{{ action: hook-err, input: {{ tolerated: "{{{{ hook.failed_steps | map(attribute='tolerated') | join(sep=',') }}}}" }} }}]
+    on_cancel: [{{ action: hook-cancel }}]
+    flow:
+      pred: {{ action: ok }}
+      imp: {{ action: ok, depends_on: [pred], continue_on_failure: true }}
+      merge: {{ action: ok, depends_on: [imp] }}
+{extra_flow}
+"#
+    );
+    serde_yaml::from_str(&yaml).expect("gate workspace yaml")
+}
+
+async fn hook_actions(pool: &PgPool) -> Vec<String> {
+    sqlx::query_scalar(
+        "SELECT s.action_name FROM job j JOIN job_step s ON s.job_id = j.job_id \
+         WHERE j.source_type = 'hook' ORDER BY s.action_name",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+async fn fail_step(
+    state: &AppState,
+    pool: &PgPool,
+    job_id: Uuid,
+    step: &str,
+    worker: Uuid,
+) -> Result<()> {
+    JobStepRepo::mark_running(pool, job_id, step, worker).await?;
+    JobRepo::mark_running_if_pending(pool, job_id, worker).await?;
+    JobStepRepo::mark_failed(pool, job_id, step, "boom").await?;
+    state.settlement().advance(job_id).await
+}
+
+async fn complete_step(
+    state: &AppState,
+    pool: &PgPool,
+    job_id: Uuid,
+    step: &str,
+    worker: Uuid,
+) -> Result<()> {
+    JobStepRepo::mark_running(pool, job_id, step, worker).await?;
+    JobStepRepo::mark_completed(pool, job_id, step, None).await?;
+    state.settlement().advance(job_id).await
+}
+
+#[tokio::test]
+async fn test_gate_caught_failure_completes_fires_on_success_no_retry() -> Result<()> {
+    // Replay of prod job 9691df79 (spec §3.1).
+    let ws = gate_workspace("", 2);
+    let (state, pool, _tmp, _c) = setup_state_with_workspace(ws.clone()).await?;
+    let job_id = create_job_for_task(
+        &pool,
+        &ws,
+        "default",
+        "pipe",
+        json!({}),
+        "api",
+        None,
+        None,
+        None,
+        None,
+        JobDefaults::default(),
+    )
+    .await?;
+    let w = register_test_worker(&pool).await;
+
+    fail_step(&state, &pool, job_id, "pred", w).await?;
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let imp = steps.iter().find(|s| s.step_name == "imp").unwrap();
+    assert_eq!(
+        (imp.status.as_str(), imp.skip_reason.as_deref()),
+        ("skipped", Some("unreachable"))
+    );
+    complete_step(&state, &pool, job_id, "merge", w).await?;
+
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "completed");
+    assert!(
+        job.retry_job_id.is_none(),
+        "a caught failure is not retried"
+    );
+    assert_eq!(hook_actions(&pool).await, ["hook-ok"]);
+    // The hook payload is the hook step's literal input (CLAUDE.md § Hooks).
+    let tolerated: Option<String> = sqlx::query_scalar(
+        "SELECT s.input->>'tolerated' FROM job j JOIN job_step s ON s.job_id = j.job_id \
+         WHERE j.source_type = 'hook'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        tolerated.as_deref(),
+        Some("true"),
+        "failed_steps[0].tolerated"
+    );
+    let recorded: bool =
+        sqlx::query_scalar("SELECT metrics_recorded_at IS NOT NULL FROM job WHERE job_id = $1")
+            .bind(job_id)
+            .fetch_one(&pool)
+            .await?;
+    assert!(
+        recorded,
+        "terminal claim ran (completion metric counted once, status=completed)"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_gate_escaping_failure_with_retry_budget_retries_without_hook() -> Result<()> {
+    let ws = gate_workspace("      side: { action: ok, depends_on: [pred] }", 2);
+    let (state, pool, _tmp, _c) = setup_state_with_workspace(ws.clone()).await?;
+    let job_id = create_job_for_task(
+        &pool,
+        &ws,
+        "default",
+        "pipe",
+        json!({}),
+        "api",
+        None,
+        None,
+        None,
+        None,
+        JobDefaults::default(),
+    )
+    .await?;
+    let w = register_test_worker(&pool).await;
+
+    fail_step(&state, &pool, job_id, "pred", w).await?;
+    complete_step(&state, &pool, job_id, "merge", w).await?;
+
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "failed", "escaped through `side`");
+    assert!(job.retry_job_id.is_some(), "retry job created");
+    assert!(
+        hook_actions(&pool).await.is_empty(),
+        "no hook while a retry is planned"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_gate_escaping_failure_without_retry_budget_fires_on_error() -> Result<()> {
+    let ws = gate_workspace("      side: { action: ok, depends_on: [pred] }", 1);
+    let (state, pool, _tmp, _c) = setup_state_with_workspace(ws.clone()).await?;
+    let job_id = create_job_for_task(
+        &pool,
+        &ws,
+        "default",
+        "pipe",
+        json!({}),
+        "api",
+        None,
+        None,
+        None,
+        None,
+        JobDefaults::default(),
+    )
+    .await?;
+    let w = register_test_worker(&pool).await;
+
+    fail_step(&state, &pool, job_id, "pred", w).await?;
+    complete_step(&state, &pool, job_id, "merge", w).await?;
+
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "failed");
+    assert!(job.retry_job_id.is_none());
+    assert_eq!(hook_actions(&pool).await, ["hook-err"]);
+    // Task 3 ruling: the uncaught failure must read back `tolerated: false`.
+    let tolerated: Option<String> = sqlx::query_scalar(
+        "SELECT s.input->>'tolerated' FROM job j JOIN job_step s ON s.job_id = j.job_id \
+         WHERE j.source_type = 'hook'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        tolerated.as_deref(),
+        Some("false"),
+        "the escaping failure is not tolerated"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_gate_cancelled_step_keeps_job_cancelled() -> Result<()> {
+    // Codex round-1 high finding: a cancelled step (e.g. a cancelled child
+    // job under a `type: task` step) skips its dependents as `unreachable`,
+    // but the job ends `cancelled` — on_cancel, no retry.
+    let ws = gate_workspace("", 2);
+    let (state, pool, _tmp, _c) = setup_state_with_workspace(ws.clone()).await?;
+    let job_id = create_job_for_task(
+        &pool,
+        &ws,
+        "default",
+        "pipe",
+        json!({}),
+        "api",
+        None,
+        None,
+        None,
+        None,
+        JobDefaults::default(),
+    )
+    .await?;
+    let w = register_test_worker(&pool).await;
+
+    // Adaptation: `mark_cancelled` only transitions a `running` row (`pred`
+    // starts `ready`, having no dependencies of its own), so claim it first.
+    JobStepRepo::mark_running(&pool, job_id, "pred", w).await?;
+    JobStepRepo::mark_cancelled(&pool, job_id, "pred").await?;
+    state.settlement().advance(job_id).await?;
+    // `imp` (cof) is skipped `unreachable` by `pred`'s cancellation but its
+    // own flag lets `merge` treat it as satisfied; finish `merge`.
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let imp = steps.iter().find(|s| s.step_name == "imp").unwrap();
+    assert_eq!(
+        (imp.status.as_str(), imp.skip_reason.as_deref()),
+        ("skipped", Some("unreachable"))
+    );
+    complete_step(&state, &pool, job_id, "merge", w).await?;
+
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "cancelled");
+    assert!(job.retry_job_id.is_none());
+    assert_eq!(hook_actions(&pool).await, ["hook-cancel"]);
+    Ok(())
+}
+
+fn approval_gate_workspace() -> WorkspaceConfig {
+    let yaml = r#"
+actions:
+  ok: { type: script, script: "true" }
+  gate-action: { type: approval, message: "ok?" }
+tasks:
+  pipe:
+    flow:
+      gate: { action: gate-action }
+      after: { action: ok, depends_on: [gate], continue_on_failure: true }
+      last: { action: ok, depends_on: [after] }
+"#;
+    serde_yaml::from_str(yaml).expect("approval gate workspace yaml")
+}
+
+#[tokio::test]
+async fn test_gate_approval_reject_caught_downstream_completes() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup_with_workspace(approval_gate_workspace()).await?;
+
+    let resp = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/pipe/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let job_id: Uuid = body_json(resp).await["job_id"].as_str().unwrap().parse()?;
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    assert_eq!(
+        steps.iter().find(|s| s.step_name == "gate").unwrap().status,
+        "suspended"
+    );
+
+    let resp = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            &format!("/api/jobs/{}/steps/gate/approve", job_id),
+            json!({"approved": false, "rejection_reason": "no"}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // `after` carries `continue_on_failure`, but §2.1: a step's own flag
+    // never lets IT run past a dependency without the flag — `gate` has none.
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let after = steps.iter().find(|s| s.step_name == "after").unwrap();
+    assert_eq!(
+        (after.status.as_str(), after.skip_reason.as_deref()),
+        ("skipped", Some("unreachable"))
+    );
+    // `last` treats `after` as satisfied because `after` itself carries the flag.
+    let last = steps.iter().find(|s| s.step_name == "last").unwrap();
+    assert_eq!(last.status, "ready");
+
+    let resp = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/last/complete", job_id),
+            json!({"exit_code": 0}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "completed");
+    Ok(())
+}
+
+fn step_retry_gate_workspace() -> WorkspaceConfig {
+    let yaml = r#"
+actions:
+  ok: { type: script, script: "true" }
+tasks:
+  pipe:
+    flow:
+      pred: { action: ok, retry: { max_attempts: 2 } }
+      imp: { action: ok, depends_on: [pred], continue_on_failure: true }
+      merge: { action: ok, depends_on: [imp] }
+"#;
+    serde_yaml::from_str(yaml).expect("step retry gate workspace yaml")
+}
+
+#[tokio::test]
+async fn test_gate_step_retry_exhausted_caught_downstream_completes() -> Result<()> {
+    let (router, pool, _tmp, _container) =
+        setup_with_workspace(step_retry_gate_workspace()).await?;
+
+    let resp = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/pipe/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let job_id: Uuid = body_json(resp).await["job_id"].as_str().unwrap().parse()?;
+
+    // First failure: retry budget remains, `pred` resets to `ready`.
+    let resp = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/pred/complete", job_id),
+            json!({"exit_code": 1}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    assert_eq!(
+        steps.iter().find(|s| s.step_name == "pred").unwrap().status,
+        "ready"
+    );
+
+    // Second failure: retries exhausted, `pred` fails for good.
+    let resp = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/pred/complete", job_id),
+            json!({"exit_code": 1}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    assert_eq!(
+        steps.iter().find(|s| s.step_name == "pred").unwrap().status,
+        "failed"
+    );
+    let imp = steps.iter().find(|s| s.step_name == "imp").unwrap();
+    assert_eq!(
+        (imp.status.as_str(), imp.skip_reason.as_deref()),
+        ("skipped", Some("unreachable"))
+    );
+    assert_eq!(
+        steps
+            .iter()
+            .find(|s| s.step_name == "merge")
+            .unwrap()
+            .status,
+        "ready"
+    );
+
+    let resp = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/merge/complete", job_id),
+            json!({"exit_code": 0}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "completed");
+    Ok(())
+}
+
+fn sequential_loop_gate_workspace() -> WorkspaceConfig {
+    let yaml = r#"
+actions:
+  ok: { type: script, script: "true" }
+tasks:
+  pipe:
+    flow:
+      loop: { action: ok, for_each: [1, 2], sequential: true }
+      c: { action: ok, depends_on: [loop], continue_on_failure: true }
+      d: { action: ok, depends_on: [c] }
+"#;
+    serde_yaml::from_str(yaml).expect("sequential loop gate workspace yaml")
+}
+
+#[tokio::test]
+async fn test_gate_failed_sequential_loop_caught_downstream_completes() -> Result<()> {
+    let ws = sequential_loop_gate_workspace();
+    let (state, pool, _tmp, _c) = setup_state_with_workspace(ws.clone()).await?;
+    let job_id = create_job_for_task(
+        &pool,
+        &ws,
+        "default",
+        "pipe",
+        json!({}),
+        "api",
+        None,
+        None,
+        None,
+        None,
+        JobDefaults::default(),
+    )
+    .await?;
+    let w = register_test_worker(&pool).await;
+
+    fail_step(&state, &pool, job_id, "loop[0]", w).await?;
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let loop1 = steps.iter().find(|s| s.step_name == "loop[1]").unwrap();
+    assert_eq!(
+        (loop1.status.as_str(), loop1.skip_reason.as_deref()),
+        ("skipped", Some("unreachable")),
+        "sequential loop stops after an untolerated instance failure"
+    );
+    let placeholder = steps.iter().find(|s| s.step_name == "loop").unwrap();
+    assert_eq!(
+        placeholder.status, "failed",
+        "the loop placeholder has no continue_on_failure of its own"
+    );
+    let c = steps.iter().find(|s| s.step_name == "c").unwrap();
+    assert_eq!(
+        (c.status.as_str(), c.skip_reason.as_deref()),
+        ("skipped", Some("unreachable"))
+    );
+    let d = steps.iter().find(|s| s.step_name == "d").unwrap();
+    assert_eq!(
+        d.status, "ready",
+        "d treats `c` as satisfied because `c` itself carries continue_on_failure"
+    );
+
+    complete_step(&state, &pool, job_id, "d", w).await?;
+
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "completed");
+    Ok(())
+}
+
+fn flagged_loop_gate_workspace() -> WorkspaceConfig {
+    let yaml = r#"
+actions:
+  ok: { type: script, script: "true" }
+  hook-ok: { type: script, script: "true" }
+tasks:
+  pipe:
+    on_success: [{ action: hook-ok, input: { cof: "{{ hook.failed_steps | map(attribute='continue_on_failure') | join(sep=',') }}", tolerated: "{{ hook.failed_steps | map(attribute='tolerated') | join(sep=',') }}" } }]
+    flow:
+      loop: { action: ok, for_each: [1, 2], continue_on_failure: true }
+"#;
+    serde_yaml::from_str(yaml).expect("flagged loop gate workspace yaml")
+}
+
+/// Controller ruling R2: a loop instance's `FailedStepInfo` reports its
+/// *placeholder*'s `continue_on_failure` flag, not its own (instances have no
+/// flag of their own — they are not in `flow`).
+#[tokio::test]
+async fn test_gate_flagged_loop_instance_failure_reports_placeholder_flag() -> Result<()> {
+    let ws = flagged_loop_gate_workspace();
+    let (state, pool, _tmp, _c) = setup_state_with_workspace(ws.clone()).await?;
+    let job_id = create_job_for_task(
+        &pool,
+        &ws,
+        "default",
+        "pipe",
+        json!({}),
+        "api",
+        None,
+        None,
+        None,
+        None,
+        JobDefaults::default(),
+    )
+    .await?;
+    let w = register_test_worker(&pool).await;
+
+    fail_step(&state, &pool, job_id, "loop[0]", w).await?;
+    complete_step(&state, &pool, job_id, "loop[1]", w).await?;
+
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(
+        job.status, "completed",
+        "the loop's own continue_on_failure catches the instance failure"
+    );
+    assert_eq!(hook_actions(&pool).await, ["hook-ok"]);
+
+    let row: (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT s.input->>'cof', s.input->>'tolerated' FROM job j \
+         JOIN job_step s ON s.job_id = j.job_id WHERE j.source_type = 'hook'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        row.0.as_deref(),
+        Some("true"),
+        "failed_steps[0].continue_on_failure reports the placeholder's flag"
+    );
+    assert_eq!(row.1.as_deref(), Some("true"), "failed_steps[0].tolerated");
+    Ok(())
+}
