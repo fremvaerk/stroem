@@ -30,25 +30,14 @@ pub fn decide(task: &TaskDef, steps: &[JobStepRow]) -> Option<Settled> {
         return None;
     }
 
-    // Loop instance steps ("process[0]") are not in task.flow — look up by
-    // their placeholder name. Instance failures are already folded into the
-    // placeholder by the cascade's rollup rule (R6).
-    let flow_name = |name: &str| -> String {
-        match name.find('[') {
-            Some(i) => name[..i].to_string(),
-            None => name.to_string(),
-        }
-    };
-    let tolerated = |name: &str| -> bool {
-        task.flow
-            .get(&flow_name(name))
-            .map(|fs| fs.continue_on_failure)
-            .unwrap_or(false)
-    };
-
-    let untolerated_failure = steps
-        .iter()
-        .any(|s| s.status == StepStatus::Failed.as_ref() && !tolerated(&s.step_name));
+    // Spec 2026-09-26 §2.4: only `failed` rows can fail the job, and only when
+    // no `continue_on_failure` catches the failure downstream. Loop instances
+    // are judged by their placeholder; skipped rows never decide the status.
+    let caught = stroem_common::gate::caught_steps(&task.flow);
+    let untolerated_failure = steps.iter().any(|s| {
+        s.status == StepStatus::Failed.as_ref()
+            && !stroem_common::gate::failure_caught(&caught, &s.step_name, s.loop_source.as_deref())
+    });
     if untolerated_failure {
         return Some(Settled {
             status: JobStatus::Failed,
@@ -219,6 +208,12 @@ mod tests {
         r
     }
 
+    fn skipped(name: &str, reason: Option<&str>) -> JobStepRow {
+        let mut r = row(name, "skipped", None);
+        r.skip_reason = reason.map(str::to_string);
+        r
+    }
+
     #[test]
     fn all_completed_completes_with_terminal_step_outputs() {
         let t = task(vec![
@@ -303,5 +298,116 @@ mod tests {
         let s = decide(&t, &[]).unwrap();
         assert_eq!(s.status, JobStatus::Completed);
         assert_eq!(s.output, None);
+    }
+
+    #[test]
+    fn failure_caught_downstream_completes() {
+        // a (no flag) failed → b (cof) skipped unreachable → c completed
+        let t = task(vec![
+            ("a", flow_step(&[], false)),
+            ("b", flow_step(&["a"], true)),
+            ("c", flow_step(&["b"], false)),
+        ]);
+        let steps = vec![
+            row("a", "failed", None),
+            skipped("b", Some("unreachable")),
+            row("c", "completed", None),
+        ];
+        assert_eq!(decide(&t, &steps).unwrap().status, JobStatus::Completed);
+    }
+
+    #[test]
+    fn failure_escaping_through_one_branch_fails() {
+        let t = task(vec![
+            ("a", flow_step(&[], false)),
+            ("b", flow_step(&["a"], true)),
+            ("d", flow_step(&["a"], false)),
+        ]);
+        let steps = vec![
+            row("a", "failed", None),
+            skipped("b", Some("unreachable")),
+            skipped("d", Some("unreachable")),
+        ];
+        assert_eq!(decide(&t, &steps).unwrap().status, JobStatus::Failed);
+    }
+
+    #[test]
+    fn cancelled_step_with_unreachable_dependents_cancels() {
+        let t = task(vec![
+            ("a", flow_step(&[], false)),
+            ("b", flow_step(&["a"], false)),
+        ]);
+        let steps = vec![
+            row("a", "cancelled", None),
+            skipped("b", Some("unreachable")),
+        ];
+        assert_eq!(decide(&t, &steps).unwrap().status, JobStatus::Cancelled);
+    }
+
+    #[test]
+    fn skipped_leaf_with_null_or_unknown_reason_completes() {
+        let t = task(vec![
+            ("a", flow_step(&[], false)),
+            ("b", flow_step(&[], false)),
+        ]);
+        for reason in [None, Some("brand-new")] {
+            let steps = vec![row("a", "completed", None), skipped("b", reason)];
+            assert_eq!(
+                decide(&t, &steps).unwrap().status,
+                JobStatus::Completed,
+                "{reason:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn failed_row_missing_from_flow_fails() {
+        let t = task(vec![("a", flow_step(&[], true))]);
+        let steps = vec![row("a", "completed", None), row("gone", "failed", None)];
+        assert_eq!(decide(&t, &steps).unwrap().status, JobStatus::Failed);
+    }
+
+    #[test]
+    fn mixed_cancelled_and_failed_precedence() {
+        // failure caught → cancelled; failure uncaught → failed
+        let caught = task(vec![
+            ("f", flow_step(&[], true)),
+            ("c", flow_step(&[], false)),
+        ]);
+        let uncaught = task(vec![
+            ("f", flow_step(&[], false)),
+            ("c", flow_step(&[], false)),
+        ]);
+        let steps = vec![row("f", "failed", None), row("c", "cancelled", None)];
+        assert_eq!(
+            decide(&caught, &steps).unwrap().status,
+            JobStatus::Cancelled
+        );
+        assert_eq!(decide(&uncaught, &steps).unwrap().status, JobStatus::Failed);
+    }
+
+    #[test]
+    fn structural_policy_ignores_an_already_completed_dependent() {
+        // Codex round 1: a restart can carry `a` failed + `b` completed while
+        // the current flow gives neither a flag. `caught` reads the flow, so
+        // the carried failure still fails the job (as in 0.16).
+        let t = task(vec![
+            ("a", flow_step(&[], false)),
+            ("b", flow_step(&["a"], false)),
+            ("z", flow_step(&[], false)),
+        ]);
+        let steps = vec![
+            row("a", "failed", None),
+            row("b", "completed", None),
+            row("z", "completed", None),
+        ];
+        assert_eq!(decide(&t, &steps).unwrap().status, JobStatus::Failed);
+    }
+
+    #[test]
+    fn cancelled_instance_under_completed_placeholder_cancels() {
+        let t = task(vec![("p", flow_step(&[], false))]);
+        let steps = vec![row("p", "completed", None), row("p[0]", "cancelled", None)];
+        assert_eq!(decide(&t, &steps).unwrap().status, JobStatus::Cancelled);
     }
 }

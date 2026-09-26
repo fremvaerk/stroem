@@ -85,6 +85,7 @@ pub fn compute_restart_set(
     .into_iter()
     .collect();
 
+    let caught = stroem_common::gate::caught_steps(flow);
     let mut carried = Vec::new();
     let mut carried_failed = Vec::new();
     let mut carried_failed_tolerated = Vec::new();
@@ -112,7 +113,7 @@ pub fn compute_restart_set(
             }
         };
         if seed.status == StepStatus::Failed.as_ref() {
-            if flow[name].continue_on_failure {
+            if caught.contains(name.as_str()) {
                 carried_failed_tolerated.push(name.clone());
             } else {
                 carried_failed.push(name.clone());
@@ -329,6 +330,22 @@ mod tests {
                 .output,
             Some(json!([1, 2]))
         );
+    }
+
+    #[test]
+    fn carried_failure_caught_downstream_is_tolerated() {
+        // a failed (no flag) → b (cof) skipped; restart the independent z.
+        let flow = HashMap::from([
+            ("a".into(), fs(&[], false)),
+            ("b".into(), fs(&["a"], true)),
+            ("z".into(), fs(&[], false)),
+        ]);
+        let mut b = row("b", "skipped", None);
+        b.skip_reason = Some("unreachable".into());
+        let src = [row("a", "failed", None), b, row("z", "failed", None)];
+        let p = compute_restart_set(&flow, &src, "z").unwrap();
+        assert_eq!(p.carried_failed_tolerated, vec!["a"]);
+        assert!(p.carried_failed.is_empty(), "carried skips never appear");
     }
 
     #[test]

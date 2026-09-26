@@ -49,6 +49,10 @@ pub struct FailedStepInfo {
     pub action_name: String,
     pub error_message: Option<String>,
     pub continue_on_failure: bool,
+    /// `true` when this failure is caught by `continue_on_failure` on this
+    /// step or on every path below it (spec 2026-09-26 §2.4); a loop instance
+    /// is judged by its placeholder.
+    pub tolerated: bool,
     /// `true` when this failure was carried over from a restarted job's
     /// source run (`job_step.carried_over`) rather than freshly produced by
     /// this job. Lets an `on_error` hook distinguish "this job just failed"
@@ -471,20 +475,27 @@ async fn build_hook_context(
 
     let artifacts = list_hook_artifacts(pool, job.job_id).await?;
 
+    let caught = stroem_common::gate::caught_steps(&task.flow);
     let failed_steps: Vec<FailedStepInfo> = steps
         .iter()
         .filter(|s| s.status == StepStatus::Failed.as_ref())
         .map(|s| {
-            let continue_on_failure = task
-                .flow
-                .get(&s.step_name)
-                .map(|fs| fs.continue_on_failure)
-                .unwrap_or(false);
+            let flow_name =
+                stroem_common::gate::flow_step_name(&s.step_name, s.loop_source.as_deref());
             FailedStepInfo {
                 step_name: s.step_name.clone(),
                 action_name: s.action_name.clone(),
                 error_message: s.error_message.clone(),
-                continue_on_failure,
+                continue_on_failure: task
+                    .flow
+                    .get(flow_name)
+                    .map(|fs| fs.continue_on_failure)
+                    .unwrap_or(false),
+                tolerated: stroem_common::gate::failure_caught(
+                    &caught,
+                    &s.step_name,
+                    s.loop_source.as_deref(),
+                ),
                 carried_over: s.carried_over,
             }
         })
@@ -801,6 +812,7 @@ mod tests {
                 action_name: "build-app".to_string(),
                 error_message: Some("exit code 1".to_string()),
                 continue_on_failure: false,
+                tolerated: false,
                 carried_over: false,
             }],
             artifacts: vec![],
@@ -899,6 +911,7 @@ mod tests {
                 action_name: "deploy-app".to_string(),
                 error_message: Some(traceback.to_string()),
                 continue_on_failure: false,
+                tolerated: false,
                 carried_over: false,
             }],
             artifacts: vec![],
