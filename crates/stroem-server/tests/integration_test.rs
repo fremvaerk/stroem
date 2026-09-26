@@ -31921,6 +31921,63 @@ async fn test_gate_escaping_failure_without_retry_budget_fires_on_error() -> Res
 }
 
 #[tokio::test]
+async fn test_gate_on_error_payload_marks_caught_and_uncaught_failures() -> Result<()> {
+    // Two independent failures: `pred` is caught downstream by `imp`'s
+    // continue_on_failure (chain reaches `merge`, unaffected); `pred2` is an
+    // independent leaf with no dependents and no flag, so it fails the job
+    // uncaught. on_error's failed_steps must report tolerated: true for the
+    // first and tolerated: false for the second.
+    let ws = gate_workspace("      pred2: { action: ok }", 1);
+    let (state, pool, _tmp, _c) = setup_state_with_workspace(ws.clone()).await?;
+    let job_id = create_job_for_task(
+        &pool,
+        &ws,
+        "default",
+        "pipe",
+        json!({}),
+        "api",
+        None,
+        None,
+        None,
+        None,
+        JobDefaults::default(),
+    )
+    .await?;
+    let w = register_test_worker(&pool).await;
+
+    fail_step(&state, &pool, job_id, "pred", w).await?;
+    fail_step(&state, &pool, job_id, "pred2", w).await?;
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let imp = steps.iter().find(|s| s.step_name == "imp").unwrap();
+    assert_eq!(
+        (imp.status.as_str(), imp.skip_reason.as_deref()),
+        ("skipped", Some("unreachable"))
+    );
+    complete_step(&state, &pool, job_id, "merge", w).await?;
+
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "failed", "pred2's failure escapes uncaught");
+    assert!(job.retry_job_id.is_none());
+    assert_eq!(hook_actions(&pool).await, ["hook-err"]);
+    let tolerated: Option<String> = sqlx::query_scalar(
+        "SELECT s.input->>'tolerated' FROM job j JOIN job_step s ON s.job_id = j.job_id \
+         WHERE j.source_type = 'hook'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    let values: Vec<&str> = tolerated
+        .as_deref()
+        .expect("tolerated field present")
+        .split(',')
+        .collect();
+    assert!(
+        values.contains(&"true") && values.contains(&"false"),
+        "expected both a caught (true) and an uncaught (false) entry, got {values:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_gate_cancelled_step_keeps_job_cancelled() -> Result<()> {
     // Codex round-1 high finding: a cancelled step (e.g. a cancelled child
     // job under a `type: task` step) skips its dependents as `unreachable`,
