@@ -30,8 +30,13 @@ pub(crate) const MAX_TASK_DEPTH: u32 = 10;
 /// used to mean both "resolve Re-run sentinels against this job" and "persist
 /// this lineage pointer".
 pub enum CreationMode<'a> {
-    /// Plain creation: API, scheduler, webhook, `type: task` child, hook.
+    /// Plain creation: API, scheduler, webhook, `type: task` child.
     Normal,
+    /// A `type: task` hook fired by `source_job_id`: input is handled exactly
+    /// like `Normal`; only the lineage pointer is persisted. Never
+    /// `parent_job_id` — a hook is not a sub-job (it keeps task-level retry and
+    /// is not cancelled with the job that fired it).
+    Hook { source_job_id: Uuid },
     /// User clicked Re-run: `••••••` sentinels in `input` are replaced from the
     /// source's `raw_input`; `source_job_id` is persisted.
     Rerun { source_job_id: Uuid },
@@ -261,6 +266,7 @@ pub(crate) fn create_job_for_task_inner<'a>(
         let mut effective_input = input;
         let (lineage_source_job_id, restart_from_step): (Option<Uuid>, Option<&str>) = match &mode {
             CreationMode::Normal => (None, None),
+            CreationMode::Hook { source_job_id } => (Some(*source_job_id), None),
             CreationMode::Rerun { source_job_id } => {
                 let src_id = *source_job_id;
                 let source_job = stroem_db::JobRepo::get(pool, src_id)

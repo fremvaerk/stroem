@@ -14333,6 +14333,10 @@ async fn test_hook_fires_on_job_success() -> Result<()> {
         .expect("Hook job not found");
     assert_eq!(hook_job.task_name, "_hook:notify");
     assert_eq!(hook_job.source_id, Some(job_id.to_string()));
+    // Typed lineage to the job that fired it — never `parent_job_id`, which
+    // would make the hook a sub-job (no task retry, cancelled with its source).
+    assert_eq!(hook_job.source_job_id, Some(job_id));
+    assert_eq!(hook_job.parent_job_id, None);
 
     // Verify hook step was created and is ready
     let hook_steps = JobStepRepo::get_steps_for_job(&pool, hook_job.job_id).await?;
@@ -15993,6 +15997,8 @@ async fn test_task_action_in_hook() -> Result<()> {
     // When hook action is type: task, it creates a real task job
     let hook_job = hook_jobs[0];
     assert_eq!(hook_job.task_name, "cleanup");
+    assert_eq!(hook_job.source_job_id, Some(job_id));
+    assert_eq!(hook_job.parent_job_id, None);
 
     // And the hook job should have the cleanup task's steps
     let hook_steps = JobStepRepo::get_steps_for_job(&pool, hook_job.job_id).await?;

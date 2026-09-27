@@ -3529,6 +3529,58 @@ async fn test_create_skipped_job() -> Result<()> {
     Ok(())
 }
 
+/// Retention counts `job_days` from when a job FINISHED, not when it was
+/// created: a job created long ago that has only just turned terminal is still
+/// running its terminal handling (hooks, log archive, task retry), and deleting
+/// it there makes the hook/retry insert fail its `source_job_id` /
+/// `retry_of_job_id` FK. A terminal row without `completed_at` falls back to
+/// `created_at`.
+#[tokio::test]
+async fn test_retention_counts_from_completion_not_creation() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    async fn insert(
+        pool: &PgPool,
+        status: &str,
+        created_days_ago: i32,
+        completed_days_ago: Option<i32>,
+    ) -> Result<Uuid> {
+        let job_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO job (job_id, workspace, task_name, mode, status, source_type, created_at, completed_at) \
+             VALUES ($1, 'default', 't', 'distributed', $2, 'api', \
+                     NOW() - make_interval(days => $3), NOW() - make_interval(days => $4))",
+        )
+        .bind(job_id)
+        .bind(status)
+        .bind(created_days_ago)
+        .bind(completed_days_ago)
+        .execute(pool)
+        .await?;
+        Ok(job_id)
+    }
+
+    let long_run_just_finished = insert(&pool, "completed", 40, Some(0)).await?;
+    let finished_long_ago = insert(&pool, "completed", 40, Some(35)).await?;
+    let terminal_without_completed_at = insert(&pool, "cancelled", 40, None).await?;
+    let recent = insert(&pool, "failed", 5, Some(5)).await?;
+    let still_running = insert(&pool, "running", 40, None).await?;
+
+    let swept: Vec<Uuid> = JobRepo::get_old_terminal_jobs(&pool, 30.0, 100)
+        .await?
+        .into_iter()
+        .map(|j| j.job_id)
+        .collect();
+
+    assert!(swept.contains(&finished_long_ago));
+    assert!(swept.contains(&terminal_without_completed_at));
+    assert!(!swept.contains(&long_run_just_finished), "{swept:?}");
+    assert!(!swept.contains(&recent));
+    assert!(!swept.contains(&still_running));
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_job_stores_revision() -> Result<()> {
     let (pool, _container) = setup_db().await?;

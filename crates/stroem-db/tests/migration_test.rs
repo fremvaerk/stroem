@@ -83,3 +83,77 @@ async fn test_schema_completeness() -> Result<()> {
 
     Ok(())
 }
+
+/// Migration 048 backfills `source_job_id` on hook jobs from the UUID prefix of
+/// their `source_id` (`{job_id}` or the legacy `{job_id}/{hook}`), but only
+/// where the firing job still exists (the column is an FK) and only for
+/// `source_type = 'hook'` — a retry's `source_id` is also a bare job id and
+/// must not be read as hook lineage.
+///
+/// Rows are inserted in the pre-048 shape after all migrations have run, then
+/// the migration's SQL is executed again; it only touches NULL rows, so a
+/// second application is exactly what the first did to legacy data.
+#[tokio::test]
+async fn test_048_backfills_hook_source_job_id() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    async fn insert(
+        pool: &PgPool,
+        source_type: &str,
+        source_id: Option<&str>,
+    ) -> Result<uuid::Uuid> {
+        let job_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO job (job_id, workspace, task_name, mode, status, source_type, source_id) \
+             VALUES ($1, 'default', 't', 'distributed', 'completed', $2, $3)",
+        )
+        .bind(job_id)
+        .bind(source_type)
+        .bind(source_id)
+        .execute(pool)
+        .await?;
+        Ok(job_id)
+    }
+
+    let fired_by = insert(&pool, "api", None).await?;
+    let fired = fired_by.to_string();
+    let bare = insert(&pool, "hook", Some(&fired)).await?;
+    let suffixed = insert(&pool, "hook", Some(&format!("{fired}/notify"))).await?;
+    let upper = insert(&pool, "hook", Some(&fired.to_uppercase())).await?;
+    let deleted_source = insert(&pool, "hook", Some(&uuid::Uuid::new_v4().to_string())).await?;
+    let not_a_uuid = insert(&pool, "hook", Some("not-a-uuid/at-all")).await?;
+    let no_source = insert(&pool, "hook", None).await?;
+    let retry = insert(&pool, "retry", Some(&fired)).await?;
+    // Already written by a 048-aware server: its pointer wins over source_id.
+    let other = insert(&pool, "api", None).await?;
+    let already_set = insert(&pool, "hook", Some(&fired)).await?;
+    sqlx::query("UPDATE job SET source_job_id = $1 WHERE job_id = $2")
+        .bind(other)
+        .bind(already_set)
+        .execute(&pool)
+        .await?;
+
+    sqlx::raw_sql(include_str!("../migrations/048_hook_source_job_id.sql"))
+        .execute(&pool)
+        .await?;
+
+    async fn source_job_id(pool: &PgPool, job_id: uuid::Uuid) -> Result<Option<uuid::Uuid>> {
+        Ok(
+            sqlx::query_scalar("SELECT source_job_id FROM job WHERE job_id = $1")
+                .bind(job_id)
+                .fetch_one(pool)
+                .await?,
+        )
+    }
+
+    assert_eq!(source_job_id(&pool, bare).await?, Some(fired_by));
+    assert_eq!(source_job_id(&pool, suffixed).await?, Some(fired_by));
+    assert_eq!(source_job_id(&pool, upper).await?, Some(fired_by));
+    assert_eq!(source_job_id(&pool, deleted_source).await?, None);
+    assert_eq!(source_job_id(&pool, not_a_uuid).await?, None);
+    assert_eq!(source_job_id(&pool, no_source).await?, None);
+    assert_eq!(source_job_id(&pool, retry).await?, None);
+    assert_eq!(source_job_id(&pool, already_set).await?, Some(other));
+
+    Ok(())
+}

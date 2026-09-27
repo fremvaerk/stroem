@@ -196,7 +196,7 @@ tasks:
 
 - **Fire-and-forget**: Hook job creation is best-effort. Failures are logged but never affect the original job.
 - **No recursion**: Jobs created by hooks (`source_type = "hook"`) never trigger further hooks.
-- **Visible as jobs**: Hook jobs appear in the job list with `task_name = "_hook:<action>"` and `source_type = "hook"`.
+- **Visible as jobs**: Hook jobs appear in the job list with `task_name = "_hook:<action>"` and `source_type = "hook"`. A hook job's detail page links back to the job that fired it (**hook for `<id>`** under the title); over the API that id is the hook job's `source_job_id`.
 - **Normal execution**: Hook jobs go through the normal claim/execute flow on workers.
 - **Multiple hooks**: You can define multiple hooks per event. They all fire independently.
 - **Validation**: Hook action references are validated at parse time — referencing a non-existent action is an error.
@@ -253,7 +253,7 @@ tasks:
 
 ## Task actions in hooks
 
-Hook actions can be `type: task`, creating a full child job for the referenced task instead of a single-step hook job:
+Hook actions can be `type: task`, creating a full job for the referenced task instead of a single-step hook job. It is still a hook job (`source_type = "hook"`), not a child of the job that fired it — so the task keeps its own `retry:` and is not cancelled along with that job:
 
 ```yaml
 tasks:
