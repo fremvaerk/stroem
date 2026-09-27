@@ -56,6 +56,7 @@ function mkJob(partial: Partial<JobDetail> & { steps: JobStep[] }): JobDetail {
     source_job_id: null,
     restart_from_step: null,
     parent_job_id: null,
+    parent_step_name: null,
     revision: null,
     worker_id: null,
     created_at: new Date(NOW - 60_000).toISOString(),

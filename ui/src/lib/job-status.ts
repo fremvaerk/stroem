@@ -28,3 +28,52 @@ export function isTopLevelJob(job: {
   if (job.parent_job_id != null) return false;
   return job.source_type == null || !DERIVED_SOURCE_TYPES.includes(job.source_type);
 }
+
+/**
+ * The job this one was created from: the source of a Re-run or Restart, the
+ * FIRST attempt of a task Retry (`retry_of_job_id` is the chain root, not the
+ * previous attempt), the parent of a `type: task` / agent-tool child, or the
+ * job whose terminal state (or suspended step) fired a hook.
+ */
+export interface JobLineage {
+  kind: "rerun" | "restart" | "retry" | "child" | "hook";
+  jobId: string;
+  /** Restart: the step it began at. Child: the parent step that started it. */
+  step: string | null;
+}
+
+/**
+ * Where this job came from, when it was created from another job. A job with a
+ * parent is a child whatever its source type (the same rule as
+ * `isTopLevelJob`); otherwise it is keyed on `source_type`, so a lineage column
+ * the row happens to carry for another reason never mislabels the job. A
+ * source type whose pointer is missing yields `null` rather than a broken link.
+ */
+export function jobLineage(job: {
+  source_type: string;
+  source_job_id: string | null;
+  restart_from_step: string | null;
+  retry_of_job_id: string | null;
+  parent_job_id: string | null;
+  parent_step_name: string | null;
+}): JobLineage | null {
+  if (job.parent_job_id) {
+    return { kind: "child", jobId: job.parent_job_id, step: job.parent_step_name };
+  }
+  switch (job.source_type) {
+    case "rerun":
+      if (!job.source_job_id) return null;
+      return { kind: "rerun", jobId: job.source_job_id, step: null };
+    case "restart":
+      if (!job.source_job_id) return null;
+      return { kind: "restart", jobId: job.source_job_id, step: job.restart_from_step };
+    case "retry":
+      if (!job.retry_of_job_id) return null;
+      return { kind: "retry", jobId: job.retry_of_job_id, step: null };
+    case "hook":
+      if (!job.source_job_id) return null;
+      return { kind: "hook", jobId: job.source_job_id, step: null };
+    default:
+      return null;
+  }
+}

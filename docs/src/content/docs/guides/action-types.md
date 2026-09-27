@@ -389,6 +389,7 @@ When the `deploy` task's `cleanup` step becomes ready, the server creates a chil
 - When a child fails, the parent step is marked as failed
 - The parent's orchestrator runs after child completion, promoting downstream steps
 - The job detail's step view lists every child job created for the step (`child_jobs`), newest first
+- A child job's detail page links back under its title — **child of `<parent>` at step `<step>`** — and `GET /api/jobs/{id}` returns both `parent_job_id` and `parent_step_name`
 
 ### Behaviour changes in 0.16.5
 
