@@ -941,9 +941,17 @@ impl JobRepo {
         Ok(rows)
     }
 
-    /// Return up to `batch_size` terminal jobs older than the given number of days.
+    /// Return up to `batch_size` terminal jobs that FINISHED more than the given
+    /// number of days ago (`completed_at`, falling back to `created_at` for a
+    /// terminal row without one).
     ///
-    /// Only considers jobs with status `completed`, `failed`, or `cancelled`.
+    /// Counting from creation let the sweep delete a long-running job the moment
+    /// it turned terminal, while its hooks, task retry and log archive were still
+    /// being written — and a hook job's `source_job_id` / a retry's
+    /// `retry_of_job_id` FK then rejected the insert. The redundant `created_at`
+    /// bound keeps the scan on its index (`completed_at >= created_at`).
+    ///
+    /// Only considers jobs with status `completed`, `failed`, `cancelled` or `skipped`.
     /// Callers should loop until an empty result is returned to process all matching rows.
     pub async fn get_old_terminal_jobs(
         pool: &PgPool,
@@ -954,6 +962,7 @@ impl JobRepo {
             "SELECT job_id, workspace, task_name, created_at FROM job \
              WHERE status IN ('completed', 'failed', 'cancelled', 'skipped') \
                AND created_at < NOW() - make_interval(secs => $1::double precision) \
+               AND COALESCE(completed_at, created_at) < NOW() - make_interval(secs => $1::double precision) \
              LIMIT $2",
         )
         .bind(retention_days * 86400.0)

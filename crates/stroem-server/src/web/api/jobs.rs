@@ -271,6 +271,8 @@ pub struct JobDetailResponse {
     /// Parent job of a `type: task` / agent-tool child. `None` for top-level
     /// runs; the UI uses it (with `source_type`) to hide Re-run and Restart.
     pub parent_job_id: Option<Uuid>,
+    /// The parent's step that created this child; `None` for top-level runs.
+    pub parent_step_name: Option<String>,
     pub revision: Option<String>,
     pub worker_id: Option<Uuid>,
     pub created_at: String,
@@ -473,6 +475,7 @@ pub async fn get_job(
         source_job_id: job.source_job_id,
         restart_from_step: job.restart_from_step,
         parent_job_id: job.parent_job_id,
+        parent_step_name: job.parent_step_name,
         revision: job.revision,
         worker_id: job.worker_id,
         created_at: job.created_at.to_rfc3339(),
@@ -1258,6 +1261,7 @@ mod tests {
             source_job_id: None,
             restart_from_step: None,
             parent_job_id: None,
+            parent_step_name: None,
             revision: None,
             worker_id: None,
             created_at: "2025-01-01T00:00:00Z".to_string(),
@@ -1288,6 +1292,7 @@ mod tests {
             source_job_id: None,
             restart_from_step: None,
             parent_job_id: None,
+            parent_step_name: None,
             revision: None,
             worker_id: None,
             created_at: "2025-01-01T00:00:00Z".to_string(),
@@ -1358,6 +1363,7 @@ mod tests {
             source_job_id: Some(Uuid::nil()),
             restart_from_step: None,
             parent_job_id: None,
+            parent_step_name: None,
             revision: None,
             worker_id: None,
             created_at: "".to_string(),

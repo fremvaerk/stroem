@@ -52,7 +52,7 @@ worker_token: "change-in-production"
 # Optional: data retention settings
 # retention:
 #   worker_hours: 2                 # Delete inactive workers older than 2h
-#   job_days: 30                    # Delete terminal jobs and logs older than 30d
+#   job_days: 30                    # Delete terminal jobs and logs 30d after they finished
 # Optional: authentication
 # auth:
 #   jwt_secret: "your-jwt-secret"

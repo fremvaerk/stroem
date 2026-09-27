@@ -148,6 +148,7 @@ export interface JobDetail {
   source_job_id: string | null;
   restart_from_step: string | null;
   parent_job_id: string | null;
+  parent_step_name: string | null;
   revision: string | null;
   worker_id: string | null;
   created_at: string;

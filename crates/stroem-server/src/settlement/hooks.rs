@@ -106,10 +106,14 @@ pub(crate) const MAX_HOOK_CHAIN_DEPTH: usize = 3;
 /// Called only once a job is known to have hooks to fire, so a job with none
 /// configured — the overwhelming majority — costs no queries at all.
 ///
-/// A `hook`-sourced job continues from the job named by the UUID prefix of
-/// its `source_id` (`{job_id}` or `{job_id}/{hook}`) and adds one to the
-/// count; any other job continues from its `parent_job_id` (no count change).
-/// A top-level, non-hook job costs no queries at all.
+/// A `hook`-sourced job continues from its `source_job_id` — the job that
+/// fired it — and adds one to the count; any other job continues from its
+/// `parent_job_id` (no count change). A top-level, non-hook job costs no
+/// queries at all. A hook row with no `source_job_id` falls back to the UUID
+/// prefix of its `source_id` (`{job_id}` or `{job_id}/{hook}`): a server older
+/// than migration 048 keeps writing such rows during a rolling deploy, after
+/// the backfill ran, and ending the walk there would let a chain crossing the
+/// deploy overrun [`MAX_HOOK_CHAIN_DEPTH`].
 ///
 /// The hop budget must be sized in *hook links*, not raw hops: as many as
 /// [`crate::job_creator::MAX_TASK_DEPTH`] plain `type: task` levels can sit
@@ -128,16 +132,19 @@ async fn hook_chain_depth(pool: &PgPool, job: &stroem_db::JobRow) -> usize {
 
     let mut depth = 0usize;
     let mut source_type = job.source_type.clone();
+    let mut source_job_id = job.source_job_id;
     let mut source_id = job.source_id.clone();
     let mut parent_job_id = job.parent_job_id;
 
     for _ in 0..MAX_HOPS {
         let next = if source_type == SourceType::Hook.as_ref() {
             depth += 1;
-            source_id
-                .as_deref()
-                .and_then(|s| s.split('/').next())
-                .and_then(|s| uuid::Uuid::parse_str(s).ok())
+            source_job_id.or_else(|| {
+                source_id
+                    .as_deref()
+                    .and_then(|s| s.split('/').next())
+                    .and_then(|s| uuid::Uuid::parse_str(s).ok())
+            })
         } else {
             parent_job_id
         };
@@ -147,6 +154,7 @@ async fn hook_chain_depth(pool: &PgPool, job: &stroem_db::JobRow) -> usize {
         match JobRepo::get(pool, next).await {
             Ok(Some(ancestor)) => {
                 source_type = ancestor.source_type;
+                source_job_id = ancestor.source_job_id;
                 source_id = ancestor.source_id;
                 parent_job_id = ancestor.parent_job_id;
             }
@@ -288,15 +296,13 @@ pub async fn fire_hooks_of_kind(
 
     let defaults = s.defaults;
     for (i, hook) in hooks.iter().enumerate() {
-        let source_id = job.job_id.to_string();
-
         if let Err(e) = fire_single_hook(
             s,
             workspace_config,
             &job.workspace,
             hook,
             &ctx_value,
-            &source_id,
+            job.job_id,
             job.revision.as_deref(),
             defaults,
         )
@@ -400,7 +406,6 @@ pub async fn fire_suspended_hooks(
         }
     };
 
-    let source_id = job.job_id.to_string();
     let defaults = s.defaults;
     for (i, hook) in hooks.iter().enumerate() {
         if let Err(e) = fire_single_hook(
@@ -409,7 +414,7 @@ pub async fn fire_suspended_hooks(
             &job.workspace,
             hook,
             &ctx_value,
-            &source_id,
+            job.job_id,
             job.revision.as_deref(),
             defaults,
         )
@@ -542,6 +547,9 @@ async fn build_hook_context(
     })
 }
 
+/// `source_job_id` is the job whose terminal state (or suspended step) fired
+/// the hook. It is persisted as the hook job's `source_job_id` — the link
+/// [`hook_chain_depth`] walks — and, as a string, its `source_id`.
 #[allow(clippy::too_many_arguments)]
 async fn fire_single_hook(
     s: &Settlement,
@@ -549,12 +557,13 @@ async fn fire_single_hook(
     workspace: &str,
     hook: &HookDef,
     ctx_value: &serde_json::Value,
-    source_id: &str,
+    source_job_id: uuid::Uuid,
     revision: Option<&str>,
     defaults: crate::config::JobDefaults,
 ) -> anyhow::Result<()> {
     let workspaces = &s.workspaces;
     let pool = &s.pool;
+    let source_id = source_job_id.to_string();
     // Resolve action
     let action = workspace_config
         .actions
@@ -598,7 +607,7 @@ async fn fire_single_hook(
             anyhow::bail!("{msg}");
         }
 
-        let created = crate::job_creator::create_job_for_task_detailed(
+        let created = crate::job_creator::create_job_for_task_inner(
             workspaces,
             pool,
             workspace_config,
@@ -606,9 +615,11 @@ async fn fire_single_hook(
             task_ref,
             rendered_input,
             "hook",
-            Some(source_id),
+            Some(&source_id),
+            None,
+            None,
             revision,
-            None, // source_job_id: hooks never re-run a specific job
+            crate::job_creator::CreationMode::Hook { source_job_id },
             None, // agents_config not available in hook context; orchestrator dispatches agents
             defaults,
         )
@@ -660,13 +671,13 @@ async fn fire_single_hook(
         "distributed",
         Some(rendered_input.clone()),
         "hook",
-        Some(source_id),
+        Some(&source_id),
         None,
         None,
         None,
         revision,
         None, // raw_input: hook jobs don't persist raw_input (no re-run use case)
-        None,
+        Some(source_job_id),
         None,
         None, // max_retries: hook jobs have no task-level retry
     )
@@ -1577,7 +1588,7 @@ mod tests {
     /// Talks to a real Postgres so the walk exercises the actual
     /// `JobRepo::get` ancestry lookups, not a mock. No workspace or task
     /// config is needed — `hook_chain_depth` only reads `source_type`,
-    /// `source_id`, and `parent_job_id`, so the synthetic rows below never
+    /// `source_job_id`, `source_id` and `parent_job_id`, so the synthetic rows below never
     /// have to resolve to a real flow.
     #[tokio::test(flavor = "multi_thread")]
     async fn hook_chain_depth_counts_hook_links_across_intermediate_task_levels() {
@@ -1610,9 +1621,9 @@ mod tests {
         .unwrap();
 
         for _ in 0..HOOK_LINKS {
-            // The hook link itself: `source_type = "hook"`, `source_id` =
-            // the job that fired it, `parent_job_id = None` — exactly what
-            // `fire_single_hook`'s `type: task` branch produces.
+            // The hook link itself: `source_type = "hook"`, `source_id` and
+            // `source_job_id` = the job that fired it, `parent_job_id = None`
+            // — exactly what `fire_single_hook`'s `type: task` branch produces.
             let mut node = JobRepo::create_with_parent(
                 &pool,
                 "default",
@@ -1626,7 +1637,7 @@ mod tests {
                 None,
                 None,
                 None,
-                None,
+                Some(current),
                 None,
             )
             .await
@@ -1666,6 +1677,107 @@ mod tests {
              got {depth} — a chain with {INTERMEDIATE_LEVELS} intermediate task levels per hook \
              link must not defeat the hop budget"
         );
+    }
+
+    /// A hook job's ancestry continues from `source_job_id`, not from the
+    /// string in `source_id`. The two point at different jobs here: the walk
+    /// must reach the hook link behind `source_job_id` (depth 2), not stop at
+    /// the plain job `source_id` names (depth 1).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn hook_chain_depth_follows_source_job_id_not_source_id() {
+        use testcontainers::runners::AsyncRunner;
+        use testcontainers_modules::postgres::Postgres;
+
+        let container = Postgres::default().start().await.unwrap();
+        let port = container.get_host_port_ipv4(5432).await.unwrap();
+        let url = format!("postgres://postgres:postgres@localhost:{port}/postgres");
+        let pool = stroem_db::create_pool(&url).await.unwrap();
+        stroem_db::run_migrations(&pool).await.unwrap();
+
+        let create = |source_type: &'static str,
+                      source_id: Option<String>,
+                      source_job_id: Option<uuid::Uuid>| {
+            let pool = pool.clone();
+            async move {
+                JobRepo::create_with_parent(
+                    &pool,
+                    "default",
+                    "t",
+                    "distributed",
+                    None,
+                    source_type,
+                    source_id.as_deref(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    source_job_id,
+                    None,
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        let genesis = create("api", None, None).await;
+        let first_hook = create("hook", Some(genesis.to_string()), Some(genesis)).await;
+        let unrelated = create("api", None, None).await;
+        let second_hook = create("hook", Some(unrelated.to_string()), Some(first_hook)).await;
+
+        let job = JobRepo::get(&pool, second_hook).await.unwrap().unwrap();
+        assert_eq!(hook_chain_depth(&pool, &job).await, 2);
+    }
+
+    /// During a rolling deploy a pre-048 server writes hook rows with the
+    /// firing job only in `source_id`. The walk must continue through such a
+    /// row instead of ending there, or a chain crossing the deploy counts only
+    /// the links after it and overruns `MAX_HOOK_CHAIN_DEPTH`. Chain here:
+    /// typed hook -> legacy hook (NULL `source_job_id`) -> typed hook = 3.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn hook_chain_depth_continues_through_pre_048_hook_rows() {
+        use testcontainers::runners::AsyncRunner;
+        use testcontainers_modules::postgres::Postgres;
+
+        let container = Postgres::default().start().await.unwrap();
+        let port = container.get_host_port_ipv4(5432).await.unwrap();
+        let url = format!("postgres://postgres:postgres@localhost:{port}/postgres");
+        let pool = stroem_db::create_pool(&url).await.unwrap();
+        stroem_db::run_migrations(&pool).await.unwrap();
+
+        let create = |source_type: &'static str,
+                      source_id: Option<String>,
+                      source_job_id: Option<uuid::Uuid>| {
+            let pool = pool.clone();
+            async move {
+                JobRepo::create_with_parent(
+                    &pool,
+                    "default",
+                    "t",
+                    "distributed",
+                    None,
+                    source_type,
+                    source_id.as_deref(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    source_job_id,
+                    None,
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        let genesis = create("api", None, None).await;
+        let first = create("hook", Some(genesis.to_string()), Some(genesis)).await;
+        let legacy = create("hook", Some(format!("{first}/notify")), None).await;
+        let last = create("hook", Some(legacy.to_string()), Some(legacy)).await;
+
+        let job = JobRepo::get(&pool, last).await.unwrap().unwrap();
+        assert_eq!(hook_chain_depth(&pool, &job).await, 3);
     }
 
     // ─── H2 regression: instrument spans must not Debug-print the JobRow ─────

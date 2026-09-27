@@ -99,6 +99,8 @@ Last updated: 2026-06-03.
 
 ## Code Quality / Rust
 
+- [ ] Drop the `source_id` fallback in `settlement/hooks.rs::hook_chain_depth` once every deployment has run a release with migration 048 for longer than `retention.job_days` — until then pre-048 servers (rolling deploy) and not-yet-expired rows can have a hook job with NULL `source_job_id`.
+
 - [x] `context(format!(...))` → `with_context(|| ...)`
 - [x] `unwrap()` in production code → `expect()` with invariant description
 - [x] Connection pool sized (max=20, min=5)

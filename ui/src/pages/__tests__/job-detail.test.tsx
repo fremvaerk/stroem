@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Routes, Route } from "react-router";
 import type { JobDetail, JobStep, TaskDetail } from "@/lib/types";
 
@@ -19,6 +19,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
 });
 
 import {
+  ApiError,
   getJob,
   getTask,
   getTaskStats,
@@ -84,6 +85,7 @@ function job(overrides: Partial<JobDetail> = {}): JobDetail {
     source_job_id: null,
     restart_from_step: null,
     parent_job_id: null,
+    parent_step_name: null,
     revision: null,
     worker_id: null,
     created_at: "2026-09-01T10:00:00Z",
@@ -216,5 +218,169 @@ describe("JobDetailPage — Re-run and Restart availability", () => {
     expect(await screen.findByText("pipeline")).toBeTruthy();
     await waitFor(() => expect(mockGetTask).toHaveBeenCalled());
     expect(restartButton()).toBeNull();
+  });
+});
+
+describe("JobDetailPage — navigation to the task and the source job", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(getTaskStats).mockRejectedValue(new Error("no stats"));
+    vi.mocked(listJobArtifacts).mockResolvedValue([]);
+    vi.mocked(listWorkers).mockResolvedValue({ items: [], total: 0 });
+    vi.mocked(getStepLogs).mockResolvedValue({ logs: "", truncated: false, total_bytes: 0, returned_bytes: 0 });
+    mockGetTask.mockResolvedValue(task(true));
+  });
+
+  it("links the task name in the header to the task page", async () => {
+    mockGetJob.mockResolvedValue(
+      job({ workspace: "my ws", task_name: "nightly/sync" }),
+    );
+    renderPage();
+
+    const heading = await screen.findByRole("heading", { level: 1 });
+    const taskLink = await within(heading).findByRole("link", {
+      name: "nightly/sync",
+    });
+    expect(taskLink.getAttribute("href")).toBe(
+      "/workspaces/my%20ws/tasks/nightly%2Fsync",
+    );
+  });
+
+  it("shows the task name as text when the task does not exist", async () => {
+    // A single-step hook job's `_hook:<action>` (and `_global_state`, or a
+    // task since removed from the workspace) has no task page to link to.
+    mockGetTask.mockRejectedValue(new ApiError(404, "Task not found"));
+    mockGetJob.mockResolvedValue(
+      job({
+        task_name: "_hook:notify",
+        source_type: "hook",
+        source_job_id: "66666666-6666-6666-6666-666666666666",
+      }),
+    );
+    renderPage();
+
+    const heading = await screen.findByRole("heading", { level: 1 });
+    await waitFor(() => expect(mockGetTask).toHaveBeenCalled());
+    // Let the page's own rejection handler run before asserting.
+    await mockGetTask.mock.results[0].value.catch(() => {});
+    expect(within(heading).getByText("_hook:notify")).toBeTruthy();
+    expect(within(heading).queryByRole("link", { name: "_hook:notify" })).toBeNull();
+  });
+
+  it.each([
+    ["a server error", new ApiError(500, "Internal server error")],
+    ["a network error", new TypeError("Failed to fetch")],
+  ])("keeps the task link after %s fetching the task", async (_, err) => {
+    mockGetTask.mockRejectedValue(err);
+    mockGetJob.mockResolvedValue(job());
+    renderPage();
+
+    const heading = await screen.findByRole("heading", { level: 1 });
+    await waitFor(() => expect(mockGetTask).toHaveBeenCalled());
+    await mockGetTask.mock.results[0].value.catch(() => {});
+    expect(within(heading).getByRole("link", { name: "pipeline" })).toBeTruthy();
+  });
+
+  it("links a re-run back to its source job from the header and Source card", async () => {
+    mockGetJob.mockResolvedValue(
+      job({
+        source_type: "rerun",
+        source_id: "ala@example.com",
+        source_job_id: "33333333-3333-3333-3333-333333333333",
+      }),
+    );
+    renderPage();
+
+    const header = await screen.findByTestId("job-lineage");
+    expect(header.textContent).toBe("re-run of 33333333");
+    const links = screen.getAllByRole("link", { name: "33333333" });
+    expect(links).toHaveLength(2);
+    for (const link of links) {
+      expect(link.getAttribute("href")).toBe(
+        "/jobs/33333333-3333-3333-3333-333333333333",
+      );
+    }
+    // Who started the re-run stays visible in the Source card.
+    expect(screen.getByText("ala@example.com")).toBeTruthy();
+  });
+
+  it("names the step a restart began at", async () => {
+    mockGetJob.mockResolvedValue(
+      job({
+        source_type: "restart",
+        source_job_id: "33333333-3333-3333-3333-333333333333",
+        restart_from_step: "build",
+      }),
+    );
+    renderPage();
+
+    const header = await screen.findByTestId("job-lineage");
+    expect(header.textContent).toBe("restart of 33333333 from build");
+  });
+
+  it("links a task retry to the first attempt", async () => {
+    mockGetJob.mockResolvedValue(
+      job({
+        source_type: "retry",
+        source_id: "44444444-4444-4444-4444-444444444444",
+        retry_of_job_id: "55555555-5555-5555-5555-555555555555",
+        retry_attempt: 2,
+      }),
+    );
+    renderPage();
+
+    const header = await screen.findByTestId("job-lineage");
+    expect(header.textContent).toBe("retry of 55555555");
+    // retry_attempt counts retries; the card counts executions.
+    expect(screen.getByText("attempt 3")).toBeTruthy();
+    expect(screen.queryByText("44444444-4444-4444-4444-444444444444")).toBeNull();
+  });
+
+  it("links a type: task child to its parent job and the step that started it", async () => {
+    mockGetJob.mockResolvedValue(
+      job({
+        source_type: "task",
+        source_id: "22222222-2222-2222-2222-222222222222/deploy",
+        parent_job_id: "22222222-2222-2222-2222-222222222222",
+        parent_step_name: "deploy",
+      }),
+    );
+    renderPage();
+
+    const header = await screen.findByTestId("job-lineage");
+    expect(header.textContent).toBe("child of 22222222 at step deploy");
+    const links = screen.getAllByRole("link", { name: "22222222" });
+    expect(links).toHaveLength(2);
+    for (const link of links) {
+      expect(link.getAttribute("href")).toBe(
+        "/jobs/22222222-2222-2222-2222-222222222222",
+      );
+    }
+  });
+
+  it("links a hook job to the job that fired it", async () => {
+    mockGetJob.mockResolvedValue(
+      job({
+        task_name: "_hook:notify",
+        source_type: "hook",
+        source_id: "66666666-6666-6666-6666-666666666666",
+        source_job_id: "66666666-6666-6666-6666-666666666666",
+      }),
+    );
+    renderPage();
+
+    const header = await screen.findByTestId("job-lineage");
+    expect(header.textContent).toBe("hook for 66666666");
+    expect(screen.getAllByRole("link", { name: "66666666" })).toHaveLength(2);
+    // source_id repeats the linked id, so the Source card does not show it.
+    expect(screen.queryByText("66666666-6666-6666-6666-666666666666")).toBeNull();
+  });
+
+  it("shows no lineage for a job that was not created from another job", async () => {
+    mockGetJob.mockResolvedValue(job({ source_type: "user", source_id: "ala@example.com" }));
+    renderPage();
+
+    expect(await screen.findByText("user (ala@example.com)")).toBeTruthy();
+    expect(screen.queryByTestId("job-lineage")).toBeNull();
   });
 });

@@ -12,14 +12,74 @@ import { ServerEvents } from "@/components/server-events";
 import { ArtifactList } from "@/components/artifact-list";
 import { JsonViewer } from "@/components/json-viewer";
 import { LoadingSpinner } from "@/components/loading-spinner";
-import { getJob, getTask, getTaskStats, cancelJob, listJobArtifacts } from "@/lib/api";
+import { ApiError, getJob, getTask, getTaskStats, cancelJob, listJobArtifacts } from "@/lib/api";
 import { useTitle } from "@/hooks/use-title";
 import { useWorkerNames } from "@/hooks/use-worker-names";
 import { formatTime, formatDuration, formatDurationMs } from "@/lib/formatting";
 import { computeEta } from "@/lib/eta";
-import { isTopLevelJob } from "@/lib/job-status";
+import { isTopLevelJob, jobLineage } from "@/lib/job-status";
+import type { JobLineage } from "@/lib/job-status";
 import type { ArtifactItem } from "@/lib/api";
 import type { JobDetail, TaskStatsResponse } from "@/lib/types";
+
+const LINEAGE_LABEL: Record<JobLineage["kind"], string> = {
+  rerun: "re-run of",
+  restart: "restart of",
+  retry: "retry of",
+  child: "child of",
+  hook: "hook for",
+};
+
+/** Restart: "from <step>"; child: "at step <step>". */
+const LINEAGE_STEP_PREFIX: Record<JobLineage["kind"], string> = {
+  rerun: "",
+  restart: "from",
+  retry: "",
+  child: "at step",
+  hook: "",
+};
+
+/** "re-run of 1a2b3c4d" / "child of 1a2b3c4d at step deploy" / "hook for 1a2b3c4d" — links to that job. */
+function LineageLink({ lineage }: { lineage: JobLineage }) {
+  return (
+    <span>
+      {LINEAGE_LABEL[lineage.kind]}{" "}
+      <Link
+        to={`/jobs/${lineage.jobId}`}
+        className="font-mono text-primary hover:underline"
+        title={lineage.jobId}
+      >
+        {lineage.jobId.substring(0, 8)}
+      </Link>
+      {lineage.step && (
+        <>
+          {` ${LINEAGE_STEP_PREFIX[lineage.kind]} `}
+          <span className="font-mono">{lineage.step}</span>
+        </>
+      )}
+    </span>
+  );
+}
+
+/**
+ * The muted line under the lineage link in the Source card — what the link
+ * does not already say. A re-run/restart's `source_id` is who started it; a
+ * retry's is the previous attempt's id, so its attempt number reads better; a
+ * child's is `<parent>/<step>`, which the link spells out, so its source type
+ * (`task` or `agent_tool`) is shown instead; a hook's is the linked job's id.
+ */
+function lineageDetail(job: JobDetail, lineage: JobLineage): string | null {
+  switch (lineage.kind) {
+    case "retry":
+      return `attempt ${job.retry_attempt + 1}`;
+    case "child":
+      return job.source_type;
+    case "hook":
+      return null;
+    default:
+      return job.source_id;
+  }
+}
 
 export function JobDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -40,6 +100,10 @@ export function JobDetailPage() {
   // that the server will only reject. A failed fetch leaves it `null` too.
   // Undefined `can_execute` on a successful fetch means ACL is off ⇒ allowed.
   const [canExecute, setCanExecute] = useState<boolean | null>(null);
+  // The job's task has no page to link to: `getTask` answered 404 (a
+  // `_hook:<action>` / `_global_state` job, or a task since removed). Any other
+  // failure is not proof of absence, so the header keeps its link.
+  const [taskMissing, setTaskMissing] = useState(false);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -74,21 +138,26 @@ export function JobDetailPage() {
     };
   }, [job?.workspace, job?.task_name]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Fetch the task definition once per (workspace, task) purely for
-  // `can_execute`, which gates the "Restart from here" buttons. Failure is
-  // non-fatal: the server re-checks the permission on the restart request.
+  // Fetch the task definition once per (workspace, task) for `can_execute`,
+  // which gates the "Restart from here" buttons, and to learn whether the task
+  // exists at all. Failure is non-fatal: the server re-checks the permission on
+  // the restart request.
   useEffect(() => {
     if (!job) return;
     let cancelled = false;
     // Back to unknown whenever the task changes, so a stale `true` from the
     // previous task can never authorise controls for the new one.
     setCanExecute(null);
+    setTaskMissing(false);
     getTask(job.workspace, job.task_name)
       .then((data) => {
         if (!cancelled) setCanExecute(data.can_execute !== false);
       })
-      .catch(() => {
-        /* non-fatal: permission stays unknown and the controls stay hidden */
+      .catch((err) => {
+        // Permission stays unknown and the controls stay hidden.
+        if (!cancelled && err instanceof ApiError && err.status === 404) {
+          setTaskMissing(true);
+        }
       });
     return () => {
       cancelled = true;
@@ -240,6 +309,8 @@ export function JobDetailPage() {
   // Re-run and Restart both create a parentless job, so neither is offered on a
   // child, hook, agent-tool or upload job — the server rejects both with 400.
   const topLevel = isTopLevelJob(job);
+  const lineage = jobLineage(job);
+  const lineageNote = lineage && lineageDetail(job, lineage);
 
   return (
     <div className="space-y-6">
@@ -259,7 +330,16 @@ export function JobDetailPage() {
                 {job.workspace}
               </Link>
               <span className="mx-2 text-muted-foreground">/</span>
-              {job.task_name}
+              {taskMissing ? (
+                job.task_name
+              ) : (
+                <Link
+                  to={`/workspaces/${encodeURIComponent(job.workspace)}/tasks/${encodeURIComponent(job.task_name)}`}
+                  className="hover:underline"
+                >
+                  {job.task_name}
+                </Link>
+              )}
             </h1>
             <StatusBadge status={job.status} />
             {eta?.type === "eta" && (
@@ -281,8 +361,16 @@ export function JobDetailPage() {
               </span>
             )}
           </div>
-          <p className="mt-0.5 font-mono text-xs text-muted-foreground">
-            {job.job_id}
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            <span className="font-mono">{job.job_id}</span>
+            {lineage && (
+              <>
+                <span className="mx-1.5">·</span>
+                <span data-testid="job-lineage">
+                  <LineageLink lineage={lineage} />
+                </span>
+              </>
+            )}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -345,9 +433,23 @@ export function JobDetailPage() {
           },
           {
             label: "Source",
-            value: job.source_id
-              ? `${job.source_type} (${job.source_id})`
-              : job.source_type,
+            value: lineage ? (
+              <>
+                <LineageLink lineage={lineage} />
+                {lineageNote && (
+                  <p
+                    className="truncate text-xs font-normal text-muted-foreground"
+                    title={job.source_id ?? undefined}
+                  >
+                    {lineageNote}
+                  </p>
+                )}
+              </>
+            ) : job.source_id ? (
+              `${job.source_type} (${job.source_id})`
+            ) : (
+              job.source_type
+            ),
           },
           {
             label: "Revision",
@@ -367,21 +469,6 @@ export function JobDetailPage() {
             label: "Duration",
             value: formatDuration(job.started_at, job.completed_at),
           },
-          ...(job.retry_of_job_id
-            ? [
-                {
-                  label: "Retry of",
-                  value: (
-                    <Link
-                      to={`/jobs/${job.retry_of_job_id}`}
-                      className="font-mono text-xs text-primary hover:underline"
-                    >
-                      {job.retry_of_job_id.substring(0, 8)}
-                    </Link>
-                  ),
-                },
-              ]
-            : []),
           ...(job.retry_job_id
             ? [
                 {
@@ -392,46 +479,6 @@ export function JobDetailPage() {
                       className="font-mono text-xs text-primary hover:underline"
                     >
                       {job.retry_job_id.substring(0, 8)}
-                    </Link>
-                  ),
-                },
-              ]
-            : []),
-          ...(job.source_job_id && job.source_type === "restart"
-            ? [
-                {
-                  label: "Restart of",
-                  value: (
-                    <span className="text-xs">
-                      <Link
-                        to={`/jobs/${job.source_job_id}`}
-                        className="font-mono text-primary hover:underline"
-                      >
-                        {job.source_job_id.substring(0, 8)}
-                      </Link>
-                      {job.restart_from_step && (
-                        <>
-                          {" from "}
-                          <span className="font-mono">
-                            {job.restart_from_step}
-                          </span>
-                        </>
-                      )}
-                    </span>
-                  ),
-                },
-              ]
-            : []),
-          ...(job.source_job_id && job.source_type === "rerun"
-            ? [
-                {
-                  label: "Re-run of",
-                  value: (
-                    <Link
-                      to={`/jobs/${job.source_job_id}`}
-                      className="font-mono text-xs text-primary hover:underline"
-                    >
-                      {job.source_job_id.substring(0, 8)}
                     </Link>
                   ),
                 },

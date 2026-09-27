@@ -14335,6 +14335,10 @@ async fn test_hook_fires_on_job_success() -> Result<()> {
         .expect("Hook job not found");
     assert_eq!(hook_job.task_name, "_hook:notify");
     assert_eq!(hook_job.source_id, Some(job_id.to_string()));
+    // Typed lineage to the job that fired it — never `parent_job_id`, which
+    // would make the hook a sub-job (no task retry, cancelled with its source).
+    assert_eq!(hook_job.source_job_id, Some(job_id));
+    assert_eq!(hook_job.parent_job_id, None);
 
     // Verify hook step was created and is ready
     let hook_steps = JobStepRepo::get_steps_for_job(&pool, hook_job.job_id).await?;
@@ -15523,6 +15527,49 @@ async fn test_task_action_creates_child_job() -> Result<()> {
     Ok(())
 }
 
+/// Job detail of a `type: task` child names its parent job AND the parent
+/// step that created it — the UI's "child of <job> at step <step>" link.
+#[tokio::test]
+async fn test_child_job_detail_carries_parent_job_and_step() -> Result<()> {
+    let (router, pool, _mgr, _tmp, _c) =
+        setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
+    let resp = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/A/tasks/pipeline/execute",
+            json!({}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), 200);
+    let parent: Uuid = body_json(resp).await["job_id"].as_str().unwrap().parse()?;
+    let child = JobRepo::get_child_jobs(&pool, parent)
+        .await?
+        .pop()
+        .expect("child job");
+
+    let detail = router
+        .clone()
+        .oneshot(api_get(&format!("/api/jobs/{}", child.job_id)))
+        .await?;
+    assert_eq!(detail.status(), 200);
+    let body = body_json(detail).await;
+    assert_eq!(body["parent_job_id"], parent.to_string());
+    assert_eq!(body["parent_step_name"], "run");
+
+    // A top-level job has neither.
+    let detail = router
+        .clone()
+        .oneshot(api_get(&format!("/api/jobs/{parent}")))
+        .await?;
+    assert_eq!(detail.status(), 200);
+    let body = body_json(detail).await;
+    assert!(body["parent_job_id"].is_null(), "{body}");
+    assert!(body["parent_step_name"].is_null(), "{body}");
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_task_action_child_completion_updates_parent() -> Result<()> {
     let container = Postgres::default().start().await?;
@@ -15952,6 +15999,8 @@ async fn test_task_action_in_hook() -> Result<()> {
     // When hook action is type: task, it creates a real task job
     let hook_job = hook_jobs[0];
     assert_eq!(hook_job.task_name, "cleanup");
+    assert_eq!(hook_job.source_job_id, Some(job_id));
+    assert_eq!(hook_job.parent_job_id, None);
 
     // And the hook job should have the cleanup task's steps
     let hook_steps = JobStepRepo::get_steps_for_job(&pool, hook_job.job_id).await?;

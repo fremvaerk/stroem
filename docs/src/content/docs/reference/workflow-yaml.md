@@ -606,13 +606,14 @@ tasks:
 - If the new job also fails, no further retries (max_attempts: 2 exhausted)
 - On final failure, `on_error` hooks fire only once (not after each retry attempt)
 
-**Retry chain:** Each retry job links to the previous via `retry_of_job_id` for audit trail:
+**Retry chain:** every retry job's `retry_of_job_id` points at the first job of the chain; each failed attempt's `retry_job_id` points at the attempt that replaced it:
 
 ```
-Job 1 (failed)
-  └─ Job 2 (failed) [retry of Job 1]
-      └─ Job 3 (success) [retry of Job 2]
+Job 1 (failed)                retry_job_id → 2
+  └─ Job 2 (failed)           retry_of_job_id → 1, retry_job_id → 3
+      └─ Job 3 (success)      retry_of_job_id → 1
 ```
+If the first job has since been deleted by [retention](/operations/retention/), the pointer is cleared (`ON DELETE SET NULL`), and the next retry points at the attempt that just failed instead — not at the earliest attempt that still exists.
 
 **Task retry vs. step retry:**
 - **Step retry**: Faster, smaller scope, good for transient failures (network timeouts, temporary service degradation)

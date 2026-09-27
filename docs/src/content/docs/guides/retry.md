@@ -174,15 +174,15 @@ tasks:
 
 ### Retry chain
 
-Each retry job is linked to the previous via `retry_of_job_id`:
+Every retry job's `retry_of_job_id` points at the **first** job of the chain, and each failed attempt's `retry_job_id` points at the attempt that replaced it:
 
 ```
-Job A (failed at deploy step)
-  └─ Job B (failed at test step) [retry of Job A]
-      └─ Job C (success) [retry of Job B]
+Job A (failed at deploy step)      retry_job_id → B
+  └─ Job B (failed at test step)   retry_of_job_id → A, retry_job_id → C
+      └─ Job C (success)           retry_of_job_id → A
 ```
 
-View the chain in the UI or via API to understand failure progression.
+In the UI, a retry job shows **retry of `<first job>`** under its title and its attempt number in the **Source** card; a failed attempt that was retried shows a **Retried** link to the next attempt. If the first job has since been deleted by [retention](/operations/retention/), the pointer is cleared (`ON DELETE SET NULL`), and the next retry points at the attempt that just failed instead — not at the earliest attempt that still exists.
 
 ### When to use task retry
 

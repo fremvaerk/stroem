@@ -331,13 +331,27 @@ test.describe("Jobs", () => {
     await page.getByRole("button", { name: "Run Task" }).click();
     await page.waitForURL(/\/jobs\/.+/);
 
-    // Lineage badge: "Re-run of" should appear with a link back to the source job.
-    const rerunOfLabel = page.locator("p").filter({ hasText: /^Re-run of$/ });
-    await expect(rerunOfLabel).toBeVisible();
-    const rerunOfCard = rerunOfLabel.locator("..");
-    await expect(rerunOfCard.locator("a")).toContainText(
-      sourceJobId.substring(0, 8),
-    );
+    // Lineage under the header: "re-run of <id>" links back to the source job.
+    const lineage = page.getByTestId("job-lineage");
+    await expect(lineage).toHaveText(`re-run of ${sourceJobId.substring(0, 8)}`);
+    await lineage.getByRole("link").click();
+    await page.waitForURL(`**/jobs/${sourceJobId}`);
+  });
+
+  test("job header links the task name to the task page", async ({
+    page,
+    baseURL,
+  }) => {
+    const jobId = await triggerJob(baseURL!, "data-pipeline", {
+      data: "task-link",
+    });
+
+    await page.goto(`/jobs/${jobId}`);
+    await page
+      .getByRole("heading", { name: "data-pipeline" })
+      .getByRole("link", { name: "data-pipeline" })
+      .click();
+    await page.waitForURL(/\/workspaces\/default\/tasks\/data-pipeline$/);
   });
 
   test("job detail shows graph toggle for multi-step job", async ({

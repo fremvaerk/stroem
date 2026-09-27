@@ -10,14 +10,14 @@ Strøm can automatically clean up old data — inactive workers, completed jobs,
 ```yaml
 retention:
   worker_hours: 2          # Delete inactive workers older than 2h (optional)
-  job_days: 30             # Delete terminal jobs and logs older than 30d (optional)
+  job_days: 30             # Delete terminal jobs and logs 30d after they finished (optional)
   interval_secs: 3600      # How often cleanup runs, in seconds (default: 3600)
 ```
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `worker_hours` | integer | disabled | Hours after which inactive workers are deleted |
-| `job_days` | integer | disabled | Days after which terminal jobs and their logs are deleted |
+| `job_days` | integer | disabled | Days after a job **finished** before it and its logs are deleted |
 | `interval_secs` | integer | `3600` | How often the cleanup runs (rate-limited independently of the recovery sweep) |
 
 ## Worker retention (`worker_hours`)
@@ -26,12 +26,14 @@ Deletes workers with `status = 'inactive'` whose last heartbeat is older than th
 
 ## Job retention (`job_days`)
 
-For each terminal job (`completed`, `failed`, `cancelled`, or `skipped`) older than the configured threshold:
+For each terminal job (`completed`, `failed`, `cancelled`, or `skipped`) that finished more than `job_days` ago:
 1. Deletes local log files (`.jsonl` and legacy `.log`)
 2. Deletes the archive log (S3 or local archive, if configured)
 3. Deletes the job and its steps from the database (steps are cascade-deleted via FK constraint)
 
 Pending and running jobs are never affected. Jobs are processed in batches of 1000 per cleanup cycle.
+
+The age is counted from when the job **finished** (`completed_at`; a terminal job without one falls back to when it was created). A job that ran for longer than `job_days` is therefore kept for `job_days` after it ended — it is never deleted while its hooks, task retry and log archive are still being written.
 
 ## How it works
 
