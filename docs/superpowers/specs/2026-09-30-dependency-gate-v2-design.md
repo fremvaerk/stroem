@@ -1,6 +1,6 @@
 # Dependency Gate v2 — per-edge optional dependencies, self-scoped `continue_on_failure` — Design
 
-Status: draft, awaiting user review
+Status: revision 2, Codex round 1 findings addressed; awaiting further review
 Ships in: 0.18.0 (breaking, on top of the already-breaking 0.17.0)
 Supersedes: `2026-09-26-dependency-gate-design.md` §2.1, §2.4, §14 (explicitly
 reverses that spec's non-goal of a dependent-side flag)
@@ -65,13 +65,34 @@ model was rebuilt from those rules rather than patched again.
 
 ### 2.1 `continue_on_failure` becomes self-scoped only
 
-> `continue_on_failure: true` on step `X`: if `X` itself fails or is
-> cancelled, that failure does not fail the job. It has no effect on `X`'s
-> dependents — they gate on `X` exactly as if the flag were absent.
+> `continue_on_failure: true` on step `X`: if `X` itself fails, that failure
+> does not fail the job. It has no effect on `X`'s dependents — they gate on
+> `X` exactly as if the flag were absent.
 
 This drops the "dependents treat `X` as satisfied" half of the 0.17.0
 definition entirely. `X`'s own outcome (Failed/Cancelled) is unchanged; only
 what it does to job status and to the gate changes.
+
+**Cancellation is not covered by this flag**, and keeps its existing,
+separate precedence, unchanged from shipped `settle.rs`: an explicit,
+external job cancellation (a user or system cancel signal) always produces
+job status `Cancelled`, regardless of any step's flags. Short of that, a
+`Cancelled` *row* (e.g. a single step cancelled by the recovery sweep without
+the whole job being cancelled) is folded into job-status determination
+*after* the uncaught-failure check — it is never itself "caught" by
+`continue_on_failure`, matching today's behaviour. §2.4 restates the full
+order.
+
+**Loops are a pre-existing, narrower exception, unchanged by this spec.** A
+`for_each` placeholder's own `continue_on_failure` already does more than
+protect job status: it also decides whether the placeholder itself rolls up
+as `completed` or `failed` when one of its instances failed, and (for
+`sequential: true` loops) whether later instances still run after an earlier
+one failed (`cascade.rs::phase_rollup`, R5/R6). Those are real execution
+effects, but they are *internal to the loop* — they were never part of the
+0.17.0 "unblock my dependents" propagation this spec removes, and this spec
+does not change them. §6 restates this explicitly so it isn't read as an
+oversight.
 
 ### 2.2 `continue_when_skipped` is unchanged
 
@@ -100,6 +121,14 @@ proceed regardless of which one it was. It is a strict superset of both
 `continue_on_failure` and `continue_when_skipped`'s tolerance, evaluated
 per-edge, declared by the dependent, not broadcast from the dependency.
 
+`optional: true` only weakens the *outcome* requirement, never the
+*existence* one: an optional entry must still name a step that actually
+exists in the flow (validated exactly like a required entry, §7), and the
+gate still waits for it to reach a terminal state before proceeding.
+`optional` never means "this dependency doesn't have to run" or "may be
+absent from the flow" — only "I don't care which terminal state it lands
+in."
+
 This was chosen over three other shapes considered and rejected in
 discussion:
 
@@ -121,18 +150,30 @@ whether a hypothetical failure there would be "caught" by
 dependents* — a structural walk over the whole flow graph, with cycle
 guarding. Once `continue_on_failure` no longer propagates (§2.1), that
 recursive fallback can never fire: nothing downstream can catch a failure it
-didn't declare tolerance for itself. Job-status determination collapses to:
+didn't declare tolerance for itself.
 
-```
-job fails ⟺ some job_step row has status Failed or Cancelled
-             AND that row's flow step does not have continue_on_failure = true
-```
+Job-status determination keeps the exact precedence order already in
+shipped `settle.rs` — this spec changes only step 2's definition of
+"uncaught", nothing else in the order:
 
-(Skipped rows still never decide job status, unchanged from every prior
-revision.) `caught_steps()`, `failure_caught()`, and their cycle-detection
-machinery are deleted; the check becomes a direct lookup keyed by the failed
-row's flow-step name (loop instances still normalize to their placeholder's
-name, exactly as `flow_step_name` does today).
+1. The job was explicitly cancelled (external signal) → `Cancelled`,
+   unconditional, no flag can override it (unchanged from today).
+2. Else, if any row has status `Failed` and its flow step does not have
+   `continue_on_failure = true` → `Failed`. (This is the one thing changing:
+   "uncaught" used to mean "not caught by `caught_steps()`'s recursive walk";
+   it now means "the failing row's own flow step lacks the flag.")
+3. Else, if any row has status `Cancelled` (e.g. a step cancelled by the
+   recovery sweep without the job itself being cancelled) → `Cancelled`. A
+   cancelled row is never excused by `continue_on_failure` — cancellation
+   sits outside the catch mechanism entirely, matching shipped behaviour.
+4. Else → `Completed`.
+
+(Skipped rows never decide job status, at any step of this order — unchanged
+from every prior revision.) `caught_steps()`, `failure_caught()`, and their
+cycle-detection machinery are deleted; step 2's check becomes a direct
+lookup keyed by the failed row's flow-step name (loop instances still
+normalize to their placeholder's name, exactly as `flow_step_name` does
+today).
 
 ### 2.5 Verdict table
 
@@ -148,6 +189,24 @@ The one behavioural change to the required-edge column versus 0.17.0:
 in that column — the choice-skip row, the pending row — is unchanged from
 the 0.17.0 table.
 
+**Combining multiple entries.** A step's overall gate result takes the worst
+verdict across all its `depends_on` entries, in this dominance order:
+`BlockFail` > `Pending` > `BlockSkip` > `Open`. So a step with one required
+dependency that failed and one optional dependency still running is
+immediately `unreachable` (`BlockFail` wins outright, it does not wait for
+the optional one); a step with one required choice-skipped dependency and
+one optional pending dependency waits (`Pending` beats `BlockSkip`). This is
+the existing 0.17.0 combination rule, unchanged — §2.3 only adds a new way
+for a single entry to resolve to `Pass`. §3's fix to `ai_sources` is a direct
+application of this: its required `build-sessions` edge dominates its
+optional `ai_maintain` edge.
+
+**Duplicate entries for the same step are rejected by validation**, not
+given an implicit precedence. A `depends_on` list naming the same step twice
+(e.g. `[a, {step: a, optional: true}]`) is almost always a copy-paste
+mistake, and picking a silent winner (required wins? optional wins? first
+listed wins?) would hide it instead of surfacing it.
+
 ## 3. Worked example: `jobs/.workflows/recalc/pipeline.yaml`
 
 The seven target rules, and the config that satisfies each:
@@ -155,7 +214,7 @@ The seven target rules, and the config that satisfies each:
 | # | Rule | Config |
 |---|---|---|
 | 1 | `build-sessions` fails → job fails, nothing depending on it runs | No `continue_on_failure` on `build-sessions`. Its (required, unannotated) dependents block. |
-| 2, 3 | `ai_maintain` fails or is skipped → `ai_sources` still runs | `ai_sources`: `depends_on: [{step: ai_maintain, optional: true}]` — one mechanism for both outcomes. |
+| 2, 3 | `ai_maintain` fails or is skipped → `ai_sources` still runs — but a `build-sessions` failure must still stop it (rule 1) | `ai_sources`: `depends_on: [build-sessions, {step: ai_maintain, optional: true}]` — `build-sessions` stays required so rule 1 holds transitively through `ai_sources`; `ai_maintain` is optional so its own outcome (fail or skip) never blocks. |
 | 4 | `ml-prediction-master` fails → job fails | No `continue_on_failure` on it. |
 | 5, 6 | `ml-prediction-beta`/`-stage` fail → job survives, but their impressions steps skip (not run on empty data) | `continue_on_failure: true` on the prediction steps (job-status only); the impressions steps keep them as required (unannotated) dependencies. |
 | 7 | `merge-ml` requires `ml-impressions-master`, tolerates `-beta`/`-stage` in any state | `merge-ml`'s `depends_on` marks only the beta/stage entries `optional: true`. |
@@ -173,8 +232,19 @@ Full diff:
   ai_sources:
     action: ai_traffic_model.sources
 -   depends_on: [ai_maintain]
-+   depends_on: [{step: ai_maintain, optional: true}]
--   continue_on_failure: true            # did nothing for ai_sources itself under either model — remove
++   depends_on: [build-sessions, {step: ai_maintain, optional: true}]
+    # build-sessions is added here, required. Without it, ai_maintain's own
+    # optional edge would let ai_sources run even when build-sessions itself
+    # failed: ai_maintain would be blocked "unreachable", which an optional
+    # edge tolerates the same as a genuine failure — violating rule 1. (This
+    # fixes a bug Codex's review of this spec's first draft found: the
+    # example as originally written let ai_sources bypass a build-sessions
+    # failure it was never meant to.) Per §2.5's combined-verdict dominance,
+    # the required build-sessions edge failing blocks ai_sources outright,
+    # regardless of the optional ai_maintain edge.
+    continue_on_failure: true            # kept, now self-scoped: protects the job if
+                                          # ai_sources itself crashes — an independent
+                                          # decision from the gating question above
 
   ml-prediction-beta:
     depends_on: [build-sessions]
@@ -236,12 +306,27 @@ impl DependsOnEntry {
 }
 ```
 
-Every current call site that treats `depends_on` as `&[String]` (cycle
-detection, validation, the render-context dependency graph, the docs
-generator, the UI's DAG payload) moves to `.iter().map(DependsOnEntry::name)`
-or gets a small adapter. Cycle detection is unaffected by `optional` — an
-optional edge is still an edge for graph-shape purposes; only the gate's
-runtime verdict differs.
+Deserialization of a malformed `Detailed` entry (e.g. a typo'd key) must
+produce a hard parse error, not silently fall back to an empty or partial
+`depends_on` list — this applies to both inline flow steps and steps pulled
+in from a referenced library action; neither path may use an
+`unwrap_or_default()`-style fallback that would drop dependencies without
+surfacing an error.
+
+Every current call site that treats `depends_on` as `&[String]` moves to
+`.iter().map(DependsOnEntry::name)` or a small adapter. This is not limited
+to the gate — the full list of consumers: cycle detection and the
+transitive-skippable check (`validation.rs`), the render-context dependency
+graph, the docs generator, the UI's DAG payload, the task/job detail API
+responses (`web/api/tasks.rs`), the UI's TypeScript types
+(`ui/src/lib/types.ts`, currently typed as a plain string array), the
+restart-preview computation (`restart.rs`), and the CLI local runner
+(`stroem-cli/src/local/run.rs`). Each of these needs to either keep working
+on plain names (via the adapter) or, where it's user-facing (the API
+response, the UI, the restart preview), surface the `optional` marker
+verbatim so a viewer can tell which edges are required. Cycle detection is
+unaffected by `optional` — an optional edge is still an edge for
+graph-shape purposes; only the gate's runtime verdict differs.
 
 ## 5. Shared gate (`stroem-common::gate`)
 
@@ -256,54 +341,117 @@ runtime verdict differs.
   `continue_on_failure`).
 - `caught_steps()` and `failure_caught()` are deleted. Callers (`settle.rs`'s
   job-status decision, the hooks `tolerated` field) switch to the direct
-  per-row check in §2.4: `flow.get(flow_step_name(step_name,
-  loop_source)).is_some_and(|fs| fs.continue_on_failure)`.
+  per-row check `flow.get(flow_step_name(step_name,
+  loop_source)).is_some_and(|fs| fs.continue_on_failure)`, applied in the
+  exact 4-step order §2.4 specifies — explicit cancellation, then uncaught
+  failures, then any cancelled row, then completed — not a flat "does this
+  row have the flag" scan.
 
 ## 6. Server cascade (`crates/stroem-server/src/cascade.rs`)
 
 Phase structure (P0–P3) is unchanged — this spec touches only what `gate_for`
 computes, not when it's called. `phase_rollup`'s existing use of a `for_each`
-placeholder's own `continue_on_failure` (deciding whether a failed loop
-instance fails the *placeholder*) is unaffected: that was always a
-self-scoped question ("does this loop's own outcome count as a failure"),
-never a propagation one, so §2.1 doesn't change it. It does mean a
-placeholder that currently also relies on its `continue_on_failure` to
-*unblock its dependents* needs the same audit as any other step — see §9.
+placeholder's own `continue_on_failure` — deciding whether a failed loop
+instance fails the *placeholder* (R6) and whether a `sequential` loop keeps
+promoting instances after a failure (R5) — is the loop exception §2.1
+carves out explicitly: unchanged by this spec, and deliberately not
+"job-status only" (it's intra-loop execution, not the cross-step propagation
+being removed). A placeholder that currently *also* relies on its
+`continue_on_failure` to unblock a step that depends on the placeholder as a
+whole — a different question from the loop's own rollup — needs the same
+audit as any other step, see §9.
 
 ## 7. Validation (`stroem-common::validation`)
 
 The existing "step will be skipped whenever its dependency is skipped, add
-`continue_when_skipped`" warning must skip entries already marked
-`optional: true` (an optional edge needs no such flag on the dependency —
-it's unconditionally satisfied). No new validation is required for the
-`optional` marker itself; a bad `step:` name inside a `Detailed` entry is
-caught by the same "unknown dependency" check as a bad bare-string entry.
+`continue_when_skipped`" warning needs two changes, not one:
+
+1. Suppress the warning on an entry already marked `optional: true` — an
+   optional edge needs no `continue_when_skipped` on the dependency, it's
+   unconditionally satisfied regardless of skip reason.
+2. `is_transitively_skippable`'s propagation must *stop* at an optional
+   edge, not just skip warning about it. Today it walks forward through
+   `depends_on` to find steps that could be skipped as a side effect of an
+   upstream `when`. Without this, `A(when) → B(optional: A) → M(required:
+   B, C)` still gets flagged as "M will be skipped whenever A is skipped"
+   even though `B`'s optional edge already absorbs that — exactly the false
+   positive the warning exists to avoid.
+
+A bad `step:` name inside a `Detailed` entry is caught by the same "unknown
+dependency" check as a bad bare-string entry; a duplicate entry for the same
+step name is rejected per §2.5.
 
 ## 8. Hooks
 
 `hook.failed_steps[].tolerated` is redefined from "caught anywhere
 downstream" to "this step's own `continue_on_failure` is set" — a direct
-flag lookup instead of a graph walk. This is a narrower, more literal
-reading of "tolerated" and needs its own line in the upgrade guide (§11):
-a failure that used to show `tolerated: true` only because something further
-downstream had the flag will now show `tolerated: false` on the failing step
-itself (the job may still be `completed` if that downstream step's
-`optional` edge let everything past it — but the *hook payload's* per-step
-flag now reflects that step alone).
+flag lookup instead of a graph walk. Under §2.4's precedence this is now
+exactly consistent with job status, not just narrower: the job can only end
+`completed` if *every* `Failed` row has `tolerated: true` on itself. (An
+earlier draft of this spec described a case where a failure showed
+`tolerated: false` while the job still completed via a downstream `optional`
+edge — that case is impossible under §2.4 as written: an optional edge
+changes whether execution continues past a block, never whether an
+already-failed, unflagged row is excused from job status.)
 
-## 9. Migration guidance (for the upgrade doc, §11)
+This is still a behaviour change worth its own line in the upgrade guide
+(§10): a failure that used to show `tolerated: true` only because something
+further downstream had the flag now shows `tolerated: false`, and — because
+job status is computed the same way — the job itself now ends `failed` where
+it used to end `completed`. That status flip has knock-on effects:
+
+- `on_error` fires instead of `on_success`.
+- A task-level `retry` (if configured) can now fire where it didn't before.
+- `stroem_jobs_completed_total` counts the job under `status="failed"`
+  instead of `"completed"`.
+
+**A cancellation-driven `Failed` job's hook payload is a known, pre-existing
+gap, not introduced here**: `hook.failed_steps` is built from `Failed` rows
+only (§2.4 step 2). Nothing in §2.4's precedence order lets a `Cancelled`-only
+row drive `Failed` status — that path stays `Cancelled` (step 3) exactly as
+today — so a job with no `Failed` rows never hits the empty-`failed_steps`
+case this could otherwise create; this gap is unchanged and out of scope.
+
+## 9. Migration guidance (for the upgrade doc, §10)
 
 Any workflow relying on 0.17.0's `continue_on_failure`-on-the-dependency
 propagation (the exact case this spec removes) needs each such dependent
 edge re-expressed as `{step: <name>, optional: true}` on the dependent's own
-`depends_on`. This is mechanical but not automatable in general — the
-existing 0.17.0 upgrade guide's checklist item ("search for
-`continue_on_failure` on a step with a `depends_on`...") gets a second pass:
-search for `continue_on_failure` on any step that has *dependents*, and for
-each one, either accept it becomes self-scoped-only (if the workflow never
-actually needed downstream propagation, e.g. it degenerately worked before
-because that node had no dependents), or add `optional: true` on each
-dependent's edge to it.
+`depends_on`. This is mechanical but not automatable in general, and it is
+**not** a behaviour-preserving search-and-replace — two things make it
+broader than a direct swap:
+
+**1. Transitive/leaf catches are easy to miss.** 0.17.0's `caught_steps()`
+walks arbitrarily far downstream: for a chain `A → B → C(flagged) → D`,
+0.17.0 catches `A`'s failure at `C` (every path from `A` reaches a flag), so
+`B` and `C` are skipped `unreachable`, `D` still runs, and the *job*
+completes — even though `A`, `B`, and the flag itself are three, two, and
+one hop apart respectively. Adding `optional: true` on `D`'s edge to `C`
+restores `D` running, but does **not** restore the job completing — under
+this spec only `A`'s *own* `continue_on_failure` can do that, and `A` has
+none. The 0.17.0 upgrade checklist's search ("`continue_on_failure` on a
+step that has a `depends_on`") only ever looks at direct edges; it does not
+surface this multi-hop case. The migration audit needs to walk each
+currently-`completed` job's dependency chain from every failure backward to
+confirm the *origin* of the failure — not just its immediate catcher — has
+(or is deliberately given) its own `continue_on_failure` if the job must
+still complete.
+
+**2. The mechanical swap widens tolerance beyond failure.** `optional: true`
+tolerates *any* terminal outcome, including a choice-class skip
+(`condition`/`empty`/`cascade`) — `continue_on_failure` never did; that was
+`continue_when_skipped`'s job. A dependency that has `continue_on_failure`
+but not `continue_when_skipped` today blocks a downstream choice-skip. After
+converting its outgoing edges to `optional: true`, it no longer does. If a
+workflow relies on that distinction — tolerate the dependency failing, but
+still block on it being skipped by choice — the migration needs a different
+answer for that edge: keep it required, and separately decide whether
+`continue_when_skipped` belongs on the dependency too, rather than a
+blanket `optional: true`.
+
+The existing 0.17.0 upgrade guide's checklist item gets a second pass
+covering both of these, not just "search for `continue_on_failure` on a step
+that has dependents and add `optional: true`."
 
 ## 10. Documentation
 
@@ -319,13 +467,19 @@ dependent's edge to it.
 - New upgrade page (`docs/src/content/docs/operations/upgrade-0-18-*.md`),
   parallel to the 0.17 one, covering §9's migration guidance and the hooks
   change (§8).
+- `CONTEXT.md` glossary: the `Settlement`, `Dependency gate`, and `Caught
+  failure` entries describe the 0.17.0 recursive-catch model; update them to
+  the direct per-row check (§2.4).
 
 ## 11. Tests
 
 - `gate.rs`: full rewrite of `verdict_table` and `gate_reads_the_dependency_flags_only`
   for the new signature; delete `caught_steps_*` tests; add
   tests for the optional-edge Pass-on-anything behaviour (including Pending
-  still waiting).
+  still waiting); add cases for combined-verdict dominance (§2.5) — a
+  required failed entry alongside a pending optional entry resolves
+  immediately, not after waiting; add a validation test rejecting a
+  duplicate entry naming the same step twice.
 - `cascade.rs`: update fixtures using the old `fs()` test helper for the new
   `depends_on` shape; add a case mirroring `ml-impressions-beta` (one
   required + one optional dependency on the same step).
@@ -336,8 +490,12 @@ dependent's edge to it.
 - `stroem-cli` local runner: same gate, same test treatment as `cascade.rs`.
 - `tests/e2e-workspace/`: extend the conditional fixtures with an
   optional-dependency scenario.
-- A migration test is not applicable — no DB schema changes, this is a YAML
-  schema and in-memory gate change only.
+- A DB migration test is not applicable — no schema changes. A *behaviour*
+  migration test is: build a flow shaped like §9's `A → B → C(flagged) → D`
+  chain, drive it through a failure at `A`, and assert the job now ends
+  `Failed` (matching §9's documented, accepted change) with `D` still
+  running/skipped correctly per its own edge's `optional` marker — pinning
+  that this specific regression from 0.17.0 is deliberate, not accidental.
 
 ## 12. Rollout
 
@@ -345,6 +503,18 @@ dependent's edge to it.
   ago). Release notes lead with the behaviour change and link both the
   0.17.0 and 0.18.0 upgrade guides.
 - No DB migration. `job_step.skip_reason` values are unchanged.
+- **In-flight jobs are re-evaluated under the new gate on their next
+  cascade** (settlement resolves the task's current config on every advance;
+  it is never pinned to the config a job started with — see CLAUDE.md §
+  Settlement). A job created under 0.17.0 that is still running at upgrade
+  time can see a downstream step it was counting on to transitively catch an
+  earlier failure (§9) stop catching it mid-flight, flipping what would have
+  been a `completed` job to `failed`. This is the same class of risk
+  0.17.0's own rollout note accepted for its cascade change; it is accepted
+  here for the same reason (re-running the cascade on every step transition
+  makes an atomic "old rules until this job finishes" cutover impractical),
+  and should be called out in the release notes alongside the upgrade guide,
+  not left implicit.
 - Operational note, not part of this spec's scope: as of 2026-09-29,
   production had likely not yet been upgraded past pre-0.17 server code (the
   job that motivated this spec showed pre-0.17 gating behaviour). If that
@@ -404,3 +574,36 @@ docs.gitlab.com/ci/yaml (needs), docs.aws.amazon.com/step-functions
   `{step, optional}` shape. `ai_maintain`'s dependency on `build-sessions`
   confirmed required (not optional) — the action reads session data
   `build-sessions` produces directly, not through a templated input.
+- 2026-09-30, Codex round 1 (thread `01a0f180-78b2-7642-b836-62a928629273`,
+  verdict SHIP WITH FIXES): all findings addressed in revision 2.
+  - High, `ai_sources` bypassed rule 1: `build-sessions` added as a required
+    dependency alongside `ai_maintain` (optional) — §3, backed by the new
+    combined-verdict dominance rule in §2.5.
+  - High, loop rollup wasn't job-status-only: §2.1 now carves this out
+    explicitly as a pre-existing, unchanged, intra-loop exception; §6
+    restates it.
+  - High, cancellation precedence unspecified: §2.1/§2.4 now state the full
+    4-step order matching shipped `settle.rs` (explicit cancel → uncaught
+    failure → any cancelled row → completed), narrowing `continue_on_failure`
+    to cover only `Failed`, not `Cancelled`.
+  - §8 contradiction (tolerated:false yet job completed) resolved — shown
+    impossible under the corrected §2.4 order; added the status-flip
+    knock-on effects (hooks, retry, metrics) and noted the cancellation/empty-
+    `failed_steps` case is pre-existing and out of scope.
+  - §3's incorrect claim that `ai_sources`' own `continue_on_failure` did
+    nothing — reverted the removal, corrected the reasoning.
+  - §10/§11 cross-references fixed; CONTEXT.md glossary added to §10.
+  - §2.5 gained combined-verdict dominance and duplicate-entry rejection;
+    §2.3 gained the optional-≠-absent clarification.
+  - §7 extended: `is_transitively_skippable` must stop propagating through
+    optional edges, not just suppress the warning on them.
+  - §4 gained a strict-parsing requirement (no silent `unwrap_or_default()`
+    on malformed entries) and the full wire-format/consumer list (API, UI
+    types, restart preview, CLI).
+  - §9 expanded for transitive/leaf catches (a multi-hop chain's original
+    failure needs its own flag, not just a fix at the immediate catcher) and
+    for the choice-skip-tolerance widening the mechanical migration
+    introduces.
+  - §12 gained an explicit in-flight-job upgrade-risk paragraph; §11 gained
+    a behaviour migration test and combined-verdict/duplicate-entry test
+    cases.
