@@ -1,6 +1,10 @@
 # Dependency Gate v2 — per-edge optional dependencies, self-scoped `continue_on_failure` — Design
 
-Status: revision 3, Codex round 2 findings addressed; awaiting further review
+Status: **SUPERSEDED 2026-10-01, before sign-off** — see
+`2026-10-01-dependency-conditions-design.md`. Kept for its review history
+(Codex rounds 1-2 found and fixed real bugs in the worked example and
+migration guidance that remain relevant background); do not implement
+against this file.
 Ships in: 0.18.0 (breaking, on top of the already-breaking 0.17.0)
 Supersedes: `2026-09-26-dependency-gate-design.md` §2.1, §2.4, §14 (explicitly
 reverses that spec's non-goal of a dependent-side flag)
