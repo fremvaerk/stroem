@@ -364,14 +364,20 @@ mod tests {
             make_step_with_entries(
                 "a",
                 vec![DependsOnEntry::Any(AnyEntry {
-                    any: vec![DependsOnEntry::Name("x".into()), DependsOnEntry::Name("y".into())],
+                    any: vec![
+                        DependsOnEntry::Name("x".into()),
+                        DependsOnEntry::Name("y".into()),
+                    ],
                 })],
             ),
         );
         flow.insert("x".to_string(), make_step("a", vec![]));
         flow.insert("y".to_string(), make_step("a", vec![]));
         let order = validate_dag(&flow).unwrap();
-        assert!(order.iter().position(|s| s == "x").unwrap() < order.iter().position(|s| s == "m").unwrap());
+        assert!(
+            order.iter().position(|s| s == "x").unwrap()
+                < order.iter().position(|s| s == "m").unwrap()
+        );
     }
 
     #[test]
@@ -382,7 +388,9 @@ mod tests {
             "m".to_string(),
             make_step_with_entries(
                 "a",
-                vec![DependsOnEntry::All(AllEntry { all: vec![DependsOnEntry::Name("ghost".into())] })],
+                vec![DependsOnEntry::All(AllEntry {
+                    all: vec![DependsOnEntry::Name("ghost".into())],
+                })],
             ),
         );
         assert!(validate_dag(&flow).is_err());
