@@ -30,13 +30,18 @@ pub fn decide(task: &TaskDef, steps: &[JobStepRow]) -> Option<Settled> {
         return None;
     }
 
-    // Spec 2026-09-26 §2.4: only `failed` rows can fail the job, and only when
-    // no `continue_on_failure` catches the failure downstream. Loop instances
-    // are judged by their placeholder; skipped rows never decide the status.
-    let caught = stroem_common::gate::caught_steps(&task.flow);
+    // Spec 2026-10-01 §6: only a failed row's OWN continue_on_failure excuses
+    // it — no more structural "caught somewhere downstream" walk. Loop
+    // instances are judged by their placeholder (flow_step_name).
     let untolerated_failure = steps.iter().any(|s| {
         s.status == StepStatus::Failed.as_ref()
-            && !stroem_common::gate::failure_caught(&caught, &s.step_name, s.loop_source.as_deref())
+            && !task
+                .flow
+                .get(stroem_common::gate::flow_step_name(
+                    &s.step_name,
+                    s.loop_source.as_deref(),
+                ))
+                .is_some_and(|fs| fs.continue_on_failure)
     });
     if untolerated_failure {
         return Some(Settled {
@@ -56,11 +61,13 @@ pub fn decide(task: &TaskDef, steps: &[JobStepRow]) -> Option<Settled> {
     }
 
     // Output = outputs of the flow's terminal steps (nothing depends on them).
-    let depended_on: HashSet<&str> = task
-        .flow
-        .values()
-        .flat_map(|fs| fs.depends_on.iter().map(|s| s.as_str()))
-        .collect();
+    let depended_on: HashSet<&str> = {
+        let mut names = Vec::new();
+        for fs in task.flow.values() {
+            stroem_common::depends_on::collect_names(&fs.depends_on, &mut names);
+        }
+        names.into_iter().collect()
+    };
     let terminal_steps: HashSet<&str> = task
         .flow
         .keys()
@@ -164,6 +171,7 @@ pub async fn cascade_and_settle(
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use stroem_common::depends_on::DependsOnEntry;
     use stroem_common::models::workflow::FlowStep;
 
     fn flow_step(deps: &[&str], continue_on_failure: bool) -> FlowStep {
@@ -171,10 +179,13 @@ mod tests {
             action: "noop".to_string(),
             name: None,
             description: None,
-            depends_on: deps.iter().map(|s| s.to_string()).collect(),
+            depends_on: deps
+                .iter()
+                .map(|s| DependsOnEntry::Name(s.to_string()))
+                .collect(),
             input: HashMap::new(),
             continue_on_failure,
-            continue_when_skipped: false,
+            legacy_continue_when_skipped: None,
             timeout: None,
             when: None,
             for_each: None,
@@ -301,8 +312,11 @@ mod tests {
     }
 
     #[test]
-    fn failure_caught_downstream_completes() {
-        // a (no flag) failed → b (cof) skipped unreachable → c completed
+    fn only_a_failed_step_s_own_flag_excuses_it_not_a_downstream_catcher() {
+        // a(no flag) -> b(cof: true) -> c. Under the OLD caught_steps() rule,
+        // a's failure was "caught" because b catches it structurally, even
+        // though a itself has no flag. Under the new rule, only a's own flag
+        // counts (spec 2026-10-01 §6).
         let t = task(vec![
             ("a", flow_step(&[], false)),
             ("b", flow_step(&["a"], true)),
@@ -311,8 +325,19 @@ mod tests {
         let steps = vec![
             row("a", "failed", None),
             skipped("b", Some("unreachable")),
-            row("c", "completed", None),
+            skipped("c", Some("unreachable")),
         ];
+        assert_eq!(
+            decide(&t, &steps).unwrap().status,
+            JobStatus::Failed,
+            "a has no flag of its own — must fail, regardless of b's"
+        );
+    }
+
+    #[test]
+    fn a_step_s_own_continue_on_failure_still_excuses_its_own_failure() {
+        let t = task(vec![("a", flow_step(&[], true))]);
+        let steps = vec![row("a", "failed", None)];
         assert_eq!(decide(&t, &steps).unwrap().status, JobStatus::Completed);
     }
 
