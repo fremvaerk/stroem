@@ -1,3 +1,4 @@
+use crate::depends_on;
 use crate::models::workflow::FlowStep;
 use anyhow::{bail, Result};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -12,7 +13,9 @@ pub fn ready_steps(flow: &HashMap<String, FlowStep>, completed: &HashSet<String>
             }
 
             // Check if all dependencies are completed
-            let all_deps_met = step.depends_on.iter().all(|dep| completed.contains(dep));
+            let mut names = Vec::new();
+            depends_on::collect_names(&step.depends_on, &mut names);
+            let all_deps_met = names.iter().all(|dep| completed.contains(*dep));
 
             if all_deps_met {
                 Some(step_name.clone())
@@ -38,7 +41,9 @@ pub fn validate_dag(flow: &HashMap<String, FlowStep>) -> Result<Vec<String>> {
 
     // Build graph
     for (step_name, step) in flow {
-        for dep in &step.depends_on {
+        let mut names = Vec::new();
+        depends_on::collect_names(&step.depends_on, &mut names);
+        for dep in names {
             // Check if dependency exists
             if !flow.contains_key(dep) {
                 bail!(
@@ -50,7 +55,7 @@ pub fn validate_dag(flow: &HashMap<String, FlowStep>) -> Result<Vec<String>> {
 
             // Add edge from dep -> step_name
             adj_list
-                .get_mut(dep.as_str())
+                .get_mut(dep)
                 .expect("dep key was inserted during initialization")
                 .push(step_name.as_str());
             *in_degree
@@ -100,14 +105,27 @@ mod tests {
     use super::*;
 
     fn make_step(action: &str, depends_on: Vec<&str>) -> FlowStep {
+        make_step_with_entries(
+            action,
+            depends_on
+                .into_iter()
+                .map(|s| crate::depends_on::DependsOnEntry::Name(s.to_string()))
+                .collect(),
+        )
+    }
+
+    fn make_step_with_entries(
+        action: &str,
+        depends_on: Vec<crate::depends_on::DependsOnEntry>,
+    ) -> FlowStep {
         FlowStep {
             action: action.to_string(),
             name: None,
             description: None,
-            depends_on: depends_on.iter().map(|s| s.to_string()).collect(),
+            depends_on,
             input: HashMap::new(),
             continue_on_failure: false,
-            continue_when_skipped: false,
+            legacy_continue_when_skipped: None,
             timeout: None,
             when: None,
             for_each: None,
@@ -271,7 +289,10 @@ mod tests {
         flow.insert("d".to_string(), make_step("action4", vec!["c", "a"]));
         // Add cycle: a -> b -> c -> a
         flow.insert("e".to_string(), make_step("action5", vec!["c"]));
-        flow.get_mut("a").unwrap().depends_on.push("e".to_string());
+        flow.get_mut("a")
+            .unwrap()
+            .depends_on
+            .push(crate::depends_on::DependsOnEntry::Name("e".to_string()));
 
         let result = validate_dag(&flow);
         assert!(result.is_err());
@@ -332,5 +353,38 @@ mod tests {
         assert!(install_pos < build_pos);
         assert!(test_pos < deploy_pos);
         assert!(build_pos < deploy_pos);
+    }
+
+    #[test]
+    fn validate_dag_walks_grouped_dependencies() {
+        use crate::depends_on::{AnyEntry, DependsOnEntry};
+        let mut flow = HashMap::new();
+        flow.insert(
+            "m".to_string(),
+            make_step_with_entries(
+                "a",
+                vec![DependsOnEntry::Any(AnyEntry {
+                    any: vec![DependsOnEntry::Name("x".into()), DependsOnEntry::Name("y".into())],
+                })],
+            ),
+        );
+        flow.insert("x".to_string(), make_step("a", vec![]));
+        flow.insert("y".to_string(), make_step("a", vec![]));
+        let order = validate_dag(&flow).unwrap();
+        assert!(order.iter().position(|s| s == "x").unwrap() < order.iter().position(|s| s == "m").unwrap());
+    }
+
+    #[test]
+    fn validate_dag_rejects_a_grouped_reference_to_a_nonexistent_step() {
+        use crate::depends_on::{AllEntry, DependsOnEntry};
+        let mut flow = HashMap::new();
+        flow.insert(
+            "m".to_string(),
+            make_step_with_entries(
+                "a",
+                vec![DependsOnEntry::All(AllEntry { all: vec![DependsOnEntry::Name("ghost".into())] })],
+            ),
+        );
+        assert!(validate_dag(&flow).is_err());
     }
 }
