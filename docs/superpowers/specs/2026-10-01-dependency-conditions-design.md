@@ -1,6 +1,6 @@
 # Dependency Conditions — typed per-edge outcome acceptance — Design
 
-Status: revision 3, Codex round 2 findings addressed; awaiting further review
+Status: revision 4, Codex round 3 findings addressed; awaiting further review
 Ships in: 0.18.0 (breaking, on top of the already-breaking 0.17.0)
 Supersedes: `2026-09-30-dependency-gate-v2-design.md` in full (abandoned before
 sign-off — a fundamentally different model, per Codex's unconstrained design
@@ -225,8 +225,10 @@ loop-specific rollup exemption. More consistent (one mechanism, not a
 special case), but a genuine behaviour change for any workflow relying on
 the rollup-to-`completed` shortcut — §9 calls this out as a migration item.
 
-**This requires changes at three separate layers, not just "build the
-array" — verified directly against the code, not assumed:**
+**This requires changes at four separate layers, not just "build the
+array" — verified directly against the code, not assumed (round 3 of
+review found a layer still missing, and a false premise, in revision 3's
+three-layer version):**
 
 1. **`cascade.rs`'s in-memory `RollupOutcome` type.** Today,
    `RollupOutcome::Completed(Value)` carries the aggregated output array;
@@ -238,7 +240,17 @@ array" — verified directly against the code, not assumed:**
    `any_failed`, using the existing documented rule unchanged (CLAUDE.md §
    For-Each Loops: "one element per existing instance, `null` where the
    instance produced none").
-2. **Persistence (`JobStepRepo::fail_placeholder_tx`,
+2. **In-memory snapshot application (`Snapshot::apply`, `cascade.rs:202-218`).**
+   Checked directly: the `Change::Rollup` match arm's `Failed` branch sets
+   only `r.status` and `r.error_message` — unlike the `Completed` branch
+   right above it, which also sets `r.output`. Without this, fix 1's output
+   payload never reaches the in-memory row at all, which matters because
+   P0 (rollup) applies its changes *before* the same cascade pass builds
+   context A/B for everything else — a dependent evaluated later in the
+   *same* pass would still see `null`, even with fixes 1/3/4 all in place.
+   This needs its own explicit assignment, and its own test asserting
+   same-pass (not just after-reload) visibility.
+3. **Persistence (`JobStepRepo::fail_placeholder_tx`,
    `crates/stroem-db/src/repos/job_step.rs:464`).** Checked directly: this
    function's `UPDATE` sets `status`, `error_message`, `completed_at` — it
    never touches the `output` column at all, unlike
@@ -246,22 +258,33 @@ array" — verified directly against the code, not assumed:**
    `output: &JsonValue` parameter and the corresponding `output = $4` in
    the `UPDATE`, and `cascade.rs`'s call site (`cascade.rs:798-801`) needs
    to pass the array from fix 1 through.
-3. **Render-context exposure (`render_context.rs:271-293`).** Checked
-   directly: the `failed` branch unconditionally sets
-   `entry.insert("output", Value::Null)` (`render_context.rs:286-287`) —
-   it doesn't even read `s.output`, unlike the `completed` branch just
-   above it, which does. The simplest correct fix is to merge the two
-   branches so a failed row's `output` is read from the column exactly
-   like a completed row's (falling back to `Value::Null` only if the
-   column is actually empty) — safe for an *ordinary* failed step, whose
-   `output` column was never populated on failure either before or after
-   this change, so nothing observable changes for that case; it only
-   starts exposing real data for the one case fix 1/2 newly populate, a
-   tolerated loop rollup. The CLI's parallel implementation
-   (`run.rs:117`'s `record_failure` and the rollup builder at `run.rs:333`)
-   needs the identical three-layer fix, independently — it's a second,
-   separate implementation of the same rollup logic, not a wrapper around
-   `cascade.rs`'s.
+4. **Render-context exposure (`render_context.rs:271-293`), scoped to loop
+   placeholders specifically — not a blanket merge.** Checked directly: the
+   `failed` branch unconditionally sets `entry.insert("output",
+   Value::Null)` (`render_context.rs:286-287`) — it doesn't even read
+   `s.output`, unlike the `completed` branch just above it, which does.
+   **Revision 3 claimed merging the two branches outright was safe because
+   an ordinary failed step's `output` column was never populated — that
+   premise is false, and round 3 of review found the counterexample**: an
+   approval step rejected after suspension already has
+   `{"approval_message": ...}` written to `output` while suspended
+   (`settlement/dispatch.rs:715`), and the terminal-failure `UPDATE`
+   (`job_step.rs:795`) only sets `status`/`error_message`/`completed_at` —
+   it never clears `output`, so that value survives into the failed row. A
+   blanket branch-merge would newly expose it (current behaviour: always
+   masked). That's a real, separate, bigger decision this spec isn't
+   making — so the fix here is scoped narrowly: read `s.output` in the
+   `failed` branch **only when the row is a `for_each` placeholder**
+   (`s.for_each_expr.is_some()`, the same predicate `is_placeholder` already
+   uses), falling back to `Value::Null` for every other failed row exactly
+   as today, approval-rejection included. Broader exposure of an ordinary
+   step's retained failure output is left as a deliberate non-goal (§12),
+   not silently adopted.
+
+The CLI's parallel implementation (`run.rs:117`'s `record_failure` and the
+rollup builder at `run.rs:333`) needs the identical four-layer fix,
+independently — it's a second, separate implementation of the same rollup
+logic, not a wrapper around `cascade.rs`'s.
 
 **Correcting an inaccurate claim from the previous revision**: a `Failed`
 placeholder did *not* previously block every dependent — a placeholder
@@ -363,12 +386,14 @@ regression Codex found.** Walking the existing pinned tests against the
   wait-for-everything barrier.
 
 **A single merged P1+P2 phase (revision 1's approach), run once per outer
-pass, reproduces only the *first* test's happy path — a merged phase with
-no internal relay is strictly weaker than today's P1-then-P2 one-hop relay,
-because it collects decisions for `a` and `b` into one batch without `b`
-ever seeing `a`'s mid-batch result. That's the regression Codex found: it
-downgrades the `unreachable`-chain case to the `failed`-chain case's
-(already worse) timing.**
+pass with no internal relay, reproduces only the *second* test's
+(condition-skip) timing for *both* cases — it is strictly weaker than
+today's P1-then-P2 one-hop relay, because it collects decisions for `a` and
+`b` into one batch without `b` ever seeing `a`'s mid-batch result. That's
+the regression Codex found: it downgrades the `unreachable`-chain case
+(today: resolves in pass 1, `p` expands) down to the `failed`-chain case's
+(already worse) timing (`p` condition-skips), instead of lifting the
+`failed`-chain case up to the `unreachable`-chain case's.**
 
 **The fix: give the merged phase (replacing P1+P2, call it P1) its own
 *internal* relay loop — re-scan pending rows against the snapshot, apply
@@ -389,6 +414,23 @@ stability before that outer iteration proceeds to P3:**
   most `N` iterations for `N` pending rows in that outer pass, plus one
   final no-change scan; it does not depend on acyclicity, only on
   monotonic shrinking.
+- **Context/batch contract, precisely (round 3 of review found this
+  under-specified and gave the counterexample that pins it down)**: each
+  inner iteration must (a) build its own template context from the
+  snapshot *as that iteration sees it* — `phase_promote` already takes its
+  context as a separate argument from the row snapshot (`cascade.rs:368`),
+  which is exactly what makes this a real risk, not a hypothetical one —
+  (b) evaluate that iteration's whole batch of decisions against that one
+  frozen context, then (c) apply the batch to the snapshot, *then* build
+  the next iteration's context from the result, before evaluating anything
+  else. Reusing one context across multiple inner iterations is wrong:
+  concretely, if `a` has `when: false` and `b` both accepts `a`'s `skipped`
+  outcome *and* separately tests whether `a` is defined in its own template,
+  an iteration that decides `a` and only then (within the same stale
+  context) decides `b` would have `b` incorrectly see `a` as still absent.
+  Each iteration's context must be rebuilt from that iteration's
+  *just-applied* snapshot, not reused from the top of the inner loop or
+  from the enclosing outer pass.
 - P0 and P3 are unchanged in shape. P3 still runs once per *outer* pass
   (unchanged from today), after the merged P1 has internally stabilized —
   so `ctx_b` reflects everything decidable within that outer pass, not a
@@ -399,9 +441,12 @@ stability before that outer iteration proceeds to P3:**
   self-correct — the exact mechanism above). An *ordinary* (non-placeholder)
   step's `when` is evaluated inline, within the same merged-P1 relay, the
   moment its own tree is satisfied — if that `when` references some other
-  step's output *without* that step being in its own `depends_on` tree
-  (unsupported today, and not addressed by this spec either way), it can
-  still observe whatever the relay's current iteration happens to show. The
+  step's output *without* that step being in its own `depends_on` tree, it
+  is **not** unsupported (round 3 of review found an existing test
+  exercising exactly this, `cascade.rs:1465`) — it's simply not synchronized
+  by a declared dependency, so it can observe whatever the relay's current
+  iteration happens to show at the moment it's evaluated, same as today;
+  this spec does not change that characteristic either way. The
   regression test (and the existing pinned tests above) use a placeholder
   for `p`/`l`, matching every one of today's existing pinned tests — this
   spec does the same, deliberately, rather than generalizing to ordinary
@@ -425,8 +470,8 @@ this section started from:
 - `timing_unreachable_chain_keeps_legacy_pass` and
   `timing_accepted_change_dependent_cof_no_longer_delays` are unaffected —
   both already resolve within one pass today, and the merged relay still
-  does so (walked through §2.5's verdict table, no change to their
-  outcome). `timing_accepted_change_unknown_reason_is_failure_class` is
+  does so (walked through §§2.1-2.3's outcome/verdict rules, no change to
+  their outcome). `timing_accepted_change_unknown_reason_is_failure_class` is
   also unaffected — an unrecognised skip reason still has row `status`
   `'skipped'`, so it was already a same-pass case, and under §2.1's
   classification it is `omitted`, same conservative bucket as `unreachable`
@@ -497,12 +542,17 @@ pub enum AcceptSet {
 pub enum Outcome { Completed, Failed, Cancelled, Skipped, Omitted }
 
 /// Deserializes only from the exact string "terminal"; any other string
-/// value is a parse error, not a silently-accepted typo.
+/// value is a parse error, not a silently-accepted typo. Serializes back to
+/// that same literal string — required, not optional: `AcceptSet` derives
+/// `Serialize`, and task definitions round-trip through the API (e.g.
+/// `web/api/tasks.rs`), so this needs a working `Serialize` impl, not just
+/// `Deserialize`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TerminalKeyword;
-// (Deserialize impl: match the input string against "terminal" literally;
-// omitted here for brevity, not because it's optional — the literal-match
-// requirement is the point.)
+// (Serialize impl: always emit the literal string "terminal". Deserialize
+// impl: match the input string against "terminal" literally, error
+// otherwise. Both omitted here for brevity, not because either is
+// optional.)
 ```
 
 (This sketch omits the crate's normal `use` imports for brevity; nothing
@@ -715,14 +765,24 @@ cases, which are the only ones that translate exactly.
   `timing_accepted_change_flagged_placeholder_retires_immediately` both need
   renaming and their assertions flipped (§5 explains exactly why for each).
   Do not just add a new test alongside these — update them in place, since
-  they're what pins the actual behavior change; the `recalc-pipeline` worked
-  example (§3) as an integration-style test driving all seven rules; a
-  loop-rollup test
-  asserting a tolerated instance failure now rolls up `failed` (not
-  `completed`) *with its output array populated* (not just the status —
-  §4's data-loss fix), and that a dependent with `accept: [completed,
-  failed]` on that placeholder still runs and can read that output, while
-  one without it is `omitted`; a cancelled-only loop test pinning the
+  they're what pins the actual behavior change. Add a new test for §5's
+  context/batch contract specifically: `a(when: false)` → `b` with
+  `accept: [completed, skipped]` on `a` *and* a template reference testing
+  whether `a` is defined — assert `b` sees `a` as defined and skipped, not
+  absent, pinning that each inner iteration rebuilds its context from its
+  own just-applied snapshot rather than reusing a stale one. The
+  `recalc-pipeline` worked example (§3) as an integration-style test
+  driving all seven rules; a loop-rollup test asserting a tolerated
+  instance failure now rolls up `failed` (not `completed`) *with its
+  output array populated in the same cascade pass that decided it* — not
+  just after a reload, pinning §4's `Snapshot::apply` fix specifically,
+  not just the persisted/rendered layers — and that a dependent with
+  `accept: [completed, failed]` on that placeholder still runs and can
+  read that output, while one without it is `omitted`; a test confirming
+  an *ordinary* failed step (e.g. a rejected approval, which already
+  stores `output`) still renders `null`, pinning that §4's render-context
+  fix stays scoped to placeholders and doesn't leak the broader exposure;
+  a cancelled-only loop test pinning the
   existing (unchanged, pre-existing) quirk that it still rolls up
   `completed` while the job can independently settle `cancelled` (§4) — a
   regression test for the *current* behaviour, not a fix.
@@ -797,6 +857,14 @@ belongs alongside the other migration-behaviour tests in §10.
   `completed` (§4's cancellation-only-loop quirk) — pre-existing in shipped
   0.17.0, not introduced or made worse by this spec, and left for a
   dedicated follow-up rather than folded into this redesign.
+- **Exposing an *ordinary* (non-loop) failed step's retained `output` value
+  to templates** — e.g. a rejected approval step's `{"approval_message":
+  ...}`, which today's render context masks to `null` regardless (§4).
+  This spec's render-context fix is deliberately scoped to loop placeholders
+  only; whether ordinary failed steps should also expose retained output is
+  a real, separate product decision with its own blast radius (hooks,
+  dependent templates that have never been able to see this before), left
+  for a dedicated follow-up.
 
 ## Appendix: why not Argo's full expression strings, or Airflow's `trigger_rule`
 
@@ -926,3 +994,35 @@ beyond the two corrections above.
     §11 given a precise statement of what "re-evaluated" does and doesn't
     cover for already-running work; §7's migration error message no longer
     prescribes a fixed `accept` set given §9's correction.
+- 2026-10-01, Codex round 3 (same thread, verdict Still SHIP WITH FIXES,
+  but the two hardest/most speculative parts — §5's timing-test
+  predictions and §9's migration-table semantics — both confirmed
+  **correct** against the actual code this round): revision 4 fixes.
+  - **§4 had a fourth missing layer**: `Snapshot::apply`'s `Failed` arm
+    (`cascade.rs:202-218`) never assigned `r.output`, so even with the
+    other three layers fixed, same-cascade-pass consumption would still
+    see `null` (persistence/render fixes only help *after* a reload).
+    Added as its own explicit layer with its own test requirement.
+  - **§4's "nothing changes for ordinary failures" claim was false**:
+    round 3 found the concrete counterexample — a rejected approval step
+    already stores `output` before failing, and the terminal-failure
+    `UPDATE` never clears it. A blanket completed/failed branch merge in
+    `render_context.rs` would have newly exposed it. Scoped the fix to
+    `for_each` placeholders specifically (`s.for_each_expr.is_some()`);
+    added broader ordinary-step output exposure as an explicit non-goal
+    rather than an accidental side effect.
+  - **§5 needed an explicit context/batch contract for the inner relay**:
+    added the precise rule (each inner iteration builds its own context
+    from its own just-applied snapshot, never reuses a stale one) plus
+    Codex's own counterexample (`a(when:false)` with `b` testing both
+    `a`'s outcome and `a`'s definedness) as the required pinning test.
+  - Four smaller corrections: §5's "reproduces only the first test's happy
+    path" sentence had the comparison backwards (fixed to state it
+    reproduces the worse, second test's timing for both cases); a
+    reference to a nonexistent "§2.5 verdict table" corrected to
+    "§§2.1-2.3"; "unsupported today" for undeclared cross-step `when`
+    references corrected to "not synchronized by a declared dependency"
+    (an existing test, `cascade.rs:1465`, already exercises this); §7's
+    `TerminalKeyword` sketch given the `Serialize` side it was missing
+    (needed since `AcceptSet` derives `Serialize` and task definitions
+    round-trip through the API).
