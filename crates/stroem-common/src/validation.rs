@@ -1,7 +1,7 @@
 use crate::dag;
-use crate::models::workflow::{ActionDef, ConnectionTypeDef, TaskDef, WorkspaceConfig};
+use crate::models::workflow::{ActionDef, ConnectionTypeDef, WorkspaceConfig};
 use anyhow::{bail, Result};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 /// Maximum allowed `FlowStep.timeout` (24h, in seconds).
 ///
@@ -147,11 +147,6 @@ fn validate_workflow_config_inner(
 
     // Validate each task
     for (task_name, task) in &config.tasks {
-        // Memoized per task: whether a step can be skipped "by choice" (its
-        // own when/for_each, or transitively through such a dependency that
-        // doesn't carry continue_when_skipped). Used by the merge warning
-        // below.
-        let mut skippable_memo: HashMap<&str, bool> = HashMap::new();
         // Validate that flow steps reference existing actions
         for (step_name, step) in &task.flow {
             let action_ref = &step.action;
@@ -193,8 +188,33 @@ fn validate_workflow_config_inner(
                 }
             }
 
-            // Validate depends_on references
-            for dep in &step.depends_on {
+            // Legacy flag detection — a named, actionable error, not a generic "unknown field."
+            if step.legacy_continue_when_skipped.is_some() {
+                bail!(
+                    "Task '{}' step '{}': continue_when_skipped was removed in 0.18.0; \
+                     see the 0.18 upgrade guide to choose the right `accept` set for \
+                     this step's dependents — it depends on what else was present on \
+                     this dependency.",
+                    task_name,
+                    step_name
+                );
+            }
+
+            // Tree-shape validation (duplicate siblings, empty groups, empty accept lists).
+            if let Err(tree_errors) = crate::depends_on::validate_tree(&step.depends_on) {
+                bail!(
+                    "Task '{}' step '{}': {}",
+                    task_name,
+                    step_name,
+                    tree_errors.join("; ")
+                );
+            }
+
+            // Validate depends_on references — walks the whole tree, not just
+            // the top level.
+            let mut referenced = Vec::new();
+            crate::depends_on::collect_names(&step.depends_on, &mut referenced);
+            for dep in referenced {
                 if !task.flow.contains_key(dep) {
                     bail!(
                         "Task '{}' step '{}' depends on non-existent step '{}'",
@@ -298,48 +318,6 @@ fn validate_workflow_config_inner(
                     task_name,
                     step_name
                 ));
-            }
-
-            // Warn if continue_when_skipped on a step nothing depends on: the
-            // flag is read from a dependency's own definition (by the steps
-            // that depend on it), so it has no effect unless some other step
-            // in the flow lists this one in its depends_on.
-            if step.continue_when_skipped
-                && !task
-                    .flow
-                    .values()
-                    .any(|other| other.depends_on.iter().any(|d| d == step_name))
-            {
-                warnings.push(format!(
-                    "Task '{}' step '{}' has continue_when_skipped: true but no step depends on it — the flag has no effect",
-                    task_name,
-                    step_name
-                ));
-            }
-
-            // Strict AND (spec 2026-09-26 §2.3): a merge is skipped whenever a
-            // dependency that can be skipped by choice — directly (its own
-            // when/for_each) or transitively through one of ITS dependencies
-            // — is skipped, unless that dependency carries
-            // continue_when_skipped.
-            if step.depends_on.len() >= 2 {
-                for dep in &step.depends_on {
-                    if let Some(d) = task.flow.get(dep) {
-                        let mut visiting: HashSet<&str> = HashSet::new();
-                        let skippable = is_transitively_skippable(
-                            task,
-                            dep.as_str(),
-                            &mut skippable_memo,
-                            &mut visiting,
-                        );
-                        if skippable && !d.continue_when_skipped {
-                            warnings.push(format!(
-                                "Task '{}' step '{}' will be skipped whenever '{}' is skipped (add continue_when_skipped: true to '{}' to let '{}' run)",
-                                task_name, step_name, dep, dep, step_name
-                            ));
-                        }
-                    }
-                }
             }
 
             // Validate step timeout (cap is shared with ServerConfig.default_step_timeout)
@@ -1109,46 +1087,6 @@ fn resolve_json_path(value: &serde_json::Value, path: &str) -> bool {
         }
         None => false,
     }
-}
-
-/// Whether `name` (a step in `task.flow`) can be skipped "by choice": it has
-/// its own `when` or `for_each`, or any of ITS OWN dependencies is itself
-/// skippable by choice and does not carry `continue_when_skipped` (spec
-/// 2026-09-26 §2.3, §7). Recursive and memoized per task; `visiting` guards
-/// against a cycle (validation rejects cycles elsewhere, but this helper
-/// must not loop if one somehow reaches it).
-fn is_transitively_skippable<'a>(
-    task: &'a TaskDef,
-    name: &'a str,
-    memo: &mut HashMap<&'a str, bool>,
-    visiting: &mut HashSet<&'a str>,
-) -> bool {
-    if let Some(&cached) = memo.get(name) {
-        return cached;
-    }
-    if !visiting.insert(name) {
-        // Cycle: treat as not skippable to break the recursion.
-        return false;
-    }
-    let result = match task.flow.get(name) {
-        None => false,
-        Some(step) => {
-            step.when.is_some()
-                || step.for_each.is_some()
-                || step.depends_on.iter().any(|d| {
-                    let dep_skippable = is_transitively_skippable(task, d.as_str(), memo, visiting);
-                    let dep_has_cws = task
-                        .flow
-                        .get(d.as_str())
-                        .map(|s| s.continue_when_skipped)
-                        .unwrap_or(false);
-                    dep_skippable && !dep_has_cws
-                })
-        }
-    };
-    visiting.remove(name);
-    memo.insert(name, result);
-    result
 }
 
 /// Checks whether `action_name` is a task action that references back to `task_name` (self-reference).
@@ -2515,6 +2453,74 @@ tasks:
         let result = validate_workflow_config(&config);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Cycle detected"));
+    }
+
+    #[test]
+    fn test_legacy_continue_when_skipped_produces_a_named_migration_error() {
+        let yaml = r#"
+actions:
+  noop:
+    type: script
+    script: "echo noop"
+tasks:
+  t:
+    flow:
+      a: { action: noop }
+      b: { action: noop, depends_on: [a], continue_when_skipped: true }
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("continue_when_skipped") && msg.contains("0.18"),
+            "expected a named migration error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_duplicate_sibling_dependency_is_rejected() {
+        let yaml = r#"
+actions:
+  noop:
+    type: script
+    script: "echo noop"
+tasks:
+  t:
+    flow:
+      a: { action: noop }
+      m: { action: noop, depends_on: [a, a] }
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("duplicate") && msg.contains('a'), "{msg}");
+    }
+
+    #[test]
+    fn test_cross_branch_duplicate_reference_is_accepted() {
+        let yaml = r#"
+actions:
+  noop:
+    type: script
+    script: "echo noop"
+tasks:
+  t:
+    flow:
+      a: { action: noop }
+      b: { action: noop }
+      c: { action: noop }
+      m:
+        action: noop
+        depends_on:
+          - any:
+              - all: [{step: a, accept: [completed]}, b]
+              - all: [{step: a, accept: [failed]}, c]
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_ok(), "expected no errors, got: {result:?}");
     }
 
     #[test]
@@ -6465,260 +6471,6 @@ tasks:
             "Expected warning about sequential without for_each, got: {:?}",
             warnings
         );
-    }
-
-    #[test]
-    fn test_continue_when_skipped_without_dependents_warns() {
-        let yaml = r#"
-actions:
-  process:
-    type: script
-    script: echo hello
-tasks:
-  main:
-    flow:
-      step:
-        action: process
-        continue_when_skipped: true
-"#;
-        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
-        let warnings = validate_workflow_config(&config).unwrap();
-        assert!(
-            warnings
-                .iter()
-                .any(|w| w.contains("continue_when_skipped") && w.contains("no step depends on it")),
-            "Expected warning about continue_when_skipped without dependents, got: {:?}",
-            warnings
-        );
-    }
-
-    #[test]
-    fn test_continue_when_skipped_with_depends_on_still_warns_without_dependents() {
-        // The flag on `step` is read by whatever depends on `step`, not by what
-        // `step` itself depends on — having its own depends_on doesn't help.
-        let yaml = r#"
-actions:
-  process:
-    type: script
-    script: echo hello
-tasks:
-  main:
-    flow:
-      first:
-        action: process
-      step:
-        action: process
-        depends_on: [first]
-        continue_when_skipped: true
-"#;
-        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
-        let warnings = validate_workflow_config(&config).unwrap();
-        assert!(
-            warnings
-                .iter()
-                .any(|w| w.contains("continue_when_skipped") && w.contains("no step depends on it")),
-            "Expected warning about continue_when_skipped without dependents, got: {:?}",
-            warnings
-        );
-    }
-
-    #[test]
-    fn test_continue_when_skipped_with_dependent_does_not_warn() {
-        let yaml = r#"
-actions:
-  process:
-    type: script
-    script: echo hello
-tasks:
-  main:
-    flow:
-      step:
-        action: process
-        continue_when_skipped: true
-      after:
-        action: process
-        depends_on: [step]
-"#;
-        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
-        let warnings = validate_workflow_config(&config).unwrap();
-        assert!(
-            warnings
-                .iter()
-                .all(|w| !w.contains("continue_when_skipped")),
-            "unexpected warning: {:?}",
-            warnings
-        );
-    }
-
-    #[test]
-    fn test_merge_after_conditional_dep_without_cws_warns() {
-        let yaml = r#"
-actions:
-  a: { type: script, script: "true" }
-tasks:
-  t:
-    flow:
-      x: { action: a }
-      y: { action: a, when: "{{ input.go }}" }
-      m: { action: a, depends_on: [x, y] }
-"#;
-        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
-        let warnings = validate_workflow_config(&config).unwrap();
-        assert!(
-            warnings
-                .iter()
-                .any(|w| w.contains("'m' will be skipped whenever 'y' is skipped")),
-            "{warnings:?}"
-        );
-    }
-
-    #[test]
-    fn test_merge_after_conditional_dep_with_cws_or_single_dep_does_not_warn() {
-        for yaml in [
-            r#"
-actions:
-  a: { type: script, script: "true" }
-tasks:
-  t:
-    flow:
-      x: { action: a }
-      y: { action: a, when: "{{ input.go }}", continue_when_skipped: true }
-      m: { action: a, depends_on: [x, y] }
-"#,
-            r#"
-actions:
-  a: { type: script, script: "true" }
-tasks:
-  t:
-    flow:
-      y: { action: a, when: "{{ input.go }}" }
-      m: { action: a, depends_on: [y] }
-"#,
-        ] {
-            let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
-            let warnings = validate_workflow_config(&config).unwrap();
-            assert!(
-                warnings
-                    .iter()
-                    .all(|w| !w.contains("will be skipped whenever")),
-                "{warnings:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn test_merge_after_transitively_conditional_dep_warns_naming_direct_dep() {
-        // x (when) → y → m ← z: y itself carries no when/for_each, but it is
-        // transitively skippable through x, which has none of its own.
-        let yaml = r#"
-actions:
-  a: { type: script, script: "true" }
-tasks:
-  t:
-    flow:
-      x: { action: a, when: "{{ input.go }}" }
-      y: { action: a, depends_on: [x] }
-      z: { action: a }
-      m: { action: a, depends_on: [y, z] }
-"#;
-        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
-        let warnings = validate_workflow_config(&config).unwrap();
-        assert!(
-            warnings
-                .iter()
-                .any(|w| w.contains("'m' will be skipped whenever 'y' is skipped")),
-            "{warnings:?}"
-        );
-    }
-
-    #[test]
-    fn test_merge_after_transitively_conditional_dep_with_cws_on_direct_dep_does_not_warn() {
-        // Same shape, but continue_when_skipped sits on y (the merge's direct
-        // dependency) — that suppresses the warning even though y is only
-        // skippable because of x.
-        let yaml = r#"
-actions:
-  a: { type: script, script: "true" }
-tasks:
-  t:
-    flow:
-      x: { action: a, when: "{{ input.go }}" }
-      y: { action: a, depends_on: [x], continue_when_skipped: true }
-      z: { action: a }
-      m: { action: a, depends_on: [y, z] }
-"#;
-        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
-        let warnings = validate_workflow_config(&config).unwrap();
-        assert!(
-            warnings
-                .iter()
-                .all(|w| !w.contains("will be skipped whenever")),
-            "{warnings:?}"
-        );
-    }
-
-    #[test]
-    fn test_merge_after_for_each_dep_without_cws_warns() {
-        let yaml = r#"
-actions:
-  a: { type: script, script: "true" }
-tasks:
-  t:
-    flow:
-      x: { action: a, for_each: ["1", "2"] }
-      z: { action: a }
-      m: { action: a, depends_on: [x, z] }
-"#;
-        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
-        let warnings = validate_workflow_config(&config).unwrap();
-        assert!(
-            warnings
-                .iter()
-                .any(|w| w.contains("'m' will be skipped whenever 'x' is skipped")),
-            "{warnings:?}"
-        );
-    }
-
-    #[test]
-    fn test_merge_with_two_conditional_deps_yields_exactly_two_warnings() {
-        let yaml = r#"
-actions:
-  a: { type: script, script: "true" }
-tasks:
-  t:
-    flow:
-      x: { action: a, when: "{{ input.go }}" }
-      y: { action: a, when: "{{ input.go2 }}" }
-      m: { action: a, depends_on: [x, y] }
-"#;
-        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
-        let warnings = validate_workflow_config(&config).unwrap();
-        let matching: Vec<_> = warnings
-            .iter()
-            .filter(|w| w.contains("will be skipped whenever"))
-            .collect();
-        assert_eq!(matching.len(), 2, "{warnings:?}");
-    }
-
-    #[test]
-    fn test_transitively_skippable_helper_terminates_on_a_cycle() {
-        // x → y → x (both plain, no when/for_each): dag::validate_dag would
-        // reject this, but the merge-warning check runs before that bail, so
-        // the recursive skippability helper must not hang on the cycle.
-        let task: TaskDef = serde_yaml::from_str(
-            r#"
-flow:
-  x: { action: a, depends_on: [y] }
-  y: { action: a, depends_on: [x] }
-  m: { action: a, depends_on: [x, y] }
-"#,
-        )
-        .unwrap();
-        let mut memo: HashMap<&str, bool> = HashMap::new();
-        let mut visiting: HashSet<&str> = HashSet::new();
-        // Must return promptly rather than looping forever.
-        let result = is_transitively_skippable(&task, "x", &mut memo, &mut visiting);
-        assert!(!result);
     }
 
     #[test]
