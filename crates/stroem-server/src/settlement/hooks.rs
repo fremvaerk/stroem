@@ -6,7 +6,7 @@ use sqlx::PgPool;
 use stroem_common::models::job::{ActionType, JobStatus, SourceType, StepStatus};
 use stroem_common::models::workflow::{FlowStep, HookDef, TaskDef, WorkspaceConfig};
 use stroem_common::template::render_input_map;
-use stroem_db::{JobRepo, JobStepRepo};
+use stroem_db::{JobRepo, JobStepRepo, JobStepRow};
 
 /// Context available to `on_suspended` hook templates as `hook.*`
 #[derive(Debug, Serialize)]
@@ -51,9 +51,11 @@ pub struct FailedStepInfo {
     /// `true` when this row's own flow step has `continue_on_failure`; a
     /// loop instance reads its placeholder's flag.
     pub continue_on_failure: bool,
-    /// `true` when this failure is caught by `continue_on_failure` on this
-    /// step or on every path below it (spec 2026-09-26 §2.4); a loop instance
-    /// is judged by its placeholder.
+    /// `true` when this row's own flow step has `continue_on_failure` (spec
+    /// 2026-10-01 §6: self-scoped only, no downstream propagation); a loop
+    /// instance is judged by its placeholder. Currently identical to
+    /// `continue_on_failure` above — kept as a separate field for API
+    /// stability.
     pub tolerated: bool,
     /// `true` when this failure was carried over from a restarted job's
     /// source run (`job_step.carried_over`) rather than freshly produced by
@@ -471,6 +473,34 @@ async fn list_hook_artifacts(
         .collect())
 }
 
+/// Pure: one `FailedStepInfo` per failed row, both flags read directly from
+/// the failed row's own flow step (spec 2026-10-01 §6 — self-scoped only, no
+/// downstream propagation). A loop instance is judged by its placeholder
+/// (`flow_step_name`). Split out from `build_hook_context` so this can be
+/// unit-tested without a DB pool.
+fn build_failed_steps(task: &TaskDef, steps: &[JobStepRow]) -> Vec<FailedStepInfo> {
+    steps
+        .iter()
+        .filter(|s| s.status == StepStatus::Failed.as_ref())
+        .map(|s| {
+            let flow_name =
+                stroem_common::gate::flow_step_name(&s.step_name, s.loop_source.as_deref());
+            let own_continue_on_failure = task
+                .flow
+                .get(flow_name)
+                .is_some_and(|fs| fs.continue_on_failure);
+            FailedStepInfo {
+                step_name: s.step_name.clone(),
+                action_name: s.action_name.clone(),
+                error_message: s.error_message.clone(),
+                continue_on_failure: own_continue_on_failure,
+                tolerated: own_continue_on_failure,
+                carried_over: s.carried_over,
+            }
+        })
+        .collect()
+}
+
 async fn build_hook_context(
     pool: &PgPool,
     job: &stroem_db::JobRow,
@@ -482,31 +512,7 @@ async fn build_hook_context(
 
     let artifacts = list_hook_artifacts(pool, job.job_id).await?;
 
-    let caught = stroem_common::gate::caught_steps(&task.flow);
-    let failed_steps: Vec<FailedStepInfo> = steps
-        .iter()
-        .filter(|s| s.status == StepStatus::Failed.as_ref())
-        .map(|s| {
-            let flow_name =
-                stroem_common::gate::flow_step_name(&s.step_name, s.loop_source.as_deref());
-            FailedStepInfo {
-                step_name: s.step_name.clone(),
-                action_name: s.action_name.clone(),
-                error_message: s.error_message.clone(),
-                continue_on_failure: task
-                    .flow
-                    .get(flow_name)
-                    .map(|fs| fs.continue_on_failure)
-                    .unwrap_or(false),
-                tolerated: stroem_common::gate::failure_caught(
-                    &caught,
-                    &s.step_name,
-                    s.loop_source.as_deref(),
-                ),
-                carried_over: s.carried_over,
-            }
-        })
-        .collect();
+    let failed_steps = build_failed_steps(task, &steps);
 
     let error_message = if failed_steps.is_empty() {
         None
@@ -650,7 +656,7 @@ async fn fire_single_hook(
         depends_on: vec![],
         input: std::collections::HashMap::new(),
         continue_on_failure: false,
-        continue_when_skipped: false,
+        legacy_continue_when_skipped: None,
         timeout: None,
         when: None,
         for_each: None,
@@ -771,6 +777,74 @@ mod tests {
             );
             assert!(!msg.contains("another workspace"), "{bad}: {msg}");
         }
+    }
+
+    fn flow_step(deps: &[&str], continue_on_failure: bool) -> FlowStep {
+        FlowStep {
+            action: "noop".to_string(),
+            name: None,
+            description: None,
+            depends_on: deps
+                .iter()
+                .map(|s| stroem_common::depends_on::DependsOnEntry::Name(s.to_string()))
+                .collect(),
+            input: HashMap::new(),
+            continue_on_failure,
+            legacy_continue_when_skipped: None,
+            timeout: None,
+            when: None,
+            for_each: None,
+            sequential: false,
+            retry: None,
+            inline_action: None,
+        }
+    }
+
+    fn task_with_flow(flow: Vec<(&str, FlowStep)>) -> TaskDef {
+        TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow: flow.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+            timeout: None,
+            retry: None,
+            on_success: vec![],
+            on_error: vec![],
+            on_suspended: vec![],
+            on_cancel: vec![],
+        }
+    }
+
+    fn step_row(name: &str, status: &str) -> stroem_db::JobStepRow {
+        let mut r = stroem_db::JobStepRow::test_default(uuid::Uuid::nil(), name);
+        r.status = status.to_string();
+        r
+    }
+
+    #[test]
+    fn tolerated_reflects_only_the_failed_step_s_own_flag() {
+        // a(no flag) -> b(cof). a fails; b never runs (unreachable). a's
+        // failed_steps entry must show tolerated: false AND
+        // continue_on_failure: false, even though b would have caught it
+        // under the old structural rule (spec 2026-10-01 §6).
+        let task = task_with_flow(vec![("a", flow_step(&[], false)), ("b", flow_step(&["a"], true))]);
+        let steps = vec![step_row("a", "failed"), step_row("b", "skipped")];
+        let failed_steps = build_failed_steps(&task, &steps);
+        let a_entry = failed_steps.iter().find(|f| f.step_name == "a").unwrap();
+        assert!(!a_entry.tolerated);
+        assert!(!a_entry.continue_on_failure);
+    }
+
+    #[test]
+    fn tolerated_is_true_when_the_failed_step_has_its_own_flag() {
+        let task = task_with_flow(vec![("a", flow_step(&[], true))]);
+        let steps = vec![step_row("a", "failed")];
+        let failed_steps = build_failed_steps(&task, &steps);
+        let a_entry = failed_steps.iter().find(|f| f.step_name == "a").unwrap();
+        assert!(a_entry.tolerated);
+        assert!(a_entry.continue_on_failure);
     }
 
     fn select_hooks_for_job<'a>(
