@@ -145,6 +145,82 @@ impl DependsOnEntry {
     }
 }
 
+/// All step names referenced anywhere in this tree, duplicates preserved —
+/// callers (cycle detection, unknown-name checks) decide what to do with
+/// repeats.
+pub fn collect_names<'a>(entries: &'a [DependsOnEntry], out: &mut Vec<&'a str>) {
+    for e in entries {
+        if let Some(name) = e.leaf_name() {
+            out.push(name);
+        }
+        if let Some(children) = e.children() {
+            collect_names(children, out);
+        }
+    }
+}
+
+fn check_siblings(children: &[DependsOnEntry], errors: &mut Vec<String>) {
+    let mut seen = std::collections::HashSet::new();
+    for c in children {
+        if let Some(name) = c.leaf_name() {
+            if !seen.insert(name) {
+                errors.push(format!(
+                    "duplicate dependency '{name}' in the same depends_on group"
+                ));
+            }
+        }
+    }
+}
+
+fn check_nested(entry: &DependsOnEntry, errors: &mut Vec<String>) {
+    match entry {
+        DependsOnEntry::Step(s) => {
+            if let AcceptSet::Outcomes(v) = &s.accept {
+                if v.is_empty() {
+                    errors.push(format!("'{}' has an empty accept list", s.step));
+                }
+            }
+        }
+        DependsOnEntry::All(a) => {
+            if a.all.is_empty() {
+                errors.push("an 'all' group must not be empty".into());
+            }
+            check_siblings(&a.all, errors);
+            for c in &a.all {
+                check_nested(c, errors);
+            }
+        }
+        DependsOnEntry::Any(a) => {
+            if a.any.is_empty() {
+                errors.push("an 'any' group must not be empty".into());
+            }
+            check_siblings(&a.any, errors);
+            for c in &a.any {
+                check_nested(c, errors);
+            }
+        }
+        DependsOnEntry::Name(_) => {}
+    }
+}
+
+/// Structural validation of a `depends_on` tree: duplicate siblings, empty
+/// groups, empty accept lists. Does NOT check that referenced step names
+/// exist in the flow — that needs the whole flow map and lives in
+/// `validation.rs` (Task 4). An empty root (`entries.is_empty()`) is valid:
+/// a step with no dependencies at all, unchanged from today.
+pub fn validate_tree(entries: &[DependsOnEntry]) -> Result<(), Vec<String>> {
+    let mut errors = Vec::new();
+    check_siblings(entries, &mut errors);
+    for e in entries {
+        check_nested(e, &mut errors);
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,5 +324,95 @@ mod tests {
             err.is_err(),
             "a mapping with both 'step' and 'any' must not silently resolve to whichever variant matches first"
         );
+    }
+
+    fn step(name: &str) -> DependsOnEntry {
+        DependsOnEntry::Name(name.to_string())
+    }
+
+    #[test]
+    fn collect_names_walks_the_whole_tree_with_duplicates_preserved() {
+        let tree = vec![
+            step("a"),
+            DependsOnEntry::Any(AnyEntry {
+                any: vec![
+                    DependsOnEntry::All(AllEntry { all: vec![step("a"), step("b")] }),
+                    DependsOnEntry::All(AllEntry { all: vec![step("a"), step("c")] }),
+                ],
+            }),
+        ];
+        let mut names = Vec::new();
+        collect_names(&tree, &mut names);
+        names.sort();
+        assert_eq!(names, vec!["a", "a", "a", "b", "c"]);
+    }
+
+    #[test]
+    fn validate_tree_rejects_duplicate_siblings_in_the_same_group() {
+        let tree = vec![step("a"), step("a")];
+        let err = validate_tree(&tree).unwrap_err();
+        assert!(err.iter().any(|e| e.contains("duplicate") && e.contains('a')));
+    }
+
+    #[test]
+    fn validate_tree_accepts_the_same_name_in_different_any_branches() {
+        // (A completed AND B completed) OR (A failed AND C completed) —
+        // `A` legitimately appears twice, once per branch, with different
+        // implied roles. This must NOT be rejected (spec §8).
+        let tree = vec![DependsOnEntry::Any(AnyEntry {
+            any: vec![
+                DependsOnEntry::All(AllEntry {
+                    all: vec![
+                        DependsOnEntry::Step(StepEntry { step: "a".into(), accept: AcceptSet::default_completed_only() }),
+                        step("b"),
+                    ],
+                }),
+                DependsOnEntry::All(AllEntry {
+                    all: vec![
+                        DependsOnEntry::Step(StepEntry {
+                            step: "a".into(),
+                            accept: AcceptSet::Outcomes(vec![Outcome::Failed]),
+                        }),
+                        step("c"),
+                    ],
+                }),
+            ],
+        })];
+        assert!(validate_tree(&tree).is_ok());
+    }
+
+    #[test]
+    fn validate_tree_rejects_nested_empty_groups_but_allows_empty_root() {
+        assert!(validate_tree(&[]).is_ok(), "an empty root depends_on is unchanged from today");
+        let nested_empty = vec![DependsOnEntry::All(AllEntry { all: vec![] })];
+        let err = validate_tree(&nested_empty).unwrap_err();
+        assert!(err.iter().any(|e| e.contains("empty")));
+    }
+
+    #[test]
+    fn validate_tree_rejects_an_empty_accept_outcomes_list() {
+        let tree = vec![DependsOnEntry::Step(StepEntry {
+            step: "a".into(),
+            accept: AcceptSet::Outcomes(vec![]),
+        })];
+        let err = validate_tree(&tree).unwrap_err();
+        assert!(err.iter().any(|e| e.contains("empty") && e.contains('a')));
+    }
+
+    #[test]
+    fn validate_tree_runs_against_the_authored_shape_not_a_flattened_one() {
+        // Implementation caution from spec §8: check siblings before any
+        // normalization. A nested `all` inside an `any` is NOT a sibling of
+        // the `any`'s other children even though it shares a name with one.
+        let tree = vec![DependsOnEntry::Any(AnyEntry {
+            any: vec![
+                step("a"),
+                DependsOnEntry::All(AllEntry { all: vec![step("a")] }),
+            ],
+        })];
+        // "a" appears once as a direct child of the `any`, and once nested
+        // one level deeper inside an `all` that is itself a child of the
+        // `any` — these are different groups, so this must be accepted.
+        assert!(validate_tree(&tree).is_ok());
     }
 }
