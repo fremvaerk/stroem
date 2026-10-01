@@ -1,6 +1,6 @@
 # Dependency Conditions — typed per-edge outcome acceptance — Design
 
-Status: revision 4, Codex round 3 findings addressed; awaiting further review
+Status: revision 5, Codex round 4 findings addressed; awaiting further review
 Ships in: 0.18.0 (breaking, on top of the already-breaking 0.17.0)
 Supersedes: `2026-09-30-dependency-gate-v2-design.md` in full (abandoned before
 sign-off — a fundamentally different model, per Codex's unconstrained design
@@ -274,12 +274,21 @@ three-layer version):**
    blanket branch-merge would newly expose it (current behaviour: always
    masked). That's a real, separate, bigger decision this spec isn't
    making — so the fix here is scoped narrowly: read `s.output` in the
-   `failed` branch **only when the row is a `for_each` placeholder**
-   (`s.for_each_expr.is_some()`, the same predicate `is_placeholder` already
-   uses), falling back to `Value::Null` for every other failed row exactly
-   as today, approval-rejection included. Broader exposure of an ordinary
-   step's retained failure output is left as a deliberate non-goal (§12),
-   not silently adopted.
+   `failed` branch **only when the row is a `for_each` placeholder**,
+   falling back to `Value::Null` for every other failed row exactly as
+   today, approval-rejection included.
+   **`StepView` (`render_context.rs:97-103`) needs a new field to make
+   this check possible** — round 4 of review found that the render-context
+   loop operates on `StepView`, not `JobStepRow` directly, and `StepView`
+   carries neither `for_each_expr` nor any placeholder flag today (only
+   `step_name`, `status`, `output`, `error_message`, `loop_source`). Add
+   `is_placeholder: bool` to `StepView`, populated in its
+   `From<&JobStepRow>` conversion as `r.for_each_expr.is_some()` (the same
+   underlying check `cascade.rs::is_placeholder` already makes on the DB
+   row), and use that field — not a direct `for_each_expr` reference that
+   `StepView` doesn't have — in the failed-output branch. Broader exposure
+   of an ordinary step's retained failure output is left as a deliberate
+   non-goal (§12), not silently adopted.
 
 The CLI's parallel implementation (`run.rs:117`'s `record_failure` and the
 rollup builder at `run.rs:333`) needs the identical four-layer fix,
@@ -1026,3 +1035,15 @@ beyond the two corrections above.
     `TerminalKeyword` sketch given the `Serialize` side it was missing
     (needed since `AcceptSet` derives `Serialize` and task definitions
     round-trip through the API).
+- 2026-10-01, Codex round 4 (same thread): **§5's context/batch contract
+  confirmed PASS** against its own counterexample, **all four wording
+  fixes confirmed PASS**, §4's four-layer contract confirmed behaviourally
+  correct — one adapter-type gap found and fixed in revision 5: the
+  placeholder check in §4's render-context fix referenced
+  `s.for_each_expr.is_some()`, but `s` there is a `StepView`
+  (`render_context.rs:97-103`), which carries neither `for_each_expr` nor
+  any placeholder flag — only `JobStepRow` does. Specified adding
+  `is_placeholder: bool` to `StepView`, populated in its conversion from
+  `JobStepRow`, and using that instead. Codex: "revision 4 is NOT ready
+  because §4 still needs to specify carrying the placeholder discriminator
+  into `StepView`" — this was the only blocker identified.
