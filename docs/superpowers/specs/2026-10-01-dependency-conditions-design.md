@@ -1,6 +1,6 @@
 # Dependency Conditions — typed per-edge outcome acceptance — Design
 
-Status: revision 2, Codex round 1 findings addressed; awaiting further review
+Status: revision 3, Codex round 2 findings addressed; awaiting further review
 Ships in: 0.18.0 (breaking, on top of the already-breaking 0.17.0)
 Supersedes: `2026-09-30-dependency-gate-v2-design.md` in full (abandoned before
 sign-off — a fundamentally different model, per Codex's unconstrained design
@@ -63,22 +63,26 @@ Every dependency resolves, once terminal, to exactly one of five outcomes:
 | `skipped` | `status = skipped`, reason `condition` or `empty` — the step's *own* choice (`when` false, or an empty `for_each`) |
 | `omitted` | `status = skipped`, reason `cascade` or `unreachable`, or NULL/unrecognised — blocked by *its own* dependency tree, not by its own choice |
 
-**No DB schema change.** `skipped` and `omitted` are a grouping of the
-*existing* `SkipReason` values (`Condition`/`Empty` vs.
-`Cascade`/`Unreachable`/NULL) that the gate derives when matching an
-`accept` set — `job_step.skip_reason` keeps recording `unreachable` for
-every omitted row exactly as today (no new stored value); the grouping is
-never itself written to the database.
+**No new stored value, but a real change in what gets written.** `omitted`
+reuses the *existing* `SkipReason::Unreachable` value — no new enum variant,
+no DB migration. It is **not** accurate to say this is written "exactly as
+today," though: going forward, `unreachable` is written for *every* omitted
+row, including ones that today would be written as `cascade` (a choice-class
+block, origin folded away per §2.1's unification). `cascade` is never
+written by new code after this ships; it only ever appears on rows written
+before the upgrade. §9's migration guidance depends on this distinction and
+states it precisely.
 
 **The existing UI label for `unreachable` ("upstream failed") stops being
-accurate and needs updating.** Today "unreachable" really only ever means a
-dependency failed outright, so the label is correct. Under `accept`, a step
-can be omitted for reasons that have nothing to do with an upstream
-*failing* — e.g. `{step: x, accept: [failed]}` (deliberately accepting only
-a failure) is unsatisfied, and the dependent is omitted, precisely when `x`
-*succeeds*. §8 tracks the UI copy change this requires (replace "upstream
-failed" with outcome-neutral wording such as "a dependency condition was not
-satisfied").
+accurate and needs updating**, for two independent reasons: first, because
+`cascade` rows (a choice-class block, not a failure) now read as
+`unreachable` going forward too; second, because under `accept`, a step can
+be omitted for reasons that have nothing to do with an upstream *failing*
+at all — e.g. `{step: x, accept: [failed]}` (deliberately accepting only a
+failure) is unsatisfied, and the dependent is omitted, precisely when `x`
+*succeeds*. Replace "upstream failed" with outcome-neutral wording such as
+"a dependency condition was not satisfied" wherever the UI currently
+renders that label from a `skip_reason` of `unreachable`.
 
 ### 2.2 `depends_on` entries
 
@@ -112,13 +116,20 @@ precisely, not loosely: today only a hard block (`Verdict::BlockFail`,
 choice-class block (`BlockSkip`) already waits behind a pending sibling.
 Under this model *both* cases wait uniformly: the decision always waits for
 every referenced step to finish, then evaluates the whole tree once. Two
-cases need their own test to pin the change precisely: an `any` already
-satisfied by one child, with a second child still pending (today's
-equivalent would proceed immediately on `Pass`; this model waits); and a
-tree already conclusively unsatisfiable by one child, with a second child
-still pending (today's `BlockFail` would omit immediately; this model
-waits, which also delays any downstream cleanup step that was only waiting
-to react to the eventual `omitted`).
+cases need their own test to pin this precisely. First, a tree already
+conclusively unsatisfiable by one child, with a second child still pending
+— today's `BlockFail` (the only one of the two old cases with no uniform
+pending-wait) would omit immediately; this model waits, which also delays
+any downstream cleanup step that was only waiting to react to the eventual
+`omitted`. Second, an `any` group already satisfied by one child, with a
+second child still pending — note there is no literal "today's behaviour"
+to contrast here, since `any` grouping doesn't exist before this spec; what
+needs pinning is that the *new* construct doesn't accidentally reintroduce
+a short-circuit of its own (an `any` satisfied by its first child must
+still wait for its other children per this section's barrier, not resolve
+early just because it's already logically decided) — §12 already lists
+this as an explicit non-goal (no short-circuiting), this test is what pins
+it in code.
 
 Trade-off: slower propagation in the specific case just described —
 accepted, because it replaces the two-pass `all_deps_skipped` machinery the
@@ -214,20 +225,51 @@ loop-specific rollup exemption. More consistent (one mechanism, not a
 special case), but a genuine behaviour change for any workflow relying on
 the rollup-to-`completed` shortcut — §9 calls this out as a migration item.
 
-**This requires an actual code change, not just removing a branch.**
-`cascade.rs:345` today only constructs the rollup's `output` array
-(`RollupOutcome::Completed`'s payload) when the outcome is `Completed` — it
-is never built for `RollupOutcome::Failed`, because nothing could read a
-failed rollup's output before (a `Failed` placeholder always blocked every
-dependent under 0.17.0/v2). Now that a `Failed` rollup can legitimately be
-consumed by a dependent with `accept: [completed, failed]`, the output
-array must be built for **every** rollup outcome, using the existing
-documented rule unchanged (CLAUDE.md § For-Each Loops: "one element per
-existing instance, `null` where the instance produced none") — not just for
-`Completed`. The CLI's separate `for_each` rollup implementation
-(`stroem-cli/src/local/run.rs:333`) needs the identical fix; it is a second,
-independent implementation of the same rollup logic, not a wrapper around
-`cascade.rs`'s.
+**This requires changes at three separate layers, not just "build the
+array" — verified directly against the code, not assumed:**
+
+1. **`cascade.rs`'s in-memory `RollupOutcome` type.** Today,
+   `RollupOutcome::Completed(Value)` carries the aggregated output array;
+   `RollupOutcome::Failed(String)` carries only an error message
+   (`cascade.rs:40-43`) — there is nowhere for an output value to go on the
+   failure branch. `Failed` needs a second field, e.g.
+   `Failed(String, Value)`, and the rollup-building code (`cascade.rs:345`)
+   needs to construct the output array unconditionally, before branching on
+   `any_failed`, using the existing documented rule unchanged (CLAUDE.md §
+   For-Each Loops: "one element per existing instance, `null` where the
+   instance produced none").
+2. **Persistence (`JobStepRepo::fail_placeholder_tx`,
+   `crates/stroem-db/src/repos/job_step.rs:464`).** Checked directly: this
+   function's `UPDATE` sets `status`, `error_message`, `completed_at` — it
+   never touches the `output` column at all, unlike
+   `complete_placeholder_tx` (`job_step.rs:441`), which does. It needs a new
+   `output: &JsonValue` parameter and the corresponding `output = $4` in
+   the `UPDATE`, and `cascade.rs`'s call site (`cascade.rs:798-801`) needs
+   to pass the array from fix 1 through.
+3. **Render-context exposure (`render_context.rs:271-293`).** Checked
+   directly: the `failed` branch unconditionally sets
+   `entry.insert("output", Value::Null)` (`render_context.rs:286-287`) —
+   it doesn't even read `s.output`, unlike the `completed` branch just
+   above it, which does. The simplest correct fix is to merge the two
+   branches so a failed row's `output` is read from the column exactly
+   like a completed row's (falling back to `Value::Null` only if the
+   column is actually empty) — safe for an *ordinary* failed step, whose
+   `output` column was never populated on failure either before or after
+   this change, so nothing observable changes for that case; it only
+   starts exposing real data for the one case fix 1/2 newly populate, a
+   tolerated loop rollup. The CLI's parallel implementation
+   (`run.rs:117`'s `record_failure` and the rollup builder at `run.rs:333`)
+   needs the identical three-layer fix, independently — it's a second,
+   separate implementation of the same rollup logic, not a wrapper around
+   `cascade.rs`'s.
+
+**Correcting an inaccurate claim from the previous revision**: a `Failed`
+placeholder did *not* previously block every dependent — a placeholder
+with `continue_on_failure: true` already passed the shipped 0.17.0/v2 gate
+for an *optional*/accepting dependent; the actual previous limitation was
+narrower and specific: such a dependent could run, but could never see any
+real data, because the array was never built for that branch (fix 1) even
+when the gate let execution through.
 
 **Cancellation-only loops are a known, pre-existing quirk this spec does
 not change or attempt to fix.** Today's rollup only checks for *failed*
@@ -264,69 +306,134 @@ shows up, revisit then.
 
 ## 5. Server cascade (`crates/stroem-server/src/cascade.rs`)
 
-Revision 1 of this spec claimed P2 could simply be deleted and folded into
-P1, on the theory that the uniform readiness barrier (§2.3) made the
-two-phase split's original purpose — handling "all deps skipped" vs. "the
-rest" as two timing-ordered cases — moot. **Codex found this is wrong**: a
-single linear P1 scan, run once per `execute()` call, only propagates one
-step's decision to its *immediate* dependents within that call. A chain
-longer than one hop — concretely, `x` already unreachable, `x → a → b`, with
-an independent root loop `p` whose `when` reads whether `b` is defined —
-needs `a`'s skip (decided during the scan) and `b`'s skip (which depends on
-`a`'s *just-decided* state) to both land before P3 builds the context `p`'s
-`when` is evaluated against. A single static-snapshot scan over all pending
-rows does not guarantee that depth-2 propagation happens before the scan
-ends; today's actual two-phase P1-then-P2 split is precisely what makes
-*that specific case* work by giving the system a second look at rows P1's
-single pass hadn't yet resolved. Removing P2 outright, as revision 1 did,
-loses that second look and can leave `b` undecided when P3 runs, making `p`
-permanently (and wrongly) condition-skipped on stale information.
+Both revision 1 and revision 2 of this section were wrong about the actual
+cascade architecture, and the only way to get this right was to read
+`run()` directly (`cascade.rs:596-649`) and the project's own existing
+pinned tests (`cascade.rs:3080-3160`, comment: "pass timing (spec §5, Codex
+rounds 1-3)" — a pre-existing section from the *original* 0.17.0
+dependency-gate work, not this spec; the comment's phrasing is a coincidence
+of this project's recurring process vocabulary). Both corrections below are
+grounded directly in that code and those tests, not re-derived from memory.
 
-**The fix is not to restore the old two-phase split verbatim — the
-one-evaluation-per-tree model (§2.3) genuinely doesn't need its specific
-"all-skipped vs. the rest" distinction — but to replace the fixed two-pass
-shape with an unbounded fixpoint, since a fixed number of passes (whether
-one or two) is the wrong primitive for a dependency chain of arbitrary
-depth:**
+**Correction 1: `execute()`/`run()` already has an outer fixpoint loop.**
+`run()` repeats P0→P1→P2→P3 — rebuilding `ctx_a` and `ctx_b` fresh from the
+current snapshot on every repetition — until one full pass produces zero
+`Change`s (`cascade.rs:613-649`, the `loop { ...; if pass.is_empty() { break
+} }` body). Revision 1's claim that `execute()` runs each phase exactly once
+was simply wrong; revision 2's attempted fix (an unscoped "P1 runs to a
+fixpoint") didn't account for this *existing* outer loop at all. Any
+redesign here has to say precisely how a new inner mechanism relates to
+this existing outer one, not pretend it doesn't exist.
 
-- **P1** (cascade-skip + promote with `when`) runs to a **fixpoint within
-  one `execute()` call**: repeatedly re-scan every still-`pending`,
-  non-placeholder row against the current in-memory snapshot, apply every
-  tree-evaluation decision (`Open`/`Omitted`) it can now make, and recurse
-  — because applying those decisions can make *further* rows decidable in
-  turn (exactly the `a → b` case above) — until one full re-scan produces
-  no new decisions. **P2 is deleted**, not folded into a single scan: its
-  old job (a second look at what one pass missed) is subsumed by the
-  fixpoint running as many looks as the chain actually needs, not a fixed
-  one or two.
-  - *Termination is guaranteed*: the flow graph is a finite DAG (cycles are
-    rejected at validation, §8); each fixpoint iteration that produces at
-    least one `Change` strictly shrinks the set of still-`pending` rows
-    (a decided row never re-enters pending), so the loop terminates in at
-    most `N` iterations for `N` pending rows, and terminates immediately
-    (zero extra iterations) once no iteration produces a change.
-  - Within a single iteration, rows are still evaluated against *one*
-    static snapshot (consistent with the project's existing "pure fixpoint,
-    not an ad hoc promote→skip→expand loop" design) — only the *outer*
-    loop (re-snapshot, re-scan) is new; a single iteration's internal
-    ordering is not relied on for correctness, only the fact that the outer
-    loop repeats until stable.
-- **P0** (rollup) and **P3** (adopt + expand placeholders) are unchanged in
-  shape and in when they run relative to P1 — P3 still runs once, after P1
-  has *fully* stabilized (not interleaved with it), so its `when`-evaluation
-  context (context B) reflects every decision the fixpoint could make, not
-  a partial one. This is what fixes the `x → a → b → p` case: `b` is fully
-  decided by the time P3 builds context B, because P1's fixpoint doesn't
-  hand off to P3 until no row is left that it can still decide.
-  P0's rollup logic itself is unaffected by this section — see §4 for its
-  own, separate fix (the output-array and Completed/Failed branching).
+**Correction 2: P2 is not redundant with the outer loop — it's what makes
+one specific case resolve one pass sooner than the outer loop alone would,
+and a naive merge of P1+P2 loses exactly that, reproducing the real
+regression Codex found.** Walking the existing pinned tests against the
+*current* code explains why, precisely:
 
-**Required regression test, directly pinning Codex's counter-example**: a
-flow `x(no flag) → a → b`, `x` already `unreachable` from a prior cascade,
-plus an independent root step/loop `p` with `when: "{{ b is defined }}"` (or
-equivalent "does this other step have a row yet" check) — assert that `b`
-is fully decided (`omitted`) *and* `p`'s `when` sees that decision, within
-one `execute()` call, not requiring a second external trigger.
+- `timing_unreachable_chain_keeps_legacy_pass`: `x` starts already
+  `skipped`/`unreachable`. P1's guard is specifically `all_deps_skipped`
+  (every dependency has row *status* `'skipped'`, regardless of reason) —
+  true for `a` here, so **P1 decides `a` right away**. `apply_all` runs
+  before P2 executes, so **P2 — which has no such guard, it unconditionally
+  checks every still-pending row's gate — now sees `a` already terminal and
+  decides `b` in the *same pass*.** `ctx_b` (built after P2) already
+  reflects both decisions, so the placeholder `p`'s `when` ("is `b`
+  defined") sees it and `p` expands, all within pass 1.
+- `timing_failed_root_keeps_legacy_pass`: `x` starts `failed` (not
+  `skipped`). `all_deps_skipped(a)` is **false** (`status` is `'failed'`,
+  not `'skipped'` — the guard checks status literally), so **P1 defers on
+  `a`**; P2's unconditional check still decides it, so `a` *is* decided in
+  pass 1 — but only by P2, one phase later than the other test, with
+  nothing left afterward in *that* phase to give `b` the same within-pass
+  relay P2 gave `a`. `b` stays pending through all of pass 1; `ctx_b` built
+  at the end of pass 1 doesn't yet reflect `b`; `p` (a placeholder, decided
+  in P3) **permanently** condition-skips on that stale read, because P3 only
+  ever revisits rows that are still `pending`, and `p` no longer is. The
+  outer loop *does* go on to decide `b` in pass 2 — one pass too late for
+  `p`, which already committed. The test's name (`keeps_legacy_pass`)
+  records that this was a deliberately preserved 0.16-era quirk when the
+  dependency gate shipped, not an accident.
+- `timing_accepted_change_flagged_placeholder_retires_immediately`: `l`
+  depends on `[x (already unreachable), y (still running)]`. Today's
+  `gate()` returns a hard `BlockFail` on the **first** unsatisfied
+  dependency found, full stop, regardless of `y` still being pending — `l`
+  retires immediately, without waiting for `y`. This is precisely the
+  fail-fast dominance §2.3 deliberately replaces with a uniform
+  wait-for-everything barrier.
+
+**A single merged P1+P2 phase (revision 1's approach), run once per outer
+pass, reproduces only the *first* test's happy path — a merged phase with
+no internal relay is strictly weaker than today's P1-then-P2 one-hop relay,
+because it collects decisions for `a` and `b` into one batch without `b`
+ever seeing `a`'s mid-batch result. That's the regression Codex found: it
+downgrades the `unreachable`-chain case to the `failed`-chain case's
+(already worse) timing.**
+
+**The fix: give the merged phase (replacing P1+P2, call it P1) its own
+*internal* relay loop — re-scan pending rows against the snapshot, apply
+every decision the tree evaluation can now make, and repeat — nested
+*inside* one iteration of the existing outer loop, run to its own
+stability before that outer iteration proceeds to P3:**
+
+- Internally, this subsumes and strictly exceeds what the old P1-then-P2
+  one-hop relay provided: it keeps relaying for as many hops as a chain
+  actually has, not just one, and it does so for a `failed`-rooted chain
+  exactly as readily as a `skipped`-rooted one (today's asymmetry — one
+  case resolves in pass 1, the other needs pass 2 — came specifically from
+  P1's `all_deps_skipped` guard checking row *status*, which this spec's
+  uniform barrier (§2.3) has no equivalent special case for; every blocking
+  outcome is just "terminal and not accepted," skip or fail alike).
+- *Termination*: the pending set only shrinks (a decided row never
+  re-enters pending) and is finite, so the inner relay terminates in at
+  most `N` iterations for `N` pending rows in that outer pass, plus one
+  final no-change scan; it does not depend on acyclicity, only on
+  monotonic shrinking.
+- P0 and P3 are unchanged in shape. P3 still runs once per *outer* pass
+  (unchanged from today), after the merged P1 has internally stabilized —
+  so `ctx_b` reflects everything decidable within that outer pass, not a
+  partial result.
+- **Scope note, since an earlier draft of this test over-reached**: this
+  specifically fixes placeholder timing (P3 only revisits still-`pending`
+  rows, so a placeholder that commits early on a stale read can never
+  self-correct — the exact mechanism above). An *ordinary* (non-placeholder)
+  step's `when` is evaluated inline, within the same merged-P1 relay, the
+  moment its own tree is satisfied — if that `when` references some other
+  step's output *without* that step being in its own `depends_on` tree
+  (unsupported today, and not addressed by this spec either way), it can
+  still observe whatever the relay's current iteration happens to show. The
+  regression test (and the existing pinned tests above) use a placeholder
+  for `p`/`l`, matching every one of today's existing pinned tests — this
+  spec does the same, deliberately, rather than generalizing to ordinary
+  steps.
+
+**This is a real, net-positive timing change beyond fixing one broken test,
+and §12 needs to say so plainly rather than deny it.** Two existing pinned
+tests need their expected outcomes updated, not just the counter-example
+this section started from:
+
+- `timing_failed_root_keeps_legacy_pass` — `p` now **expands** within pass
+  1 instead of condition-skipping, because the failed-rooted chain now gets
+  the same within-pass relay the skipped-rooted chain already got. The test
+  needs renaming (its current name specifically celebrates *preserving* the
+  quirk this spec removes) and its assertion flipped.
+- `timing_accepted_change_flagged_placeholder_retires_immediately` — `l` now
+  **waits for `y`** before retiring, instead of retiring immediately on `x`
+  alone — the direct, already-acknowledged (§2.3) consequence of replacing
+  fail-fast `BlockFail` dominance with a uniform barrier. Needs the same
+  treatment: rename and flip.
+- `timing_unreachable_chain_keeps_legacy_pass` and
+  `timing_accepted_change_dependent_cof_no_longer_delays` are unaffected —
+  both already resolve within one pass today, and the merged relay still
+  does so (walked through §2.5's verdict table, no change to their
+  outcome). `timing_accepted_change_unknown_reason_is_failure_class` is
+  also unaffected — an unrecognised skip reason still has row `status`
+  `'skipped'`, so it was already a same-pass case, and under §2.1's
+  classification it is `omitted`, same conservative bucket as `unreachable`
+  was.
+
+P0's rollup logic itself is unaffected by this section — see §4 for its own,
+separate fix (the output-array and `Completed`/`Failed` branching).
 
 ## 6. Job status and hooks (unchanged from v2)
 
@@ -388,7 +495,18 @@ pub enum AcceptSet {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome { Completed, Failed, Cancelled, Skipped, Omitted }
+
+/// Deserializes only from the exact string "terminal"; any other string
+/// value is a parse error, not a silently-accepted typo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalKeyword;
+// (Deserialize impl: match the input string against "terminal" literally;
+// omitted here for brevity, not because it's optional — the literal-match
+// requirement is the point.)
 ```
+
+(This sketch omits the crate's normal `use` imports for brevity; nothing
+about them is load-bearing to the design.)
 
 Revision 1's sketch put `#[serde(deny_unknown_fields)]` directly on
 `DependsOnEntry`'s enum variants — **that doesn't compile**:
@@ -404,12 +522,13 @@ shape, or `{step: a, accpet: [completed]}` here) must be a hard parse error,
 not silently dropped. Add a test asserting a mapping with **two**
 discriminating keys at once (e.g. both `step` and `any` present) is also
 rejected, not resolved by picking whichever variant happens to match first.
-An empty `Outcomes` list, or an `all`/`any` with zero children, is a
+An empty `Outcomes` list, or a *nested* `all`/`any` with zero children, is a
 validation error, not a vacuous pass (an empty `all` would trivially always
-be satisfied; an empty `any` would trivially never be) — except the
-top-level, *entirely absent* `depends_on` on a step with no dependencies at
-all, which is unchanged from today and satisfied immediately (§8 states
-this exception precisely).
+be satisfied; an empty `any` would trivially never be) — except at the top
+level: a step with no dependencies at all, written either as an absent
+`depends_on` field or as an explicit `depends_on: []`, is unchanged from
+today and satisfied immediately (§8 states this same exception precisely,
+for both spellings).
 
 **Parse-error propagation is unconditional, for both code paths that read a
 flow step.** `workflow.rs:578`'s existing pattern — falling back to an empty
@@ -420,11 +539,16 @@ explicitly so it isn't lost in translation again. Separately, the
 permissive reference-step struct that currently still accepts
 `continue_when_skipped` (`workflow.rs:458`) must not simply stop
 recognizing that field once it's retired (§2) — a workspace config that
-still sets it needs a named, actionable validation error ("`
-continue_when_skipped` was removed; set `accept: [completed, skipped]` on
-the dependent's edge instead"), not silent acceptance-and-ignore. Tests for
-both of these must exercise actual flow-step loading (the full parse path),
-not just the `DependsOnEntry` type in isolation.
+still sets it needs a named, actionable validation error, not silent
+acceptance-and-ignore. The error message must not prescribe a single fixed
+`accept` set — §9 shows the two single-flag migration cases are
+context-dependent, not a fixed substitution — so it should point at the
+migration guide (§9) rather than assert a specific replacement, e.g. "`
+continue_when_skipped` was removed in 0.18.0; see the 0.18 upgrade guide to
+choose the right `accept` set for this dependent, it depends on what else
+was present on this dependency." Tests for both of these must exercise
+actual flow-step loading (the full parse path), not just the
+`DependsOnEntry` type in isolation.
 
 `depends_on`'s consumer list is the same one v2's §4 already enumerated,
 carried over unchanged — every place that reads `depends_on` is reading a
@@ -470,7 +594,11 @@ treatment).
   root group); allow the same name to recur across *different* branches of
   nested groups. The readiness barrier and cycle detection still treat the
   name as one graph node regardless of how many branches reference it —
-  only the per-branch `accept` evaluation differs.
+  only the per-branch `accept` evaluation differs. Implementation caution:
+  this check must run against the tree exactly as authored, before any
+  normalization step (e.g. flattening nested `all`s into their parent) —
+  flattening first could turn a legitimate cross-branch reference into a
+  same-level sibling and wrongly reject it.
 - The 0.17.0-era "step will be skipped whenever its dependency is skipped,
   add `continue_when_skipped`" warning is retired along with the flag it was
   about — there's nothing left for it to warn about, since the consumer now
@@ -483,31 +611,65 @@ v2 never shipped — it's superseded before sign-off — so there is one
 migration path to document: 0.17.0 (released, likely not yet deployed to
 production per the v2 spec's rollout note) to this design.
 
-**The translation is precise, not a two-bullet approximation — it depends on
-exactly which of the two old flags the dependency carried**, since each one
-tolerated a different, specific outcome set (`gate.rs:55`), and `accept:
-[completed, failed]` alone silently drops outcomes the old flag(s) covered:
+**Revision 2's table claimed this translation is exact. It is not, and
+cannot be, for the two single-flag rows — not a bug to fix, but a direct,
+unavoidable consequence of §2.1's own design choice, which the migration
+guidance needs to state honestly rather than paper over.**
 
-| Dependency's 0.17.0 flags | Dependent's new `accept` |
-|---|---|
-| neither | `[completed]` (bare name, unchanged default) |
-| `continue_when_skipped` only | `[completed, skipped]` |
-| `continue_on_failure` only | `[completed, failed, cancelled, omitted]` (i.e. `terminal` minus `skipped` — tolerates every failure-class outcome, including `cascade`/`unreachable`-turned-`omitted`, but still blocks a choice-skip) |
-| both | `terminal` |
+Here is precisely why. The shipped 0.17.0 gate keys its two flags off *skip
+reason*, not off *why* that reason arose: `continue_when_skipped` tolerates
+a dependency being `Skipped` with reason `condition`, `empty`, *or*
+`cascade`; `continue_on_failure` tolerates `Failed`/`Cancelled`/`Skipped`
+with reason `unreachable` or unknown (`gate.rs:55`). §2.1 of *this* spec
+deliberately does not preserve that split — per Codex's own original
+recommendation, adopted in §2 — it collapses `cascade` and `unreachable`
+into one unified `omitted` outcome, because once a dependency is itself
+blocked by *its own* tree, nothing further downstream can (or, by design,
+should be able to) tell whether the ultimate cause several hops back was a
+choice or a failure. That is the entire point of unifying `Omitted` — and
+it means the two single-flag migration cases genuinely have no exact
+equivalent:
 
-The "tolerate failure, block choice-skip" case v2's own migration guidance
-had no answer for is row 3 — `continue_on_failure` only — now expressible
-exactly, not approximated. Getting rows 3 and 4 right matters specifically
-because `omitted` (today's `cascade`/`unreachable`) was tolerated by
-`continue_on_failure` alone, and is easy to drop by writing `[completed,
-failed]` instead of the full row-3 set — a worked example:
-`A(when=false) → B(continue_when_skipped=true) → C` lets `C` run today once
-`B` is cascade-skipped; migrating `B`'s flags to row 2's `accept:
-[completed, skipped]` on `C`'s edge preserves this exactly (cascade-skip of
-`B` is `skipped` in the new vocabulary, since `B`'s own skip originates from
-its own choice-class ancestor, not a failure) — but naively using
-`[completed, failed]` here would be wrong in the other direction, rejecting
-the very outcome the migration is supposed to preserve.
+| Dependency's 0.17.0 flags | Closest new `accept` | What changes, precisely |
+|---|---|---|
+| neither | `[completed]` (unchanged default) | Exact. |
+| both | `terminal` | Exact (both old flags together already tolerated everything but `Pending`). |
+| `continue_when_skipped` only | `[completed, skipped]` | **Narrows**: today this also tolerates the dependency being cascade-skipped (an upstream choice-block reaching it); `omitted` isn't in this set, so that case is now newly rejected. |
+| `continue_on_failure` only | `[completed, failed, cancelled, omitted]` (`terminal` minus `skipped`) | **Widens**: `omitted` here also covers the dependency being cascade-skipped, which the old flag never tolerated — only `unreachable`/unknown did. |
+
+**Worked example, corrected** (revision 2's version of this example was
+wrong under the spec's own §2.1): `A(when=false) → B(continue_when_skipped=
+true) → C`. Today, `B` is cascade-skipped and `C` runs. Under this spec,
+`B`'s own resulting outcome is `omitted` (§2.1 — `B` was blocked by *its
+own* tree, specifically by `A`'s choice-skip; this is exactly the kind of
+case §2.1 unifies, not `skipped`, which is reserved for a step's own direct
+`when`/empty-loop choice). Migrating via the table's row-3 recommendation,
+`accept: [completed, skipped]` on `C`'s edge to `B`, therefore does **not**
+reproduce today's behaviour — `omitted` isn't in that set, so `C` would now
+be omitted too, where it used to run. Reproducing today's behaviour here
+needs `accept: [completed, omitted]` (or `terminal`) instead — the opposite
+of what a literal reading of "migrate `continue_when_skipped` to `accept:
+[completed, skipped]`" would suggest. **This is precisely why the table
+above is framed as "closest approximation," not "exact translation," and
+why a migrator must check which specific case they're in.**
+
+When the distinction genuinely matters (a workflow really does need
+"tolerate a failure several hops back, but not a choice-skip several hops
+back," or vice versa, through an intermediate dependency), there is no
+single-edge-on-the-intermediate-dependency way to express it, because the
+intermediate dependency's own `omitted` outcome has already thrown that
+distinction away. The only faithful option is to stop relying on the
+intermediate hop's broadcast at all and name the actual origin directly:
+give the edge several hops up an explicit `accept` for its own direct
+outcome (`failed`/`cancelled` vs. `skipped`), and have the intermediate
+steps use `accept: terminal` purely for ordering. This is more verbose, but
+it's the one way to recover precision the unified `omitted` outcome
+deliberately gave up.
+
+Migration tests (§10) must cover both directions concretely: a workflow
+whose historical rows include a `cascade` skip reason, and one whose
+historical rows include `unreachable` — not just the happy "neither/both"
+cases, which are the only ones that translate exactly.
 - The loop-rollup behaviour change (§4) needs its own checklist item: any
   workflow whose dependents currently rely on a tolerated loop failure
   rolling up as `completed` needs those dependents' edges updated to
@@ -544,11 +706,18 @@ the very outcome the migration is supposed to preserve.
   and `any`); a test that a workspace still setting the retired
   `continue_when_skipped` gets the named migration error, not silent
   acceptance (§7).
-- `cascade.rs`: the §5 fixpoint regression test (`x → a → b` plus an
-  independent `p` whose `when` reads `b`'s existence) — the specific case
-  Codex found broken by revision 1's "just delete P2" claim — is mandatory,
-  not optional; the `recalc-pipeline` worked example (§3) as an
-  integration-style test driving all seven rules; a loop-rollup test
+- `cascade.rs`: update the five existing pinned timing tests
+  (`cascade.rs:3080-3160`) for the new merged-phase relay (§5) —
+  `timing_unreachable_chain_keeps_legacy_pass` and
+  `timing_accepted_change_dependent_cof_no_longer_delays` keep their current
+  assertions (unaffected); `timing_accepted_change_unknown_reason_is_failure_class`
+  keeps its assertion too; `timing_failed_root_keeps_legacy_pass` and
+  `timing_accepted_change_flagged_placeholder_retires_immediately` both need
+  renaming and their assertions flipped (§5 explains exactly why for each).
+  Do not just add a new test alongside these — update them in place, since
+  they're what pins the actual behavior change; the `recalc-pipeline` worked
+  example (§3) as an integration-style test driving all seven rules; a
+  loop-rollup test
   asserting a tolerated instance failure now rolls up `failed` (not
   `completed`) *with its output array populated* (not just the status —
   §4's data-loss fix), and that a dependent with `accept: [completed,
@@ -577,7 +746,13 @@ re-evaluated under the new gate on their next cascade (same accepted risk
 class as both 0.17.0's and v2's own rollout notes), and the same open
 question about whether production has actually reached 0.17.0 server code
 yet — worth confirming before release so the upgrade communication targets
-the right starting point.
+the right starting point. To state precisely what "re-evaluated" covers: a
+row already past the gate — `ready`, `claimed`, `running`, or terminal — is
+never re-gated by the new code; only rows still `pending` when the upgrade
+takes effect are evaluated under the new tree/`accept` model on their next
+cascade. A step that already started executing under 0.17.0's rules keeps
+running to its own completion under those rules; only its *dependents*,
+still pending, see the new gate.
 
 **Loops add their own timing wrinkle, worth calling out explicitly rather
 than leaving implicit in the general in-flight-job note above.** P0 only
@@ -607,8 +782,13 @@ belongs alongside the other migration-behaviour tests in §10.
   revisit only with a concrete latency complaint.
 - Renaming `continue_on_failure` — the user decided to keep the name for
   now (2026-10-01).
-- Any change to how `when` or `for_each` are evaluated, beyond §4's
-  loop-rollup status fix.
+- Changing how an individual `when` expression is *written* or evaluated —
+  still the same Tera condition, still evaluated after the dependency tree
+  is satisfied (§2.3). **Not a non-goal, and withdrawn as a claim**: the
+  *timing* of when a placeholder's `when` gets evaluated relative to a
+  multi-hop dependency chain resolving does change, deliberately — §5
+  documents it precisely, including the two existing pinned tests whose
+  expected outcome flips as a direct, intentional consequence.
 - Named, reusable sub-groups — `all`/`any` are inline combinators scoped to
   one step's `depends_on`, not separately named/referenceable entities (no
   system in Appendix A's research has these either).
@@ -702,3 +882,47 @@ beyond the two corrections above.
   - §12/Appendix: marked diagnostic tracing as an explicit scope reduction
     from Codex's proposal; corrected two inherited inaccuracies about
     Tekton's `onError: continue` and GitHub Actions' `success()` display.
+- 2026-10-01, Codex round 2 (same thread, verdict Still SHIP WITH FIXES):
+  6 of 15 round-1 findings confirmed fully resolved; 3 required real
+  rework, addressed in revision 3 by reading the actual code and existing
+  tests directly rather than re-deriving from memory a third time.
+  - **§9's migration table was still wrong, called the "core unresolved
+    issue"**: §2.1's unification of `cascade`/`unreachable` into one
+    `omitted` outcome (a deliberate design choice, kept) means the two
+    single-flag migration cases have no exact equivalent — one narrows,
+    one widens. Rewrote §9 to state this honestly with a corrected worked
+    example (the original was wrong under the spec's own §2.1), instead of
+    claiming an exactness that doesn't hold; added guidance for when the
+    distinction actually matters (name the origin directly, several hops
+    up, rather than relying on an intermediate hop's broadcast).
+  - **§5 was substantively wrong, twice**: revision 1 assumed `execute()`
+    ran each phase once (it doesn't — `run()` already loops P0-P3 to a
+    fixpoint, `cascade.rs:596-649`); revision 2's "P1 runs to a fixpoint"
+    fix didn't account for that existing outer loop, and its regression
+    test over-generalized from a placeholder to an ordinary step (where it
+    doesn't apply). Rewrote §5 from scratch, grounded directly in the
+    actual code and the project's own pre-existing pinned timing tests
+    (`cascade.rs:3080-3160`), which turned up exactly why P2 isn't
+    redundant with the outer loop (it's what lets a same-pass relay reach
+    one hop further than a bare merged-P1 would) and exactly which two of
+    those five existing tests need their assertions flipped, not just a
+    new test added. §12's "no other timing changes" claim is withdrawn and
+    replaced with an explicit, honest statement of what changes and why.
+  - **§4's loop-output fix was incomplete**: "build the array" doesn't
+    reach a template. Traced the full chain in the actual code — `cascade.rs:40`'s
+    `RollupOutcome::Failed` carries no output value at all,
+    `job_step.rs:464`'s `fail_placeholder_tx` never writes the `output`
+    column, and `render_context.rs:286` unconditionally nulls it for any
+    failed row regardless — and specified the fix at all three layers,
+    plus removed the incorrect "blocked every dependent" claim.
+  - Smaller fixes: §2.1's "exactly as today" overclaim corrected (going
+    forward, `cascade` is never written, only read on legacy rows); §2.3's
+    imprecise "today's equivalent" sentence for the `any` case corrected
+    (no such equivalent exists, since grouping is new); §7 given its
+    omitted `TerminalKeyword` definition; §7's empty-`depends_on`
+    exception now explicitly covers both the absent-field and `[]`
+    spellings, matching §8; §8 given an implementation caution about
+    checking duplicates against the authored tree, not a flattened one;
+    §11 given a precise statement of what "re-evaluated" does and doesn't
+    cover for already-running work; §7's migration error message no longer
+    prescribes a fixed `accept` set given §9's correction.
