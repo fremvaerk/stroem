@@ -1,6 +1,7 @@
 # Dependency Conditions — typed per-edge outcome acceptance — Design
 
-Status: revision 5, Codex round 4 findings addressed; awaiting further review
+Status: revision 5, Codex sign-off (round 5: "Ready — revision 5 is ready
+to move to an implementation plan"); awaiting user review
 Ships in: 0.18.0 (breaking, on top of the already-breaking 0.17.0)
 Supersedes: `2026-09-30-dependency-gate-v2-design.md` in full (abandoned before
 sign-off — a fundamentally different model, per Codex's unconstrained design
@@ -1047,3 +1048,9 @@ beyond the two corrections above.
   `JobStepRow`, and using that instead. Codex: "revision 4 is NOT ready
   because §4 still needs to specify carrying the placeholder discriminator
   into `StepView`" — this was the only blocker identified.
+- 2026-10-01, Codex round 5 (same thread, verdict: **Ready — sign-off**):
+  confirmed the `StepView.is_placeholder` fix closes the round-4 gap
+  correctly (predicate matches `cascade.rs:271`'s existing
+  `is_placeholder`, the type conversion is sound, no other `StepView`
+  construction site exists that would need the same treatment). No new
+  issues found. "Revision 5 is ready to move to an implementation plan."
