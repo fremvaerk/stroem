@@ -23,3 +23,8 @@ test_output.txt
 
 # Local Codex CLI config (holds credentials)
 .codex/
+graphify-out
+.DS_Store
+
+# Local git worktrees (feature-branch isolation)
+.worktrees/
