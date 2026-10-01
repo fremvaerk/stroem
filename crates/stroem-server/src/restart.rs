@@ -67,7 +67,12 @@ pub fn compute_restart_set(
     loop {
         let before = restart.len();
         for (name, fs) in flow {
-            if !restart.contains(name) && fs.depends_on.iter().any(|d| restart.contains(d)) {
+            if restart.contains(name) {
+                continue;
+            }
+            let mut dep_names = Vec::new();
+            stroem_common::depends_on::collect_names(&fs.depends_on, &mut dep_names);
+            if dep_names.iter().any(|d| restart.contains(*d)) {
                 restart.insert(name.clone());
             }
         }
@@ -85,7 +90,6 @@ pub fn compute_restart_set(
     .into_iter()
     .collect();
 
-    let caught = stroem_common::gate::caught_steps(flow);
     let mut carried = Vec::new();
     let mut carried_failed = Vec::new();
     let mut carried_failed_tolerated = Vec::new();
@@ -113,7 +117,12 @@ pub fn compute_restart_set(
             }
         };
         if seed.status == StepStatus::Failed.as_ref() {
-            if caught.contains(name.as_str()) {
+            // Spec 2026-10-01 §6: only this step's OWN continue_on_failure
+            // (in the CURRENT flow) excuses a carried failure — no more
+            // structural "caught somewhere downstream" walk. `name` here is
+            // always a placeholder (loop instances are excluded from
+            // `source_by_name` above), so a direct lookup is correct.
+            if flow.get(name.as_str()).is_some_and(|fs| fs.continue_on_failure) {
                 carried_failed_tolerated.push(name.clone());
             } else {
                 carried_failed.push(name.clone());
@@ -145,10 +154,13 @@ mod tests {
             action: "noop".into(),
             name: None,
             description: None,
-            depends_on: deps.iter().map(|s| s.to_string()).collect(),
+            depends_on: deps
+                .iter()
+                .map(|s| stroem_common::depends_on::DependsOnEntry::Name(s.to_string()))
+                .collect(),
             input: Default::default(),
             continue_on_failure: cof,
-            continue_when_skipped: false,
+            legacy_continue_when_skipped: None,
             timeout: None,
             when: None,
             for_each: None,
@@ -333,8 +345,12 @@ mod tests {
     }
 
     #[test]
-    fn carried_failure_caught_downstream_is_tolerated() {
+    fn carried_failure_is_tolerated_only_by_its_own_flag() {
         // a failed (no flag) → b (cof) skipped; restart the independent z.
+        // Under the OLD caught_steps() rule, a's failure was "caught"
+        // because b catches it structurally downstream even though a itself
+        // has no flag. Under the new rule (spec 2026-10-01 §6), only a's own
+        // flag counts — a has none, so it's an untolerated carried failure.
         let flow = HashMap::from([
             ("a".into(), fs(&[], false)),
             ("b".into(), fs(&["a"], true)),
@@ -344,8 +360,12 @@ mod tests {
         b.skip_reason = Some("unreachable".into());
         let src = [row("a", "failed", None), b, row("z", "failed", None)];
         let p = compute_restart_set(&flow, &src, "z").unwrap();
-        assert_eq!(p.carried_failed_tolerated, vec!["a"]);
-        assert!(p.carried_failed.is_empty(), "carried skips never appear");
+        assert_eq!(
+            p.carried_failed,
+            vec!["a"],
+            "a has no flag of its own — must be untolerated, regardless of b's"
+        );
+        assert!(p.carried_failed_tolerated.is_empty());
     }
 
     #[test]
