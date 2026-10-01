@@ -58,138 +58,58 @@ impl DepOutcome {
     }
 }
 
-/// The combined decision for one step (spec §2.3).
+/// The gate's decision for one step. Spec §2.3: evaluated only once every
+/// referenced dependency is terminal — no fail-fast short-circuit on a
+/// hard block, no special-casing a group already logically decided.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Gate {
-    /// Every dependency passes: evaluate the step's own `when`.
     Open,
-    /// Some dependency is still running and nothing has blocked as a failure.
     Wait,
-    /// Skip with this reason (`Cascade` or `Unreachable` only).
-    Skip(SkipReason),
+    Omitted,
 }
 
-/// Strict AND. Takes only the dependent's `depends_on` — never its own
-/// `FlowStep` — so the dependent's flags cannot be read.
-///
-/// NOTE: this old signature/body is superseded by Step 8 — left as-is here
-/// deliberately (it no longer compiles against the new `DepOutcome` shape
-/// above, nor against `DependsOnEntry`; that is expected until Step 8 lands,
-/// per the brief's own Step 4 note).
-pub fn gate(
-    depends_on: &[String],
-    flow: &std::collections::HashMap<String, crate::models::workflow::FlowStep>,
-    outcome_of: impl Fn(&str) -> DepOutcome,
-) -> Gate {
-    let mut pending = false;
-    let mut block_skip = false;
-    for d in depends_on {
-        match verdict(outcome_of(d), flow.get(d)) {
-            Verdict::BlockFail => return Gate::Skip(SkipReason::Unreachable),
-            Verdict::Pending => pending = true,
-            Verdict::BlockSkip => block_skip = true,
-            Verdict::Pass => {}
-        }
+fn all_terminal(entry: &DependsOnEntry, outcome_of: &impl Fn(&str) -> DepOutcome) -> bool {
+    if let Some(name) = entry.leaf_name() {
+        return !matches!(outcome_of(name), DepOutcome::Pending);
     }
-    if pending {
-        Gate::Wait
-    } else if block_skip {
-        Gate::Skip(SkipReason::Cascade)
-    } else {
+    entry
+        .children()
+        .expect("leaf_name() and children() are exhaustive over the 4 variants")
+        .iter()
+        .all(|c| all_terminal(c, outcome_of))
+}
+
+fn satisfied(entry: &DependsOnEntry, outcome_of: &impl Fn(&str) -> DepOutcome) -> bool {
+    match entry {
+        DependsOnEntry::Name(n) => {
+            matches!(outcome_of(n), DepOutcome::Completed)
+        }
+        DependsOnEntry::Step(s) => outcome_of(&s.step)
+            .as_schema_outcome()
+            .is_some_and(|o| s.accept.contains(o)),
+        DependsOnEntry::All(a) => a.all.iter().all(|c| satisfied(c, outcome_of)),
+        DependsOnEntry::Any(a) => a.any.iter().any(|c| satisfied(c, outcome_of)),
+    }
+}
+
+/// Evaluate one step's `depends_on` tree (an implicit `all` group at the
+/// top level) against a row-outcome lookup. Spec §2.3: wait for every
+/// referenced step to go terminal before deciding anything, then evaluate
+/// the whole tree once.
+pub fn gate(depends_on: &[DependsOnEntry], outcome_of: impl Fn(&str) -> DepOutcome) -> Gate {
+    if !depends_on.iter().all(|e| all_terminal(e, &outcome_of)) {
+        return Gate::Wait;
+    }
+    if depends_on.iter().all(|e| satisfied(e, &outcome_of)) {
         Gate::Open
+    } else {
+        Gate::Omitted
     }
-}
-
-/// What one dependency means for its dependent (spec §2.2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Verdict {
-    Pass,
-    BlockSkip,
-    BlockFail,
-    Pending,
-}
-
-/// `dep` is the DEPENDENCY's flow definition; `None` (missing from the flow)
-/// reads as no flags.
-pub fn verdict(outcome: DepOutcome, dep: Option<&crate::models::workflow::FlowStep>) -> Verdict {
-    let cof = dep.is_some_and(|d| d.continue_on_failure);
-    let cws = dep.is_some_and(|d| d.legacy_continue_when_skipped.unwrap_or(false));
-    match outcome {
-        DepOutcome::Pending => Verdict::Pending,
-        DepOutcome::Completed => Verdict::Pass,
-        DepOutcome::Skipped => {
-            if cws {
-                Verdict::Pass
-            } else {
-                Verdict::BlockSkip
-            }
-        }
-        DepOutcome::Failed | DepOutcome::Cancelled | DepOutcome::Omitted => {
-            if cof {
-                Verdict::Pass
-            } else {
-                Verdict::BlockFail
-            }
-        }
-    }
-}
-
-/// Every flow step `s` with `caught(s)` (spec §2.4):
-/// `s.continue_on_failure || (dependents non-empty && all dependents caught)`.
-/// Structural: computed from the flow definition only.
-pub fn caught_steps(
-    flow: &std::collections::HashMap<String, crate::models::workflow::FlowStep>,
-) -> std::collections::HashSet<String> {
-    let mut dependents: std::collections::HashMap<&str, Vec<&str>> =
-        std::collections::HashMap::new();
-    for (name, fs) in flow {
-        for d in &fs.depends_on {
-            dependents
-                .entry(d.as_str())
-                .or_default()
-                .push(name.as_str());
-        }
-    }
-    let mut memo: std::collections::HashMap<&str, bool> = std::collections::HashMap::new();
-    let mut visiting: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    for start in flow.keys() {
-        let mut stack: Vec<(&str, bool)> = vec![(start.as_str(), false)];
-        while let Some((s, expanded)) = stack.pop() {
-            if memo.contains_key(s) {
-                continue;
-            }
-            let fs = &flow[s];
-            let ds = dependents.get(s).map(Vec::as_slice).unwrap_or(&[]);
-            if fs.continue_on_failure {
-                memo.insert(s, true);
-                continue;
-            }
-            if !expanded {
-                if visiting.contains(s) {
-                    continue;
-                }
-                visiting.insert(s);
-                stack.push((s, true));
-                for d in ds {
-                    if !memo.contains_key(d) && !visiting.contains(d) {
-                        stack.push((d, false));
-                    }
-                }
-                continue;
-            }
-            visiting.remove(s);
-            let v = !ds.is_empty() && ds.iter().all(|d| memo.get(d).copied().unwrap_or(false));
-            memo.insert(s, v);
-        }
-    }
-    memo.into_iter()
-        .filter(|&(_, v)| v)
-        .map(|(k, _)| k.to_string())
-        .collect()
 }
 
 /// The flow step a `job_step` row belongs to: a loop instance is judged by
-/// its placeholder.
+/// its placeholder. Unchanged from the prior revision — still needed by
+/// job-status/hooks/restart (Task 5).
 pub fn flow_step_name<'a>(step_name: &'a str, loop_source: Option<&'a str>) -> &'a str {
     if let Some(src) = loop_source {
         return src;
@@ -198,15 +118,6 @@ pub fn flow_step_name<'a>(step_name: &'a str, loop_source: Option<&'a str>) -> &
         Some(i) => &step_name[..i],
         None => step_name,
     }
-}
-
-/// Is a failed row's failure caught (spec §2.4)?
-pub fn failure_caught(
-    caught: &std::collections::HashSet<String>,
-    step_name: &str,
-    loop_source: Option<&str>,
-) -> bool {
-    caught.contains(flow_step_name(step_name, loop_source))
 }
 
 #[cfg(test)]
@@ -297,5 +208,119 @@ mod tests {
             Some(Outcome::Omitted)
         );
         assert_eq!(DepOutcome::Pending.as_schema_outcome(), None);
+    }
+
+    fn outcome_map<'a>(pairs: &'a [(&'a str, DepOutcome)]) -> impl Fn(&str) -> DepOutcome + 'a {
+        move |name| {
+            pairs
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, o)| *o)
+                .unwrap_or(DepOutcome::Pending)
+        }
+    }
+
+    fn step_entry(name: &str, accept: &[Outcome]) -> DependsOnEntry {
+        DependsOnEntry::Step(StepEntry {
+            step: name.to_string(),
+            accept: AcceptSet::Outcomes(accept.to_vec()),
+        })
+    }
+    fn name_entry(name: &str) -> DependsOnEntry {
+        DependsOnEntry::Name(name.to_string())
+    }
+
+    #[test]
+    fn empty_depends_on_is_immediately_open() {
+        assert_eq!(gate(&[], outcome_map(&[])), Gate::Open);
+    }
+
+    #[test]
+    fn bare_name_requires_completed() {
+        let deps = vec![name_entry("a")];
+        assert_eq!(
+            gate(&deps, outcome_map(&[("a", DepOutcome::Completed)])),
+            Gate::Open
+        );
+        assert_eq!(
+            gate(&deps, outcome_map(&[("a", DepOutcome::Failed)])),
+            Gate::Omitted
+        );
+        assert_eq!(gate(&deps, outcome_map(&[])), Gate::Wait);
+    }
+
+    #[test]
+    fn step_entry_with_explicit_accept_tolerates_failure_but_not_skip() {
+        let deps = vec![step_entry("a", &[Outcome::Completed, Outcome::Failed])];
+        assert_eq!(
+            gate(&deps, outcome_map(&[("a", DepOutcome::Failed)])),
+            Gate::Open
+        );
+        assert_eq!(
+            gate(&deps, outcome_map(&[("a", DepOutcome::Skipped)])),
+            Gate::Omitted
+        );
+    }
+
+    #[test]
+    fn a_hard_block_still_waits_for_a_pending_sibling() {
+        // The deliberate change from today's fail-fast BlockFail dominance
+        // (spec §2.3) — pins `timing_accepted_change_flagged_placeholder_retires_immediately`'s new behavior at the gate level.
+        let deps = vec![name_entry("a"), name_entry("b")];
+        let outcome = outcome_map(&[("a", DepOutcome::Failed)]); // b still pending
+        assert_eq!(gate(&deps, outcome), Gate::Wait);
+    }
+
+    #[test]
+    fn an_any_group_satisfied_by_one_child_still_waits_for_a_pending_sibling() {
+        // No short-circuit (spec §12 non-goal) — pinned here, not just claimed.
+        let deps = vec![DependsOnEntry::Any(AnyEntry {
+            any: vec![name_entry("a"), name_entry("b")],
+        })];
+        let outcome = outcome_map(&[("a", DepOutcome::Completed)]); // b still pending
+        assert_eq!(gate(&deps, outcome), Gate::Wait);
+        let outcome2 = outcome_map(&[("a", DepOutcome::Completed), ("b", DepOutcome::Failed)]);
+        assert_eq!(gate(&deps, outcome2), Gate::Open);
+    }
+
+    #[test]
+    fn an_all_group_needs_every_child_satisfied() {
+        let deps = vec![DependsOnEntry::All(AllEntry {
+            all: vec![name_entry("a"), name_entry("b")],
+        })];
+        let outcome = outcome_map(&[("a", DepOutcome::Completed), ("b", DepOutcome::Completed)]);
+        assert_eq!(gate(&deps, outcome), Gate::Open);
+        let outcome2 = outcome_map(&[("a", DepOutcome::Completed), ("b", DepOutcome::Failed)]);
+        assert_eq!(gate(&deps, outcome2), Gate::Omitted);
+    }
+
+    #[test]
+    fn nested_any_inside_all_combines_correctly() {
+        // audit must finish (terminal), and at least one mirror must complete.
+        let deps = vec![
+            step_entry("audit", &Outcome::ALL),
+            DependsOnEntry::Any(AnyEntry {
+                any: vec![name_entry("mirror-a"), name_entry("mirror-b")],
+            }),
+        ];
+        let outcome = outcome_map(&[
+            ("audit", DepOutcome::Failed),
+            ("mirror-a", DepOutcome::Failed),
+            ("mirror-b", DepOutcome::Completed),
+        ]);
+        assert_eq!(gate(&deps, outcome), Gate::Open);
+        let outcome2 = outcome_map(&[
+            ("audit", DepOutcome::Completed),
+            ("mirror-a", DepOutcome::Failed),
+            ("mirror-b", DepOutcome::Failed),
+        ]);
+        assert_eq!(gate(&deps, outcome2), Gate::Omitted);
+    }
+
+    #[test]
+    fn flow_step_name_normalizes_loop_instances() {
+        assert_eq!(flow_step_name("p[3]", Some("p")), "p");
+        assert_eq!(flow_step_name("p[3]", None), "p");
+        assert_eq!(flow_step_name("plain", None), "plain");
     }
 }
