@@ -87,6 +87,64 @@ impl AcceptSet {
     }
 }
 
+fn default_accept() -> AcceptSet {
+    AcceptSet::default_completed_only()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StepEntry {
+    pub step: String,
+    #[serde(default = "default_accept")]
+    pub accept: AcceptSet,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AllEntry {
+    pub all: Vec<DependsOnEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnyEntry {
+    pub any: Vec<DependsOnEntry>,
+}
+
+/// One entry in a `depends_on` list. `deny_unknown_fields` lives on each
+/// named struct above, not on this enum's variants directly — serde treats
+/// that as a container attribute, and rejects it on a bare enum variant.
+/// See spec §7 for why this is the standard pattern, not a workaround.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum DependsOnEntry {
+    Name(String),
+    Step(StepEntry),
+    All(AllEntry),
+    Any(AnyEntry),
+}
+
+impl DependsOnEntry {
+    /// For a leaf (`Name`/`Step`) entry, the step it names; `None` for a
+    /// group (`All`/`Any`), which doesn't name exactly one step.
+    pub fn leaf_name(&self) -> Option<&str> {
+        match self {
+            DependsOnEntry::Name(n) => Some(n.as_str()),
+            DependsOnEntry::Step(s) => Some(s.step.as_str()),
+            DependsOnEntry::All(_) | DependsOnEntry::Any(_) => None,
+        }
+    }
+
+    /// This entry's direct children, if it's a group; `None` for a leaf.
+    pub fn children(&self) -> Option<&[DependsOnEntry]> {
+        match self {
+            DependsOnEntry::All(a) => Some(&a.all),
+            DependsOnEntry::Any(a) => Some(&a.any),
+            DependsOnEntry::Name(_) | DependsOnEntry::Step(_) => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,5 +193,60 @@ mod tests {
         assert!(matches!(list, AcceptSet::Outcomes(v) if v == vec![Outcome::Completed, Outcome::Failed]));
         let term: AcceptSet = serde_json::from_str("\"terminal\"").unwrap();
         assert!(matches!(term, AcceptSet::Terminal(_)));
+    }
+
+    #[test]
+    fn bare_name_parses_as_a_name_entry() {
+        let e: DependsOnEntry = serde_json::from_str("\"build-sessions\"").unwrap();
+        assert!(matches!(e, DependsOnEntry::Name(n) if n == "build-sessions"));
+    }
+
+    #[test]
+    fn step_entry_parses_with_explicit_accept() {
+        let e: DependsOnEntry =
+            serde_json::from_str("{\"step\":\"a\",\"accept\":[\"completed\",\"failed\"]}").unwrap();
+        match e {
+            DependsOnEntry::Step(s) => {
+                assert_eq!(s.step, "a");
+                assert!(s.accept.contains(Outcome::Failed));
+            }
+            other => panic!("expected Step, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn step_entry_without_accept_defaults_to_completed_only() {
+        let e: DependsOnEntry = serde_json::from_str("{\"step\":\"a\"}").unwrap();
+        match e {
+            DependsOnEntry::Step(s) => assert!(s.accept.contains(Outcome::Completed) && !s.accept.contains(Outcome::Failed)),
+            other => panic!("expected Step, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn all_and_any_groups_parse_and_nest() {
+        let e: DependsOnEntry =
+            serde_json::from_str("{\"any\":[\"mirror-a\",{\"all\":[\"audit\",\"source\"]}]}").unwrap();
+        match e {
+            DependsOnEntry::Any(a) => assert_eq!(a.any.len(), 2),
+            other => panic!("expected Any, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn typo_d_key_is_a_hard_error_not_silently_dropped() {
+        let err = serde_json::from_str::<DependsOnEntry>("{\"step\":\"a\",\"accpet\":[\"completed\"]}");
+        assert!(err.is_err(), "typo'd key must fail to parse, not silently default accept");
+    }
+
+    #[test]
+    fn two_discriminating_keys_at_once_is_a_hard_error() {
+        let err = serde_json::from_str::<DependsOnEntry>(
+            "{\"step\":\"a\",\"any\":[\"b\"]}",
+        );
+        assert!(
+            err.is_err(),
+            "a mapping with both 'step' and 'any' must not silently resolve to whichever variant matches first"
+        );
     }
 }
