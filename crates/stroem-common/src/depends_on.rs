@@ -62,6 +62,31 @@ impl<'de> Deserialize<'de> for TerminalKeyword {
     }
 }
 
+/// A non-empty set of outcomes that satisfies one dependency edge, or the
+/// literal `terminal` sugar for "all five, I don't care which." Spec §2.2.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AcceptSet {
+    Terminal(TerminalKeyword),
+    Outcomes(Vec<Outcome>),
+}
+
+impl AcceptSet {
+    pub fn contains(&self, outcome: Outcome) -> bool {
+        match self {
+            AcceptSet::Terminal(_) => true,
+            AcceptSet::Outcomes(v) => v.contains(&outcome),
+        }
+    }
+
+    /// The default for a bare-string `depends_on` entry and for a `{step:
+    /// ...}` entry with no explicit `accept` — matches today's "must
+    /// complete" meaning.
+    pub fn default_completed_only() -> Self {
+        AcceptSet::Outcomes(vec![Outcome::Completed])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -86,5 +111,29 @@ mod tests {
         assert!(err.is_err(), "must reject case variants, not fuzzy-match");
         let err2 = serde_json::from_str::<TerminalKeyword>("\"all\"");
         assert!(err2.is_err());
+    }
+
+    #[test]
+    fn accept_set_outcomes_contains_matches_the_list() {
+        let a = AcceptSet::Outcomes(vec![Outcome::Completed, Outcome::Failed]);
+        assert!(a.contains(Outcome::Completed));
+        assert!(a.contains(Outcome::Failed));
+        assert!(!a.contains(Outcome::Skipped));
+    }
+
+    #[test]
+    fn accept_set_terminal_contains_everything() {
+        let a = AcceptSet::Terminal(TerminalKeyword);
+        for o in Outcome::ALL {
+            assert!(a.contains(o), "{o:?} should be accepted by terminal");
+        }
+    }
+
+    #[test]
+    fn accept_set_deserializes_both_shapes() {
+        let list: AcceptSet = serde_json::from_str("[\"completed\",\"failed\"]").unwrap();
+        assert!(matches!(list, AcceptSet::Outcomes(v) if v == vec![Outcome::Completed, Outcome::Failed]));
+        let term: AcceptSet = serde_json::from_str("\"terminal\"").unwrap();
+        assert!(matches!(term, AcceptSet::Terminal(_)));
     }
 }
