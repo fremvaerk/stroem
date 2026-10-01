@@ -391,24 +391,21 @@ pub struct FlowStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(default)]
-    pub depends_on: Vec<String>,
+    pub depends_on: Vec<crate::depends_on::DependsOnEntry>,
     #[serde(default)]
     pub input: HashMap<String, serde_json::Value>,
-    /// If this step fails, is cancelled, or is skipped because something
-    /// above it failed, the steps that depend on it still run, and the
-    /// failure does not fail the job. It never makes the step itself run.
-    /// Read only from this step (the dependency), never from a dependent.
-    /// See spec 2026-09-26 (dependency gate) §2.1, §2.4.
+    /// If this step fails or is cancelled, the job does not fail because of
+    /// it. Self-scoped only: no effect on dependents. See spec
+    /// 2026-10-01 (dependency conditions) §6.
     #[serde(default)]
     pub continue_on_failure: bool,
-    /// If this step is skipped by its own `when`, an empty `for_each`, or
-    /// because a step above it was skipped the same way, the steps that
-    /// depend on it still run. Read only from this step (the dependency),
-    /// never from a dependent. Does not cover a failure-class skip
-    /// (`unreachable`) — that needs `continue_on_failure` on the same step.
-    /// See spec 2026-09-26 (dependency gate) §2.1, §2.3.
-    #[serde(default)]
-    pub continue_when_skipped: bool,
+    /// Detection-only: captures a legacy `continue_when_skipped` value so
+    /// validation (Task 4) can emit a named migration error. NEVER read for
+    /// behavior — the flag itself is retired. `None` when the key was
+    /// absent; `Some(_)` (even `Some(false)`) means the workspace still has
+    /// it and hasn't migrated.
+    #[serde(default, rename = "continue_when_skipped")]
+    pub legacy_continue_when_skipped: Option<bool>,
     /// Step-level timeout: kill this step after the specified duration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<HumanDuration>,
@@ -458,6 +455,7 @@ impl<'de> serde::Deserialize<'de> for FlowStep {
         if has_action {
             // Reference step — deserialize normally
             #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
             struct RefStep {
                 action: String,
                 #[serde(default)]
@@ -465,13 +463,13 @@ impl<'de> serde::Deserialize<'de> for FlowStep {
                 #[serde(default)]
                 description: Option<String>,
                 #[serde(default)]
-                depends_on: Vec<String>,
+                depends_on: Vec<crate::depends_on::DependsOnEntry>,
                 #[serde(default)]
                 input: HashMap<String, serde_json::Value>,
                 #[serde(default)]
                 continue_on_failure: bool,
-                #[serde(default)]
-                continue_when_skipped: bool,
+                #[serde(default, rename = "continue_when_skipped")]
+                legacy_continue_when_skipped: Option<bool>,
                 #[serde(default)]
                 timeout: Option<HumanDuration>,
                 #[serde(default)]
@@ -493,7 +491,7 @@ impl<'de> serde::Deserialize<'de> for FlowStep {
                 depends_on: ref_step.depends_on,
                 input: ref_step.input,
                 continue_on_failure: ref_step.continue_on_failure,
-                continue_when_skipped: ref_step.continue_when_skipped,
+                legacy_continue_when_skipped: ref_step.legacy_continue_when_skipped,
                 timeout: ref_step.timeout,
                 when: ref_step.when,
                 for_each: ref_step.for_each,
@@ -575,10 +573,12 @@ impl<'de> serde::Deserialize<'de> for FlowStep {
                     .map_err(D::Error::custom)?;
 
             // Parse step-level fields
-            let depends_on: Vec<String> = step_map
-                .get(serde_yaml::Value::String("depends_on".into()))
-                .map(|v| serde_yaml::from_value(v.clone()).unwrap_or_default())
-                .unwrap_or_default();
+            let depends_on: Vec<crate::depends_on::DependsOnEntry> =
+                match step_map.get(serde_yaml::Value::String("depends_on".into())) {
+                    Some(v) => serde_yaml::from_value(v.clone())
+                        .map_err(|e| D::Error::custom(format!("invalid depends_on: {e}")))?,
+                    None => Vec::new(),
+                };
 
             let input = step_input;
 
@@ -587,10 +587,13 @@ impl<'de> serde::Deserialize<'de> for FlowStep {
                 .map(|v| serde_yaml::from_value(v.clone()).unwrap_or(false))
                 .unwrap_or(false);
 
-            let continue_when_skipped: bool = step_map
-                .get(serde_yaml::Value::String("continue_when_skipped".into()))
-                .map(|v| serde_yaml::from_value(v.clone()).unwrap_or(false))
-                .unwrap_or(false);
+            let legacy_continue_when_skipped: Option<bool> =
+                match step_map.get(serde_yaml::Value::String("continue_when_skipped".into())) {
+                    Some(v) => Some(serde_yaml::from_value(v.clone()).map_err(|e| {
+                        D::Error::custom(format!("invalid continue_when_skipped: {e}"))
+                    })?),
+                    None => None,
+                };
 
             let name: Option<String> = step_map
                 .get(serde_yaml::Value::String("name".into()))
@@ -634,7 +637,7 @@ impl<'de> serde::Deserialize<'de> for FlowStep {
                 depends_on,
                 input,
                 continue_on_failure,
-                continue_when_skipped,
+                legacy_continue_when_skipped,
                 timeout,
                 when,
                 for_each,
@@ -1706,7 +1709,7 @@ tasks:
 "#;
         let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let step = config.tasks["test"].flow.get("step1").unwrap();
-        assert!(!step.continue_when_skipped);
+        assert_eq!(step.legacy_continue_when_skipped, None);
     }
 
     #[test]
@@ -1722,7 +1725,7 @@ tasks:
 "#;
         let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let step = config.tasks["test"].flow.get("step1").unwrap();
-        assert!(step.continue_when_skipped);
+        assert_eq!(step.legacy_continue_when_skipped, Some(true));
         assert!(!step.continue_on_failure, "flags are independent");
     }
 
@@ -1740,9 +1743,76 @@ tasks:
 "#;
         let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let step = config.tasks["test"].flow.get("step1").unwrap();
-        assert!(step.continue_when_skipped);
+        assert_eq!(step.legacy_continue_when_skipped, Some(true));
         // The key must have been routed to the step, not the hoisted action.
         assert!(config.actions.values().all(|a| a.action_type == "script"));
+    }
+
+    #[test]
+    fn test_depends_on_accepts_bare_names_and_step_entries() {
+        use crate::depends_on::{DependsOnEntry, Outcome};
+        let yaml = r#"
+action: a
+depends_on:
+  - x
+  - step: y
+    accept: [completed, failed]
+"#;
+        let step: FlowStep = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(step.depends_on.len(), 2);
+        assert!(matches!(&step.depends_on[0], DependsOnEntry::Name(n) if n == "x"));
+        match &step.depends_on[1] {
+            DependsOnEntry::Step(s) => {
+                assert_eq!(s.step, "y");
+                assert!(s.accept.contains(Outcome::Failed));
+            }
+            other => panic!("expected Step entry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_malformed_depends_on_entry_is_a_hard_error_inline_step() {
+        let yaml = r#"
+type: script
+script: "echo hi"
+depends_on:
+  - step: y
+    accpet: [completed]
+"#;
+        let err = serde_yaml::from_str::<FlowStep>(yaml);
+        assert!(err.is_err(), "a typo'd key in an inline step's depends_on must fail to parse, not silently drop the dependency");
+    }
+
+    #[test]
+    fn test_malformed_depends_on_entry_is_a_hard_error_reference_step() {
+        let yaml = r#"
+action: a
+depends_on:
+  - step: y
+    accpet: [completed]
+"#;
+        let err = serde_yaml::from_str::<FlowStep>(yaml);
+        assert!(err.is_err(), "a typo'd key in a reference step's depends_on must fail to parse, not silently drop the dependency");
+    }
+
+    #[test]
+    fn test_legacy_continue_when_skipped_is_captured_not_silently_ignored() {
+        let yaml = r#"
+action: a
+depends_on: [x]
+continue_when_skipped: true
+"#;
+        let step: FlowStep = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(step.legacy_continue_when_skipped, Some(true));
+
+        let yaml_inline = r#"
+type: script
+script: "echo hi"
+depends_on: [x]
+continue_when_skipped: false
+"#;
+        let step2: FlowStep = serde_yaml::from_str(yaml_inline).unwrap();
+        assert_eq!(step2.legacy_continue_when_skipped, Some(false));
     }
 
     #[test]
@@ -1767,10 +1837,19 @@ tasks:
         assert_eq!(step1.depends_on.len(), 0);
 
         let step2 = task.flow.get("step2").unwrap();
-        assert_eq!(step2.depends_on, vec!["step1"]);
+        assert_eq!(
+            step2.depends_on,
+            vec![crate::depends_on::DependsOnEntry::Name("step1".to_string())]
+        );
 
         let step3 = task.flow.get("step3").unwrap();
-        assert_eq!(step3.depends_on, vec!["step1", "step2"]);
+        assert_eq!(
+            step3.depends_on,
+            vec![
+                crate::depends_on::DependsOnEntry::Name("step1".to_string()),
+                crate::depends_on::DependsOnEntry::Name("step2".to_string())
+            ]
+        );
     }
 
     #[test]
@@ -3156,7 +3235,10 @@ tasks:
 
         let task = config.tasks.get("pipeline").unwrap();
         let second = task.flow.get("second").unwrap();
-        assert_eq!(second.depends_on, vec!["first"]);
+        assert_eq!(
+            second.depends_on,
+            vec![crate::depends_on::DependsOnEntry::Name("first".to_string())]
+        );
         assert_eq!(second.input.get("msg").unwrap(), "hello");
 
         // Action should have empty input schema (not step-level input values)
@@ -4325,7 +4407,7 @@ retry:
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
-            continue_when_skipped: false,
+            legacy_continue_when_skipped: None,
             timeout: None,
             when: None,
             for_each: None,
@@ -4395,7 +4477,7 @@ retry:
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
-            continue_when_skipped: false,
+            legacy_continue_when_skipped: None,
             timeout: None,
             when: None,
             for_each: None,
@@ -4454,7 +4536,7 @@ retry:
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
-            continue_when_skipped: false,
+            legacy_continue_when_skipped: None,
             timeout: None,
             when: None,
             for_each: None,
