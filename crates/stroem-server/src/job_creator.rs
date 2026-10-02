@@ -439,6 +439,8 @@ pub(crate) fn create_job_for_task_inner<'a>(
             commit: c.to_string(),
         });
 
+        let memo = RefMemo::seeded(workspace_name, job_pin.as_ref());
+
         // Build job steps from the task flow. Every pin is resolved and
         // ensured here, before the creation transaction opens: a pin failure
         // returns before any row is written.
@@ -462,6 +464,7 @@ pub(crate) fn create_job_for_task_inner<'a>(
                 step_name,
                 flow_step,
                 &world,
+                &memo,
             )
             .await?;
 
@@ -491,6 +494,7 @@ pub(crate) fn create_job_for_task_inner<'a>(
                     task_ref,
                     action.git_ref.as_deref(),
                     &world,
+                    &memo,
                 )
                 .await?;
                 // A self-reference is the same task at the same pin; the same
@@ -916,16 +920,63 @@ fn parse_ref(git_ref: &str, what: &str) -> Result<()> {
         .with_context(|| format!("{what}: invalid ref name"))
 }
 
+/// One job creation's `(owner workspace, ref as written) → PinRef` memo: every
+/// ref in a creation resolves to a commit ONCE, so a branch that moves between
+/// two steps cannot split the job across two commits of the same ref. Keyed by
+/// the string as written (`release/2.3` and `refs/heads/release/2.3` are
+/// distinct, as their state partitions are). A std mutex, locked briefly and
+/// never across an `.await`.
+#[derive(Default)]
+pub(crate) struct RefMemo(std::sync::Mutex<HashMap<(String, String), PinRef>>);
+
+impl RefMemo {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// A memo seeded with the job's own pin, so an explicit `ref:` naming the
+    /// job's workspace at the job's ref string reuses the job's commit.
+    fn seeded(workspace: &str, pin: Option<&PinRef>) -> Self {
+        let memo = Self::new();
+        if let Some(p) = pin {
+            memo.insert(workspace, &p.git_ref, p.clone());
+        }
+        memo
+    }
+
+    fn get(&self, owner: &str, git_ref: &str) -> Option<PinRef> {
+        let map = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        map.get(&(owner.to_string(), git_ref.to_string())).cloned()
+    }
+
+    fn insert(&self, owner: &str, git_ref: &str, pin: PinRef) {
+        let mut map = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        map.entry((owner.to_string(), git_ref.to_string()))
+            .or_insert(pin);
+    }
+}
+
 /// § 4.3 steps 4–5: `owner`@`git_ref` resolved to a commit, and the config at
-/// that commit. A `PinLoadFailed` is replaced by its fixed sentence
+/// that commit. The commit is resolved once per `memo` (a hit only ensures the
+/// memoised commit). A `PinLoadFailed` is replaced by its fixed sentence
 /// ([`WorkspaceManager::pin_error_for_user`]); every other `PinError`
 /// propagates as is, for `classify_execute_error` to downcast.
 pub(crate) async fn pin_at_ref(
     workspaces: &WorkspaceManager,
+    memo: &RefMemo,
     owner: &str,
     git_ref: &str,
 ) -> Result<(PinRef, Arc<Pinned>)> {
-    let pin = workspaces.pins().resolve(owner, git_ref).await?.pin_ref();
+    let pin = match memo.get(owner, git_ref) {
+        Some(pin) => pin,
+        None => {
+            let pin = workspaces.pins().resolve(owner, git_ref).await?.pin_ref();
+            memo.insert(owner, git_ref, pin.clone());
+            // A concurrent insert cannot happen within one creation, but
+            // re-read so the memoised value always wins.
+            memo.get(owner, git_ref).unwrap_or(pin)
+        }
+    };
     match workspaces.pins().ensure(owner, &pin.commit).await {
         Ok(pinned) => Ok((pin, pinned)),
         Err(e) => Err(workspaces.pin_error_for_user(owner, &pin, e).await),
@@ -994,6 +1045,7 @@ pub(crate) fn task_at(
 /// § 4.3 / § 7.1 for a `type: task` action whose config is `base_cfg` (workspace
 /// `base_ws`, pinned at `base_pin` or live): the task owner `T`, its task, and the
 /// pin to stamp. `None` ⇒ unpinned; dispatch resolves it live, as today.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn resolve_task_for_step(
     workspaces: &WorkspaceManager,
     base_ws: &str,
@@ -1002,13 +1054,14 @@ pub(crate) async fn resolve_task_for_step(
     task_ref: &str,
     git_ref: Option<&str>,
     world: &RefWorld<'_>,
+    memo: &RefMemo,
 ) -> Result<(ResolvedTask, Option<PinRef>)> {
     if let Some(r) = git_ref {
         parse_ref(r, &format!("task '{task_ref}'"))?;
     }
     match plan_reference(base_ws, base_pin, task_ref, git_ref, world)? {
         RefPlan::AtRef { target, git_ref } => {
-            let (pin, pinned) = pin_at_ref(workspaces, &target.owner, &git_ref).await?;
+            let (pin, pinned) = pin_at_ref(workspaces, memo, &target.owner, &git_ref).await?;
             let task = task_named_at(
                 task_ref,
                 &target.owner,
@@ -1075,6 +1128,7 @@ struct StepAction {
 
 /// § 4.3 for a flow step's `action` (+ `ref`), written in `workspace_config`
 /// (`workspace_name`, pinned at `job_pin` or live).
+#[allow(clippy::too_many_arguments)]
 async fn resolve_step_action(
     workspaces: &WorkspaceManager,
     workspace_name: &str,
@@ -1083,6 +1137,7 @@ async fn resolve_step_action(
     step_name: &str,
     flow_step: &FlowStep,
     world: &RefWorld<'_>,
+    memo: &RefMemo,
 ) -> Result<StepAction> {
     if let Some(step_ref) = flow_step.git_ref.as_deref() {
         // With `ref:` the owner is decided syntactically, then the name is
@@ -1098,7 +1153,7 @@ async fn resolve_step_action(
         else {
             unreachable!("plan_reference returns AtRef whenever a ref is given")
         };
-        let (pin, pinned) = pin_at_ref(workspaces, &target.owner, &git_ref).await?;
+        let (pin, pinned) = pin_at_ref(workspaces, memo, &target.owner, &git_ref).await?;
         let action = action_at(
             &flow_step.action,
             &target.owner,

@@ -49,10 +49,14 @@ pub(crate) async fn resolve_source_pin(
     let Some(git_ref) = source.git_ref.as_deref() else {
         return Ok(None);
     };
-    let (pin, pinned) =
-        crate::job_creator::pin_at_ref(&state.workspaces, &source.workspace, git_ref)
-            .await
-            .map_err(super::classify_execute_error)?;
+    let (pin, pinned) = crate::job_creator::pin_at_ref(
+        &state.workspaces,
+        &crate::job_creator::RefMemo::new(),
+        &source.workspace,
+        git_ref,
+    )
+    .await
+    .map_err(super::classify_execute_error)?;
     Ok(Some(SourcePin {
         pin,
         handle: ConfigHandle::Pinned(pinned),

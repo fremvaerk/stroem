@@ -71,6 +71,7 @@ pub(crate) async fn resolve_trigger_target(
         task_ref,
         git_ref,
         &world,
+        &crate::job_creator::RefMemo::new(),
     )
     .await?;
     let task_folder = pin.as_ref().and_then(|_| resolved.task.folder.clone());

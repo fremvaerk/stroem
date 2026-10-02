@@ -1127,3 +1127,116 @@ async fn permanent_pin_failure_that_cannot_be_written_is_retried_by_recovery() -
     assert_eq!(log.matches("[pin]").count(), 1, "{log}");
     Ok(())
 }
+
+// ─── Task 24b: one commit per ref within one job creation ──────────────────
+
+/// `etl` main plus a task whose two independent steps name the same
+/// `etl@release/2.3`: one action step, one `type: task` action (its own `ref:`).
+fn cr_etl_main_same_ref_twice() -> String {
+    format!(
+        "{ETL_MAIN}  same-ref-twice:\n    flow:\n      a:\n        action: import\n        \
+         ref: release/2.3\n      b:\n        action: call-nightly\n      c:\n        \
+         action: import\n        ref: release/2.3\n"
+    )
+}
+
+/// Spec § 4.4: two steps naming the same `(owner, ref)` in one creation get
+/// ONE commit even when the branch moves between their resolutions (the
+/// fixture's PinStore re-lists the remote on every `resolve`).
+#[tokio::test]
+async fn same_ref_twice_in_one_creation_resolves_one_commit() -> Result<()> {
+    bounded(async {
+        let fx = pinned_workspace_fixture(PinnedFixtureOpts {
+            etl_main: Some(cr_etl_main_same_ref_twice()),
+            ..Default::default()
+        })
+        .await?;
+        // A cold PinStore: the first step's `ensure` parks at the gate after
+        // its `resolve` returned.
+        let replica = fx.second_replica().await?;
+        let workspaces = replica.state.clone();
+        let hold = workspaces.workspaces.pins().hold_loads_for_test();
+        let c1 = fx.commits.etl_release.clone();
+
+        let creating = {
+            let state = replica.state.clone();
+            let pool = fx.pool.clone();
+            let main = fx.commits.etl_main.clone();
+            tokio::spawn(async move {
+                let cfg = state.workspaces.get_config("etl").await.expect("etl");
+                create_job_for_task_detailed(
+                    &state.workspaces,
+                    &pool,
+                    &cfg,
+                    "etl",
+                    "same-ref-twice",
+                    json!({}),
+                    "api",
+                    None,
+                    Some(&main),
+                    None,
+                    None,
+                    JobDefaults::default(),
+                )
+                .await
+                .map(|c| c.job_id)
+            })
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while hold.entered() < 1 {
+            assert!(std::time::Instant::now() < deadline, "no pin load started");
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let c2 = fx.etl.commit(
+            "release/2.3",
+            "main",
+            &[("workflow.yaml", &cr_etl_release_v2())],
+        );
+        assert_ne!(c1, c2);
+        drop(hold);
+        let job_id = creating.await??;
+
+        let a = cr_step(&fx.pool, job_id, "a").await;
+        let b = cr_step(&fx.pool, job_id, "b").await;
+        let c = cr_step(&fx.pool, job_id, "c").await;
+        assert_eq!(a.action_revision.as_deref(), Some(c1.as_str()), "step a");
+        assert_eq!(b.task_revision.as_deref(), Some(c1.as_str()), "step b task");
+        assert_eq!(c.action_revision.as_deref(), Some(c1.as_str()), "step c");
+        Ok(())
+    })
+    .await
+}
+
+/// The job's own pin seeds the memo: an explicit `ref:` naming the job's own
+/// workspace at the job's own ref string gets the job's commit, not a newer tip.
+#[tokio::test]
+async fn step_ref_equal_to_job_ref_uses_job_commit() -> Result<()> {
+    bounded(async {
+        let release = format!(
+            "{ETL_RELEASE}  self-ref:\n    flow:\n      run:\n        action: import\n        \
+             ref: release/2.3\n"
+        );
+        let fx = pinned_workspace_fixture(PinnedFixtureOpts {
+            etl_release: Some(release.clone()),
+            ..Default::default()
+        })
+        .await?;
+        let c1 = fx.commits.etl_release.clone();
+        let c2 = fx
+            .etl
+            .commit("release/2.3", "main", &[("workflow.yaml", &release)]);
+        assert_ne!(c1, c2);
+        assert_eq!(
+            fx.mgr().pins().resolve("etl", "release/2.3").await?.commit,
+            c2
+        );
+
+        let job_id = fx.create_pinned_etl_job("self-ref").await?;
+        let job = JobRepo::get(&fx.pool, job_id).await?.unwrap();
+        assert_eq!(job.revision.as_deref(), Some(c1.as_str()));
+        let run = cr_step(&fx.pool, job_id, "run").await;
+        assert_eq!(run.action_revision.as_deref(), Some(c1.as_str()));
+        Ok(())
+    })
+    .await
+}
