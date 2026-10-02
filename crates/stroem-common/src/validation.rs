@@ -1,5 +1,5 @@
 use crate::dag;
-use crate::models::workflow::{ActionDef, ConnectionTypeDef, TaskDef, WorkspaceConfig};
+use crate::models::workflow::{ActionDef, ConnectionTypeDef, HookDef, TaskDef, WorkspaceConfig};
 use anyhow::{bail, Result};
 use std::collections::{HashMap, HashSet};
 
@@ -63,6 +63,16 @@ fn validate_workflow_config_inner(
 
     // Validate each action
     for (action_name, action) in &config.actions {
+        if let Some(r) = action.git_ref.as_deref() {
+            if action.action_type != "task" {
+                bail!(
+                    "Action '{}' has `ref` but is type '{}': `ref` is only valid on type: task actions, where it qualifies `task`",
+                    action_name,
+                    action.action_type
+                );
+            }
+            check_git_ref(&format!("Action '{action_name}'"), r)?;
+        }
         warnings.extend(validate_action(action_name, action)?);
 
         // For type: task, verify the referenced task exists — locally (incl.
@@ -71,7 +81,12 @@ fn validate_workflow_config_inner(
             let task_ref = action.task.as_ref().expect(
                 "task field is required for action_type == task, enforced by validate_action",
             );
-            if config.tasks.contains_key(task_ref) {
+            if let Some(r) = action.git_ref.as_deref() {
+                warnings.push(format!(
+                    "Action '{}' references task '{}' at ref '{}' - validation skipped (resolved at job creation)",
+                    action_name, task_ref, r
+                ));
+            } else if config.tasks.contains_key(task_ref) {
                 // local or library-flattened key
             } else if task_ref.starts_with('.') || task_ref.ends_with('.') {
                 bail!(
@@ -157,7 +172,13 @@ fn validate_workflow_config_inner(
             let action_ref = &step.action;
 
             // Check if it's a library action (contains .)
-            if !libraries_resolved && action_ref.contains('.') {
+            if let Some(r) = step.git_ref.as_deref() {
+                check_git_ref(&format!("Task '{task_name}' step '{step_name}'"), r)?;
+                warnings.push(format!(
+                    "Task '{}' step '{}' references action '{}' at ref '{}' - validation skipped (resolved at job creation)",
+                    task_name, step_name, action_ref, r
+                ));
+            } else if !libraries_resolved && action_ref.contains('.') {
                 // Library actions can't be validated without server context
                 warnings.push(format!(
                     "Task '{}' step '{}' references library action '{}' - validation skipped",
@@ -398,7 +419,7 @@ fn validate_workflow_config_inner(
         for (i, hook) in task.on_success.iter().enumerate() {
             validate_hook_action_exists(
                 &format!("Task '{task_name}' on_success[{i}]"),
-                &hook.action,
+                hook,
                 config,
                 libraries_resolved,
                 &mut warnings,
@@ -407,7 +428,7 @@ fn validate_workflow_config_inner(
         for (i, hook) in task.on_error.iter().enumerate() {
             validate_hook_action_exists(
                 &format!("Task '{task_name}' on_error[{i}]"),
-                &hook.action,
+                hook,
                 config,
                 libraries_resolved,
                 &mut warnings,
@@ -416,7 +437,7 @@ fn validate_workflow_config_inner(
         for (i, hook) in task.on_suspended.iter().enumerate() {
             validate_hook_action_exists(
                 &format!("Task '{task_name}' on_suspended[{i}]"),
-                &hook.action,
+                hook,
                 config,
                 libraries_resolved,
                 &mut warnings,
@@ -425,7 +446,7 @@ fn validate_workflow_config_inner(
         for (i, hook) in task.on_cancel.iter().enumerate() {
             validate_hook_action_exists(
                 &format!("Task '{task_name}' on_cancel[{i}]"),
-                &hook.action,
+                hook,
                 config,
                 libraries_resolved,
                 &mut warnings,
@@ -435,18 +456,21 @@ fn validate_workflow_config_inner(
 
     // Validate triggers reference existing tasks
     for (trigger_name, trigger) in &config.triggers {
-        // EventSource validates both consumer and target tasks in its own match arm below;
-        // skip the generic check so those arms can emit more specific error messages.
+        // EventSource validates both consumer and target tasks (and rejects
+        // `ref`) in its own match arm below.
         if !matches!(
             trigger,
             crate::models::workflow::TriggerDef::EventSource { .. }
-        ) && !config.tasks.contains_key(trigger.task())
-        {
-            bail!(
-                "Trigger '{}' references non-existent task '{}'",
+        ) {
+            validate_trigger_task(
                 trigger_name,
-                trigger.task()
-            );
+                trigger.task(),
+                trigger.git_ref(),
+                config,
+                libraries_resolved,
+                resolver,
+                &mut warnings,
+            )?;
         }
 
         match trigger {
@@ -525,7 +549,14 @@ fn validate_workflow_config_inner(
                 restart_policy: _,
                 backoff_secs,
                 max_in_flight,
+                git_ref,
             } => {
+                if git_ref.is_some() {
+                    bail!(
+                        "Trigger '{}': `ref` is not supported on event_source triggers yet",
+                        trigger_name
+                    );
+                }
                 // Validate consumer task exists
                 if task.contains('.') {
                     // Library reference — skip validation
@@ -584,7 +615,7 @@ fn validate_workflow_config_inner(
     for (i, hook) in config.on_success.iter().enumerate() {
         validate_hook_action_exists(
             &format!("Workspace on_success[{i}]"),
-            &hook.action,
+            hook,
             config,
             libraries_resolved,
             &mut warnings,
@@ -593,7 +624,7 @@ fn validate_workflow_config_inner(
     for (i, hook) in config.on_error.iter().enumerate() {
         validate_hook_action_exists(
             &format!("Workspace on_error[{i}]"),
-            &hook.action,
+            hook,
             config,
             libraries_resolved,
             &mut warnings,
@@ -602,7 +633,7 @@ fn validate_workflow_config_inner(
     for (i, hook) in config.on_suspended.iter().enumerate() {
         validate_hook_action_exists(
             &format!("Workspace on_suspended[{i}]"),
-            &hook.action,
+            hook,
             config,
             libraries_resolved,
             &mut warnings,
@@ -611,7 +642,7 @@ fn validate_workflow_config_inner(
     for (i, hook) in config.on_cancel.iter().enumerate() {
         validate_hook_action_exists(
             &format!("Workspace on_cancel[{i}]"),
-            &hook.action,
+            hook,
             config,
             libraries_resolved,
             &mut warnings,
@@ -1160,7 +1191,7 @@ fn check_task_self_reference(
     context: &str,
 ) -> Result<()> {
     if let Some(action) = config.actions.get(action_name) {
-        if action.action_type == "task" {
+        if action.action_type == "task" && action.git_ref.is_none() {
             if let Some(ref task_ref) = action.task {
                 if task_ref == task_name {
                     bail!(
@@ -1174,6 +1205,64 @@ fn check_task_self_reference(
         }
     }
     Ok(())
+}
+
+/// Syntax check for a `ref:` value (spec 2026-10-02 § 4.2).
+fn check_git_ref(label: &str, git_ref: &str) -> Result<()> {
+    crate::git_ref::parse_git_ref(git_ref)
+        .map(|_| ())
+        .map_err(|e| anyhow::anyhow!("{label} has invalid `ref` '{git_ref}': {e}"))
+}
+
+/// A trigger's `task` (scheduler / webhook). With `ref`, the task is looked up
+/// at that ref by the server when the trigger fires, so it is not checked
+/// here. Without `ref`, `ws.task` is a cross-workspace trigger task.
+fn validate_trigger_task(
+    trigger_name: &str,
+    task: &str,
+    git_ref: Option<&str>,
+    config: &WorkspaceConfig,
+    libraries_resolved: bool,
+    resolver: Option<&dyn CrossWorkspaceResolver>,
+    warnings: &mut Vec<String>,
+) -> Result<()> {
+    if let Some(r) = git_ref {
+        check_git_ref(&format!("Trigger '{trigger_name}'"), r)?;
+        warnings.push(format!(
+            "Trigger '{trigger_name}' targets task '{task}' at ref '{r}' - validation skipped (resolved when the trigger fires)"
+        ));
+        return Ok(());
+    }
+    if config.tasks.contains_key(task) {
+        return Ok(());
+    }
+    match crate::template::parse_qualified_ref(task) {
+        (Some(ws), name) => match (libraries_resolved, resolver) {
+            (false, _) => {
+                warnings.push(format!(
+                    "Trigger '{trigger_name}' targets task '{task}' outside this workspace - cannot validate cross-workspace task reference offline"
+                ));
+                Ok(())
+            }
+            (true, Some(r)) if r.has_task(ws, name) => Ok(()),
+            (true, Some(_)) => bail!(
+                "trigger '{}': workspace '{}' has no task '{}'",
+                trigger_name,
+                ws,
+                name
+            ),
+            (true, None) => bail!(
+                "Trigger '{}' references non-existent task '{}'",
+                trigger_name,
+                task
+            ),
+        },
+        (None, _) => bail!(
+            "Trigger '{}' references non-existent task '{}'",
+            trigger_name,
+            task
+        ),
+    }
 }
 
 /// Validates a single action definition. Dispatches to a per-type helper.
@@ -1771,11 +1860,18 @@ fn validate_agent_action(action: &ActionDef, action_name: &str) -> Result<Vec<St
     // Validate tool references: empty strings are not allowed
     for tool_ref in &action.tools {
         match tool_ref {
-            crate::models::workflow::AgentToolRef::Task { task } => {
+            crate::models::workflow::AgentToolRef::Task { task, git_ref } => {
                 if task.is_empty() {
                     bail!(
                         "Action '{}' has a tool with empty task reference",
                         action_name
+                    );
+                }
+                if git_ref.is_some() {
+                    bail!(
+                        "Action '{}' tool task '{}': `ref` is not supported on agent task tools yet",
+                        action_name,
+                        task
                     );
                 }
             }
@@ -1933,11 +2029,15 @@ fn validate_approval_action(action: &ActionDef, action_name: &str) -> Result<Vec
 /// hook actions are never resolved cross-workspace.
 fn validate_hook_action_exists(
     label: &str,
-    action: &str,
+    hook: &HookDef,
     config: &WorkspaceConfig,
     libraries_resolved: bool,
     warnings: &mut Vec<String>,
 ) -> Result<()> {
+    if hook.git_ref.is_some() {
+        bail!("{}: `ref` is not supported on hooks yet", label);
+    }
+    let action = hook.action.as_str();
     if !libraries_resolved && action.contains('.') {
         return Ok(()); // library action — skip when libraries not resolved
     }
@@ -1945,6 +2045,13 @@ fn validate_hook_action_exists(
         bail!("{} references non-existent action '{}'", label, action);
     };
     if def.action_type == "task" {
+        if def.git_ref.is_some() {
+            bail!(
+                "{} uses action '{}' whose task reference carries `ref`: `ref` is not supported on hooks yet",
+                label,
+                action
+            );
+        }
         if let Some(task_ref) = def.task.as_deref() {
             if !config.tasks.contains_key(task_ref) && task_ref.contains('.') {
                 if libraries_resolved {
@@ -2558,6 +2665,7 @@ triggers:
         config.triggers.insert(
             "bad-cron".to_string(),
             TriggerDef::Scheduler {
+                git_ref: None,
                 cron: "not a cron".to_string(),
                 task: "test".to_string(),
                 input: HashMap::new(),
@@ -2599,6 +2707,7 @@ triggers:
         config.triggers.insert(
             "every-10s".to_string(),
             TriggerDef::Scheduler {
+                git_ref: None,
                 cron: "*/10 * * * * *".to_string(),
                 task: "test".to_string(),
                 input: HashMap::new(),
@@ -2636,6 +2745,7 @@ triggers:
         config.triggers.insert(
             "nightly".to_string(),
             TriggerDef::Scheduler {
+                git_ref: None,
                 cron: "0 2 * * *".to_string(),
                 task: "test".to_string(),
                 input: HashMap::new(),
@@ -2673,6 +2783,7 @@ triggers:
         config.triggers.insert(
             "nightly".to_string(),
             TriggerDef::Scheduler {
+                git_ref: None,
                 cron: "0 2 * * *".to_string(),
                 task: "test".to_string(),
                 input: HashMap::new(),
@@ -2710,6 +2821,7 @@ triggers:
         config.triggers.insert(
             "nightly".to_string(),
             TriggerDef::Scheduler {
+                git_ref: None,
                 cron: "0 2 * * *".to_string(),
                 task: "test".to_string(),
                 input: HashMap::new(),
@@ -2749,6 +2861,7 @@ triggers:
         config.triggers.insert(
             "nightly".to_string(),
             TriggerDef::Scheduler {
+                git_ref: None,
                 cron: "0 2 * * *".to_string(),
                 task: "test".to_string(),
                 input: HashMap::new(),
@@ -7596,7 +7709,10 @@ prompt: "Do something useful"
     fn test_validate_agent_action_max_turns_zero() {
         let action = make_agent_action_with(|a| {
             a.max_turns = Some(0);
-            a.tools = vec![AgentToolRef::Task { task: "t".into() }];
+            a.tools = vec![AgentToolRef::Task {
+                git_ref: None,
+                task: "t".into(),
+            }];
         });
         let result = validate_workflow_config(&make_config_with_action("a", action));
         assert!(result.is_err());
@@ -7607,7 +7723,10 @@ prompt: "Do something useful"
     fn test_validate_agent_action_max_turns_101() {
         let action = make_agent_action_with(|a| {
             a.max_turns = Some(101);
-            a.tools = vec![AgentToolRef::Task { task: "t".into() }];
+            a.tools = vec![AgentToolRef::Task {
+                git_ref: None,
+                task: "t".into(),
+            }];
         });
         let result = validate_workflow_config(&make_config_with_action("a", action));
         assert!(result.is_err());
@@ -7619,7 +7738,10 @@ prompt: "Do something useful"
         // max_turns=1 with tools should be valid
         let action = make_agent_action_with(|a| {
             a.max_turns = Some(1);
-            a.tools = vec![AgentToolRef::Task { task: "t".into() }];
+            a.tools = vec![AgentToolRef::Task {
+                git_ref: None,
+                task: "t".into(),
+            }];
         });
         let result = validate_workflow_config(&make_config_with_action("a", action));
         assert!(result.is_ok());
@@ -7627,7 +7749,10 @@ prompt: "Do something useful"
         // max_turns=100 with tools should be valid
         let action = make_agent_action_with(|a| {
             a.max_turns = Some(100);
-            a.tools = vec![AgentToolRef::Task { task: "t".into() }];
+            a.tools = vec![AgentToolRef::Task {
+                git_ref: None,
+                task: "t".into(),
+            }];
         });
         let result = validate_workflow_config(&make_config_with_action("a", action));
         assert!(result.is_ok());
@@ -7663,7 +7788,10 @@ prompt: "Do something useful"
     fn test_validate_agent_action_interactive_no_max_turns_warns() {
         let action = make_agent_action_with(|a| {
             a.interactive = true;
-            a.tools = vec![AgentToolRef::Task { task: "t".into() }];
+            a.tools = vec![AgentToolRef::Task {
+                git_ref: None,
+                task: "t".into(),
+            }];
         });
         let result = validate_workflow_config(&make_config_with_action("a", action));
         assert!(result.is_ok());
@@ -7676,7 +7804,10 @@ prompt: "Do something useful"
     #[test]
     fn test_validate_agent_action_empty_task_ref() {
         let action = make_agent_action_with(|a| {
-            a.tools = vec![AgentToolRef::Task { task: "".into() }];
+            a.tools = vec![AgentToolRef::Task {
+                git_ref: None,
+                task: "".into(),
+            }];
         });
         let result = validate_workflow_config(&make_config_with_action("a", action));
         assert!(result.is_err());
@@ -8141,5 +8272,312 @@ actions:
 "#;
         let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(validate_workflow_config(&config).is_err());
+    }
+
+    fn warnings_of(yaml: &str) -> Vec<String> {
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        validate_workflow_config(&config).expect("must validate")
+    }
+
+    fn error_of(yaml: &str) -> String {
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        format!("{:#}", validate_workflow_config(&config).unwrap_err())
+    }
+
+    #[test]
+    fn git_ref_on_non_task_action_is_rejected() {
+        let err = error_of(
+            r#"
+actions:
+  s:
+    type: script
+    script: echo hi
+    ref: release/2.3
+"#,
+        );
+        assert!(
+            err.contains("`ref` is only valid on type: task actions"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn git_ref_templated_or_invalid_is_rejected() {
+        let err = error_of(
+            r#"
+actions:
+  a:
+    type: script
+    script: echo hi
+tasks:
+  t:
+    flow:
+      s:
+        action: a
+        ref: "{{ input.release }}"
+"#,
+        );
+        assert!(err.contains("is a template"), "{err}");
+        let err = error_of(
+            r#"
+tasks:
+  t:
+    flow:
+      s:
+        action: a
+        ref: "a..b"
+"#,
+        );
+        assert!(err.contains("invalid `ref`"), "{err}");
+    }
+
+    #[test]
+    fn git_ref_step_skips_the_existence_check_with_a_warning() {
+        // `import` exists only on the release branch: the step must not fail
+        // validation (spec § 4.3: the name need not exist in the caller).
+        let warnings = warnings_of(
+            r#"
+tasks:
+  t:
+    flow:
+      import:
+        action: import
+        ref: release/2.3
+"#,
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("action 'import' at ref 'release/2.3' - validation skipped")),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn git_ref_task_action_skips_task_existence_and_self_reference() {
+        // `nightly` calling `nightly` at another ref is not a self-reference.
+        let warnings = warnings_of(
+            r#"
+actions:
+  nightly-2-3:
+    type: task
+    task: nightly
+    ref: release/2.3
+  run:
+    type: script
+    script: echo hi
+tasks:
+  nightly:
+    flow:
+      a:
+        action: run
+      older:
+        action: nightly-2-3
+"#,
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("task 'nightly' at ref 'release/2.3' - validation skipped")),
+            "{warnings:?}"
+        );
+        // Server mode (libraries resolved) skips it the same way.
+        let config: WorkspaceConfig = serde_yaml::from_str(
+            r#"
+actions:
+  remote:
+    type: task
+    task: only-on-the-branch
+    ref: v1
+tasks:
+  t:
+    flow:
+      s:
+        action: remote
+"#,
+        )
+        .unwrap();
+        assert!(validate_workflow_config_with_libraries(&config).is_ok());
+    }
+
+    #[test]
+    fn git_ref_on_hooks_is_rejected() {
+        let err = error_of(
+            r#"
+actions:
+  notify:
+    type: script
+    script: echo hi
+tasks:
+  t:
+    on_error:
+      - action: notify
+        ref: release/2.3
+    flow:
+      s:
+        action: notify
+"#,
+        );
+        assert!(err.contains("`ref` is not supported on hooks yet"), "{err}");
+        let err = error_of(
+            r#"
+actions:
+  notify:
+    type: script
+    script: echo hi
+on_success:
+  - action: notify
+    ref: v1
+"#,
+        );
+        assert!(err.contains("`ref` is not supported on hooks yet"), "{err}");
+    }
+
+    #[test]
+    fn hook_using_a_ref_task_action_is_rejected() {
+        // spec § 4.6 (G8): both hook creation branches read `ActionDef.task`
+        // directly, so the action's `ref` would be dropped.
+        let err = error_of(
+            r#"
+actions:
+  run-old:
+    type: task
+    task: cleanup
+    ref: release/2.3
+  run:
+    type: script
+    script: echo hi
+tasks:
+  cleanup:
+    flow:
+      s:
+        action: run
+  t:
+    on_success:
+      - action: run-old
+    flow:
+      s:
+        action: run
+"#,
+        );
+        assert!(err.contains("`ref` is not supported on hooks yet"), "{err}");
+    }
+
+    #[test]
+    fn git_ref_on_event_source_is_rejected() {
+        let err = error_of(
+            r#"
+actions:
+  run:
+    type: script
+    script: echo hi
+tasks:
+  consumer:
+    flow:
+      s:
+        action: run
+  target:
+    flow:
+      s:
+        action: run
+triggers:
+  q:
+    type: event_source
+    task: consumer
+    target_task: target
+    ref: main
+"#,
+        );
+        assert!(
+            err.contains("`ref` is not supported on event_source triggers yet"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn git_ref_on_agent_task_tool_is_rejected() {
+        let err = error_of(
+            r#"
+actions:
+  helper:
+    type: agent
+    provider: anthropic
+    model: m
+    prompt: hi
+    tools:
+      - task: summarize
+        ref: release/2.3
+"#,
+        );
+        assert!(
+            err.contains("`ref` is not supported on agent task tools yet"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn trigger_with_ref_or_cross_workspace_task() {
+        // With `ref`, the task need not exist here.
+        let warnings = warnings_of(
+            r#"
+triggers:
+  cron:
+    type: scheduler
+    cron: "0 2 * * *"
+    task: only-on-the-branch
+    ref: release/2.3
+"#,
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("task 'only-on-the-branch' at ref 'release/2.3'")),
+            "{warnings:?}"
+        );
+        // Cross-workspace trigger task (new): offline it is a warning…
+        let yaml = r#"
+triggers:
+  cron:
+    type: scheduler
+    cron: "0 2 * * *"
+    task: billing.nightly
+"#;
+        let warnings = warnings_of(yaml);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("outside this workspace")),
+            "{warnings:?}"
+        );
+        // …with a resolver it is checked…
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let has = FakeResolver {
+            actions: vec![],
+            tasks: vec![("billing", "nightly")],
+        };
+        assert!(validate_workflow_config_with_cross_workspace_resolver(&config, &has).is_ok());
+        let lacks = FakeResolver {
+            actions: vec![],
+            tasks: vec![],
+        };
+        let err = validate_workflow_config_with_cross_workspace_resolver(&config, &lacks)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("workspace 'billing' has no task 'nightly'"),
+            "{err}"
+        );
+        // …and an invalid ref on a trigger is rejected.
+        let err = error_of(
+            r#"
+triggers:
+  cron:
+    type: scheduler
+    cron: "0 2 * * *"
+    task: x
+    ref: "a b"
+"#,
+        );
+        assert!(err.contains("invalid `ref`"), "{err}");
     }
 }

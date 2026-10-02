@@ -311,6 +311,7 @@ mod tests {
 
     fn make_action(action_type: &str) -> ActionDef {
         ActionDef {
+            git_ref: None,
             action_type: action_type.to_string(),
             name: None,
             description: None,
@@ -349,6 +350,7 @@ mod tests {
 
     fn make_flow_step(action: &str, input: HashMap<String, serde_json::Value>) -> FlowStep {
         FlowStep {
+            git_ref: None,
             action: action.to_string(),
             name: None,
             description: None,

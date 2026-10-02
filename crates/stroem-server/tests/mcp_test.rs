@@ -116,6 +116,7 @@ fn mcp_test_workspace() -> WorkspaceConfig {
     workspace.actions.insert(
         "greet".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "script".to_string(),
             name: None,
             description: None,
@@ -172,6 +173,7 @@ fn mcp_test_workspace() -> WorkspaceConfig {
     workspace.actions.insert(
         "notify".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "script".to_string(),
             name: None,
             description: None,
@@ -215,6 +217,7 @@ fn mcp_test_workspace() -> WorkspaceConfig {
     hello_flow.insert(
         "greet".to_string(),
         FlowStep {
+            git_ref: None,
             action: "greet".to_string(),
             name: None,
             description: None,
@@ -269,6 +272,7 @@ fn mcp_test_workspace() -> WorkspaceConfig {
     hook_flow.insert(
         "step1".to_string(),
         FlowStep {
+            git_ref: None,
             action: "greet".to_string(),
             name: None,
             description: None,
@@ -298,6 +302,7 @@ fn mcp_test_workspace() -> WorkspaceConfig {
             timeout: None,
             retry: None,
             on_success: vec![HookDef {
+                git_ref: None,
                 action: "notify".to_string(),
                 input: hook_input,
             }],

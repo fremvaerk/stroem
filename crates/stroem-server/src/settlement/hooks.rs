@@ -644,6 +644,7 @@ async fn fire_single_hook(
     let task_name = format!("_hook:{}", hook.action);
 
     let flow_step = FlowStep {
+        git_ref: None,
         action: hook.action.clone(),
         name: None,
         description: None,
@@ -1142,6 +1143,7 @@ mod tests {
 
     fn make_hook(action: &str) -> HookDef {
         HookDef {
+            git_ref: None,
             action: action.to_string(),
             input: HashMap::new(),
         }

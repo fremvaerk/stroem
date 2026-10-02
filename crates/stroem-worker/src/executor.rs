@@ -1331,6 +1331,7 @@ mod tests {
 
         // Simulate what the server does: serialize ActionDef to JSON then hand it to the executor.
         let action = ActionDef {
+            git_ref: None,
             action_type: "script".to_string(),
             name: None,
             description: None,
@@ -1382,6 +1383,7 @@ mod tests {
 
         // ActionDef with source field serialized to JSON → executor resolves path correctly.
         let action = ActionDef {
+            git_ref: None,
             action_type: "script".to_string(),
             name: None,
             description: None,

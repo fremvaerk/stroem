@@ -403,6 +403,7 @@ mod tests {
 
     fn make_shell_action(cmd: &str) -> ActionDef {
         ActionDef {
+            git_ref: None,
             action_type: "script".to_string(),
             name: None,
             description: None,
@@ -441,6 +442,7 @@ mod tests {
 
     fn make_task_action(task_ref: &str) -> ActionDef {
         ActionDef {
+            git_ref: None,
             action_type: "task".to_string(),
             name: None,
             description: None,
@@ -479,6 +481,7 @@ mod tests {
 
     fn make_flow_step(action: &str) -> FlowStep {
         FlowStep {
+            git_ref: None,
             action: action.to_string(),
             name: None,
             description: None,
@@ -598,18 +601,22 @@ mod tests {
                 timeout: None,
                 retry: None,
                 on_success: vec![HookDef {
+                    git_ref: None,
                     action: "slack-notify".to_string(),
                     input: HashMap::new(),
                 }],
                 on_error: vec![HookDef {
+                    git_ref: None,
                     action: "slack-notify".to_string(),
                     input: HashMap::new(),
                 }],
                 on_suspended: vec![HookDef {
+                    git_ref: None,
                     action: "slack-notify".to_string(),
                     input: HashMap::new(),
                 }],
                 on_cancel: vec![HookDef {
+                    git_ref: None,
                     action: "slack-notify".to_string(),
                     input: HashMap::new(),
                 }],
@@ -767,6 +774,7 @@ mod tests {
         ws.triggers.insert(
             "nightly".to_string(),
             TriggerDef::Scheduler {
+                git_ref: None,
                 cron: "0 0 * * *".to_string(),
                 task: "deploy".to_string(),
                 input: HashMap::new(),

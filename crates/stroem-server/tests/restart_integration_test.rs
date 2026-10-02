@@ -45,6 +45,7 @@ async fn spawn_pg() -> Result<(PgPool, testcontainers::ContainerAsync<Postgres>)
 
 fn script_action(cmd: &str) -> ActionDef {
     ActionDef {
+        git_ref: None,
         action_type: "script".to_string(),
         name: None,
         description: None,
@@ -83,6 +84,7 @@ fn script_action(cmd: &str) -> ActionDef {
 
 fn flow_step(action: &str, depends_on: &[&str], input: HashMap<String, JsonValue>) -> FlowStep {
     FlowStep {
+        git_ref: None,
         action: action.to_string(),
         name: None,
         description: None,
@@ -1522,6 +1524,7 @@ async fn restart_endpoint_terminal_at_creation_fires_hooks() -> Result<()> {
     ws.actions
         .insert("notify".to_string(), script_action("true"));
     ws.on_error = vec![HookDef {
+        git_ref: None,
         action: "notify".to_string(),
         input: HashMap::new(),
     }];
@@ -1582,6 +1585,7 @@ async fn restart_hook_context_flags_carried_over_failure() -> Result<()> {
     ws.actions
         .insert("notify".to_string(), script_action("true"));
     ws.on_error = vec![HookDef {
+        git_ref: None,
         action: "notify".to_string(),
         input: HashMap::from([(
             "failed".to_string(),
@@ -1677,6 +1681,7 @@ fn line_workspace_with_task_hook() -> WorkspaceConfig {
         ),
     );
     ws.on_error = vec![HookDef {
+        git_ref: None,
         action: "notify".to_string(),
         input: HashMap::new(),
     }];
@@ -1991,6 +1996,7 @@ async fn restart_endpoint_from_approval_step_fires_suspended_hook() -> Result<()
     ws.actions
         .insert("notify".to_string(), script_action("true"));
     ws.on_suspended = vec![HookDef {
+        git_ref: None,
         action: "notify".to_string(),
         input: HashMap::new(),
     }];

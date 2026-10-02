@@ -191,6 +191,7 @@ async fn load_triggers(
             // Only process enabled scheduler triggers
             let (cron_expr, task, input, concurrency, tz_str, refresh) = match trigger_def {
                 stroem_common::models::workflow::TriggerDef::Scheduler {
+                    git_ref: _,
                     cron,
                     task,
                     input,
@@ -615,6 +616,7 @@ mod tests {
         config.triggers.insert(
             name.to_string(),
             TriggerDef::Scheduler {
+                git_ref: None,
                 cron: cron.to_string(),
                 task: "t".to_string(),
                 input: HashMap::new(),
@@ -751,6 +753,7 @@ mod tests {
             config.triggers.insert(
                 "every-minute".to_string(),
                 TriggerDef::Scheduler {
+                    git_ref: None,
                     cron: "* * * * *".to_string(),
                     task: task.to_string(),
                     input: HashMap::new(),
@@ -785,6 +788,7 @@ mod tests {
         config.actions.insert(
             "greet".to_string(),
             ActionDef {
+                git_ref: None,
                 action_type: "script".to_string(),
                 name: None,
                 description: None,
@@ -825,6 +829,7 @@ mod tests {
         flow.insert(
             "step1".to_string(),
             FlowStep {
+                git_ref: None,
                 action: "greet".to_string(),
                 name: None,
                 description: None,
@@ -860,6 +865,7 @@ mod tests {
         config.triggers.insert(
             "every-minute".to_string(),
             TriggerDef::Scheduler {
+                git_ref: None,
                 cron: "* * * * *".to_string(),
                 task: "hello".to_string(),
                 input: HashMap::new(),
@@ -891,6 +897,7 @@ mod tests {
         config.triggers.insert(
             "disabled-trigger".to_string(),
             TriggerDef::Scheduler {
+                git_ref: None,
                 cron: "* * * * *".to_string(),
                 task: "test".to_string(),
                 input: HashMap::new(),
@@ -914,6 +921,7 @@ mod tests {
         config.triggers.insert(
             "on-push".to_string(),
             TriggerDef::Webhook {
+                git_ref: None,
                 name: "on-push".to_string(),
                 task: "test".to_string(),
                 secret: None,
@@ -938,6 +946,7 @@ mod tests {
         config.triggers.insert(
             "nightly".to_string(),
             TriggerDef::Scheduler {
+                git_ref: None,
                 cron: "0 0 2 * * *".to_string(),
                 task: "test".to_string(),
                 input: HashMap::new(),
@@ -984,6 +993,7 @@ mod tests {
         config.triggers.insert(
             "bad-cron".to_string(),
             TriggerDef::Scheduler {
+                git_ref: None,
                 cron: "not valid cron".to_string(),
                 task: "test".to_string(),
                 input: HashMap::new(),
@@ -1008,6 +1018,7 @@ mod tests {
         config1.triggers.insert(
             "my-trigger".to_string(),
             TriggerDef::Scheduler {
+                git_ref: None,
                 cron: "* * * * *".to_string(),
                 task: "test".to_string(),
                 input: HashMap::new(),
@@ -1033,6 +1044,7 @@ mod tests {
         config2.triggers.insert(
             "my-trigger".to_string(),
             TriggerDef::Scheduler {
+                git_ref: None,
                 cron: "0 * * * *".to_string(), // changed from * to 0
                 task: "test".to_string(),
                 input: HashMap::new(),
@@ -1060,6 +1072,7 @@ mod tests {
         config.triggers.insert(
             "every-minute".to_string(),
             TriggerDef::Scheduler {
+                git_ref: None,
                 cron: "* * * * *".to_string(),
                 task: "task-a".to_string(),
                 input: HashMap::new(),
@@ -1072,6 +1085,7 @@ mod tests {
         config.triggers.insert(
             "nightly".to_string(),
             TriggerDef::Scheduler {
+                git_ref: None,
                 cron: "0 0 2 * * *".to_string(),
                 task: "task-b".to_string(),
                 input: HashMap::new(),
@@ -1085,6 +1099,7 @@ mod tests {
         config.triggers.insert(
             "disabled-one".to_string(),
             TriggerDef::Scheduler {
+                git_ref: None,
                 cron: "0 0 * * *".to_string(),
                 task: "task-c".to_string(),
                 input: HashMap::new(),
@@ -1119,6 +1134,7 @@ mod tests {
         config.triggers.insert(
             "deploy".to_string(),
             TriggerDef::Scheduler {
+                git_ref: None,
                 cron: "0 0 * * *".to_string(),
                 task: "deploy-task".to_string(),
                 input: input.clone(),
@@ -1272,6 +1288,7 @@ mod tests {
         config1.triggers.insert(
             "tz-trigger".to_string(),
             TriggerDef::Scheduler {
+                git_ref: None,
                 cron: "0 2 * * *".to_string(),
                 task: "test".to_string(),
                 input: HashMap::new(),
@@ -1297,6 +1314,7 @@ mod tests {
         config2.triggers.insert(
             "tz-trigger".to_string(),
             TriggerDef::Scheduler {
+                git_ref: None,
                 cron: "0 2 * * *".to_string(), // same cron
                 task: "test".to_string(),
                 input: HashMap::new(),
@@ -1325,6 +1343,7 @@ mod tests {
         config1.triggers.insert(
             "tz-trigger".to_string(),
             TriggerDef::Scheduler {
+                git_ref: None,
                 cron: "0 2 * * *".to_string(),
                 task: "test".to_string(),
                 input: HashMap::new(),
@@ -1352,6 +1371,7 @@ mod tests {
         config2.triggers.insert(
             "tz-trigger".to_string(),
             TriggerDef::Scheduler {
+                git_ref: None,
                 cron: "0 2 * * *".to_string(), // same cron
                 task: "test".to_string(),
                 input: HashMap::new(),
@@ -1391,6 +1411,7 @@ mod tests {
         config.triggers.insert(
             "bad-tz".to_string(),
             TriggerDef::Scheduler {
+                git_ref: None,
                 cron: "0 2 * * *".to_string(),
                 task: "test".to_string(),
                 input: HashMap::new(),

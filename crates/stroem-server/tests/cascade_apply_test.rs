@@ -391,6 +391,7 @@ fn make_task(flow: HashMap<String, FlowStep>) -> TaskDef {
 
 fn flow_step(depends_on: Vec<&str>) -> FlowStep {
     FlowStep {
+        git_ref: None,
         action: "noop".to_string(),
         name: None,
         description: None,

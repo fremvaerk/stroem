@@ -824,7 +824,9 @@ pub async fn claim_job(
         {
             let mut tools_map = serde_json::Map::new();
             for tool_ref in &action.tools {
-                if let stroem_common::models::workflow::AgentToolRef::Task { task } = tool_ref {
+                if let stroem_common::models::workflow::AgentToolRef::Task { git_ref: _, task } =
+                    tool_ref
+                {
                     if let Some(task_def) = workspace.tasks.get(task) {
                         tools_map.insert(task.clone(), serde_json::json!({
                                 "description": task_def.description,

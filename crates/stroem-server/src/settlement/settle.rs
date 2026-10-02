@@ -168,6 +168,7 @@ mod tests {
 
     fn flow_step(deps: &[&str], continue_on_failure: bool) -> FlowStep {
         FlowStep {
+            git_ref: None,
             action: "noop".to_string(),
             name: None,
             description: None,

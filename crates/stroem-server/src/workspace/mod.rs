@@ -994,6 +994,7 @@ tasks:
         config.actions.insert(
             "test-action".to_string(),
             ActionDef {
+                git_ref: None,
                 action_type: "script".to_string(),
                 name: None,
                 description: None,
@@ -1034,6 +1035,7 @@ tasks:
         flow.insert(
             "step1".to_string(),
             FlowStep {
+                git_ref: None,
                 action: "test-action".to_string(),
                 name: None,
                 description: None,
@@ -1087,6 +1089,7 @@ tasks:
         config1.actions.insert(
             "action1".to_string(),
             ActionDef {
+                git_ref: None,
                 action_type: "script".to_string(),
                 name: None,
                 description: None,
@@ -1127,6 +1130,7 @@ tasks:
         flow1.insert(
             "step1".to_string(),
             FlowStep {
+                git_ref: None,
                 action: "action1".to_string(),
                 name: None,
                 description: None,
@@ -1164,6 +1168,7 @@ tasks:
         config2.actions.insert(
             "action2".to_string(),
             ActionDef {
+                git_ref: None,
                 action_type: "script".to_string(),
                 name: None,
                 description: None,
@@ -1204,6 +1209,7 @@ tasks:
         flow2.insert(
             "step1".to_string(),
             FlowStep {
+                git_ref: None,
                 action: "action2".to_string(),
                 name: None,
                 description: None,

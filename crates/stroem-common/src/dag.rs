@@ -101,6 +101,7 @@ mod tests {
 
     fn make_step(action: &str, depends_on: Vec<&str>) -> FlowStep {
         FlowStep {
+            git_ref: None,
             action: action.to_string(),
             name: None,
             description: None,

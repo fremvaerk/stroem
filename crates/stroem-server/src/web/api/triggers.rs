@@ -148,6 +148,7 @@ mod tests {
     fn make_trigger(trigger_type: &str, cron: Option<&str>, enabled: bool) -> TriggerDef {
         match trigger_type {
             "scheduler" => TriggerDef::Scheduler {
+                git_ref: None,
                 cron: cron.unwrap_or("* * * * *").to_string(),
                 task: "test-task".to_string(),
                 input: HashMap::new(),
@@ -157,6 +158,7 @@ mod tests {
                 force_refresh: false,
             },
             "webhook" => TriggerDef::Webhook {
+                git_ref: None,
                 name: "test-hook".to_string(),
                 task: "test-task".to_string(),
                 secret: None,
@@ -221,6 +223,7 @@ mod tests {
     fn test_compute_next_runs_event_source_type() {
         // EventSource triggers always return no next_runs (no cron schedule).
         let trigger = TriggerDef::EventSource {
+            git_ref: None,
             task: "my-consumer".to_string(),
             target_task: "process-events".to_string(),
             enabled: true,
@@ -237,6 +240,7 @@ mod tests {
     #[test]
     fn test_trigger_info_event_source_has_no_cron_or_timezone() {
         let trigger = TriggerDef::EventSource {
+            git_ref: None,
             task: "my-consumer".to_string(),
             target_task: "process-events".to_string(),
             enabled: true,
@@ -306,6 +310,7 @@ mod tests {
         // time (i.e. during the brief DST window where they coincide), the `assert_ne!` could
         // theoretically fail. This is acceptable given the negligible probability.
         let trigger_utc = TriggerDef::Scheduler {
+            git_ref: None,
             cron: "0 2 * * *".to_string(),
             task: "test".to_string(),
             input: HashMap::new(),
@@ -315,6 +320,7 @@ mod tests {
             force_refresh: false,
         };
         let trigger_cph = TriggerDef::Scheduler {
+            git_ref: None,
             cron: "0 2 * * *".to_string(),
             task: "test".to_string(),
             input: HashMap::new(),
@@ -340,6 +346,7 @@ mod tests {
     #[test]
     fn test_compute_next_runs_with_timezone_multiple_occurrences() {
         let trigger = TriggerDef::Scheduler {
+            git_ref: None,
             cron: "0 0 * * *".to_string(),
             task: "test".to_string(),
             input: HashMap::new(),
@@ -373,6 +380,7 @@ mod tests {
     #[test]
     fn test_trigger_info_serialization_includes_timezone() {
         let trigger = TriggerDef::Scheduler {
+            git_ref: None,
             cron: "0 0 * * *".to_string(),
             task: "test-task".to_string(),
             input: HashMap::new(),
@@ -392,6 +400,7 @@ mod tests {
     #[test]
     fn test_trigger_info_serialization_omits_timezone_when_none() {
         let trigger = TriggerDef::Scheduler {
+            git_ref: None,
             cron: "0 0 * * *".to_string(),
             task: "test-task".to_string(),
             input: HashMap::new(),

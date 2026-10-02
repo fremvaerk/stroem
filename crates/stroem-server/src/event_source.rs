@@ -378,6 +378,7 @@ async fn collect_desired(state: &AppState) -> Vec<DesiredEventSource> {
             let (task, target_task, input, env, restart_policy, backoff_secs, max_in_flight) =
                 match trigger_def {
                     TriggerDef::EventSource {
+                        git_ref: _,
                         task,
                         target_task,
                         enabled,
@@ -913,6 +914,7 @@ mod tests {
             config.triggers.insert(
                 "queue".to_string(),
                 TriggerDef::EventSource {
+                    git_ref: None,
                     task: "consumer".to_string(),
                     target_task: "handler".to_string(),
                     enabled: true,

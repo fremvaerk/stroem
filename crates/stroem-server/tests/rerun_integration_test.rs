@@ -69,6 +69,7 @@ fn build_rerun_workspace() -> WorkspaceConfig {
     workspace.actions.insert(
         "noop".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "script".to_string(),
             name: None,
             description: None,
@@ -160,6 +161,7 @@ fn build_rerun_workspace() -> WorkspaceConfig {
     flow.insert(
         "step1".to_string(),
         FlowStep {
+            git_ref: None,
             action: "noop".to_string(),
             name: None,
             description: None,
@@ -600,6 +602,7 @@ async fn rerun_failure_fires_workspace_on_error_hook() -> Result<()> {
     workspace
         .on_error
         .push(stroem_common::models::workflow::HookDef {
+            git_ref: None,
             action: hook_action,
             input: HashMap::new(),
         });

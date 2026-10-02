@@ -1390,6 +1390,7 @@ mod tests {
         flow.insert(
             "build".to_string(),
             FlowStep {
+                git_ref: None,
                 action: "shell/bash".to_string(),
                 name: None,
                 description: None,
@@ -1408,6 +1409,7 @@ mod tests {
         flow.insert(
             "test".to_string(),
             FlowStep {
+                git_ref: None,
                 action: "shell/bash".to_string(),
                 name: None,
                 description: None,
@@ -1426,6 +1428,7 @@ mod tests {
         flow.insert(
             "deploy".to_string(),
             FlowStep {
+                git_ref: None,
                 action: "shell/bash".to_string(),
                 name: None,
                 description: None,

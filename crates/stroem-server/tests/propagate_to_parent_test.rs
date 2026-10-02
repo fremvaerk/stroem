@@ -83,6 +83,7 @@ fn make_workspace_config() -> WorkspaceConfig {
     actions.insert(
         "noop".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "script".to_string(),
             name: None,
             description: None,
@@ -121,6 +122,7 @@ fn make_workspace_config() -> WorkspaceConfig {
     actions.insert(
         "run-child-action".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "task".to_string(),
             name: None,
             description: None,
@@ -161,6 +163,7 @@ fn make_workspace_config() -> WorkspaceConfig {
     parent_flow.insert(
         "run-child".to_string(),
         FlowStep {
+            git_ref: None,
             action: "run-child-action".to_string(),
             name: None,
             description: None,
@@ -181,6 +184,7 @@ fn make_workspace_config() -> WorkspaceConfig {
     child_flow.insert(
         "do-work".to_string(),
         FlowStep {
+            git_ref: None,
             action: "noop".to_string(),
             name: None,
             description: None,
@@ -562,6 +566,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
     actions.insert(
         "noop".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "script".to_string(),
             name: None,
             description: None,
@@ -604,6 +609,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
         actions.insert(
             action_name.to_string(),
             ActionDef {
+                git_ref: None,
                 action_type: "task".to_string(),
                 name: None,
                 description: None,
@@ -647,6 +653,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
     gp_flow.insert(
         "run-parent".to_string(),
         FlowStep {
+            git_ref: None,
             action: "run-parent-action".to_string(),
             name: None,
             description: None,
@@ -685,6 +692,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
     p_flow.insert(
         "run-child".to_string(),
         FlowStep {
+            git_ref: None,
             action: "run-child-action".to_string(),
             name: None,
             description: None,
@@ -723,6 +731,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
     c_flow.insert(
         "do-work".to_string(),
         FlowStep {
+            git_ref: None,
             action: "noop".to_string(),
             name: None,
             description: None,
@@ -942,6 +951,7 @@ async fn parent_with_mixed_steps() -> Result<()> {
     actions.insert(
         "noop".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "script".to_string(),
             name: None,
             description: None,
@@ -980,6 +990,7 @@ async fn parent_with_mixed_steps() -> Result<()> {
     actions.insert(
         "run-child-action".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "task".to_string(),
             name: None,
             description: None,
@@ -1020,6 +1031,7 @@ async fn parent_with_mixed_steps() -> Result<()> {
     parent_flow.insert(
         "shell-step".to_string(),
         FlowStep {
+            git_ref: None,
             action: "noop".to_string(),
             name: None,
             description: None,
@@ -1038,6 +1050,7 @@ async fn parent_with_mixed_steps() -> Result<()> {
     parent_flow.insert(
         "task-step".to_string(),
         FlowStep {
+            git_ref: None,
             action: "run-child-action".to_string(),
             name: None,
             description: None,
@@ -1058,6 +1071,7 @@ async fn parent_with_mixed_steps() -> Result<()> {
     child_flow.insert(
         "do-work".to_string(),
         FlowStep {
+            git_ref: None,
             action: "noop".to_string(),
             name: None,
             description: None,

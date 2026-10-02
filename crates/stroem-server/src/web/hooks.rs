@@ -494,6 +494,7 @@ async fn find_webhook_trigger(state: &AppState, name: &str) -> Option<WebhookMat
         };
         for (trigger_key, trigger_def) in &config.triggers {
             if let TriggerDef::Webhook {
+                git_ref: _,
                 name: wh_name,
                 task,
                 secret,
@@ -635,6 +636,7 @@ mod tests {
         config.triggers.insert(
             "incoming".to_string(),
             TriggerDef::Webhook {
+                git_ref: None,
                 name: hook_name.to_string(),
                 task: "handler".to_string(),
                 secret: None,
