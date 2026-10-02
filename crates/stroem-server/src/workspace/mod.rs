@@ -2,8 +2,11 @@ pub mod availability;
 pub mod entry;
 pub mod folder;
 pub mod git;
+#[cfg(test)]
+pub(crate) mod git_test_support;
 pub mod library;
 pub mod lifecycle;
+pub mod pins;
 pub mod source;
 #[cfg(test)]
 pub(crate) mod test_support;

@@ -141,7 +141,7 @@ impl GitSource {
         }
     }
 
-    fn build_remote_callbacks<'a>(
+    pub(crate) fn build_remote_callbacks<'a>(
         auth: &'a Option<GitAuthConfig>,
         budget: &LoadBudget,
     ) -> git2::RemoteCallbacks<'a> {
@@ -238,7 +238,7 @@ fn checkout_builder(budget: &LoadBudget) -> git2::build::CheckoutBuilder<'static
 /// already expired by the time libgit2 errors (usually because our own
 /// callbacks aborted it) — the original libgit2 message is kept in the
 /// context either way.
-fn git_error(err: git2::Error, budget: &LoadBudget, msg: &'static str) -> anyhow::Error {
+pub(crate) fn git_error(err: git2::Error, budget: &LoadBudget, msg: &'static str) -> anyhow::Error {
     if budget.expired() {
         anyhow::Error::new(DeadlineExceeded).context(format!("{msg}: {err}"))
     } else {
