@@ -1,6 +1,6 @@
 # Git Refs on Action, Task and Trigger References — Design
 
-Status: revision 3 — Codex round 2 applied, pending re-review
+Status: revision 4 — Codex round 3 applied, pending re-review
 Ships in: next minor (migration `049`)
 
 Lets a flow step's `action:`, a `type: task` action's `task:` and a
@@ -10,6 +10,17 @@ side, each from its own definitions and files. Line numbers cite
 `anatolii/Revisions` at `b367b6c`.
 
 ## Revision history
+
+**Revision 4 (2026-10-02, Codex round 3, same thread).** 4 findings, all
+applied:
+- H1: the connection lookup is role-scoped (caller / owner / others) at the
+  pre-check, at claim and at dispatch, so an own-workspace ref at another
+  commit cannot shadow the caller's commit.
+- H2, H3: a pinned job's ACL folder is always its own `task_folder`. Lists
+  authorise per job (pairs for unpinned, triples for pinned), in REST and
+  MCP.
+- H4: the migration's index locking is documented, with migration 009's
+  `CONCURRENTLY` pre-build note.
 
 **Revision 3 (2026-10-02, Codex round 2, same thread).** 12 findings; 11
 applied, 1 cut from scope.
@@ -404,12 +415,14 @@ archives the working clone, `workspace.rs:221-247`).
 
 ## 6. Data model — migration `049_git_refs.sql`
 
-All additive and nullable.
+New columns only, all nullable or defaulted; no existing row is rewritten.
+The migration also rebuilds two state indexes and adds one partial index on
+`job` (see the end of this section).
 
 | Column | Set when | Meaning |
 |---|---|---|
 | `job.ref TEXT` | The job was created in owner@ref (ref'd `type: task` child, inherited child, ref'd trigger incl. its skipped rows, hook/retry/re-run/restart of a pinned job) | Ref string as written. `job.revision` holds the commit. `ref IS NOT NULL` ⇔ **pinned job** |
-| `job.task_folder TEXT` | Every pinned job, from the task's `folder` in the pinned config (NULL = no folder) | ACL path of a task that does not exist in the live config (§ 7.8) |
+| `job.task_folder TEXT` | Every pinned job, from the task's `folder` in the pinned config (NULL = no folder) | The pinned job's ACL folder (§ 7.8) |
 | `job_step.action_ref TEXT` | The step's action was resolved through a `ref:` | `action_workspace` (now also set when the owner is the job's own workspace) and `action_revision` (the commit) describe the pin |
 | `job_step.task_workspace TEXT`, `task_ref TEXT`, `task_revision TEXT` | A `type: task` step whose task resolves to a pin: an explicit `ref:`, or an inherited pin (§ 7.1) | The task owner `T` and its pin, stamped at parent creation. Dispatch reads only these columns and never infers a pin from the parent job |
 | `job_step.pin_releases INT NOT NULL DEFAULT 0` | A claim was released because its pin was unavailable (§ 7.2) | Bounds the release-to-ready loop |
@@ -425,6 +438,19 @@ recreated with `ref` inserted after the leading key columns. No existing row
 is rewritten (D6). A partial index `idx_job_pinned_tasks ON job (workspace,
 task_name, task_folder) WHERE ref IS NOT NULL` serves the ACL scope query
 (§ 7.8).
+
+**Locking.** sqlx runs the migration in one transaction at server startup
+(`stroem-server/src/main.rs:67`, `stroem-db/src/pool.rs:17`), so an index
+build holds a `SHARE` lock that blocks writes to its table while it scans:
+- The two state tables are empty in practice (state is unused, D6), so their
+  rebuild is instant.
+- `idx_job_pinned_tasks` scans all of `job`. It indexes no row yet, but the
+  scan still blocks job writes for as long as it takes.
+
+Following migration 009's precedent, every index statement uses `IF NOT
+EXISTS` / `IF EXISTS`. The migration's header documents the `CONCURRENTLY`
+statements an operator runs by hand before deploying for a zero-downtime
+rollout, which makes the migration's own statements no-ops.
 
 ## 7. Flows
 
@@ -622,12 +648,37 @@ Result<ConfigHandle>`: `None` → today's live `get_config`; `Some` →
   same config the caller passed; for a cross-workspace or pinned trigger
   target it is the target's.
 
-**Per-claim config set.** Connection resolution at claim uses
-`WorkspaceSet::load` (`workspace_set.rs:26`), a snapshot of the live configs
-with one local override (`:78`). It gains an overlay map
-`{workspace → ConfigHandle}` holding the job's own config (if pinned) and the
-step's owner pin (if any). Lookups for those workspaces hit the pinned
-config. Every other workspace stays live.
+**Role-scoped connection lookup.** Connection resolution identifies configs
+only by workspace name today (`workspace_set.rs:13`,
+`stroem-common/src/template.rs:877`). That breaks when the caller and the
+action owner are the **same workspace at different commits**, e.g. a pinned
+job `W@X` calling `action: import, ref: R2`. A name-keyed overlay would let
+one commit shadow the other.
+
+The lookup handed to the resolver therefore becomes role-scoped:
+`{ caller: ConfigHandle, owner: Option<ConfigHandle>, others: WorkspaceSet }`.
+
+- A **bare** connection name resolves in the config of its provenance
+  bucket's role. A caller-supplied value resolves in `caller`; an owner
+  default resolves in `owner`. That is today's provenance-aware two-pass
+  (`prepare_action_input_cross`, `template::resolve_task_input_by_provenance`),
+  keyed by role instead of by name.
+- The caller-first, then owner-if-shared fallback for caller-supplied names
+  still applies across a workspace boundary. When caller and owner are the
+  **same** workspace (an own-workspace ref), the fallback to `owner` is
+  ungated, because no boundary is crossed.
+- A **qualified** `ws.conn` resolves in the role's handle when `ws` names
+  that role's workspace, and in `others` (live) otherwise.
+
+The same lookup is used at all three sites that resolve connections for a
+step:
+- the creation-time literal pre-check (`job_creator.rs:790`);
+- claim preparation (`web/worker_api/jobs.rs:615`);
+- `type: task` dispatch (`settlement/dispatch.rs:402`).
+
+In each, `caller` is the job's own config (pinned or live) and `owner` is the
+step's action or task pin. When there is no pin, `others` is exactly today's
+`WorkspaceSet` and behaviour is unchanged.
 
 **Per-job redaction set.** Job detail (`web/api/jobs.rs:491-494`), the sync
 webhook response (§ 7.5), `fail_claimed_step` and `fail_task_step` redact
@@ -727,32 +778,42 @@ at a ref, so the fix applies to all sync webhook responses.
 ### 7.8 ACL
 
 ACL keeps keying on the workspace name (§ 4.5). Only the **folder** half of
-the task path `{folder}/{task}` needs a rule for pinned jobs. Today it comes
-from the live config, both for one job (`check_job_acl`,
-`web/api/jobs.rs:1091`, `:1108`; MCP `mcp/tools.rs:291`) and for lists
-(`resolve_acl_scope` builds allowed `(workspace, task)` pairs from live
-tasks, used by `list_with_acl` / `count_with_acl` /
-`get_status_counts_with_acl`). Without a rule, a release-only task's jobs
-would be invisible to non-admins and evaluated against no folder.
+the task path `{folder}/{task}` needs a rule for pinned jobs. Today the
+folder comes from the live config, in two places:
 
-**Rule.** A job's ACL path uses the live task's folder when the task name
-exists in the live config. It falls back to `job.task_folder` only when the
-name does not exist live, which can only be a pinned job.
+- **Single-job checks:** `check_job_acl` (`web/api/jobs.rs:1091`, `:1108`)
+  and MCP's per-job check (`mcp/tools.rs:291`).
+- **Lists:** REST `resolve_acl_scope` (`web/api/jobs.rs:1141`) and MCP's own
+  `resolve_acl_scope` (`mcp/auth.rs:155`, `:178`). Both build allowed
+  `(workspace, task)` **pairs** from live tasks. The list, count and
+  status-count SQL authorise on that pair alone (`stroem-db/src/repos/job.rs:1070`,
+  `:1134`), and so does MCP `list_jobs` (`mcp/tools.rs:710`, `:726`).
 
-When the name exists live, this matches today's semantics for unpinned jobs:
-a task moved between folders on `main` re-scopes its past jobs too. A
-release-only task gets the folder its own commit declared.
+**Rule.**
+- An **unpinned** job keeps today's rule: its folder is the live task's.
+- A **pinned** job's folder is always its own `job.task_folder`, the folder
+  its commit declared. The live config is never consulted, even when a task
+  of the same name exists live.
 
-- `check_job_acl` and its MCP twin apply the rule. `task_folder` is read from
-  the job row, so no pin load is needed.
-- `resolve_acl_scope` evaluates its rules over the live tasks **plus**
-  `SELECT DISTINCT workspace, task_name, task_folder FROM job WHERE ref IS
-  NOT NULL` (served by `idx_job_pinned_tasks`, § 6), restricted to names
-  absent from the live config. Because a name gets a pair from exactly one
-  source, the two sources never conflate.
+This is consistent with "a pinned job runs that commit". It also avoids
+conflating two refs of one task that declare different folders.
+
+- Single-job checks (REST and MCP) apply the rule from the job row. No pin
+  load is needed.
+- Lists authorise **per job**, in REST and MCP alike. The scope becomes:
+  - `live_pairs`: as today, for unpinned jobs;
+  - `pinned_triples`: the ACL rules evaluated over `SELECT DISTINCT
+    workspace, task_name, task_folder FROM job WHERE ref IS NOT NULL`
+    (served by `idx_job_pinned_tasks`, § 6).
+  
+  The list, count and status-count queries, and MCP `list_jobs`, filter on
+  `(ref IS NULL AND (workspace, task_name) IN live_pairs) OR (ref IS NOT NULL
+  AND (workspace, task_name, COALESCE(task_folder, '')) IN pinned_triples)`.
+  A user allowed one ref's folder therefore never sees another ref's jobs
+  under a denied folder.
 - The execute-time ACL check (`Run` on the task) is unchanged for ordinary
-  executes. For a re-run or restart of a pinned source it applies the same
-  rule, with the source job's `task_folder` as the fallback.
+  executes. A re-run or restart of a pinned source checks the source's
+  `task_folder`.
 
 ## 8. Errors and classification
 
@@ -855,7 +916,9 @@ from an allowed ref".
 
 ## 13. Rollout
 
-- Migration 049 is additive; old code ignores the new columns.
+- Migration 049 adds columns only, and old code ignores them. Its index
+  statements lock tables; for a zero-downtime rollout, pre-build the indexes
+  `CONCURRENTLY` as described in § 6.
 - Workers should ship with the server. Uploads are always partitioned
   correctly, because the server derives the partition from the job. An old
   worker's **download** carries no `job_id` and mounts the `NULL` partition
@@ -969,6 +1032,15 @@ the GitSource tests).**
   by SHA.
 - `pin_dir` lock: a second store on the same dir fails to start. Eviction
   skips an entry whose handle is still held.
+- Role-scoped lookup: pinned job `W@X` calling `action: import, ref: R2`,
+  where a connection `db` differs between `X` and `R2`. The caller-supplied
+  `db` resolves at `X`, the action's default `db` resolves at `R2`, and a
+  release-only connection named by the caller falls back to `R2` ungated.
+  Covered at the pre-check, at claim and at dispatch.
+- ACL lists with two refs of one release-only task under different folders:
+  a user allowed only one folder sees only that ref's jobs. REST list, count,
+  status counts and MCP `list_jobs` all agree. A pinned job of a task that
+  also exists live uses its own `task_folder`.
 - Old ordinary revision tarball served instead of 404.
 - `classify_execute_error` 400/500 for each § 8 row.
 - `migration_test.rs`: 049 columns and indexes.
