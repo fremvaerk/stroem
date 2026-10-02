@@ -12561,6 +12561,27 @@ async fn test_workspace_tarball_nonexistent_404() -> Result<()> {
     Ok(())
 }
 
+/// Spec § 5.4: folder workspaces have no history — an unknown revision keeps
+/// today's 404 (the PinStore branch is for git workspaces only).
+#[tokio::test]
+async fn test_folder_workspace_superseded_revision_still_404() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup().await?;
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!(
+            "/worker/workspace/default.tar.gz?revision={}",
+            "a".repeat(64)
+        ))
+        .header("Authorization", "Bearer test-token-secret")
+        .body(Body::empty())
+        .unwrap();
+    let response = router.oneshot(req).await?;
+    assert_eq!(response.status(), 404);
+    let body = String::from_utf8(body_bytes(response).await)?;
+    assert!(body.contains("no longer available"), "{body}");
+    Ok(())
+}
+
 // ─── Multi-workspace: Get task detail from specific workspace ───────
 
 #[tokio::test]

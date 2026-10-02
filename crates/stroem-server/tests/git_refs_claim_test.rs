@@ -1162,3 +1162,170 @@ async fn own_workspace_ref_render_error_stays_visible_and_scrubbed() -> anyhow::
     }
     Ok(())
 }
+
+// ─── Task 14: pinned tarballs (spec § 5.4) ──────────────────────────────
+
+/// GET the worker tarball endpoint; (status, headers, body bytes).
+async fn claim_tarball_get(
+    router: &axum::Router,
+    ws: &str,
+    revision: Option<&str>,
+) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+    let uri = match revision {
+        Some(r) => format!("/worker/workspace/{ws}.tar.gz?revision={r}"),
+        None => format!("/worker/workspace/{ws}.tar.gz"),
+    };
+    let req = axum::http::Request::builder()
+        .method("GET")
+        .uri(uri)
+        .header("Authorization", format!("Bearer {FIXTURE_WORKER_TOKEN}"))
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let resp = router.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
+    (status, headers, bytes)
+}
+
+/// (path without leading "./", content when it is a regular UTF-8 file)
+fn claim_tar_entries(gz: &[u8]) -> Vec<(String, Option<String>)> {
+    use std::io::Read;
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(gz));
+    archive
+        .entries()
+        .unwrap()
+        .map(|e| {
+            let mut e = e.unwrap();
+            let path = e
+                .path()
+                .unwrap()
+                .to_string_lossy()
+                .trim_start_matches("./")
+                .to_string();
+            let mut s = String::new();
+            let content = e.read_to_string(&mut s).ok().map(|_| s);
+            (path, content)
+        })
+        .collect()
+}
+
+fn claim_tar_file(gz: &[u8], path: &str) -> Option<String> {
+    claim_tar_entries(gz)
+        .into_iter()
+        .find(|(p, _)| p == path)
+        .and_then(|(_, c)| c)
+}
+
+fn claim_tar_has_git_dir(gz: &[u8]) -> bool {
+    claim_tar_entries(gz)
+        .iter()
+        .any(|(p, _)| p == ".git" || p.starts_with(".git/"))
+}
+
+/// Two commits on `etl` main touching `data.txt`; the live revision ends at the second.
+async fn claim_two_main_commits(fx: &PinnedFixture) -> anyhow::Result<(String, String)> {
+    let first = fx.etl.commit("main", "main", &[("data.txt", "v1")]);
+    fx.mgr().reload("etl").await?;
+    let second = fx.etl.commit("main", "main", &[("data.txt", "v2")]);
+    fx.mgr().reload("etl").await?;
+    assert_eq!(
+        fx.mgr().get_revision("etl").as_deref(),
+        Some(second.as_str())
+    );
+    Ok((first, second))
+}
+
+const CLAIM_TARBALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(240);
+
+#[tokio::test]
+async fn superseded_git_revision_is_served_from_pin_store() -> anyhow::Result<()> {
+    tokio::time::timeout(CLAIM_TARBALL_TIMEOUT, async {
+        let fx = pinned_workspace_fixture(PinnedFixtureOpts::default()).await?;
+        let (first, _second) = claim_two_main_commits(&fx).await?;
+        let (status, headers, bytes) = claim_tarball_get(&fx.router, "etl", Some(&first)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers["X-Revision"], first.as_str());
+        assert_eq!(claim_tar_file(&bytes, "data.txt").as_deref(), Some("v1"));
+        assert!(
+            !claim_tar_has_git_dir(&bytes),
+            "pinned tarballs carry no .git"
+        );
+        Ok(())
+    })
+    .await?
+}
+
+#[tokio::test]
+async fn erroring_git_workspace_still_serves_a_pinned_revision() -> anyhow::Result<()> {
+    tokio::time::timeout(CLAIM_TARBALL_TIMEOUT, async {
+        let fx = pinned_workspace_fixture(PinnedFixtureOpts::default()).await?;
+        let (_first, second) = claim_two_main_commits(&fx).await?;
+        fx.mgr().mark_unavailable_for_test("etl");
+
+        // The live path is gated, as today...
+        let (status, _, _) = claim_tarball_get(&fx.router, "etl", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        // ...but a git revision does not depend on the live entry.
+        let (status, _, bytes) = claim_tarball_get(&fx.router, "etl", Some(&second)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(claim_tar_file(&bytes, "data.txt").as_deref(), Some("v2"));
+        Ok(())
+    })
+    .await?
+}
+
+#[tokio::test]
+async fn missing_git_commit_is_404() -> anyhow::Result<()> {
+    tokio::time::timeout(CLAIM_TARBALL_TIMEOUT, async {
+        let fx = pinned_workspace_fixture(PinnedFixtureOpts::default()).await?;
+        let missing = "0".repeat(40);
+        let (status, _, _) = claim_tarball_get(&fx.router, "etl", Some(&missing)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        Ok(())
+    })
+    .await?
+}
+
+#[tokio::test]
+async fn pinned_revision_during_git_outage_on_a_cold_replica_is_503() -> anyhow::Result<()> {
+    tokio::time::timeout(CLAIM_TARBALL_TIMEOUT, async {
+        let fx = pinned_workspace_fixture(PinnedFixtureOpts::default()).await?;
+        // The replica needs the remote up to start; break it afterwards.
+        let replica = fx.second_replica().await?;
+        fx.etl.break_remote();
+        // `release/2.3`'s commit is not the live revision, so it takes the pin path,
+        // and the cold replica must fetch it.
+        let (status, headers, _) =
+            claim_tarball_get(&replica.router, "etl", Some(&fx.commits.etl_release)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(headers["Retry-After"], "5");
+        Ok(())
+    })
+    .await?
+}
+
+#[tokio::test]
+async fn healthy_current_revision_keeps_the_live_tarball() -> anyhow::Result<()> {
+    tokio::time::timeout(CLAIM_TARBALL_TIMEOUT, async {
+        let fx = pinned_workspace_fixture(PinnedFixtureOpts::default()).await?;
+        let (_first, second) = claim_two_main_commits(&fx).await?;
+        let (status, _, bytes) = claim_tarball_get(&fx.router, "etl", Some(&second)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(claim_tar_file(&bytes, "data.txt").as_deref(), Some("v2"));
+        assert!(
+            claim_tar_has_git_dir(&bytes),
+            "the healthy current revision is built from the live clone, unchanged"
+        );
+        Ok(())
+    })
+    .await?
+}

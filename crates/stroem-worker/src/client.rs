@@ -163,6 +163,20 @@ struct StepCompleteRequest {
     error: Option<String>,
 }
 
+/// The server answered 503 for a workspace tarball: its PinStore could not
+/// load the pinned revision yet (spec § 5.4, e.g. git briefly unreachable on
+/// that replica). `WorkspaceCache::ensure_revision` retries it.
+#[derive(Debug)]
+pub struct TarballUnavailable;
+
+impl std::fmt::Display for TarballUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "workspace tarball temporarily unavailable (503)")
+    }
+}
+
+impl std::error::Error for TarballUnavailable {}
+
 impl ServerClient {
     pub fn new(
         base_url: &str,
@@ -432,6 +446,10 @@ impl ServerClient {
 
         if response.status() == reqwest::StatusCode::NOT_MODIFIED {
             return Ok(None);
+        }
+
+        if response.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+            return Err(anyhow::Error::new(TarballUnavailable));
         }
 
         let response = Self::check_response(response, "Download workspace").await?;
