@@ -155,6 +155,8 @@ pub struct JobContext<'a> {
     pub owner_secrets: &'a HashMap<String, Value>,
     pub snapshots: &'a Snapshots,
     pub job_revision: Option<&'a str>,
+    /// `job.git_ref` — the ref a pinned job runs at; `None` for unpinned jobs.
+    pub job_ref: Option<&'a str>,
 }
 
 /// Which field is being rendered. The ONLY thing `build` matches on.
@@ -214,9 +216,9 @@ impl RenderContext {
     }
 }
 
-/// Build the `job` template variable: `{{ job.revision }}` etc.
-pub fn job_context(revision: Option<&str>) -> Value {
-    json!({ "revision": revision })
+/// Build the `job` template variable: `{{ job.revision }}`, `{{ job.ref }}`.
+pub fn job_context(revision: Option<&str>, git_ref: Option<&str>) -> Value {
+    json!({ "revision": revision, "ref": git_ref })
 }
 
 /// Insert-or-replace-in-place into an ordered `(key, value)` accumulator.
@@ -269,7 +271,7 @@ fn build_entries(
         upsert(&mut ctx, "global_state", v.clone());
     }
     // Before step outputs so a step literally named `job` shadows it.
-    upsert(&mut ctx, "job", job_context(job.job_revision));
+    upsert(&mut ctx, "job", job_context(job.job_revision, job.job_ref));
 
     let completed = StepStatus::Completed.as_ref();
     let skipped = StepStatus::Skipped.as_ref();
@@ -462,6 +464,7 @@ mod tests {
             owner_secrets: &owner,
             snapshots: &sn,
             job_revision: Some("rev"),
+            job_ref: None,
         };
         for scope in all_scopes(&prepared) {
             let is_condition = matches!(scope, Scope::Condition);
@@ -513,6 +516,7 @@ mod tests {
             owner_secrets: &owner,
             snapshots: &sn,
             job_revision: None,
+            job_ref: None,
         };
         let body = build(
             &job,
@@ -548,6 +552,7 @@ mod tests {
             owner_secrets: &caller,
             snapshots: &sn,
             job_revision: None,
+            job_ref: None,
         };
         let none = build(
             &job,
@@ -620,6 +625,7 @@ mod tests {
             owner_secrets: &caller,
             snapshots: &sn,
             job_revision: None,
+            job_ref: None,
         };
         let v = build(&job, &views(&rows), None, Scope::Condition);
         let v = v.as_value();
@@ -649,6 +655,7 @@ mod tests {
             owner_secrets: &caller,
             snapshots: &sn,
             job_revision: None,
+            job_ref: None,
         };
         let v = build(&job, &views(&rows), None, Scope::Condition);
         assert_eq!(v.as_value()["boom"]["output"], serde_json::Value::Null);
@@ -670,6 +677,7 @@ mod tests {
             owner_secrets: &caller,
             snapshots: &sn,
             job_revision: None,
+            job_ref: None,
         };
         let v = build(&job, &views(&rows), None, Scope::StepInput);
         assert_eq!(v.as_value()["my_step"]["output"], json!(["agg"]));
@@ -688,6 +696,7 @@ mod tests {
             owner_secrets: &caller,
             snapshots: &sn,
             job_revision: None,
+            job_ref: None,
         };
         let v = build(&job, &[], None, Scope::StepInput);
         assert_eq!(v.as_value()["secret"], json!({}));
@@ -706,6 +715,7 @@ mod tests {
             owner_secrets: &caller,
             snapshots: &sn,
             job_revision: Some("abc"),
+            job_ref: None,
         };
         let v = build(&job, &[], None, Scope::StepInput);
         assert_eq!(v.as_value()["job"]["revision"], "abc");
@@ -725,6 +735,44 @@ mod tests {
     }
 
     #[test]
+    fn job_metadata_carries_ref_of_a_pinned_job() {
+        let caller = secrets(&[]);
+        let sn = Snapshots::default();
+        let job = JobContext {
+            job_id: uuid::Uuid::nil(),
+            job_input: None,
+            caller_secrets: &caller,
+            owner_secrets: &caller,
+            snapshots: &sn,
+            job_revision: Some("3f2a9c0e"),
+            job_ref: Some("release/2.3"),
+        };
+        let v = build(&job, &[], None, Scope::StepInput);
+        assert_eq!(v.as_value()["job"]["ref"], "release/2.3");
+        assert_eq!(v.as_value()["job"]["revision"], "3f2a9c0e");
+        assert_eq!(
+            stroem_common::template::render_template(
+                "{{ job.ref }}@{{ job.revision }}",
+                v.as_value()
+            )
+            .unwrap(),
+            "release/2.3@3f2a9c0e"
+        );
+
+        let unpinned = JobContext {
+            job_ref: None,
+            ..job
+        };
+        let v = build(&unpinned, &[], None, Scope::StepInput);
+        assert_eq!(v.as_value()["job"]["ref"], serde_json::Value::Null);
+        assert_eq!(
+            stroem_common::template::render_template("[{{ job.ref }}]", v.as_value()).unwrap(),
+            "[]",
+            "an unpinned job's ref renders as an empty string"
+        );
+    }
+
+    #[test]
     fn collisions_recorded_for_every_framework_key() {
         let caller = secrets(&[("k", "v")]);
         let sn = snaps(Some(json!({})), Some(json!({})));
@@ -736,6 +784,7 @@ mod tests {
             owner_secrets: &caller,
             snapshots: &sn,
             job_revision: None,
+            job_ref: None,
         };
         let rows: Vec<JobStepRow> = ["input", "secret", "state", "global_state", "job", "each"]
             .iter()
@@ -769,6 +818,7 @@ mod tests {
             owner_secrets: &caller,
             snapshots: &sn,
             job_revision: None,
+            job_ref: None,
         };
         let v = build(&job, &[], None, Scope::StepInput);
         let dbg = format!("{v:?}");

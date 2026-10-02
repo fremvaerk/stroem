@@ -1019,6 +1019,7 @@ pub async fn claim_job(
             .unwrap_or(&empty_secrets),
         snapshots: &snapshots,
         job_revision: job.revision.as_deref(),
+        job_ref: job.git_ref.as_deref(),
     };
     let step_views = crate::render_context::views(&all_steps_for_job);
     let loop_slot = crate::render_context::LoopSlot::of(&step);

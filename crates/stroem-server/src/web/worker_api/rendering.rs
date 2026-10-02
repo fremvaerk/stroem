@@ -485,6 +485,7 @@ mod tests {
             owner_secrets: &owner.secrets,
             snapshots: &snapshots,
             job_revision: revision,
+            job_ref: None,
         };
         build(
             &job,

@@ -20,6 +20,9 @@ pub struct SuspendedHookContext {
     pub source_id: Option<String>,
     /// Workspace revision pinned on the job (git SHA or folder hash).
     pub revision: Option<String>,
+    /// The ref a pinned job runs at (`job.git_ref`); `None` for unpinned jobs.
+    #[serde(rename = "ref")]
+    pub git_ref: Option<String>,
 }
 
 /// Context available to hook templates as `hook.*`
@@ -40,6 +43,9 @@ pub struct HookContext {
     pub artifacts: Vec<HookArtifactMeta>,
     /// Workspace revision pinned on the job (git SHA or folder hash).
     pub revision: Option<String>,
+    /// The ref a pinned job runs at (`job.git_ref`); `None` for unpinned jobs.
+    #[serde(rename = "ref")]
+    pub git_ref: Option<String>,
 }
 
 /// Info about a single failed step, available in `hook.failed_steps`
@@ -392,6 +398,7 @@ pub async fn fire_suspended_hooks(
         source_type: job.source_type.clone(),
         source_id: job.source_id.clone(),
         revision: job.revision.clone(),
+        git_ref: job.git_ref.clone(),
     };
 
     let ctx_value = match serde_json::to_value(&ctx) {
@@ -546,6 +553,7 @@ async fn build_hook_context(
         failed_steps,
         artifacts,
         revision: job.revision.clone(),
+        git_ref: job.git_ref.clone(),
     })
 }
 
@@ -875,6 +883,7 @@ mod tests {
             }],
             artifacts: vec![],
             revision: None,
+            git_ref: None,
         };
 
         let value = serde_json::to_value(&ctx).unwrap();
@@ -901,6 +910,7 @@ mod tests {
             failed_steps: vec![],
             artifacts: vec![],
             revision: None,
+            git_ref: None,
         };
 
         let ctx_value = serde_json::to_value(&ctx).unwrap();
@@ -933,6 +943,7 @@ mod tests {
             failed_steps: vec![],
             artifacts: vec![],
             revision: Some("abc123def".to_string()),
+            git_ref: None,
         };
 
         let ctx_value = serde_json::to_value(&ctx).unwrap();
@@ -946,6 +957,50 @@ mod tests {
 
         let result = render_input_map(&input, &template_context).unwrap();
         assert_eq!(result["message"], "Deployed revision abc123def");
+    }
+
+    #[test]
+    fn test_hook_ref_available_in_template() {
+        let ctx = HookContext {
+            workspace: "prod".to_string(),
+            task_name: "deploy".to_string(),
+            job_id: "abc-123".to_string(),
+            status: "completed".to_string(),
+            is_success: true,
+            error_message: None,
+            source_type: "trigger".to_string(),
+            source_id: None,
+            started_at: None,
+            completed_at: None,
+            duration_secs: None,
+            failed_steps: vec![],
+            artifacts: vec![],
+            revision: Some("abc123def".to_string()),
+            git_ref: Some("release/2.3".to_string()),
+        };
+        let ctx_value = serde_json::to_value(&ctx).unwrap();
+        assert_eq!(ctx_value["ref"], "release/2.3", "serialised as `ref`");
+        let template_context = json!({ "hook": ctx_value });
+        let mut input = std::collections::HashMap::new();
+        input.insert(
+            "message".to_string(),
+            json!("{{ hook.task_name }} ran {{ hook.ref }}"),
+        );
+        let result = render_input_map(&input, &template_context).unwrap();
+        assert_eq!(result["message"], "deploy ran release/2.3");
+
+        let suspended = SuspendedHookContext {
+            workspace: "prod".to_string(),
+            task_name: "deploy".to_string(),
+            job_id: "abc-123".to_string(),
+            step_name: "gate".to_string(),
+            message: "ok?".to_string(),
+            source_type: "trigger".to_string(),
+            source_id: None,
+            revision: None,
+            git_ref: Some("v4.1.0".to_string()),
+        };
+        assert_eq!(serde_json::to_value(&suspended).unwrap()["ref"], "v4.1.0");
     }
 
     #[test]
@@ -974,6 +1029,7 @@ mod tests {
             }],
             artifacts: vec![],
             revision: None,
+            git_ref: None,
         };
 
         let ctx_value = serde_json::to_value(&ctx).unwrap();
@@ -1008,6 +1064,7 @@ mod tests {
             failed_steps: vec![],
             artifacts: vec![],
             revision: None,
+            git_ref: None,
         };
 
         let ctx_value = serde_json::to_value(&ctx).unwrap();
@@ -1055,6 +1112,7 @@ mod tests {
             failed_steps: vec![],
             artifacts: vec![],
             revision: None,
+            git_ref: None,
         };
 
         let ctx_value = serde_json::to_value(&ctx).unwrap();
@@ -1112,6 +1170,7 @@ mod tests {
                 },
             ],
             revision: None,
+            git_ref: None,
         };
 
         let ctx_value = serde_json::to_value(&ctx).unwrap();
@@ -1168,6 +1227,7 @@ mod tests {
                     .to_string(),
             }],
             revision: None,
+            git_ref: None,
         };
 
         let ctx_value = serde_json::to_value(&ctx).unwrap();
@@ -1518,6 +1578,7 @@ mod tests {
             source_type: "api".to_string(),
             source_id: Some("user@example.com".to_string()),
             revision: None,
+            git_ref: None,
         };
 
         let value = serde_json::to_value(&ctx).unwrap();
@@ -1544,6 +1605,7 @@ mod tests {
             source_type: "trigger".to_string(),
             source_id: None,
             revision: None,
+            git_ref: None,
         };
 
         let value = serde_json::to_value(&ctx).unwrap();
@@ -1561,6 +1623,7 @@ mod tests {
             source_type: "api".to_string(),
             source_id: None,
             revision: Some("abc123def".to_string()),
+            git_ref: None,
         };
 
         let ctx_value = serde_json::to_value(&ctx).unwrap();

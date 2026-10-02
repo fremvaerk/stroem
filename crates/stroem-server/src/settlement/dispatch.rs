@@ -201,6 +201,7 @@ async fn handle_task_steps_pass(
         owner_secrets: &workspace_config.secrets,
         snapshots,
         job_revision: job.revision.as_deref(),
+        job_ref: job.git_ref.as_deref(),
     };
     let step_views = render_context::views(&steps);
 
@@ -677,6 +678,7 @@ pub async fn handle_approval_steps(
         owner_secrets: &workspace_config.secrets,
         snapshots,
         job_revision: job.revision.as_deref(),
+        job_ref: job.git_ref.as_deref(),
     };
     let step_views = render_context::views(&steps);
 

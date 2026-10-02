@@ -231,6 +231,7 @@ pub async fn list_jobs(
                 "source_type": job.source_type,
                 "source_id": job.source_id,
                 "revision": job.revision,
+                "ref": job.git_ref,
                 "created_at": job.created_at,
                 "started_at": job.started_at,
                 "completed_at": job.completed_at,
@@ -265,6 +266,9 @@ pub struct JobDetailResponse {
     /// The parent's step that created this child; `None` for top-level runs.
     pub parent_step_name: Option<String>,
     pub revision: Option<String>,
+    /// Ref a pinned job runs at (spec § 6); `None` for unpinned jobs.
+    #[serde(rename = "ref")]
+    pub git_ref: Option<String>,
     pub worker_id: Option<Uuid>,
     pub created_at: String,
     pub started_at: Option<String>,
@@ -335,6 +339,12 @@ pub async fn get_job(
                 "retry_at": step.retry_at,
                 "carried_over": step.carried_over,
                 "skip_reason": step.skip_reason,
+                "action_workspace": step.action_workspace,
+                "action_revision": step.action_revision,
+                "action_ref": step.action_ref,
+                "task_workspace": step.task_workspace,
+                "task_ref": step.task_ref,
+                "task_revision": step.task_revision,
             });
             // For approval and agent steps, always surface approval-specific fields so
             // the UI can show the message and input schema after the step leaves the
@@ -362,6 +372,8 @@ pub async fn get_job(
                             "task_name": c.task_name,
                             "status": c.status,
                             "created_at": c.created_at,
+                            "ref": c.git_ref,
+                            "revision": c.revision,
                         })
                     })
                     .collect();
@@ -497,6 +509,7 @@ pub async fn get_job(
         parent_job_id: job.parent_job_id,
         parent_step_name: job.parent_step_name,
         revision: job.revision,
+        git_ref: job.git_ref,
         worker_id: job.worker_id,
         created_at: job.created_at.to_rfc3339(),
         started_at: job.started_at.map(|dt| dt.to_rfc3339()),
@@ -1128,6 +1141,17 @@ mod tests {
         v
     }
 
+    #[test]
+    fn job_detail_serialises_git_ref_as_ref() {
+        let mut resp = job_detail_fixture();
+        resp.revision = Some("3f2a9c0e".into());
+        resp.git_ref = Some("release/2.3".into());
+        let v = serde_json::to_value(&resp).unwrap();
+        assert_eq!(v["ref"], "release/2.3");
+        assert_eq!(v["revision"], "3f2a9c0e");
+        assert!(v.get("git_ref").is_none(), "the wire name is `ref`");
+    }
+
     fn job_detail_fixture() -> JobDetailResponse {
         JobDetailResponse {
             job_id: Uuid::nil(),
@@ -1145,6 +1169,7 @@ mod tests {
             parent_job_id: None,
             parent_step_name: None,
             revision: None,
+            git_ref: None,
             worker_id: None,
             created_at: "2025-01-01T00:00:00Z".to_string(),
             started_at: None,
@@ -1176,6 +1201,7 @@ mod tests {
             parent_job_id: None,
             parent_step_name: None,
             revision: None,
+            git_ref: None,
             worker_id: None,
             created_at: "2025-01-01T00:00:00Z".to_string(),
             started_at: None,
@@ -1249,6 +1275,7 @@ mod tests {
             parent_job_id: None,
             parent_step_name: None,
             revision: None,
+            git_ref: None,
             worker_id: None,
             created_at: "".to_string(),
             started_at: None,

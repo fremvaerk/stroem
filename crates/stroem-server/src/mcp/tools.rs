@@ -594,6 +594,7 @@ impl StromMcpHandler {
             "status": job.status,
             "source_type": job.source_type,
             "revision": job.revision,
+                    "ref": job.git_ref,
             "created_at": job.created_at.to_rfc3339(),
             "started_at": job.started_at.map(|dt| dt.to_rfc3339()),
             "completed_at": job.completed_at.map(|dt| dt.to_rfc3339()),
@@ -742,6 +743,7 @@ impl StromMcpHandler {
                     "status": job.status,
                     "source_type": job.source_type,
                     "revision": job.revision,
+                    "ref": job.git_ref,
                     "created_at": job.created_at.to_rfc3339(),
                     "completed_at": job.completed_at.map(|dt| dt.to_rfc3339()),
                 })

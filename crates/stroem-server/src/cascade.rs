@@ -591,6 +591,7 @@ fn condition_context(
         owner_secrets: &ws.secrets,
         snapshots,
         job_revision: job.revision.as_deref(),
+        job_ref: job.git_ref.as_deref(),
     };
     build(&job_ctx, &views(rows), None, Scope::Condition)
 }
