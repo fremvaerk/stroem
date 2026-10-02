@@ -1166,12 +1166,12 @@ async fn test_fail_or_retry_reject_after_approve_is_not_applied() -> Result<()> 
     Ok(())
 }
 
-// ─── fail_placeholder_tx tests (Task 6: loop output on a failed rollup) ──
+// ─── fail_placeholder_tx tests (loop output on a failed rollup) ──────────
 
 /// `fail_placeholder_tx` persists the caller-supplied output column, not
 /// just status/error_message — cascade.rs's R6 now builds the loop's output
-/// array even on a failed (untolerated) rollup, and that array must survive
-/// the write (spec §4/§12).
+/// array even on a failed rollup, and that array must survive the write
+/// (spec §4/§12).
 #[tokio::test]
 async fn test_fail_placeholder_tx_persists_the_output_column() -> Result<()> {
     let (pool, _container) = setup_db().await?;
@@ -1183,8 +1183,7 @@ async fn test_fail_placeholder_tx_persists_the_output_column() -> Result<()> {
 
     let output = serde_json::json!([{"n": 1}, null]);
     let mut tx = pool.begin().await?;
-    let n =
-        JobStepRepo::fail_placeholder_tx(&mut *tx, job_id, "p", "boom", &output).await?;
+    let n = JobStepRepo::fail_placeholder_tx(&mut *tx, job_id, "p", "boom", &output).await?;
     assert_eq!(n, 1);
     tx.commit().await?;
 

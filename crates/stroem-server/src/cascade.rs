@@ -356,9 +356,16 @@ fn phase_rollup(snap: &Snapshot, task: &TaskDef) -> Vec<Change> {
                     .map(|i| i.output.clone().unwrap_or(Value::Null))
                     .collect(),
             );
-            let outcome = if any_failed && !cof {
+            // The rollup's own status is never excused by its own
+            // continue_on_failure — that flag protects only the JOB (spec
+            // §6), never the loop's own terminal state. A loop with any
+            // failed instance stays `failed`, cof'd or not.
+            let outcome = if any_failed {
                 RollupOutcome::Failed(
-                    format!("for_each loop failed: instances {:?} failed", failed_indices),
+                    format!(
+                        "for_each loop failed: instances {:?} failed",
+                        failed_indices
+                    ),
                     output_array,
                 )
             } else {
@@ -1010,10 +1017,11 @@ mod tests {
         }
     }
     /// Kept for the pre-0.18.0 continue_when_skipped/skip-reason test block
-    /// below (Task 7's territory, per the dependency-conditions plan — this
-    /// helper only needs to compile against the renamed, detection-only
-    /// field; its many call sites' assertions still exercise retired
-    /// gate_for semantics and are not this task's scope).
+    /// below — this helper only needs to compile against the renamed,
+    /// detection-only field; its many call sites' assertions still exercise
+    /// retired `gate_for` semantics (`continue_when_skipped` is no longer
+    /// read for behavior, spec 2026-10-01 §6) and are unrelated to the loop
+    /// output fix.
     fn fs_cws(deps: &[&str]) -> FlowStep {
         FlowStep {
             legacy_continue_when_skipped: Some(true),
@@ -1874,18 +1882,15 @@ mod tests {
         }
     }
 
-    /// spec §4/§12: a failed (untolerated) rollup must build the SAME output
-    /// array a completed rollup would — one element per existing instance,
-    /// null where it produced none — not drop it. The pre-fix code only
-    /// built the array on the `Completed` branch.
-    ///
-    /// Deliberately NOT `fs_cof` — the placeholder has no `continue_on_failure`
-    /// of its own, so the rollup is genuinely `Failed` (a `cof`'d placeholder
-    /// would roll up `Completed` instead, which `rollup_failed_text_and_cof`
-    /// below already covers).
+    /// spec §4: a failed rollup must build the SAME output array a completed
+    /// rollup would — one element per existing instance, null where it
+    /// produced none — not drop it. The pre-fix code only built the array on
+    /// the `Completed` branch. `fs_cof` on purpose: `continue_on_failure`
+    /// protects only the job (spec §6), never the rollup's own status — a
+    /// cof'd placeholder with a failed instance still rolls up `Failed`.
     #[test]
     fn rollup_builds_the_output_array_on_failure_too_not_just_completion() {
-        let task = task(vec![("p", fs(&[]))]);
+        let task = task(vec![("p", fs_cof(&[]))]);
         let rows = vec![
             placeholder("p", "running", "[2]"),
             instance("p", 0, "completed", Some(json!({"n": 1}))),
@@ -1923,6 +1928,9 @@ mod tests {
 
     #[test]
     fn rollup_failed_text_and_cof() {
+        // `y` has its own `continue_on_failure`, but that flag protects only
+        // the JOB (spec §6) — the rollup's own status is never excused by
+        // it, so both `x` and `y` roll up `Failed` here.
         let t = task(vec![("x", fs(&[])), ("y", fs_cof(&[]))]);
         let rows = vec![
             placeholder("x", "running", "[1,2,3]"),
@@ -1957,12 +1965,21 @@ mod tests {
         }
         assert_eq!(
             fails,
-            [(
-                "x".to_string(),
-                "for_each loop failed: instances [1, 2] failed".to_string()
-            )]
+            [
+                (
+                    "x".to_string(),
+                    "for_each loop failed: instances [1, 2] failed".to_string()
+                ),
+                (
+                    "y".to_string(),
+                    "for_each loop failed: instances [0] failed".to_string()
+                ),
+            ]
         );
-        assert_eq!(oks, ["y"], "cof loop completes even with a failed instance");
+        assert!(
+            oks.is_empty(),
+            "cof no longer excuses the rollup's own status, only the job's (spec §6)"
+        );
     }
 
     /// An instance row with no `loop_index` (legacy/hand-written data): R5 has no

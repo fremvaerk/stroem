@@ -342,8 +342,18 @@ async fn run_dag(
                         }
                     }
                 }
+                // An untolerated failure breaks out of the loop above before
+                // pushing anything for the failing iteration or any that
+                // never ran — pad to one element per item, null where it
+                // produced none, matching the server's rule (spec §4).
+                while iter_outputs.len() < items.len() {
+                    iter_outputs.push(json!(null));
+                }
 
-                if any_failed && !step.continue_on_failure {
+                if any_failed {
+                    // The rollup's own status is never excused by its own
+                    // continue_on_failure — that flag protects only the job
+                    // (spec §6), never the loop's own terminal state.
                     record_failed_loop(
                         &mut outcomes,
                         &mut outputs,
@@ -420,11 +430,7 @@ async fn run_dag(
     // downstream" walk (`caught_steps`, deleted). Mirrors
     // `settlement/settle.rs::decide`.
     let uncaught = outcomes.iter().any(|(name, o)| {
-        *o == DepOutcome::Failed
-            && !task
-                .flow
-                .get(name)
-                .is_some_and(|fs| fs.continue_on_failure)
+        *o == DepOutcome::Failed && !task.flow.get(name).is_some_and(|fs| fs.continue_on_failure)
     });
     Ok(RunSummary {
         completed,
@@ -1046,34 +1052,46 @@ tasks:
         assert_eq!(s.outcome, RunOutcome::Failed);
     }
 
-    // `test_run_failure_caught_downstream_completes` is retired, NOT replaced
-    // with a mechanical equivalent — a genuinely ambiguous case, reported
-    // here rather than guessed at (surprise finding beyond this task's named
-    // fallout: run.rs:1055,1268 — see the Task 6 report).
-    //
-    // Pre-0.18.0 this exercised the deleted `caught_steps` structural walk
-    // TWICE over, in a way the new per-edge `accept` model cannot reproduce
-    // with one obvious equivalent:
-    //   1. `a` (own cof: false) failed; `b`'s gate read A's OWN cof (false)
-    //      — not b's own cof: true — so `b` was skipped (Unreachable), never
-    //      ran, regardless of its own flag.
-    //   2. `c`'s gate then read the SKIPPED `b`'s own cof (true) and treated
-    //      that as license to run past a `Skipped(Unreachable)` dependency —
-    //      `c` completed without ever seeing `b` actually execute.
-    //   3. Job status: `caught_steps` walked a's dependents (`[b]`) and
-    //      found `b.continue_on_failure == true`, so `a` itself counted as
-    //      "caught" — the job completed despite the (real, upstream) failure
-    //      never being excused by its OWN flag.
-    // None of these three steps exists anymore: `gate()` now reads only the
-    // DEPENDENT's own `accept` set, never a dependency's flags; job status
-    // (`settlement/settle.rs::decide`, mirrored above) now reads only the
-    // FAILING row's own `continue_on_failure`. Re-expressing "b still runs"
-    // needs `accept: [failed]` on b's edge to a — straightforward — but
-    // getting the OVERALL RUN back to `Completed` needs `a` to carry its
-    // OWN `continue_on_failure: true` instead of `b`'s, which moves the
-    // flag to a different step than the test originally authored and changes
-    // what the test is actually demonstrating. Two non-equivalent rewrites
-    // are defensible; picking one is a design call, not a mechanical port.
+    #[tokio::test]
+    async fn test_run_failure_caught_downstream_completes() {
+        // Pre-0.18.0 this exercised the deleted `caught_steps` structural
+        // walk: `a` (no flag of its own) failed, `b` (cof: true) caught it
+        // transitively just by depending on it, and the job completed. Under
+        // the per-edge `accept` model, `gate()` reads only the DEPENDENT's
+        // own `accept` set — `b` needs `accept: [failed]` on its edge to `a`
+        // to still run past the failure — and job status
+        // (`settlement/settle.rs::decide`, mirrored here) reads only the
+        // FAILING row's own `continue_on_failure`: `a` has none, so the run
+        // fails regardless of what `b` or `c` do (spec 2026-10-01 §6).
+        let s = run_yaml(
+            r#"
+actions:
+  fail: { type: script, script: exit 1 }
+  ok: { type: script, script: echo ok }
+tasks:
+  t:
+    flow:
+      a: { action: fail }
+      b:
+        action: ok
+        depends_on:
+          - step: a
+            accept: [failed]
+        continue_on_failure: true
+      c: { action: ok, depends_on: [b] }
+"#,
+            "t",
+        )
+        .await;
+        assert_eq!(s.failed, 1, "a fails");
+        assert_eq!(s.skipped, 0, "b and c both run");
+        assert_eq!(s.completed, 2, "b and c both complete");
+        assert_eq!(
+            s.outcome,
+            RunOutcome::Failed,
+            "a has no continue_on_failure of its own — b's does not excuse it"
+        );
+    }
 
     // `test_run_merge_needs_cws_on_skipped_branch` (pre-0.18.0: asserted that
     // `y`'s own `continue_when_skipped: true` let `m` run despite `y` being
@@ -1103,18 +1121,21 @@ tasks:
     }
 
     #[tokio::test]
-    async fn test_run_failed_loop_output_is_exposed_to_an_accepting_dependent_cof_loop_unaffected() {
+    async fn test_run_failed_loop_output_is_exposed_to_an_accepting_dependent_cof_excuses_only_the_job(
+    ) {
         // Pre-0.18.0 this asserted the OPPOSITE of the current intent — that
         // L's failed-loop output stayed masked as `null` downstream, and that
         // B's OWN `continue_on_failure` let it run past L's failure
         // (`caught_steps`-era semantics, see the retired test above). Both
         // premises are gone: `continue_on_failure` is self-scoped (spec §6),
-        // so B must `accept: [failed]` on its edge to L; and spec §4/§12's
-        // loop-output fix means L's PARTIAL per-iteration output (produced
-        // before it stopped on "bad", the first item) is now exposed to C,
-        // not masked to `null` — this is the scope of Task 6 itself. K (own
-        // `continue_on_failure`) still completes normally with one null per
-        // instance, unaffected, and D reads its length as before.
+        // so B must `accept: [failed]` on its edge to L; and the loop-output
+        // fix (spec §4) means L's PARTIAL per-iteration output (one null for
+        // "bad", padded with one more null for "good", which never ran) is
+        // now exposed to C, not masked to `null`. K's own `continue_on_failure`
+        // protects only the JOB (spec §6), never the rollup's own status: K
+        // still rolls up `Failed` (its "bad" iteration failed too), so D
+        // needs its own `accept` to still read K's output — K's cof just
+        // means the overall run isn't failed BY K.
         let s = run_yaml(
             r#"
 actions:
@@ -1135,9 +1156,14 @@ tasks:
         depends_on:
           - step: L
             accept: [failed]
-      C: { action: check, depends_on: [B], input: { c: "{{ L.output | json_encode() }}", want: "[]" } }
+      C: { action: check, depends_on: [B], input: { c: "{{ L.output | json_encode() }}", want: "[null,null]" } }
       K: { action: item, for_each: ["bad", "good"], continue_on_failure: true }
-      D: { action: check, depends_on: [K], input: { c: "{{ K.output | length }}", want: "2" } }
+      D:
+        action: check
+        depends_on:
+          - step: K
+            accept: [completed, failed]
+        input: { c: "{{ K.output | length }}", want: "2" }
 "#,
             "t",
         )
@@ -1145,16 +1171,17 @@ tasks:
         // `completed`/`failed` are diagnostic counters, not per-step outcome
         // tallies (`failed` counts every failing EXECUTION, including a
         // tolerated loop's own failing iteration — K's "bad" iteration
-        // contributes to `failed` even though K's own outcome is Completed;
-        // see "Counts are diagnostic..." above `run_dag`'s return). Five
-        // steps total, none skipped, two failing executions (L's stopping
-        // iteration + K's tolerated one) → completed = 5 - 0 - 2 = 3.
+        // contributes to `failed` even though K's own job-status contribution
+        // is excused by its cof; see "Counts are diagnostic..." above
+        // `run_dag`'s return). Five steps total, none skipped, two failing
+        // executions (L's stopping iteration + K's tolerated one) →
+        // completed = 5 - 0 - 2 = 3.
         assert_eq!(s.failed, 2, "L's stopping iteration + K's tolerated one");
         assert_eq!(s.skipped, 0);
         assert_eq!(s.completed, 3);
         // L has no `continue_on_failure` of its own (self-scoped, spec §6):
-        // B and C accepting/reading its failure does not excuse it — the
-        // overall run still fails.
+        // B and C accepting/reading its failure does not excuse it, and
+        // neither does K's unrelated cof — the overall run still fails.
         assert_eq!(s.outcome, RunOutcome::Failed);
     }
 
@@ -1169,6 +1196,11 @@ tasks:
     /// local runner has) feeding `build_render_context` (layer 4).
     #[tokio::test]
     async fn cli_for_each_rollup_exposes_output_on_a_tolerated_failure_too() {
+        // L's items are ["good", "bad", "good"]: "good" (idx 0) runs and
+        // pushes null (no OUTPUT line), "bad" (idx 1) fails and stops the
+        // loop without its own push, and "good" (idx 2) never runs at all —
+        // padded to one element per item, null where it produced none (spec
+        // §4), the array is [null, null, null], not `[]` or `[null]`.
         let s = run_yaml(
             r#"
 actions:
@@ -1177,7 +1209,7 @@ actions:
     type: script
     input:
       c: { type: string }
-    script: "test '{{ input.c }}' = '[null]'"
+    script: "test '{{ input.c }}' = '[null,null,null]'"
 tasks:
   t:
     flow:
@@ -1195,11 +1227,45 @@ tasks:
         assert_eq!(s.failed, 1, "L's bad iteration fails the loop");
         assert_eq!(
             s.completed, 1,
-            "C ran and its check passed against L's partial (non-null) output array"
+            "C ran and its check passed against L's padded output array"
         );
         // L has no `continue_on_failure` of its own (self-scoped, spec §6) —
         // tolerated-by-C or not, L's failure still fails the overall run.
         assert_eq!(s.outcome, RunOutcome::Failed);
+    }
+
+    /// The masking-scope boundary (spec §4/§12), pinned from the other side:
+    /// an ORDINARY (non-loop) failed step still masks its output as `null`
+    /// to a dependent, even one that explicitly accepts the failure. `a`
+    /// prints a real `OUTPUT:` line before exiting nonzero — proving
+    /// `record_failure` discards it, not just that nothing was produced.
+    #[tokio::test]
+    async fn cli_ordinary_failed_step_output_stays_masked_even_for_an_accepting_dependent() {
+        let s = run_yaml(
+            r#"
+actions:
+  produce_then_fail: { type: script, script: "echo 'OUTPUT: {\"secret\":\"val\"}' && exit 1" }
+  check:
+    type: script
+    input:
+      c: { type: string }
+    script: "test '{{ input.c }}' = 'null'"
+tasks:
+  t:
+    flow:
+      a: { action: produce_then_fail }
+      c:
+        action: check
+        depends_on:
+          - step: a
+            accept: [failed]
+        input: { c: "{{ a.output | json_encode() }}" }
+"#,
+            "t",
+        )
+        .await;
+        assert_eq!(s.failed, 1, "a fails");
+        assert_eq!(s.completed, 1, "c ran and saw a's output masked null");
     }
 
     // --- Integration tests ---
@@ -1367,7 +1433,10 @@ tasks:
         let summary = run_dag(task, &config, &input, dir.path(), &cancel)
             .await
             .unwrap();
-        assert_eq!(summary.completed, 1, "report ran (its accept tolerates y's skip)");
+        assert_eq!(
+            summary.completed, 1,
+            "report ran (its accept tolerates y's skip)"
+        );
         assert_eq!(
             summary.skipped, 2,
             "y (own condition) and follow (omitted by the gate)"
