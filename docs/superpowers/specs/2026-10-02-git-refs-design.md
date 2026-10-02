@@ -1,6 +1,6 @@
 # Git Refs on Action, Task and Trigger References — Design
 
-Status: revision 7 — Codex round 6 applied, pending re-review
+Status: revision 7 — Codex READY FOR PLAN (round 7, thread `01a0fb54`); pending owner review
 Ships in: next minor (migrations `049` + `050`)
 
 Lets a flow step's `action:`, a `type: task` action's `task:` and a
