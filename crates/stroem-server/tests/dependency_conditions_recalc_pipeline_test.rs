@@ -62,7 +62,12 @@ fn flow_step(depends_on: Vec<DependsOnEntry>, continue_on_failure: bool) -> Flow
 /// `ai_sources`, the three `ml-prediction-*` branches, `dwell-time`, the
 /// three `ml-impressions-*` branches, and `merge-ml` — with exactly the
 /// `depends_on`/`accept`/`continue_on_failure` spec §3 specifies for each
-/// edge.
+/// edge. `continue_on_failure` on `build-sessions`, `ml-prediction-master`,
+/// `dwell-time`, `ml-impressions-master`, and `merge-ml` is `false` by
+/// inference from spec §3's "the same seven rules... hold here" framing
+/// (no flag stated ⇒ no flag), not a value spec §3 states directly for
+/// those five — each is exercised by one of the seven rules below (1, 4,
+/// 7) so a wrong inference would show up as a test failure, not silently.
 fn recalc_pipeline_flow() -> TaskDef {
     let mut flow = HashMap::new();
 
@@ -443,6 +448,18 @@ fn rule_7_merge_ml_requires_master_tolerates_beta_and_stage() {
         status_of(&rows, "merge-ml"),
         "completed",
         "merge-ml requires only ml-impressions-master, and tolerates beta/stage in any terminal state: {rows:?}"
+    );
+
+    // Both failures are on steps with their own continue_on_failure: true,
+    // so they must not fail the job either — pins that value against
+    // regression (the step-status assertions above only check gating, not
+    // accounting; a job that failed here would mean the fixture's
+    // continue_on_failure for these two steps was wrong, or regressed).
+    let settled = settle::decide(&task, &rows).expect("every row is terminal");
+    assert_ne!(
+        settled.status,
+        JobStatus::Failed,
+        "job must not fail — both impressions failures are tolerated by their own continue_on_failure: {rows:?}"
     );
 }
 
