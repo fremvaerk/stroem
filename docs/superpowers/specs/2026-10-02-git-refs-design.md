@@ -1,6 +1,6 @@
 # Git Refs on Action, Task and Trigger References — Design
 
-Status: revision 5 — Codex round 4 applied, pending re-review
+Status: revision 6 — Codex round 5 applied, pending re-review
 Ships in: next minor (migrations `049` + `050`)
 
 Lets a flow step's `action:`, a `type: task` action's `task:` and a
@@ -10,6 +10,16 @@ side, each from its own definitions and files. Line numbers cite
 `anatolii/Revisions` at `b367b6c`.
 
 ## Revision history
+
+**Revision 6 (2026-10-02, Codex round 5, same thread).** I1–I5 CLOSED; log
+redaction confirmed pre-existing. Two findings, applied by inventory rather
+than path by path:
+- J1: one helper (`job_task_path`, `check_job_acl(&JobRow)`) plus an
+  exhaustive table of job-scoped read paths. This adds the WebSocket stream
+  and worker detail, which derived the live folder inline.
+- J2: worker detail's `error_message` joins the per-job redaction set (with
+  row-level fail-closed), with the full list of `error_message` / output
+  outlets.
 
 **Revision 5 (2026-10-02, Codex round 4, same thread).** Explicit verdicts:
 F6, G1–G12 CLOSED; event sources, keep-set vs eviction, retry window,
@@ -733,7 +743,13 @@ step's `action_ref` and `task_ref`):
 - the sync webhook response (§ 7.5);
 - MCP `get_job_status` (`mcp/tools.rs:577`), which today returns job output
   and step `error_message` raw although job detail redacts them;
+- worker detail's recent steps (`web/api/workers.rs:134-148`), which today
+  returns `error_message` raw. The page lists steps of many jobs, so it
+  builds one redaction set per distinct job;
 - `fail_claimed_step` and `fail_task_step`.
+
+These are all the API outlets of step `error_message` and job / step output
+(a grep for `error_message` under `web/api/` and `mcp/`).
 
 Step `error_message` can carry a failing script's stderr
 (`stroem-worker/src/poller.rs:745`, persisted at `web/worker_api/jobs.rs:939`).
@@ -741,7 +757,12 @@ Step `error_message` can carry a failing script's stderr
 If a referenced pin cannot be ensured (`PinUnavailable` on a cold replica),
 job detail, the sync webhook and MCP status **fail closed** with 503 / an MCP
 error "redaction set unavailable, retry" (the webhook body still carries
-`job_id`). They never answer with a redaction set that is missing a pin.
+`job_id`).
+
+Worker detail fails closed **per row**: an affected step's `error_message`
+is replaced by `••••••`, so one cold pin does not fail the whole page.
+
+No path answers with a redaction set that is missing a pin.
 
 Other entry points: `handle_task_steps_pass` / `resolve_task_ref` (via
 `task_*`), the state endpoints (§ 7.6) and `download_workspace` (§ 5.4).
@@ -851,8 +872,30 @@ folder comes from the live config, in two places:
 This is consistent with "a pinned job runs that commit". It also avoids
 conflating two refs of one task that declare different folders.
 
-- Single-job checks (REST and MCP) apply the rule from the job row. No pin
-  load is needed.
+- **One helper.** `acl::job_task_path(state, &JobRow) -> String` returns
+  `{task_folder}/{task}` for a pinned job and the live-folder path for an
+  unpinned one. No pin load is needed. `check_job_acl` changes signature to
+  take the `JobRow` (it takes `(workspace, task_name)` strings today) and
+  calls the helper. Every **job-scoped** read path goes through it. The
+  inventory at `b367b6c` is exhaustive, from a grep for `make_task_path`,
+  `.folder` and `check_job_acl` under `web/` and `mcp/`:
+
+  | Path | Today | After |
+  |---|---|---|
+  | Job detail, cancel, approve, restart source, re-run source (`web/api/jobs.rs:304`, `:577`, `:667`, `:830`; `web/api/tasks.rs:507`) | `check_job_acl(ws, task)` | `check_job_acl(&job)` |
+  | REST logs (`web/api/logs.rs:84`) | `check_job_acl(ws, task)` | `check_job_acl(&job)` |
+  | Artifacts list / download (`web/api/artifacts.rs:115`, `:153`) | `check_job_acl(ws, task)` | `check_job_acl(&job)` |
+  | WebSocket log stream, backfill and live (`web/api/ws.rs:103-136`) | inline live-folder derivation (`:119`) | `job_task_path(&job)` |
+  | Worker detail, recent steps (`web/api/workers.rs:98-148`) | inline live-folder derivation per step (`:106`) | per step row: the step query joins `job.ref` and `job.task_folder`, and each row uses `job_task_path` |
+  | MCP per-job checks: status, logs, cancel (`mcp/tools.rs:291`) | live folder | `job_task_path(&job)` |
+  | REST + MCP lists and counts | live pairs | per-job predicate (below) |
+
+  Task-scoped paths are unchanged: task list and detail, execute, triggers,
+  workspaces, manual state upload. They concern live tasks.
+
+  CLAUDE.md gains the rule: a new read path that exposes a job must authorise
+  with `check_job_acl(&job)` / `job_task_path`, never by looking up a task's
+  folder in the live config.
 - Lists authorise **per job**, in REST and MCP alike. The scope becomes:
   - `live_pairs`: as today, for unpinned jobs;
   - `pinned_triples`: the ACL rules evaluated over `SELECT DISTINCT
@@ -1047,6 +1090,14 @@ the GitSource tests).**
   stay visible (scrubbed).
 - Sync webhook (both branches) redacts a ref-only secret in `output`, and
   answers 503 with `job_id` when the pin is unavailable.
+- Job-scoped ACL inventory: for a pinned job in a denied `task_folder`
+  whose live namesake sits in an allowed folder, every path in § 7.8's table
+  denies. That covers job detail, REST logs, artifacts, WebSocket (backfill
+  and live), worker detail rows and MCP status/logs; lists and counts are
+  covered above.
+- Worker detail redacts a ref-only secret in a step's `error_message`, and
+  masks the field (row-level fail-closed) when that job's pin is
+  unavailable.
 - Webhook with `force_refresh`: a refresh that changes the `ref` runs the
   new ref; one that removes the webhook gives 404; one that rotates the
   secret authenticates against the new secret.
