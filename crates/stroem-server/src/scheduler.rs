@@ -1,4 +1,3 @@
-use crate::job_creator::create_job_for_task_detailed;
 use crate::state::{AliveGuard, AppState};
 use crate::workspace::WorkspaceManager;
 use chrono::{DateTime, Utc};
@@ -22,6 +21,8 @@ pub(crate) struct TriggerState {
     pub(crate) cron_expr: String,
     pub(crate) workspace: String,
     pub(crate) task: String,
+    /// The trigger's `ref:` — the task runs pinned to it (spec § 7.5).
+    pub(crate) git_ref: Option<String>,
     pub(crate) input: HashMap<String, serde_json::Value>,
     pub(crate) trigger_name: String,
     pub(crate) concurrency: ConcurrencyPolicy,
@@ -189,9 +190,10 @@ async fn load_triggers(
 
         for (trigger_name, trigger_def) in &config.triggers {
             // Only process enabled scheduler triggers
-            let (cron_expr, task, input, concurrency, tz_str, refresh) = match trigger_def {
+            let (cron_expr, task, git_ref, input, concurrency, tz_str, refresh) = match trigger_def
+            {
                 stroem_common::models::workflow::TriggerDef::Scheduler {
-                    git_ref: _,
+                    git_ref,
                     cron,
                     task,
                     input,
@@ -202,6 +204,7 @@ async fn load_triggers(
                 } if *enabled => (
                     cron.clone(),
                     task.clone(),
+                    git_ref.clone(),
                     input.clone(),
                     *concurrency,
                     timezone.clone(),
@@ -262,6 +265,7 @@ async fn load_triggers(
                     cron_expr,
                     workspace: ws_name.to_string(),
                     task,
+                    git_ref,
                     input,
                     trigger_name: trigger_name.clone(),
                     concurrency,
@@ -410,7 +414,24 @@ async fn fire_trigger(app_state: &AppState, workspaces: &WorkspaceManager, tstat
         return;
     }
 
-    let revision = app_state.workspaces.get_revision(&tstate.workspace);
+    // Spec § 7.5: resolve the target — cross-workspace `ws.task` and/or
+    // `ref:` — BEFORE the concurrency policy. A fire that cannot create its
+    // job must not cancel the previous run or record a skipped row.
+    let target = match crate::trigger_target::resolve_trigger_target(
+        workspaces,
+        &tstate.workspace,
+        &config,
+        &tstate.task,
+        tstate.git_ref.as_deref(),
+    )
+    .await
+    {
+        Ok(target) => target,
+        Err(e) => {
+            tracing::error!("Trigger '{}' MISSED: {:#}", source_id, e);
+            return;
+        }
+    };
 
     // Apply concurrency policy
     match tstate.concurrency {
@@ -425,13 +446,13 @@ async fn fire_trigger(app_state: &AppState, workspaces: &WorkspaceManager, tstat
                     // Record the skipped trigger fire for visibility
                     match JobRepo::create_skipped(
                         &app_state.pool,
-                        &tstate.workspace,
-                        &tstate.task,
+                        &target.workspace,
+                        &target.task_name,
                         Some(input.clone()),
                         "trigger",
                         Some(&source_id),
-                        revision.as_deref(),
-                        None,
+                        target.revision(&app_state.workspaces).as_deref(),
+                        target.pin_cols().as_ref(),
                     )
                     .await
                     {
@@ -497,26 +518,19 @@ async fn fire_trigger(app_state: &AppState, workspaces: &WorkspaceManager, tstat
     }
 
     tracing::info!(
-        "Scheduler firing trigger '{}' -> task '{}'",
+        "Scheduler firing trigger '{}' -> task '{}/{}'{}",
         source_id,
-        tstate.task
+        target.workspace,
+        target.task_name,
+        target
+            .pin
+            .as_ref()
+            .map(|p| format!(" @ {} ({})", p.git_ref, p.commit))
+            .unwrap_or_default()
     );
 
-    match create_job_for_task_detailed(
-        workspaces,
-        &app_state.pool,
-        &config,
-        &tstate.workspace,
-        &tstate.task,
-        input,
-        "trigger",
-        Some(&source_id),
-        revision.as_deref(),
-        None,
-        app_state.config.agents.as_ref(),
-        crate::config::JobDefaults::from(app_state.config.as_ref()),
-    )
-    .await
+    match crate::trigger_target::create_target_job(app_state, &target, input, "trigger", &source_id)
+        .await
     {
         Ok(created) => {
             let job_id = created.job_id;
@@ -552,6 +566,7 @@ mod tests {
             cron_expr: cron_expr.to_string(),
             workspace: "default".to_string(),
             task: "noop".to_string(),
+            git_ref: None,
             input: HashMap::new(),
             trigger_name: "test".to_string(),
             concurrency: ConcurrencyPolicy::Allow,

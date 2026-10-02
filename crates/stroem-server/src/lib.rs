@@ -28,6 +28,7 @@ pub mod settlement;
 pub mod state;
 pub mod state_storage;
 pub mod tarball_cache;
+pub(crate) mod trigger_target;
 pub mod web;
 pub mod workspace;
 pub mod workspace_set;
