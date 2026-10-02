@@ -273,6 +273,30 @@ pub enum FailOutcome {
     },
 }
 
+/// Who holds a claim: the worker and the `started_at` the claim SQL wrote.
+/// Equal only for the very claim that produced it — a release and a reclaim,
+/// even by the same worker, stamp a new `started_at` (spec 2026-10-02 § 7.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClaimIdentity {
+    pub worker_id: Uuid,
+    pub started_at: DateTime<Utc>,
+}
+
+/// Result of [`JobStepRepo::release_claim`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReleaseOutcome {
+    /// The step is `ready` again with `retry_at`; not a failure.
+    Released,
+    /// The job was already terminal: the step (and every pending/ready/
+    /// suspended sibling) is now `cancelled`. The caller must advance the job.
+    Cancelled,
+    /// `pin_releases` would exceed the cap. Nothing written; the step is still
+    /// `running` under this claim and the caller fails it with the same claim.
+    CapReached,
+    /// The row is no longer this claim (or the job/step is gone). Nothing written.
+    NotApplied,
+}
+
 impl JobStepRepo {
     /// Create steps for a job (batch insert)
     pub async fn create_steps(pool: &PgPool, steps: &[NewJobStep]) -> Result<()> {
@@ -753,6 +777,12 @@ impl JobStepRepo {
     ///   `[Suspended]`; every other caller passes `[]`.
     /// * `delay_for` — computes the retry delay in seconds from the locked row
     ///   (the server passes `compute_retry_delay`).
+    /// * `expected_claim` — when `Some`, the row must still be that claim
+    ///   (`worker_id` and `started_at` equal) or nothing is written
+    ///   (`NotApplied`). Recovery and `fail_claimed_step` pass the claim they
+    ///   observed so a released or reclaimed step is never failed on the
+    ///   strength of an earlier attempt (spec 2026-10-02 § 7.2). Everyone else
+    ///   passes `None`.
     pub async fn fail_or_retry(
         pool: &PgPool,
         job_id: Uuid,
@@ -760,6 +790,7 @@ impl JobStepRepo {
         error: &str,
         expected: &[StepStatus],
         delay_for: impl FnOnce(&JobStepRow) -> u64,
+        expected_claim: Option<ClaimIdentity>,
     ) -> Result<FailOutcome> {
         let mut tx = pool.begin().await.context("begin fail_or_retry")?;
 
@@ -785,6 +816,15 @@ impl JobStepRepo {
                 tracing::debug!("fail_or_retry rollback after NotApplied: {e:#}");
             }
             return Ok(FailOutcome::NotApplied);
+        }
+
+        if let Some(claim) = expected_claim {
+            if row.worker_id != Some(claim.worker_id) || row.started_at != Some(claim.started_at) {
+                if let Err(e) = tx.rollback().await {
+                    tracing::debug!("fail_or_retry rollback after NotApplied: {e:#}");
+                }
+                return Ok(FailOutcome::NotApplied);
+            }
         }
 
         let outcome = match row.max_retries {
@@ -850,6 +890,96 @@ impl JobStepRepo {
         };
 
         tx.commit().await.context("commit fail_or_retry")?;
+        Ok(outcome)
+    }
+
+    /// Put a claimed step whose pin is unavailable back to `ready` (spec
+    /// 2026-10-02 § 7.2), in ONE transaction:
+    ///
+    /// 1. `job` row `FOR SHARE` — serialises with `JobRepo::cancel`, whose
+    ///    `UPDATE` needs the row lock.
+    /// 2. The step `FOR UPDATE`, only while it is still `claim` (`running`,
+    ///    same `worker_id` and `started_at`); otherwise `NotApplied`.
+    /// 3. Decide under both locks: a terminal job -> `Cancelled` (this step and
+    ///    every pending/ready/suspended sibling are cancelled here, because
+    ///    cancellation's own sibling sweep is a separate call);
+    ///    `pin_releases + 1 > max_releases` -> `CapReached` (nothing written);
+    ///    else `Released` (`ready`, worker/started_at cleared, `ready_at = now`
+    ///    so the unmatched-step sweep does not count the claimed time,
+    ///    `retry_at = now + retry_after`, `pin_releases + 1`).
+    ///
+    /// A release is not a failure: `retry_attempt` and `retry_history` are
+    /// untouched.
+    pub async fn release_claim(
+        pool: &PgPool,
+        job_id: Uuid,
+        step_name: &str,
+        claim: ClaimIdentity,
+        retry_after: chrono::Duration,
+        max_releases: i32,
+    ) -> Result<ReleaseOutcome> {
+        let mut tx = pool.begin().await.context("begin release_claim")?;
+
+        let job_status: Option<String> =
+            sqlx::query_scalar("SELECT status FROM job WHERE job_id = $1 FOR SHARE")
+                .bind(job_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .context("lock job row for release_claim")?;
+        let Some(job_status) = job_status else {
+            tx.rollback().await.ok();
+            return Ok(ReleaseOutcome::NotApplied);
+        };
+
+        let pin_releases: Option<i32> = sqlx::query_scalar(
+            "SELECT pin_releases FROM job_step \
+             WHERE job_id = $1 AND step_name = $2 AND status = 'running' \
+               AND worker_id = $3 AND started_at = $4 \
+             FOR UPDATE",
+        )
+        .bind(job_id)
+        .bind(step_name)
+        .bind(claim.worker_id)
+        .bind(claim.started_at)
+        .fetch_optional(&mut *tx)
+        .await
+        .context("lock claimed step for release_claim")?;
+        let Some(pin_releases) = pin_releases else {
+            tx.rollback().await.ok();
+            return Ok(ReleaseOutcome::NotApplied);
+        };
+
+        let outcome = if job_status != "pending" && job_status != "running" {
+            sqlx::query(
+                "UPDATE job_step SET status = 'cancelled', completed_at = NOW() \
+                 WHERE job_id = $1 AND step_name = $2",
+            )
+            .bind(job_id)
+            .bind(step_name)
+            .execute(&mut *tx)
+            .await
+            .context("cancel released step")?;
+            Self::cancel_pending_steps_tx(&mut *tx, job_id).await?;
+            ReleaseOutcome::Cancelled
+        } else if pin_releases + 1 > max_releases {
+            ReleaseOutcome::CapReached
+        } else {
+            sqlx::query(
+                "UPDATE job_step \
+                 SET status = 'ready', worker_id = NULL, started_at = NULL, \
+                     ready_at = NOW(), retry_at = $3, pin_releases = pin_releases + 1 \
+                 WHERE job_id = $1 AND step_name = $2",
+            )
+            .bind(job_id)
+            .bind(step_name)
+            .bind(Utc::now() + retry_after)
+            .execute(&mut *tx)
+            .await
+            .context("release claimed step")?;
+            ReleaseOutcome::Released
+        };
+
+        tx.commit().await.context("commit release_claim")?;
         Ok(outcome)
     }
 
@@ -984,6 +1114,15 @@ impl JobStepRepo {
 
     /// Cancel all pending/ready/suspended steps for a job. Returns the number of steps cancelled.
     pub async fn cancel_pending_steps(pool: &PgPool, job_id: Uuid) -> Result<u64> {
+        Self::cancel_pending_steps_tx(pool, job_id).await
+    }
+
+    /// [`Self::cancel_pending_steps`] against any executor (used inside
+    /// [`Self::release_claim`]'s transaction).
+    pub async fn cancel_pending_steps_tx<'e, E>(executor: E, job_id: Uuid) -> Result<u64>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
         let result = sqlx::query(
             r#"
             UPDATE job_step
@@ -992,7 +1131,7 @@ impl JobStepRepo {
             "#,
         )
         .bind(job_id)
-        .execute(pool)
+        .execute(executor)
         .await
         .context("Failed to cancel pending steps")?;
 

@@ -6,7 +6,10 @@ mod common;
 use anyhow::Result;
 use common::{create_job, setup_db};
 use sqlx::PgPool;
-use stroem_db::{JobPinCols, JobRepo, JobStepRepo, NewJobStep, TaskStateRepo, WorkspaceStateRepo};
+use stroem_db::{
+    ClaimIdentity, FailOutcome, JobPinCols, JobRepo, JobStepRepo, NewJobStep, ReleaseOutcome,
+    TaskStateRepo, WorkerRepo, WorkspaceStateRepo,
+};
 use uuid::Uuid;
 
 const SHA: &str = "3f2a9c0e1b2c3d4e5f60718293a4b5c6d7e8f901";
@@ -281,5 +284,214 @@ async fn duration_stats_exclude_pinned_jobs() -> Result<()> {
     let steps = JobStepRepo::get_step_duration_stats_for_task(&pool, "ws", "t", 50).await?;
     assert_eq!(steps.len(), 1);
     assert_eq!(steps[0].sample_size, 1);
+    Ok(())
+}
+
+// ─── Task 3: release_claim / expected_claim ───────────────────────────
+
+/// Create one ready step and claim it; returns the claim identity.
+/// Only ONE step may be ready when this runs (the claim picks at random).
+async fn claim_one(pool: &PgPool, job_id: Uuid, name: &str) -> ClaimIdentity {
+    JobStepRepo::create_steps(pool, &[script_step(job_id, name, "ready")])
+        .await
+        .unwrap();
+    let worker_id = Uuid::new_v4();
+    WorkerRepo::register(
+        pool,
+        worker_id,
+        &format!("w-{name}-{worker_id}"),
+        &["script".to_string()],
+        &[],
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+    let row = JobStepRepo::claim_ready_step(pool, &["script".to_string()], &[], false, worker_id)
+        .await
+        .unwrap()
+        .expect("a ready step to claim");
+    assert_eq!(row.step_name, name);
+    ClaimIdentity {
+        worker_id,
+        started_at: row.started_at.expect("claim stamps started_at"),
+    }
+}
+
+async fn step(pool: &PgPool, job_id: Uuid, name: &str) -> stroem_db::JobStepRow {
+    JobStepRepo::get_step(pool, job_id, name)
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn release_claim_puts_the_step_back_to_ready() -> Result<()> {
+    let pool = setup_db().await;
+    let job = create_job(&pool, "ws", "t").await;
+    let claim = claim_one(&pool, job, "s").await;
+
+    let before = chrono::Utc::now();
+    let out = JobStepRepo::release_claim(&pool, job, "s", claim, chrono::Duration::seconds(10), 30)
+        .await?;
+    assert_eq!(out, ReleaseOutcome::Released);
+
+    let row = step(&pool, job, "s").await;
+    assert_eq!(row.status, "ready");
+    assert_eq!(row.worker_id, None);
+    assert_eq!(row.started_at, None);
+    assert_eq!(row.pin_releases, 1);
+    assert_eq!(row.retry_attempt, 0, "a release is not a retry");
+    let retry_at = row.retry_at.expect("retry_at set");
+    assert!(
+        retry_at >= before + chrono::Duration::seconds(9),
+        "{retry_at}"
+    );
+    // Not claimable before retry_at.
+    let w = Uuid::new_v4();
+    WorkerRepo::register(
+        &pool,
+        w,
+        &format!("w2-{w}"),
+        &["script".to_string()],
+        &[],
+        false,
+        None,
+    )
+    .await?;
+    assert!(
+        JobStepRepo::claim_ready_step(&pool, &["script".to_string()], &[], false, w)
+            .await?
+            .is_none()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn release_claim_on_a_cancelled_job_cancels_the_step_and_its_siblings() -> Result<()> {
+    let pool = setup_db().await;
+    let job = create_job(&pool, "ws", "t").await;
+    let claim = claim_one(&pool, job, "s").await;
+    // A sibling becomes ready after the claim, then the job is cancelled
+    // between `JobRepo::cancel` and `cancel_pending_steps` (two calls).
+    JobStepRepo::create_steps(&pool, &[script_step(job, "sib", "ready")]).await?;
+    assert!(JobRepo::cancel(&pool, job).await?);
+
+    let out = JobStepRepo::release_claim(&pool, job, "s", claim, chrono::Duration::seconds(10), 30)
+        .await?;
+    assert_eq!(out, ReleaseOutcome::Cancelled);
+    let s = step(&pool, job, "s").await;
+    assert_eq!(s.status, "cancelled");
+    assert!(s.completed_at.is_some());
+    assert_eq!(step(&pool, job, "sib").await.status, "cancelled");
+    assert!(!JobStepRepo::has_live_steps(&pool, job).await?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn release_claim_at_the_cap_writes_nothing() -> Result<()> {
+    let pool = setup_db().await;
+    let job = create_job(&pool, "ws", "t").await;
+    let claim = claim_one(&pool, job, "s").await;
+    sqlx::query("UPDATE job_step SET pin_releases = 30 WHERE job_id = $1 AND step_name = 's'")
+        .bind(job)
+        .execute(&pool)
+        .await?;
+
+    let out = JobStepRepo::release_claim(&pool, job, "s", claim, chrono::Duration::seconds(10), 30)
+        .await?;
+    assert_eq!(out, ReleaseOutcome::CapReached);
+    let row = step(&pool, job, "s").await;
+    assert_eq!(row.status, "running", "still this claim");
+    assert_eq!(row.worker_id, Some(claim.worker_id));
+    assert_eq!(row.pin_releases, 30);
+
+    // 29 → one more release is allowed (30 releases in total).
+    sqlx::query("UPDATE job_step SET pin_releases = 29 WHERE job_id = $1 AND step_name = 's'")
+        .bind(job)
+        .execute(&pool)
+        .await?;
+    let out = JobStepRepo::release_claim(&pool, job, "s", claim, chrono::Duration::seconds(10), 30)
+        .await?;
+    assert_eq!(out, ReleaseOutcome::Released);
+    Ok(())
+}
+
+#[tokio::test]
+async fn release_claim_with_a_stale_identity_is_not_applied() -> Result<()> {
+    let pool = setup_db().await;
+    let job = create_job(&pool, "ws", "t").await;
+    let claim = claim_one(&pool, job, "s").await;
+    let stale = ClaimIdentity {
+        started_at: claim.started_at - chrono::Duration::seconds(1),
+        ..claim
+    };
+    let out = JobStepRepo::release_claim(&pool, job, "s", stale, chrono::Duration::seconds(10), 30)
+        .await?;
+    assert_eq!(out, ReleaseOutcome::NotApplied);
+    assert_eq!(step(&pool, job, "s").await.status, "running");
+
+    // A step that already completed is not released either.
+    sqlx::query("UPDATE job_step SET status = 'completed' WHERE job_id = $1 AND step_name = 's'")
+        .bind(job)
+        .execute(&pool)
+        .await?;
+    let out = JobStepRepo::release_claim(&pool, job, "s", claim, chrono::Duration::seconds(10), 30)
+        .await?;
+    assert_eq!(out, ReleaseOutcome::NotApplied);
+    assert_eq!(step(&pool, job, "s").await.status, "completed");
+    Ok(())
+}
+
+#[tokio::test]
+async fn fail_or_retry_expected_claim_guards_released_and_reclaimed_steps() -> Result<()> {
+    let pool = setup_db().await;
+    let job = create_job(&pool, "ws", "t").await;
+    let first = claim_one(&pool, job, "s").await;
+
+    // Released: the step is `ready` with no worker — a failure decided on the
+    // first claim must not apply.
+    JobStepRepo::release_claim(&pool, job, "s", first, chrono::Duration::seconds(0), 30).await?;
+    let out =
+        JobStepRepo::fail_or_retry(&pool, job, "s", "timed out", &[], |_| 0, Some(first)).await?;
+    assert_eq!(out, FailOutcome::NotApplied);
+    assert_eq!(step(&pool, job, "s").await.status, "ready");
+
+    // Reclaimed by another worker: still not the first claim.
+    let w2 = Uuid::new_v4();
+    WorkerRepo::register(
+        &pool,
+        w2,
+        &format!("w2-{w2}"),
+        &["script".to_string()],
+        &[],
+        false,
+        None,
+    )
+    .await?;
+    sqlx::query("UPDATE job_step SET retry_at = NULL WHERE job_id = $1 AND step_name = 's'")
+        .bind(job)
+        .execute(&pool)
+        .await?;
+    let row = JobStepRepo::claim_ready_step(&pool, &["script".to_string()], &[], false, w2)
+        .await?
+        .expect("released step is claimable once retry_at passed");
+    let second = ClaimIdentity {
+        worker_id: w2,
+        started_at: row.started_at.unwrap(),
+    };
+    let out =
+        JobStepRepo::fail_or_retry(&pool, job, "s", "timed out", &[], |_| 0, Some(first)).await?;
+    assert_eq!(out, FailOutcome::NotApplied);
+    assert_eq!(step(&pool, job, "s").await.status, "running");
+
+    // The matching claim applies.
+    let out = JobStepRepo::fail_or_retry(&pool, job, "s", "boom", &[], |_| 0, Some(second)).await?;
+    assert!(matches!(out, FailOutcome::Failed { .. }), "{out:?}");
+    // And `None` keeps today's behaviour (any status).
+    let job2 = create_job(&pool, "ws", "t2").await;
+    claim_one(&pool, job2, "s").await;
+    let out = JobStepRepo::fail_or_retry(&pool, job2, "s", "boom", &[], |_| 0, None).await?;
+    assert!(matches!(out, FailOutcome::Failed { .. }));
     Ok(())
 }

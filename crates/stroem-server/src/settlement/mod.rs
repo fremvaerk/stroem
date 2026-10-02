@@ -496,6 +496,7 @@ impl Settlement {
             error,
             expected,
             retry::compute_retry_delay,
+            None, // expected_claim: threaded by the claim/recovery task
         )
         .await
         .with_context(|| format!("fail_or_retry for step '{}' of job {}", step_name, job_id))?;

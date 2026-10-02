@@ -8,8 +8,8 @@ pub use repos::job::{
     DurationStatsRow, JobPinCols, JobRepo, JobRow, RecentDurationRow, RetentionJobInfo,
 };
 pub use repos::job_step::{
-    FailOutcome, JobStepRepo, JobStepRow, NewJobStep, Seed, StaleStepInfo, StepDurationStatsRow,
-    WorkerStepRow,
+    ClaimIdentity, FailOutcome, JobStepRepo, JobStepRow, NewJobStep, ReleaseOutcome, Seed,
+    StaleStepInfo, StepDurationStatsRow, WorkerStepRow,
 };
 pub use repos::oauth_authorization_code::{OAuthAuthorizationCodeRepo, OAuthAuthorizationCodeRow};
 pub use repos::oauth_client::{OAuthClientRepo, OAuthClientRow};

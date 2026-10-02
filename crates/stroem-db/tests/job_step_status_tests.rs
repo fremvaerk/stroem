@@ -887,7 +887,7 @@ async fn test_fail_or_retry_schedules_retry_when_budget_remains() -> Result<()> 
     make_running_step_with_retry(&pool, job_id, "s", Some(2)).await?;
 
     let before = chrono::Utc::now();
-    let outcome = JobStepRepo::fail_or_retry(&pool, job_id, "s", "boom", &[], |_| 7).await?;
+    let outcome = JobStepRepo::fail_or_retry(&pool, job_id, "s", "boom", &[], |_| 7, None).await?;
     let after = chrono::Utc::now();
     assert_eq!(
         outcome,
@@ -960,7 +960,7 @@ async fn test_fail_or_retry_fails_when_budget_exhausted() -> Result<()> {
         .execute(&pool)
         .await?;
 
-    let outcome = JobStepRepo::fail_or_retry(&pool, job_id, "s", "boom", &[], |_| 7).await?;
+    let outcome = JobStepRepo::fail_or_retry(&pool, job_id, "s", "boom", &[], |_| 7, None).await?;
     assert_eq!(
         outcome,
         FailOutcome::Failed {
@@ -989,7 +989,7 @@ async fn test_fail_or_retry_fails_when_no_retry_configured() -> Result<()> {
     let job_id = make_job(&pool, "t").await?;
     make_running_step_with_retry(&pool, job_id, "s", None).await?;
 
-    let outcome = JobStepRepo::fail_or_retry(&pool, job_id, "s", "boom", &[], |_| 7).await?;
+    let outcome = JobStepRepo::fail_or_retry(&pool, job_id, "s", "boom", &[], |_| 7, None).await?;
     assert_eq!(
         outcome,
         FailOutcome::Failed {
@@ -1016,6 +1016,7 @@ async fn test_fail_or_retry_precondition() -> Result<()> {
         "rejected",
         &[StepStatus::Suspended],
         |_| 7,
+        None,
     )
     .await?;
     assert_eq!(outcome, FailOutcome::NotApplied);
@@ -1040,6 +1041,7 @@ async fn test_fail_or_retry_precondition() -> Result<()> {
         "rejected",
         &[StepStatus::Suspended],
         |_| 7,
+        None,
     )
     .await?;
     assert!(matches!(outcome, FailOutcome::RetryScheduled { .. }));
@@ -1050,7 +1052,8 @@ async fn test_fail_or_retry_precondition() -> Result<()> {
 async fn test_fail_or_retry_missing_row_is_not_applied() -> Result<()> {
     let (pool, _c) = setup_db().await?;
     let job_id = make_job(&pool, "t").await?;
-    let outcome = JobStepRepo::fail_or_retry(&pool, job_id, "nope", "boom", &[], |_| 7).await?;
+    let outcome =
+        JobStepRepo::fail_or_retry(&pool, job_id, "nope", "boom", &[], |_| 7, None).await?;
     assert_eq!(outcome, FailOutcome::NotApplied);
     Ok(())
 }
@@ -1091,7 +1094,7 @@ async fn test_fail_or_retry_never_exposes_failed_on_retry_path() -> Result<()> {
     });
     for i in 0..50 {
         let name = format!("s{i}");
-        JobStepRepo::fail_or_retry(&pool, job_id, &name, "boom", &[], |_| 1).await?;
+        JobStepRepo::fail_or_retry(&pool, job_id, &name, "boom", &[], |_| 1, None).await?;
     }
     let (unexpected, short_polls) = reader.await?;
     assert!(
@@ -1116,8 +1119,9 @@ async fn test_fail_or_retry_duplicate_reports_consume_budget() -> Result<()> {
     let job_id = make_job(&pool, "t").await?;
     make_running_step_with_retry(&pool, job_id, "s", Some(2)).await?;
 
-    let first = JobStepRepo::fail_or_retry(&pool, job_id, "s", "boom", &[], |_| 7).await?;
-    let second = JobStepRepo::fail_or_retry(&pool, job_id, "s", "boom again", &[], |_| 7).await?;
+    let first = JobStepRepo::fail_or_retry(&pool, job_id, "s", "boom", &[], |_| 7, None).await?;
+    let second =
+        JobStepRepo::fail_or_retry(&pool, job_id, "s", "boom again", &[], |_| 7, None).await?;
     assert!(
         matches!(first, FailOutcome::RetryScheduled { attempt: 1, .. }),
         "got {first:?}"
@@ -1157,6 +1161,7 @@ async fn test_fail_or_retry_reject_after_approve_is_not_applied() -> Result<()> 
         "rejected",
         &[StepStatus::Suspended],
         |_| 7,
+        None,
     )
     .await?;
     assert_eq!(outcome, FailOutcome::NotApplied);

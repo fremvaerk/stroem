@@ -1039,6 +1039,7 @@ pub async fn approve_step(
             &reason,
             &[StepStatus::Suspended],
             crate::settlement::retry::compute_retry_delay,
+            None,
         )
         .await
         .context("reject suspended step")?;
