@@ -92,7 +92,7 @@ pub async fn latest_snapshots(
     Snapshots { task, global }
 }
 
-/// The five fields the context needs from a step row.
+/// The fields the context needs from a step row.
 #[derive(Debug, Clone, Copy)]
 pub struct StepView<'a> {
     pub step_name: &'a str,
@@ -100,6 +100,11 @@ pub struct StepView<'a> {
     pub output: Option<&'a Value>,
     pub error_message: Option<&'a str>,
     pub loop_source: Option<&'a str>,
+    /// A `for_each` placeholder (never a loop instance — those are already
+    /// skipped above by `loop_source`). Scopes the failed-row output
+    /// exposure below to a tolerated loop rollup only, never an ordinary
+    /// failed step (spec §4/§12).
+    pub is_placeholder: bool,
 }
 
 impl<'a> From<&'a JobStepRow> for StepView<'a> {
@@ -110,6 +115,7 @@ impl<'a> From<&'a JobStepRow> for StepView<'a> {
             output: r.output.as_ref(),
             error_message: r.error_message.as_deref(),
             loop_source: r.loop_source.as_deref(),
+            is_placeholder: r.for_each_expr.is_some(),
         }
     }
 }
@@ -284,7 +290,16 @@ fn build_entries(
         } else if s.status == skipped || s.status == suspended {
             entry.insert("output".into(), Value::Null);
         } else if s.status == failed {
-            entry.insert("output".into(), Value::Null);
+            // Scoped to loop placeholders only (spec §4/§12) — an ordinary
+            // failed step's output (e.g. a rejected approval's stored
+            // message) must stay masked; only a tolerated loop rollup's
+            // output is newly exposed here.
+            let output = if s.is_placeholder {
+                s.output.cloned().unwrap_or(Value::Null)
+            } else {
+                Value::Null
+            };
+            entry.insert("output".into(), output);
             if let Some(err) = s.error_message {
                 entry.insert("error".into(), Value::String(err.to_string()));
             }
@@ -628,6 +643,61 @@ mod tests {
         // suspended rows keep their stored output MASKED (rule 3)
         assert_eq!(v["wait"]["output"], serde_json::Value::Null);
         assert!(v.get("pend").is_none() && v.get("run").is_none());
+    }
+
+    #[test]
+    fn step_view_carries_is_placeholder_from_for_each_expr() {
+        let mut r = row("p", "failed", None);
+        r.for_each_expr = Some("{{ items }}".to_string());
+        assert!(StepView::from(&r).is_placeholder);
+
+        let ordinary = row("a", "failed", None);
+        assert!(!StepView::from(&ordinary).is_placeholder);
+    }
+
+    /// spec §4/§12: a failed loop placeholder's output is no longer masked —
+    /// cascade.rs's R6 now builds the output array even on a failed rollup,
+    /// and it must reach templates, not render as `null`.
+    #[test]
+    fn a_failed_loop_placeholder_exposes_its_output() {
+        let mut r = row("p", "failed", Some(json!([{"n": 1}, null])));
+        r.for_each_expr = Some("{{ items }}".to_string());
+        let caller = secrets(&[]);
+        let sn = Snapshots::default();
+        let job = JobContext {
+            job_id: uuid::Uuid::nil(),
+            job_input: None,
+            caller_secrets: &caller,
+            owner_secrets: &caller,
+            snapshots: &sn,
+            job_revision: None,
+        };
+        let v = build(&job, &views(&[r]), None, Scope::Condition);
+        assert_eq!(v.as_value()["p"]["output"], json!([{"n": 1}, null]));
+    }
+
+    /// A rejected approval step already stores `{"approval_message": ...}`
+    /// before failing — this must stay masked. Pins the scope boundary from
+    /// spec §4/§12: this is NOT a blanket completed/failed output merge.
+    #[test]
+    fn an_ordinary_failed_step_still_renders_null_even_with_retained_output() {
+        let r = row(
+            "approval",
+            "failed",
+            Some(json!({"approval_message": "please confirm"})),
+        );
+        let caller = secrets(&[]);
+        let sn = Snapshots::default();
+        let job = JobContext {
+            job_id: uuid::Uuid::nil(),
+            job_input: None,
+            caller_secrets: &caller,
+            owner_secrets: &caller,
+            snapshots: &sn,
+            job_revision: None,
+        };
+        let v = build(&job, &views(&[r]), None, Scope::Condition);
+        assert_eq!(v.as_value()["approval"]["output"], serde_json::Value::Null);
     }
 
     /// Migrated from the deleted `job_creator` context builder's tests: a failed
