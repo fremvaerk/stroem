@@ -1,6 +1,6 @@
 # Git Refs on Action, Task and Trigger References — Design
 
-Status: revision 4 — Codex round 3 applied, pending re-review
+Status: revision 5 — Codex round 4 applied, pending re-review
 Ships in: next minor (migration `049`)
 
 Lets a flow step's `action:`, a `type: task` action's `task:` and a
@@ -10,6 +10,20 @@ side, each from its own definitions and files. Line numbers cite
 `anatolii/Revisions` at `b367b6c`.
 
 ## Revision history
+
+**Revision 5 (2026-10-02, Codex round 4, same thread).** Explicit verdicts:
+F6, G1–G12 CLOSED; event sources, keep-set vs eviction, retry window,
+`hook_chain_depth` and MCP execute had no defects found.
+
+Five findings, applied:
+- I1: the role scope has three roles (caller / action owner / task owner),
+  with a bucket → role table and a site → roles table.
+- I2: MCP `get_job_status` uses the per-job redaction set and fails closed.
+  Log-line redaction is pre-existing and goes to § 16.
+- I3: the ACL test now matches § 7.8.
+- I4: MCP `list_jobs` filters in SQL before `LIMIT`.
+- I5: the migration is split into 049 (columns) and 050 (indexes under new
+  names), so a `CONCURRENTLY` pre-run is possible.
 
 **Revision 4 (2026-10-02, Codex round 3, same thread).** 4 findings, all
 applied:
@@ -413,7 +427,7 @@ instead of 404'd. That tarball comes from a clean checkout and has no `.git`
 directory (today's live tarballs include `.git` because `build_tarball`
 archives the working clone, `workspace.rs:221-247`).
 
-## 6. Data model — migration `049_git_refs.sql`
+## 6. Data model — migrations `049_git_refs.sql` + `050_git_refs_indexes.sql`
 
 New columns only, all nullable or defaulted; no existing row is rewritten.
 The migration also rebuilds two state indexes and adds one partial index on
@@ -439,18 +453,38 @@ is rewritten (D6). A partial index `idx_job_pinned_tasks ON job (workspace,
 task_name, task_folder) WHERE ref IS NOT NULL` serves the ACL scope query
 (§ 7.8).
 
-**Locking.** sqlx runs the migration in one transaction at server startup
-(`stroem-server/src/main.rs:67`, `stroem-db/src/pool.rs:17`), so an index
-build holds a `SHARE` lock that blocks writes to its table while it scans:
-- The two state tables are empty in practice (state is unused, D6), so their
-  rebuild is instant.
-- `idx_job_pinned_tasks` scans all of `job`. It indexes no row yet, but the
-  scan still blocks job writes for as long as it takes.
+**Two migrations, staged for an optional zero-downtime pre-run.** sqlx runs
+migrations in one transaction each, at server startup
+(`stroem-server/src/main.rs:67`, `stroem-db/src/pool.rs:17`). An index build
+inside one holds a `SHARE` lock that blocks writes while it scans.
 
-Following migration 009's precedent, every index statement uses `IF NOT
-EXISTS` / `IF EXISTS`. The migration's header documents the `CONCURRENTLY`
-statements an operator runs by hand before deploying for a zero-downtime
-rollout, which makes the migration's own statements no-ops.
+- **`049_git_refs.sql`**: columns only, all `ADD COLUMN IF NOT EXISTS`.
+  Adding nullable or constant-default columns is metadata-only in Postgres
+  11+, so this is instant.
+- **`050_git_refs_indexes.sql`**: new indexes under **new names**, all
+  `CREATE INDEX IF NOT EXISTS`:
+  - `idx_task_state_lookup_ref` on `task_state(workspace, task_name, ref,
+    created_at DESC)`;
+  - `idx_workspace_state_lookup_ref` on `workspace_state(workspace, ref,
+    created_at DESC)`;
+  - `idx_job_pinned_tasks` on `job(workspace, task_name, task_folder) WHERE
+    ref IS NOT NULL`.
+  
+  Then `DROP INDEX IF EXISTS` of the old `idx_task_state_lookup` /
+  `idx_workspace_state_lookup`. Those take a brief exclusive lock and no
+  scan.
+
+The default path is a normal deploy, where both migrations run at startup.
+The two state tables are empty in practice (D6), so only
+`idx_job_pinned_tasks` scans a large table; it indexes no row yet, but the
+scan blocks `job` writes for as long as it takes.
+
+For a zero-downtime rollout, migration 050's header documents the manual
+pre-run, following migration 009's precedent:
+1. Run 049's `ALTER`s.
+2. `CREATE INDEX CONCURRENTLY` the three new indexes.
+3. `DROP INDEX CONCURRENTLY` the two old ones.
+4. Deploy. Both migrations' statements are then no-ops.
 
 ## 7. Flows
 
@@ -650,45 +684,64 @@ Result<ConfigHandle>`: `None` → today's live `get_config`; `Some` →
 
 **Role-scoped connection lookup.** Connection resolution identifies configs
 only by workspace name today (`workspace_set.rs:13`,
-`stroem-common/src/template.rs:877`). That breaks when the caller and the
-action owner are the **same workspace at different commits**, e.g. a pinned
-job `W@X` calling `action: import, ref: R2`. A name-keyed overlay would let
-one commit shadow the other.
+`stroem-common/src/template.rs:877`). That breaks once two **roles** of one
+resolution are the same workspace at different commits. Examples: a pinned
+job `W@X` calling `action: import, ref: R2`; or a `type: task` step whose
+action owner `O` and task owner `T` are one workspace pinned at two commits.
+A name-keyed overlay lets one commit shadow the other.
 
 The lookup handed to the resolver therefore becomes role-scoped:
-`{ caller: ConfigHandle, owner: Option<ConfigHandle>, others: WorkspaceSet }`.
 
-- A **bare** connection name resolves in the config of its provenance
-  bucket's role. A caller-supplied value resolves in `caller`; an owner
-  default resolves in `owner`. That is today's provenance-aware two-pass
-  (`prepare_action_input_cross`, `template::resolve_task_input_by_provenance`),
-  keyed by role instead of by name.
-- The caller-first, then owner-if-shared fallback for caller-supplied names
-  still applies across a workspace boundary. When caller and owner are the
-  **same** workspace (an own-workspace ref), the fallback to `owner` is
-  ungated, because no boundary is crossed.
-- A **qualified** `ws.conn` resolves in the role's handle when `ws` names
-  that role's workspace, and in `others` (live) otherwise.
+```
+RoleScope {
+    caller:       ConfigHandle,          // A: the job's own config (pinned or live)
+    action_owner: Option<ConfigHandle>,  // O: the step's action pin / live owner
+    task_owner:   Option<ConfigHandle>,  // T: the step's task pin / live owner (type: task)
+    others:       WorkspaceSet,          // every other workspace, live
+}
+```
 
-The same lookup is used at all three sites that resolve connections for a
-step:
-- the creation-time literal pre-check (`job_creator.rs:790`);
-- claim preparation (`web/worker_api/jobs.rs:615`);
-- `type: task` dispatch (`settlement/dispatch.rs:402`).
+**Rule.** Every existing resolution rule is kept as written. Each "config of
+workspace X" it consults becomes the handle of the role that the rule names.
+Concretely:
 
-In each, `caller` is the job's own config (pinned or live) and `owner` is the
-step's action or task pin. When there is no pin, `others` is exactly today's
-`WorkspaceSet` and behaviour is unchanged.
+| Lookup | Role handle |
+|---|---|
+| Bucket `C`: caller's rendered step `input:` (connection names) | `caller` |
+| Bucket `D`: action `input` defaults (`merge_action_defaults`, `prepare_action_input_cross`) | `action_owner` |
+| The task's own defaults, and the task's **input schema** (which fields are connection-typed, their types) | `task_owner` |
+| The action's input schema at claim | `action_owner` |
+| Caller-first, then owner-if-shared fallback for a caller-supplied name | `caller`, then the role whose schema the field belongs to. The `shared` gate applies only when that role's workspace ≠ the caller's |
+| Qualified `ws.conn` / `type: ws.type` inside a bucket | The bucket's role handle when `ws` names that role's workspace, else `others` |
 
-**Per-job redaction set.** Job detail (`web/api/jobs.rs:491-494`), the sync
-webhook response (§ 7.5), `fail_claimed_step` and `fail_task_step` redact
-with the live set's values plus `secret_values` of **every** pin the job
-references: `job.ref`, and each step's `action_ref` and `task_ref`.
+Sites, each building `RoleScope` from what it has stamped:
+
+| Site | Roles used |
+|---|---|
+| Creation pre-check, flow-step action (`precheck_literal_connection_inputs`, `job_creator.rs:790`) | caller + action owner |
+| Creation pre-check, `type: task` (`precheck_task_step_literals`, `job_creator.rs:815`) | caller + task owner |
+| Claim preparation (`web/worker_api/jobs.rs:615`) | caller + action owner |
+| `type: task` dispatch (`template::resolve_task_input_by_provenance`, `template.rs:961`; `settlement/dispatch.rs:322`, `:402`) | caller + action owner + task owner |
+
+When no role is pinned, every handle is today's live config and behaviour is
+unchanged.
+
+**Per-job redaction set.** These all redact with the live set's values plus
+`secret_values` of **every** pin the job references (`job.ref`, and each
+step's `action_ref` and `task_ref`):
+- job detail (`web/api/jobs.rs:491-494`);
+- the sync webhook response (§ 7.5);
+- MCP `get_job_status` (`mcp/tools.rs:577`), which today returns job output
+  and step `error_message` raw although job detail redacts them;
+- `fail_claimed_step` and `fail_task_step`.
+
+Step `error_message` can carry a failing script's stderr
+(`stroem-worker/src/poller.rs:745`, persisted at `web/worker_api/jobs.rs:939`).
 
 If a referenced pin cannot be ensured (`PinUnavailable` on a cold replica),
-job detail and the sync webhook **fail closed** with 503 "redaction set
-unavailable, retry" (the webhook body still carries `job_id`). They never
-answer with a redaction set that is missing a pin.
+job detail, the sync webhook and MCP status **fail closed** with 503 / an MCP
+error "redaction set unavailable, retry" (the webhook body still carries
+`job_id`). They never answer with a redaction set that is missing a pin.
 
 Other entry points: `handle_task_steps_pass` / `resolve_task_ref` (via
 `task_*`), the state endpoints (§ 7.6) and `download_workspace` (§ 5.4).
@@ -806,11 +859,15 @@ conflating two refs of one task that declare different folders.
     workspace, task_name, task_folder FROM job WHERE ref IS NOT NULL`
     (served by `idx_job_pinned_tasks`, § 6).
   
-  The list, count and status-count queries, and MCP `list_jobs`, filter on
-  `(ref IS NULL AND (workspace, task_name) IN live_pairs) OR (ref IS NOT NULL
-  AND (workspace, task_name, COALESCE(task_folder, '')) IN pinned_triples)`.
-  A user allowed one ref's folder therefore never sees another ref's jobs
-  under a denied folder.
+  The list, count and status-count queries filter on `(ref IS NULL AND
+  (workspace, task_name) IN live_pairs) OR (ref IS NOT NULL AND (workspace,
+  task_name, COALESCE(task_folder, '')) IN pinned_triples)` **in SQL**, before
+  `ORDER BY` / `LIMIT` / `OFFSET`. A user allowed one ref's folder therefore
+  never sees another ref's jobs under a denied folder.
+- MCP `list_jobs` stops filtering in Rust after `LIMIT` (`mcp/tools.rs:708`,
+  `:726`). Today that lets denied recent jobs fill the page and hide older
+  permitted ones. It now calls the same SQL-side `JobRepo::list_with_acl`
+  path as REST, with the predicate above.
 - The execute-time ACL check (`Run` on the task) is unchanged for ordinary
   executes. A re-run or restart of a pinned source checks the source's
   `task_folder`.
@@ -916,9 +973,9 @@ from an allowed ref".
 
 ## 13. Rollout
 
-- Migration 049 adds columns only, and old code ignores them. Its index
-  statements lock tables; for a zero-downtime rollout, pre-build the indexes
-  `CONCURRENTLY` as described in § 6.
+- Migration 049 adds columns only (instant), and old code ignores them.
+  Migration 050's index build locks `job` writes for one table scan; for a
+  zero-downtime rollout, pre-run it `CONCURRENTLY` as described in § 6.
 - Workers should ship with the server. Uploads are always partitioned
   correctly, because the server derives the partition from the job. An old
   worker's **download** carries no `job_id` and mounts the `NULL` partition
@@ -997,9 +1054,11 @@ the GitSource tests).**
   the commit and `task_folder`.
 - Re-run and restart of a pinned trigger job whose task exists only at the
   ref: the ref is re-resolved, and restart's plan uses the pinned flow.
-- ACL: a release-only task's jobs are listed for a user allowed by its
-  `task_folder`, and hidden for one who is not. A task that exists live uses
-  the live folder. `check_job_acl` and MCP agree.
+- ACL: a pinned job's folder is its `task_folder` even when a task of the
+  same name exists live under another folder; an unpinned job uses the live
+  folder. A release-only task's jobs are listed for a user allowed by its
+  `task_folder` and hidden for one who is not. `check_job_acl` and MCP
+  agree.
 - A hook whose action is a ref'd `type: task` action is not fired and logs
   to the source job.
 - Cross-workspace step state: upload and download (with `job_id`) use the
@@ -1043,7 +1102,7 @@ the GitSource tests).**
   also exists live uses its own `task_folder`.
 - Old ordinary revision tarball served instead of 404.
 - `classify_execute_error` 400/500 for each § 8 row.
-- `migration_test.rs`: 049 columns and indexes.
+- `migration_test.rs`: 049 columns, 050 indexes (new names present, old names gone); both re-runnable after a manual pre-run (idempotent).
 
 **E2E (`tests/e2e.sh`).** A git workspace backed by a local bare repo with a
 `release/1` branch and a `v1.0.0` tag; a `main` task calling both; assert the
@@ -1083,6 +1142,9 @@ outputs differ by ref and that `job.ref` is set on the child.
   - `fail_or_retry` with an empty expected list accepts any status, so a
     recovery sweep can race a worker's completion. This design guards only
     the new release path and `fail_claimed_step` (§ 7.2);
+  - job **logs** are never value-redacted on read: REST, WebSocket and MCP
+    `get_job_logs` all return raw lines. A script that prints a secret
+    leaks it whether or not refs are involved;
   - cancellation is two non-atomic calls (`JobRepo::cancel`, then
     `cancel_pending_steps`), and the claim SQL does not check the job's
     status (`job_step.rs:561`). A worker can claim a `ready` sibling between
