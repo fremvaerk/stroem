@@ -54,7 +54,9 @@ pub fn cmd_inspect(config: &WorkspaceConfig, task_name: &str) -> Result<()> {
             let deps = if step.depends_on.is_empty() {
                 "-".to_string()
             } else {
-                step.depends_on.join(", ")
+                let mut names = Vec::new();
+                stroem_common::depends_on::collect_names(&step.depends_on, &mut names);
+                names.join(", ")
             };
 
             let mut extras = Vec::new();
@@ -71,8 +73,10 @@ pub fn cmd_inspect(config: &WorkspaceConfig, task_name: &str) -> Result<()> {
             if step.continue_on_failure {
                 extras.push("continue_on_failure".to_string());
             }
-            if step.continue_when_skipped {
-                extras.push("continue_when_skipped".to_string());
+            if let Some(cws) = step.legacy_continue_when_skipped {
+                extras.push(format!(
+                    "continue_when_skipped={cws} (REMOVED in 0.18.0, run `stroem validate`)"
+                ));
             }
 
             let extras_str = if extras.is_empty() {
@@ -125,10 +129,13 @@ mod tests {
             action: action.to_string(),
             name: None,
             description: None,
-            depends_on: depends_on.iter().map(|s| s.to_string()).collect(),
+            depends_on: depends_on
+                .iter()
+                .map(|s| stroem_common::depends_on::DependsOnEntry::Name(s.to_string()))
+                .collect(),
             input: HashMap::new(),
             continue_on_failure: false,
-            continue_when_skipped: false,
+            legacy_continue_when_skipped: None,
             timeout: None,
             when: None,
             for_each: None,
@@ -363,7 +370,7 @@ mod tests {
         let mut config = WorkspaceConfig::new();
         let mut flow = HashMap::new();
         let mut step = make_step("act", vec![]);
-        step.continue_when_skipped = true;
+        step.legacy_continue_when_skipped = Some(true);
         flow.insert("step1".to_string(), step);
 
         let task = TaskDef {
