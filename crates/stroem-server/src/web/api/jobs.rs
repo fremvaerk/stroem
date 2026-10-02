@@ -1473,6 +1473,57 @@ mod tests {
         assert_eq!(steps_json[2]["depends_on"], json!(["build", "test"]));
     }
 
+    /// Job-detail's step-dependency enrichment (`step_json["depends_on"] =
+    /// json!(&flow_step.depends_on)`, same expression as the handler above)
+    /// must round-trip a grouped `depends_on` entry as-authored, not
+    /// flattened to bare step names.
+    #[test]
+    fn test_depends_on_enriched_preserves_grouped_shape() {
+        use stroem_common::depends_on::{AnyEntry, DependsOnEntry};
+        use stroem_common::models::workflow::FlowStep;
+
+        let mut flow = HashMap::new();
+        flow.insert(
+            "deploy".to_string(),
+            FlowStep {
+                action: "shell/bash".to_string(),
+                name: None,
+                description: None,
+                depends_on: vec![DependsOnEntry::Any(AnyEntry {
+                    any: vec![
+                        DependsOnEntry::Name("build".to_string()),
+                        DependsOnEntry::Name("test".to_string()),
+                    ],
+                })],
+                input: HashMap::new(),
+                continue_on_failure: false,
+                legacy_continue_when_skipped: None,
+                timeout: None,
+                when: None,
+                for_each: None,
+                sequential: false,
+                retry: None,
+                inline_action: None,
+            },
+        );
+
+        let mut steps_json: Vec<serde_json::Value> =
+            vec![json!({"step_name": "deploy", "depends_on": []})];
+
+        for step_json in &mut steps_json {
+            if let Some(step_name) = step_json["step_name"].as_str() {
+                if let Some(flow_step) = flow.get(step_name) {
+                    step_json["depends_on"] = json!(&flow_step.depends_on);
+                }
+            }
+        }
+
+        assert_eq!(
+            steps_json[0]["depends_on"],
+            json!([{"any": ["build", "test"]}])
+        );
+    }
+
     #[test]
     fn test_depends_on_empty_for_missing_flow() {
         // Steps not found in the flow should keep the default empty array

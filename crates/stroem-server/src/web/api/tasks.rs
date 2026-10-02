@@ -554,3 +554,80 @@ pub async fn execute_task(
         job_id: job_id.to_string(),
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use stroem_common::depends_on::{AnyEntry, DependsOnEntry};
+    use stroem_common::models::workflow::FlowStep;
+
+    fn flow_step_with_entries(depends_on: Vec<DependsOnEntry>) -> FlowStep {
+        FlowStep {
+            action: "shell/bash".to_string(),
+            name: None,
+            description: None,
+            depends_on,
+            input: HashMap::new(),
+            continue_on_failure: false,
+            legacy_continue_when_skipped: None,
+            timeout: None,
+            when: None,
+            for_each: None,
+            sequential: false,
+            retry: None,
+            inline_action: None,
+        }
+    }
+
+    /// `TaskDetail.flow` (see `get_task_detail` above) is built by
+    /// `serde_json::to_value`-ing each `FlowStep` directly — this pins that a
+    /// grouped `depends_on` entry round-trips as-authored, not flattened to
+    /// bare step names.
+    #[test]
+    fn task_detail_serializes_grouped_dependencies_as_authored() {
+        let mut flow = HashMap::new();
+        flow.insert(
+            "m".to_string(),
+            flow_step_with_entries(vec![DependsOnEntry::Any(AnyEntry {
+                any: vec![
+                    DependsOnEntry::Name("a".to_string()),
+                    DependsOnEntry::Name("b".to_string()),
+                ],
+            })]),
+        );
+
+        let flow_json: HashMap<String, serde_json::Value> = flow
+            .iter()
+            .map(|(k, v)| (k.clone(), serde_json::to_value(v).unwrap_or_default()))
+            .collect();
+
+        assert_eq!(flow_json["m"]["depends_on"], json!([{"any": ["a", "b"]}]));
+    }
+
+    #[test]
+    fn task_detail_serializes_step_accept_entry() {
+        let mut flow = HashMap::new();
+        flow.insert(
+            "notify".to_string(),
+            flow_step_with_entries(vec![DependsOnEntry::Step(
+                stroem_common::depends_on::StepEntry {
+                    step: "build".to_string(),
+                    accept: stroem_common::depends_on::AcceptSet::Outcomes(vec![
+                        stroem_common::depends_on::Outcome::Failed,
+                    ]),
+                },
+            )]),
+        );
+
+        let flow_json: HashMap<String, serde_json::Value> = flow
+            .iter()
+            .map(|(k, v)| (k.clone(), serde_json::to_value(v).unwrap_or_default()))
+            .collect();
+
+        assert_eq!(
+            flow_json["notify"]["depends_on"],
+            json!([{"step": "build", "accept": ["failed"]}])
+        );
+    }
+}
