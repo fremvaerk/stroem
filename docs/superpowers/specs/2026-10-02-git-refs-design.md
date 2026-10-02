@@ -1,6 +1,6 @@
 # Git Refs on Action, Task and Trigger References — Design
 
-Status: revision 7 — Codex READY FOR PLAN (round 7, thread `01a0fb54`); pending owner review
+Status: revision 8 — Codex READY FOR PLAN at rev 7 (thread `01a0fb54`); rev 8 adds plan-time amendments, owner-approved spec
 Ships in: next minor (migrations `049` + `050`)
 
 Lets a flow step's `action:`, a `type: task` action's `task:` and a
@@ -10,6 +10,15 @@ side, each from its own definitions and files. Line numbers cite
 `anatolii/Revisions` at `b367b6c`.
 
 ## Revision history
+
+**Revision 8 (2026-10-02, implementation planning).** Three amendments found
+while writing the plan:
+- The `readvance_stalled_pinned_jobs` recovery phase (§ 7.3), so a pinned job
+  whose `advance` hit `PinUnavailable` does not strand.
+- Tarball 503 + `Retry-After`, with a bounded worker retry (§ 5.4).
+- The `git_ref` column naming (§ 6).
+
+Not yet reviewed by Codex; the implementation review covers them.
 
 **Revision 7 (2026-10-02, Codex round 6, same thread).** The inventories
 were incomplete. Added:
@@ -435,7 +444,13 @@ This branch runs **before** the live health gate (`get_path` → `None` for
 an errored entry, `workspace.rs:53-58`, `workspace/mod.rs:426`). A pin does
 not depend on the owner's live load (§ 5.1), so a pinned step whose claim
 succeeded must also get its files while `main` fails to load. It 404s only
-when the commit does not exist in the repo.
+when the commit does not exist in the repo. A transient `PinUnavailable` (a cold replica
+during a git outage) answers **503 with `Retry-After: 5`**.
+
+The worker's pinned download (`ensure_revision`) retries a 503 every 5 s for up
+to 12 attempts before failing the step as today. Without this, a tarball
+request that lands on a cold replica during an outage would fail the step, even
+though the claiming replica has the pin warm.
 
 The only exception to "pin first": when the requested revision **is** the
 live one and the live entry is healthy, today's live-dir path is used
@@ -462,6 +477,10 @@ The migration also rebuilds two state indexes and adds one partial index on
 | `job_step.task_workspace TEXT`, `task_ref TEXT`, `task_revision TEXT` | A `type: task` step whose task resolves to a pin: an explicit `ref:`, or an inherited pin (§ 7.1) | The task owner `T` and its pin, stamped at parent creation. Dispatch reads only these columns and never infers a pin from the parent job |
 | `job_step.pin_releases INT NOT NULL DEFAULT 0` | A claim was released because its pin was unavailable (§ 7.2) | Bounds the release-to-ready loop |
 | `task_state.ref TEXT`, `workspace_state.ref TEXT` | Snapshot written by a pinned job | Part of the key. `NULL` = unpinned (today's rows) |
+
+**Column naming (implementation).** The SQL and Rust name of `job.ref`,
+`task_state.ref` and `workspace_state.ref` is **`git_ref`**, because `ref` is a
+Rust keyword and an awkward `FromRow` field. API JSON keeps `ref`.
 
 A `type: task` step carries two owners: the action's owner `O`
 (`action_*`) and the task's owner `T` (`task_*`). They are kept in separate
@@ -659,6 +678,25 @@ one commit.
 
 `dispatch::handle_task_steps_pass` picks the task's config from `task_*` if
 set, else live (today). It never infers a pin from the parent job.
+
+**A pinned job whose pin cannot be loaded must not strand.** `Settlement::resolve`
+logs a `PinUnavailable` for a pinned job and returns `Ok(None)`. One case is a
+step completing on a cold replica during a git outage. Today nothing would
+re-enter `advance` afterwards, so the next steps would stay `pending` forever.
+
+A recovery phase fixes this. `readvance_stalled_pinned_jobs` runs on every
+leader sweep and selects
+
+```sql
+SELECT id FROM job
+WHERE status = 'running' AND git_ref IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM job_step
+                  WHERE job_id = job.id AND status IN ('ready','running','suspended'))
+```
+
+It calls `Settlement::advance` for each job, with one heartbeat per job
+(CLAUDE.md § Health Check). `advance` is idempotent, so a job that is
+merely between events loses nothing.
 
 **Re-run and restart of a pinned source.** Both reject non-top-level sources
 (`is_top_level_job`, `web/api/jobs.rs:629`), so this concerns pinned jobs
