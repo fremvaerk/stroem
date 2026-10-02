@@ -156,8 +156,9 @@ credentials `secret: true` in the connection type.
   successfully again.
 - A job that touches a [git ref](/guides/git-refs/#secrets-and-redaction) is
   also masked with the secrets of every pinned commit it is connected to.
-  Those are loaded from the commit itself, and if one cannot be loaded the
-  job's content is not shown unmasked (`503`, or every value masked).
+  Those are loaded from the commit itself, and if one cannot be loaded these
+  responses never fall back to a partial mask (`503`, or every value masked).
+  Job logs and artifacts are not masked.
 - The same masking now also applies to the sync webhook response, the
   webhook job-status poll, MCP `get_job_status` and the recent steps on worker
   detail, not only to job detail.
@@ -183,8 +184,13 @@ details. This applies in two places:
   in the caller's context.
 
 The persisted step error is a fixed message naming the workspace whose
-rendering failed and pointing at the server log; it never contains any
-representation of the value that caused the failure, however that value was
+rendering failed. At dispatch it reads `Failed to prepare input for task step
+'<step>': rendering in workspace '<owner>' failed (details withheld from this
+job; see the server log or validate the owner workspace)`; at claim it is the
+shorter `rendering action '<action>' of workspace '<owner>' failed; details
+withheld`, which does not mention the server log (the full error is logged
+there all the same). Neither ever contains any representation of the value
+that caused the failure, however that value was
 encoded (raw, JSON-escaped, or otherwise — a filter chain can produce
 arbitrarily many encodings, which is exactly why this is withheld outright
 rather than scrubbed).
@@ -198,12 +204,15 @@ value in the log text. The server log is an operator-trusted surface, so
 this is an acceptable tradeoff there — it is precisely why the caller-facing
 job record gets the stronger guarantee (withholding, not scrubbing) instead.
 
-This only applies to a value that actually came from the OWNER's own
-config. A value the CALLER supplied itself — even a bad one, even on a step
-that crosses into another workspace — is always shown as before (scrubbed of
-known secret values); it's the caller's own data. That covers the caller's
-own step `input:` and a connection name the caller supplied, at dispatch and
-at claim alike. Likewise, a structural problem (the referenced task
+What is withheld is decided by where the failing template comes from, not by
+whose value broke it. An error in the caller's own step `input:` (rendered in
+the caller's context) and an error about a connection name the caller
+supplied (for example, an unshared owner connection) are the caller's own
+data and are always shown as before, scrubbed of known secret values — at
+dispatch and at claim alike. The other way round, an error rendering a
+foreign owner's action body or `image` at claim is withheld even when the
+value that broke it came from the caller's input, because the template is
+the owner's. Likewise, a structural problem (the referenced task
 doesn't exist, a required field is missing, a database error) is never
 withheld either, whichever workspace it's reported against — with one
 exception: a structural problem INSIDE the owner's own task default (for

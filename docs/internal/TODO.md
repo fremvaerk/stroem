@@ -1047,7 +1047,7 @@ Feature: `ref:` (branch | tag | full SHA) on flow-step actions, `type: task` act
 - [x] Webhook trigger not revalidated after `force_refresh` — fixed: authenticate against the cached definition first (no unauthenticated git refresh), then re-match on the refreshed config (gone → 404, errored → 500) and re-authenticate against the fresh secret.
 - [x] MCP `get_job_status` and worker detail returned step `error_message` raw — fixed: per-job redaction, fail-closed (MCP error / masked row).
 - [x] MCP `list_jobs` filtered ACL in Rust after `LIMIT` (denied jobs could fill the page) — fixed: SQL-side `JobRepo::list_with_acl` with the shared `JobAclScope`.
-- [x] An old revision of a git workspace 404'd once it left the replica's tarball cache — fixed: built from a PinStore checkout (`pin-{sha}` cache key, no `.git`), 503 + `Retry-After` while the remote is unreachable, worker retries 12 × 5 s.
+- [x] An old revision of a git workspace 404'd once it left the replica's tarball cache — fixed: built from a PinStore checkout (`pin-{sha}` cache key, no `.git`), 503 + `Retry-After` while the remote is unreachable, worker makes up to 12 requests 5 s apart.
 - [x] Owner-side claim render errors of cross-workspace actions were scrubbed, not withheld — fixed: withheld by origin at claim (`rendering.rs::withheld_owner_error`).
 - [x] Claim-time failures and recovery phases 1–2 could overwrite a step that completed or was reclaimed meanwhile — fixed: `Settlement::claimed_step_failed` (`expected = [Running]` + `expected_claim`).
 

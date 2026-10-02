@@ -197,9 +197,13 @@ offered again 10 seconds later. The load continues in the background, so the
 next claim usually finds the commit ready. The job log shows
 `[pin] etl@release/2.3 (3f2a9c0) not available yet on this server, retrying: …`.
 A release is not a failure: it uses none of the step's retry attempts.
-After 30 releases (about 5 minutes) the step fails with
+After 30 releases the step fails with
 `[pin] … still unavailable after 30 attempts: …`, and step retry applies as
-usual.
+usual. Each release cycle takes up to the claim budget, plus the 10-second
+release delay, plus the time until a worker polls again — 30 × (budget + 10 s
++ poll). With the defaults that is a little over 5 minutes when the git
+server fails fast, and about 15 minutes or more when it hangs until the
+budget runs out.
 
 A permanent problem (the commit was force-pushed away, or its YAML does not
 load) fails the step at once with `[pin] … cannot be loaded: …`.
@@ -209,8 +213,9 @@ load) fails the step at once with `[pin] … cannot be loaded: …`.
 The worker downloads the step's files at the pinned commit. The server
 builds that tarball from a clean checkout of the commit, which has no `.git`
 directory. If the server cannot reach the git server for a commit it has not
-loaded, it answers `503` with `Retry-After: 5`, and the worker retries
-every 5 seconds, up to 12 times, before it fails the step.
+loaded, it answers `503` with `Retry-After: 5`, and the worker tries again
+every 5 seconds — up to 12 attempts in all, about a minute — before it fails
+the step.
 
 ### Settlement
 
@@ -223,8 +228,10 @@ by default), so it continues once the git server is reachable again.
 
 If the commit can never load again (force-pushed away, or the YAML at it is
 broken), the job is **failed** with `[pin] … cannot be loaded: …`, and its
-remaining steps are cancelled. Its hooks and task-level retry do not run,
-because their definitions are unreadable.
+steps that have not started yet are cancelled. Steps already running keep
+running — their workers are not told to stop — and finish on their own. Its
+hooks and task-level retry do not run, because their definitions are
+unreadable.
 
 ## Task state
 
@@ -249,9 +256,9 @@ pinned jobs are left out.
 ## Secrets and redaction
 
 A commit's secrets can differ from the default branch's, and can exist only
-at that commit. Every place that shows a job's content masks secrets with
-the live workspaces' values **plus** the secret values of every pinned commit
-the job is connected to:
+at that commit. The API responses that show a job's input, output and step
+errors mask secrets with the live workspaces' values **plus** the secret
+values of every pinned commit the job is connected to:
 
 - the commits of the job and its steps;
 - the commits of every job in the same job tree (parent, children,
@@ -260,12 +267,17 @@ the job is connected to:
   job a restart was restarted from, the job a task retry retries — and of
   their job trees.
 
-This applies to job detail (`GET /api/jobs/{id}`), the sync webhook response
-and the webhook job-status poll, MCP `get_job_status`, and the recent steps
-on worker detail.
+These responses are job detail (`GET /api/jobs/{id}`), the recent steps on
+worker detail, the sync webhook response and the webhook job-status poll,
+and MCP `get_job_status`.
 
-When some of those secret values cannot be loaded, nothing is shown
-unmasked:
+Job **logs** (REST, the WebSocket stream, MCP `get_job_logs`) and
+**artifacts** are not masked at all: a secret that exists only at a ref and
+that a script prints appears in the log exactly as printed. See
+[Secrets & Encryption](/guides/secrets/#api-redaction).
+
+When some of the secret values those responses need cannot be loaded, the
+responses never fall back to a partial mask:
 
 | Situation | Job detail, webhook, MCP | Worker detail |
 |---|---|---|

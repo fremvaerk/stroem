@@ -180,13 +180,14 @@ pin_store:
 |---|---|---|
 | `dir` | `<temp>/stroem/pins` | One bare repository per git workspace plus one checkout per pinned commit. Must be private to ONE server process: startup fails with `pin_store.dir … is in use by another process` if another process holds its lock. Must not be empty. |
 | `keep_recent_per_workspace` | `5` | Recently used pinned commits kept per workspace beyond those active jobs still need. At most `1000`. |
-| `claim_load_budget_secs` | `20` | How long a worker's claim waits for the pinned commits it needs to load. Past it, the step is released back to `ready` and the load continues in the background. Keep it clearly **below** the workers' `request_timeout_secs` (30 s by default). If a worker gives up first, the server releases that claim too, so the step is only delayed. Between `1` and `86400`. |
+| `claim_load_budget_secs` | `20` | How long a worker's claim waits for the pinned commits it needs to load. Past it, the step is released back to `ready` and the load continues in the background. Keep it clearly **below** the workers' `request_timeout_secs` (30 s by default). If a worker gives up while the commits are still loading, the server releases that claim too, so the step is only delayed. A worker that gives up later — after the commits loaded, while the step is being rendered — leaves the step `running` with nobody executing it, until a step or job timeout ends it (the stale-worker sweep acts only if that worker also stops heartbeating; with no timeout configured, until the job is cancelled). Between `1` and `86400`. |
 
 The pin store is opened only when at least one git workspace is configured.
 It takes a lock on `{dir}/.lock`, so two server processes on one host need
 different directories — with the default directory, also two servers
-sharing one temporary directory. Startup removes checkouts left half-written
-by an interrupted run.
+sharing one temporary directory. At startup the server removes **every**
+per-commit checkout under the directory, finished ones included, and keeps
+only the bare repositories; checkouts are rebuilt on demand.
 
 The bare repositories are never garbage-collected. With the default
 directory they are lost on a container restart and refilled on demand; the

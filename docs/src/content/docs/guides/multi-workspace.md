@@ -137,7 +137,7 @@ stroem trigger etl-pipeline --workspace data-team --input '{"date": "2025-01-01"
 
 Workers automatically download the correct workspace files before executing each step. Workspace tarballs are cached locally using ETag-based caching, so workers only re-download when a workspace changes.
 
-Each step downloads the workspace at the revision its job was created with. For a git workspace, a revision that is no longer the current one is built from a clean checkout of that commit (no `.git` directory). If the server cannot reach the git server to fetch it, it answers `503` and the worker retries every 5 seconds, up to 12 times, before failing the step.
+Each step downloads the workspace at the revision its job was created with. For a git workspace, a revision that is no longer the current one is built from a clean checkout of that commit (no `.git` directory). If the server cannot reach the git server to fetch it, it answers `503` and the worker tries again every 5 seconds — up to 12 attempts in all, about a minute — before failing the step.
 
 Configure the local cache directory in the worker config:
 

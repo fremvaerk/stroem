@@ -263,7 +263,7 @@ How a requested `revision` is served:
 | `200` | Tarball returned |
 | `304` | Not Modified (workspace unchanged) |
 | `404` | Workspace not found, the commit does not exist in the git repository, or a folder workspace's revision is no longer available |
-| `503` | The commit exists but cannot be fetched right now (the git server is unreachable from this replica). Carries `Retry-After: 5`. The worker retries every 5 seconds, up to 12 attempts, then fails the step |
+| `503` | The commit exists but cannot be fetched right now (the git server is unreachable from this replica). Carries `Retry-After: 5`. The worker tries again every 5 seconds, up to 12 attempts in all (about a minute), then fails the step |
 
 ## Download State Snapshot
 

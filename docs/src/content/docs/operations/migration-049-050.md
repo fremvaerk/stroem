@@ -103,13 +103,14 @@ uses `ref:`.
 
 ### More outlets mask secrets
 
-Job detail always masked secret values; other places that show job content
-did not. Now all of them use the same secret set:
+Job detail always masked secret values; the other API responses that show a
+job's output or step errors did not. Now these all use the same secret set
+(job logs and artifacts are still not masked):
 
 | Where | Before | Now |
 |---|---|---|
 | Sync webhook response (`mode: sync`) | `output` returned raw | masked |
-| Webhook job-status poll (`GET /hooks/{name}/jobs/{id}`) | `output` returned raw | masked, in every branch, with `Cache-Control: no-store` |
+| Webhook job-status poll (`GET /hooks/{name}/jobs/{id}`) | `output` returned raw (already `Cache-Control: no-store`) | masked, in every branch (still `no-store`, now also on the `503`) |
 | MCP `get_job_status` | step `error_message` returned raw | masked |
 | Worker detail (`GET /api/workers/{id}`), recent steps | `error_message` returned raw | masked |
 | Job detail (`GET /api/jobs/{id}`) | `input`, `raw_input`, `output`, step `input` / `output` / `error_message` / `retry_history` | every string except identifiers: also `approval_message`, `approval_fields`, `when_condition`, `for_each_expr`, `action_image` |

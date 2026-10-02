@@ -45,10 +45,8 @@ When generating Strøm workflow YAML, these constraints are enforced at parse ti
 - Maximum nesting depth: 10 levels.
 
 **Git refs (\`ref:\`):**
-- Allowed only on a flow step (qualifies \`action\`), a \`type: task\` action (qualifies \`task\`), and scheduler / webhook triggers (qualifies \`task\`). Not on any other action type.
-- Value: a branch, a tag, \`refs/heads/<name>\`, \`refs/tags/<name>\`, or a full 40-hex commit SHA. Short SHAs, other \`refs/…\` namespaces and templated values (\`{{\`, \`{%\`) are rejected.
-- Rejected on hooks, event-source triggers, agent \`tools: [{task: …}]\` entries, and on a flow step whose ref'd action is \`type: agent\`.
-- Only git workspaces have refs; a library item (\`lib.item\`) cannot carry \`ref\`.
+- At parse time (\`stroem validate\`): \`ref\` is allowed only on a flow step (qualifies \`action\`), a \`type: task\` action (qualifies \`task\`), and scheduler / webhook triggers (qualifies \`task\`) — not on any other action type, hooks, event-source triggers or agent \`tools: [{task: …}]\` entries. The value must be a branch or tag name, \`refs/heads/<name>\`, \`refs/tags/<name>\`, or a full 40-hex commit SHA; other \`refs/…\` namespaces and templated values (\`{{\`, \`{%\`) are rejected.
+- Not checked at parse time — rejected (400 / trigger MISSED) when the job is created or the trigger fires: a short SHA (it parses as a branch name, then fails as "ref … not found" with a hint to use the full 40-character SHA), a branch / tag / commit that does not exist, a library item (\`lib.item\`) with \`ref\`, a \`ref\` whose owner is a folder (non-git) workspace, an unknown workspace, a name missing at that ref, and a flow step whose ref'd action is \`type: agent\`.
 - The referenced name is looked up at the ref (it need not exist on the default branch); \`stroem validate\` skips that check with a warning.
 
 **Flow steps:**
