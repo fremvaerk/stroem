@@ -86,28 +86,10 @@ fn rr_opts() -> PinnedFixtureOpts {
     }
 }
 
-/// Fire `etl/{trigger}` once and return the job it created.
-async fn rr_fire(fx: &PinnedFixture, trigger: &str) -> Result<Uuid> {
-    let key = format!("etl/{trigger}");
-    tokio::time::timeout(
-        Duration::from_secs(120),
-        stroem_server::scheduler::fire_trigger_once(&fx.state, fx.mgr(), fx.mgr(), &key),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("fire_trigger_once({key}) timed out"))?;
-    let id: Uuid = sqlx::query_scalar(
-        "SELECT job_id FROM job WHERE source_type = 'trigger' AND source_id = $1 \
-         ORDER BY created_at DESC LIMIT 1",
-    )
-    .bind(&key)
-    .fetch_one(&fx.pool)
-    .await?;
-    Ok(id)
-}
-
-/// Source job: pinned to `release/2.3` at its first commit, `a` completed, `b` failed.
-async fn rr_failed_pinned_source(fx: &PinnedFixture) -> Result<Uuid> {
-    let source = rr_fire(fx, "nightly").await?;
+/// Source job: pinned to `release/2.3` at its first commit, `a` completed
+/// with `a_output`, `b` failed.
+async fn rr_failed_pinned_source(fx: &PinnedFixture, a_output: JsonValue) -> Result<Uuid> {
+    let source = fire_etl_trigger(fx, "nightly").await?;
     let row = JobRepo::get(&fx.pool, source).await?.expect("source job");
     assert_eq!(row.git_ref.as_deref(), Some("release/2.3"));
     assert_eq!(
@@ -115,7 +97,7 @@ async fn rr_failed_pinned_source(fx: &PinnedFixture) -> Result<Uuid> {
         Some(fx.commits.etl_release.as_str())
     );
     let w = register_worker(&fx.router, &["script"]).await;
-    claim_and_complete(fx, &w, source, "a", json!({"output": {"ok": true}})).await;
+    claim_and_complete(fx, &w, source, "a", json!({"output": a_output})).await;
     claim_and_complete(
         fx,
         &w,
@@ -146,7 +128,7 @@ fn rr_error(body: &JsonValue) -> &str {
 async fn rerun_of_pinned_source_reresolves_the_ref_for_a_release_only_task() -> Result<()> {
     rr_bounded(async {
         let fx = pinned_workspace_fixture(rr_opts()).await?;
-        let source = rr_failed_pinned_source(&fx).await?;
+        let source = rr_failed_pinned_source(&fx, json!({"ok": true})).await?;
         let c2 = rr_hotfix(&fx);
         assert_ne!(c2, fx.commits.etl_release);
 
@@ -180,7 +162,7 @@ async fn rerun_of_pinned_source_reresolves_the_ref_for_a_release_only_task() -> 
 async fn rerun_of_pinned_source_under_another_task_name_is_400() -> Result<()> {
     rr_bounded(async {
         let fx = pinned_workspace_fixture(rr_opts()).await?;
-        let source = rr_failed_pinned_source(&fx).await?;
+        let source = rr_failed_pinned_source(&fx, json!({"ok": true})).await?;
         let (st, body) = api_req(
             &fx.router,
             "POST",
@@ -215,7 +197,7 @@ async fn rerun_of_pinned_source_under_another_task_name_is_400() -> Result<()> {
 async fn restart_of_pinned_source_plans_against_the_pinned_flow() -> Result<()> {
     rr_bounded(async {
         let fx = pinned_workspace_fixture(rr_opts()).await?;
-        let source = rr_failed_pinned_source(&fx).await?;
+        let source = rr_failed_pinned_source(&fx, json!({"ok": true})).await?;
         let c2 = rr_hotfix(&fx);
 
         let (st, plan) = api_req(
@@ -298,7 +280,7 @@ async fn pinned_rerun_authorises_against_the_source_task_folder() -> Result<()> 
             ..rr_opts()
         })
         .await?;
-        let source = rr_failed_pinned_source(&fx).await?;
+        let source = rr_failed_pinned_source(&fx, json!({"ok": true})).await?;
         let rel = fx.api_key(REL, false).await;
         let live = fx.api_key(LIVE, false).await;
         let uri = "/api/workspaces/etl/tasks/only-on-release/execute";
@@ -335,7 +317,7 @@ async fn pinned_rerun_authorises_against_the_source_task_folder() -> Result<()> 
 async fn rerun_and_restart_of_pinned_source_are_400_when_the_tip_lost_the_task() -> Result<()> {
     rr_bounded(async {
         let fx = pinned_workspace_fixture(rr_opts()).await?;
-        let source = rr_failed_pinned_source(&fx).await?;
+        let source = rr_failed_pinned_source(&fx, json!({"ok": true})).await?;
         let c2 = fx.etl.commit(
             "release/2.3",
             "release/2.3",
@@ -381,7 +363,7 @@ async fn rerun_and_restart_of_pinned_source_are_400_when_the_tip_lost_the_task()
 async fn rerun_and_restart_of_pinned_source_are_400_when_the_branch_was_deleted() -> Result<()> {
     rr_bounded(async {
         let fx = pinned_workspace_fixture(rr_opts()).await?;
-        let source = rr_failed_pinned_source(&fx).await?;
+        let source = rr_failed_pinned_source(&fx, json!({"ok": true})).await?;
         fx.etl.delete_branch("release/2.3");
 
         let (st, body) = api_req(
@@ -426,7 +408,7 @@ async fn rerun_of_tag_pinned_source_keeps_the_tag_commit() -> Result<()> {
     rr_bounded(async {
         let fx = pinned_workspace_fixture(rr_opts()).await?;
         fx.etl.tag("v2.3.0", &fx.commits.etl_release);
-        let source = rr_fire(&fx, "tagged").await?;
+        let source = fire_etl_trigger(&fx, "tagged").await?;
         let row = JobRepo::get(&fx.pool, source).await?.expect("source job");
         assert_eq!(row.git_ref.as_deref(), Some("v2.3.0"));
         assert_eq!(
@@ -456,6 +438,100 @@ async fn rerun_of_tag_pinned_source_keeps_the_tag_commit() -> Result<()> {
             "a tag re-resolves to the commit it names"
         );
         assert_eq!(job.task_folder.as_deref(), Some("rel"));
+        Ok(())
+    })
+    .await
+}
+
+/// Declared ONLY at release/2.3's first commit (the source's); the branch then
+/// moves to a commit without it.
+const RR_SOURCE_ONLY_SECRET: &str = "rr-only-at-the-source-commit";
+
+fn rr_secret_opts() -> PinnedFixtureOpts {
+    PinnedFixtureOpts {
+        etl_main: Some(RR_ETL_MAIN.to_string()),
+        etl_release: Some(format!(
+            "secrets:\n  TOKEN: \"{RR_SOURCE_ONLY_SECRET}\"\n{RR_ETL_RELEASE}"
+        )),
+        ..Default::default()
+    }
+}
+
+/// Restart carried rows (spec § 7.4 redaction closure): the source's `a`
+/// output, holding a secret of the SOURCE commit, is copied into a restart
+/// pinned at the branch's new commit, which no longer declares that secret.
+/// Only the source lineage (restart → source) can mask it.
+#[tokio::test(flavor = "multi_thread")]
+async fn restart_masks_a_carried_secret_of_the_source_commit() -> Result<()> {
+    rr_bounded(async {
+        let fx = pinned_workspace_fixture(rr_secret_opts()).await?;
+        let carried = json!({"token": RR_SOURCE_ONLY_SECRET});
+        let source = rr_failed_pinned_source(&fx, carried.clone()).await?;
+
+        let c2 = fx.etl.commit(
+            "release/2.3",
+            "release/2.3",
+            &[(RR_YAML_PATH, RR_ETL_RELEASE)],
+        );
+        let pinned = fx.mgr().pins().ensure("etl", &c2).await?;
+        assert!(
+            !fx.mgr()
+                .pin_redaction_values("etl", &pinned)
+                .await
+                .iter()
+                .any(|v| v == RR_SOURCE_ONLY_SECRET),
+            "precondition: the new commit does not declare the secret"
+        );
+
+        let (st, body) = api_req(
+            &fx.router,
+            "POST",
+            &format!("/api/jobs/{source}/restart"),
+            None,
+            Some(json!({"from_step": "b"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "restart: {body}");
+        let restart: Uuid = body["job_id"].as_str().unwrap().parse()?;
+        let job = JobRepo::get(&fx.pool, restart).await?.unwrap();
+        assert_eq!(job.revision.as_deref(), Some(c2.as_str()));
+        let a = JobStepRepo::get_steps_for_job(&fx.pool, restart)
+            .await?
+            .into_iter()
+            .find(|s| s.step_name == "a")
+            .expect("row a");
+        assert!(a.carried_over);
+        assert_eq!(
+            a.output,
+            Some(carried),
+            "precondition: the source's output is carried raw"
+        );
+
+        let (st, detail) = api_req(
+            &fx.router,
+            "GET",
+            &format!("/api/jobs/{restart}"),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{detail}");
+        assert!(
+            !detail.to_string().contains(RR_SOURCE_ONLY_SECRET),
+            "carried secret leaked: {detail}"
+        );
+        let a = detail["steps"]
+            .as_array()
+            .expect("steps")
+            .iter()
+            .find(|s| s["step_name"] == "a")
+            .expect("step a")
+            .clone();
+        assert_eq!(
+            a["output"],
+            json!({"token": "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}"}),
+            "{a}"
+        );
         Ok(())
     })
     .await

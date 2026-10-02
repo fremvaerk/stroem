@@ -2,11 +2,13 @@
 //!
 //! Every API outlet that returns a job's input/output, step output or
 //! `error_message` masks with the live workspaces' values PLUS the secret
-//! values of every pin referenced by the job's **redaction closure**: the job,
-//! its descendants, and its hook-source chain with each source's descendants
-//! ([`closure_pins`]). Content is copied between those jobs (a child's output
-//! settles into its parent step, a hook payload quotes its source's step
-//! errors), so a job's own pins alone would let a copied value through. A
+//! values of every pin referenced by the job's **redaction closure**: the
+//! whole job tree of every job in its source lineage (the job, the hook and
+//! restart sources it was made from), see [`closure_pins`]. Content is copied
+//! between those jobs: a child's output settles into its parent step, a
+//! parent's or sibling's values render into a child's input, a hook payload
+//! quotes its source's step errors, and a restart carries its source's step
+//! output. So a job's own pins alone would let a copied value through. A
 //! pinned commit's sops values (or how its vals references render) can differ
 //! from the live config, so the live set alone would let an older or
 //! ref-only secret through. A pin that cannot be loaded, or a closure that
@@ -19,7 +21,7 @@
 use std::collections::BTreeSet;
 
 use serde_json::Value;
-use stroem_db::{ClosurePinRow, JobRepo, JobRow, JobStepRow};
+use stroem_db::{ClosureBounds, ClosurePinRow, JobRepo, JobRow, JobStepRow};
 
 use crate::state::AppState;
 use crate::workspace::pins::{PinError, PinLoadWithheld, PinRef};
@@ -200,26 +202,35 @@ pub fn merge_pins(
     out
 }
 
+/// Restart links the redaction closure follows. Nothing else caps a chain of
+/// restarts (each one is a user action on a top-level job), so the walk
+/// needs its own bound. A restart carries rows from its immediate source,
+/// which may carry from its own, so a cap as low as the hook cap would drop
+/// values carried through a short chain.
+pub const MAX_RESTART_LINEAGE_HOPS: i32 = 32;
+
+/// How far [`closure_pins`] walks: the server's task-nesting and hook-chain
+/// caps, and [`MAX_RESTART_LINEAGE_HOPS`].
+pub const CLOSURE_BOUNDS: ClosureBounds = ClosureBounds {
+    task_depth: crate::job_creator::MAX_TASK_DEPTH as i32,
+    hook_hops: crate::settlement::hooks::MAX_HOOK_CHAIN_DEPTH as i32,
+    restart_hops: MAX_RESTART_LINEAGE_HOPS,
+};
+
 /// Every distinct pin of the job's **redaction closure** (spec § 7.4): the
 /// job's own [`referenced_pins`] (from the rows the outlet is about to show),
-/// plus the pins of every job whose content can be copied into it — its
-/// descendants (a child's output settles into its parent step), its
-/// hook-source chain (a hook payload quotes its source's step errors and
-/// output) and each source's descendants. Bounded by
-/// `job_creator::MAX_TASK_DEPTH` and `settlement::hooks::MAX_HOOK_CHAIN_DEPTH`.
+/// plus the pins of every job whose content can be copied into it. That is
+/// the whole job tree (root and all descendants) of every job in the job's
+/// source lineage: the job itself and, following parents up and hook and
+/// restart sources back, every job it was made from. Bounded by
+/// [`CLOSURE_BOUNDS`].
 #[tracing::instrument(skip_all, fields(job_id = %job.job_id))]
 pub async fn closure_pins(
     state: &AppState,
     job: &JobRow,
     steps: &[JobStepRow],
 ) -> anyhow::Result<Vec<(String, PinRef)>> {
-    let rows = JobRepo::redaction_closure_pins(
-        &state.pool,
-        job.job_id,
-        crate::job_creator::MAX_TASK_DEPTH as i32,
-        crate::settlement::hooks::MAX_HOOK_CHAIN_DEPTH as i32,
-    )
-    .await?;
+    let rows = JobRepo::redaction_closure_pins(&state.pool, job.job_id, CLOSURE_BOUNDS).await?;
     Ok(merge_pins(referenced_pins(job, steps), rows))
 }
 

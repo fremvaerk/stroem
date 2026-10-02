@@ -825,34 +825,56 @@ secret value cannot mangle a link. It skips the `child_jobs[]` summaries
 whole, which is safe only while they hold identifiers (§ 7.8).
 
 **Redaction closure** (Task 22 review). Content is copied between jobs:
-- a hook payload quotes its source's step errors (`hook.error_message`,
-  `hook.failed_steps[]`, `settlement/hooks.rs::build_hook_context`), and the
-  rendered hook input becomes the hook job's input. The hook job's only pin
-  is its source's `job.ref`; its own step has none;
-- a child's output settles into its parent's `type: task` step
+- **up:** a child's output settles into its parent's `type: task` step
   (`Settlement::propagate`). The parent references the child's own pin
-  (`task_ref`), but not the pins of the child's steps.
+  (`task_ref`), but not the pins of the child's steps;
+- **down:** a parent renders its own values into a child's input. A pinned
+  parent can do this for a live cross-workspace child (bucket `C` is
+  rendered in the caller's context);
+- **across:** a parent step renders a sibling child's output into another
+  child's input;
+- **into a hook:** a hook payload quotes its source's step errors
+  (`hook.error_message`, `hook.failed_steps[]`,
+  `settlement/hooks.rs::build_hook_context`), and the rendered hook input
+  becomes the hook job's input. The hook job's only pin is its source's
+  `job.ref`; its own step has none;
+- **into a restart:** a restart's carried rows copy the source's step
+  `output` / `error_message` (`JobStepRepo::seed_steps_tx`) into rows
+  stamped with the pins of the commit the restart runs at.
 
 So the set of the job's own pins alone misses a value copied in from
 another job. Rule: a job's redaction set is the live values plus
-`pin_redaction_values` of every pin referenced by:
-- the job itself;
-- every **descendant** (`parent_job_id`, at most `MAX_TASK_DEPTH` levels);
-- its **hook-source chain**: while a job is `source_type = 'hook'`, the job
-  that fired it (`source_job_id`, or the UUID prefix of `source_id` on a
-  pre-048 hook row), at most `MAX_HOOK_CHAIN_DEPTH` links;
-- each source's descendants.
+`pin_redaction_values` of every distinct `(workspace, commit)` pin
+referenced (`job.ref`, and each step's `action_ref` and `task_ref`) by any
+job in the **whole tree of every job in its source lineage**:
+- **Source lineage:** the job, plus the jobs it was made from. From a
+  `source_type = 'hook'` job, that is the job that fired it
+  (`source_job_id`, or the UUID prefix of `source_id` on a pre-048 hook
+  row). From a `source_type = 'restart'` job, it is the restarted job
+  (`source_job_id`). The walk goes up `parent_job_id` too, so a child of a
+  hook or restart job reaches that job's source. A re-run is not a copy (it
+  replays the user's raw input) and is not followed.
+- **Whole tree:** for each lineage job, its root (walking `parent_job_id`
+  up) and every descendant of that root.
+- **Bounds:** `MAX_TASK_DEPTH` levels up and down, `MAX_HOOK_CHAIN_DEPTH`
+  hook links, and `redaction::MAX_RESTART_LINEAGE_HOPS` (32) restart links.
+  Restart chains have no cap of their own, and the hook cap would drop
+  values carried through a short chain.
 
 One recursive query reads the distinct pins
-(`JobRepo::redaction_closure_pins`), merged with the job's own pins from the
-rows the outlet shows (`redaction::closure_pins`). Neither copy path is
-special-cased. Fail-closed is unchanged, over the whole closure: a transient
-pin failure anywhere in it answers 503, and a permanent one masks
-everything. A closure that cannot be read (a DB error) answers 503.
+(`JobRepo::redaction_closure_pins`, bounds `redaction::CLOSURE_BOUNDS`). It
+is merged with the job's own pins from the rows the outlet shows
+(`redaction::closure_pins`). No copy path is special-cased.
+
+Fail-closed is unchanged, over the whole closure: a transient pin failure
+anywhere in it answers 503, and a permanent one masks everything. A
+closure that cannot be read (a DB error) answers 503. The price: an
+outlet loads every pin of the tree, so a cold pin anywhere in it can 503
+an otherwise unrelated job's detail.
 
 These outlets were found by grep and are checked again by the audit task in
 § 7.9. The audit at `324f0b1` found no outlet route missing from this list.
-Its review then found the two copy paths above, which the job's own pins
+Its review then found the copy paths above, which the job's own pins
 missed. The redaction closure covers them.
 
 Step `error_message` can carry a failing script's stderr
@@ -1058,10 +1080,12 @@ missing § 7.4 outlet route. Every job-scoped path already had its test from
 the task that changed it.
 
 The audit's review found one hole. A value can be copied INTO a job from
-another job, and the job's own pins did not cover it. A hook payload quotes
-its source's step errors, and a child's output settles into its parent
-step. The § 7.4 redaction closure fixes it. New tests cover `child_jobs[]`
-and both copy paths.
+another job, and the job's own pins did not cover it. The copies run up
+(a child's output), down and across (a parent's or sibling's values
+rendered into a child's input), into a hook payload, and into a restart's
+carried rows. The § 7.4 redaction closure, the whole tree of every job in
+the source lineage, fixes it. New tests cover `child_jobs[]` and every copy
+direction.
 
 Hook jobs: a single-step hook job is named `_hook:{action}`. That name
 matches no task, and a pinned hook job stamps no `task_folder`, so it is
@@ -1077,7 +1101,7 @@ ordinary job of its task and is authorised by that task's folder.
 | Job-scoped per row | `GET /api/workers/{id}` (recent steps) | yes, per row | `pinned_job_in_denied_folder_is_denied_on_every_rest_path`, `worker_detail_masks_error_and_fails_closed_per_row` |
 | List / count predicate | `GET /api/jobs`, `GET /api/stats`, MCP `list_jobs` | no (metadata only) | the same deny tests |
 | The parent's ACL | `child_jobs[]` and the lineage ids in job detail | identifiers, skipped | `read_path_audit_test.rs::child_job_summary_in_job_detail_is_identifiers_only_and_the_child_stays_job_scoped` |
-| Content copied between jobs (redaction closure, § 7.4) | a hook payload in the hook job's input (`hook.error_message`, `hook.failed_steps[]`); a child's output settled into its parent's `type: task` step | yes: the receiving job's set covers the pins of its hook sources and descendants | `read_path_audit_test.rs`: `hook_job_detail_masks_a_secret_of_its_sources_step_pin`, `parent_job_detail_masks_a_secret_of_its_childs_step_pin`; stroem-db `git_refs_test.rs::redaction_closure_pins_follow_descendants_and_the_hook_source_chain` |
+| Content copied between jobs (redaction closure, § 7.4) | a child's output in its parent's step (up); a pinned parent's values in a live child's input (down); a hook payload in the hook job's input; a restart's carried rows | yes: the receiving job's set covers the whole tree of every job in its source lineage | `read_path_audit_test.rs`: `parent_job_detail_masks_a_secret_of_its_childs_step_pin`, `child_job_detail_masks_a_secret_its_pinned_parent_rendered_into_its_input`, `hook_job_detail_masks_a_secret_of_its_sources_step_pin`; `pinned_rerun_restart_test.rs::restart_masks_a_carried_secret_of_the_source_commit`; stroem-db `git_refs_test.rs::redaction_closure_pins_cover_the_whole_tree_of_the_source_lineage` |
 | Job-scoped, hook job (pre-existing) | single-step hook jobs on every job-scoped path: task path `_hook:{action}`, root folder | as any job | the job-scoped deny tests (the rule is the same `check_job_acl`) |
 | Task-scoped (live), pinned jobs excluded | `GET /api/workspaces/{ws}/tasks/{name}/stats` | no | stroem-db `git_refs_test.rs::duration_stats_exclude_pinned_jobs` |
 | Task-scoped (live) | workspaces and refresh, task list and detail, triggers, execute (not a re-run), manual state upload; MCP `list_workspaces`, `list_tasks`, `get_task`, `execute_task` | no | unchanged |

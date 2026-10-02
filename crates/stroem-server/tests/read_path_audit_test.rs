@@ -173,9 +173,16 @@ async fn child_job_summary_in_job_detail_is_identifiers_only_and_the_child_stays
 const REF_ONLY_SECRET: &str = "ref-only-audit-s3cret-23";
 const MASK: &str = "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}";
 
-/// `etl` main: every job below is UNPINNED. Only the `boom` / `emit` steps
-/// run an action at release/2.3.
+/// `etl` main: every job of these tasks is UNPINNED. Only the `boom` / `emit`
+/// steps run an action at release/2.3. `down-at-ref` starts `down-parent`
+/// pinned at release/2.3.
 const CLOSURE_MAIN: &str = r#"
+triggers:
+  down-at-ref:
+    type: scheduler
+    cron: "0 0 1 1 *"
+    task: down-parent
+    ref: release/2.3
 actions:
   notify:
     type: script
@@ -217,13 +224,44 @@ actions:
     type: script
     runner: local
     script: echo emit
-tasks: {}
+tasks:
+  down-parent:
+    flow:
+      produce:
+        action: emit
+      call:
+        action: billing.run-sink
+        depends_on: [produce]
+        input:
+          token: "{{ produce.output.token }}"
+"#;
+
+/// `billing` main (live): `run-sink` starts `sink-task`, which declares the
+/// input the pinned caller renders.
+const CLOSURE_BILLING_MAIN: &str = r#"
+actions:
+  sink:
+    type: script
+    runner: local
+    script: echo sink
+  run-sink:
+    type: task
+    task: sink-task
+tasks:
+  sink-task:
+    input:
+      token:
+        type: string
+    flow:
+      s:
+        action: sink
 "#;
 
 fn closure_opts() -> PinnedFixtureOpts {
     PinnedFixtureOpts {
         etl_main: Some(CLOSURE_MAIN.to_string()),
         etl_release: Some(CLOSURE_RELEASE.to_string()),
+        billing_main: Some(CLOSURE_BILLING_MAIN.to_string()),
         ..Default::default()
     }
 }
@@ -353,6 +391,62 @@ async fn parent_job_detail_masks_a_secret_of_its_childs_step_pin() -> Result<()>
             .expect("call step")
             .clone();
         assert_eq!(step["output"], json!({"leak": {"token": MASK}}), "{step}");
+        Ok(())
+    })
+    .await
+}
+
+/// Downward copy: a job PINNED at release/2.3 renders its own step's output,
+/// a release-only secret, into the input of a LIVE cross-workspace child
+/// (`billing`). The child references no pin and has no descendant; only its
+/// ancestor does.
+#[tokio::test(flavor = "multi_thread")]
+async fn child_job_detail_masks_a_secret_its_pinned_parent_rendered_into_its_input() -> Result<()> {
+    bounded(async {
+        let fx = pinned_workspace_fixture(closure_opts()).await?;
+        let worker = register_worker(&fx.router, &["script"]).await;
+        let parent = fire_etl_trigger(&fx, "down-at-ref").await?;
+        let row = stroem_db::JobRepo::get(&fx.pool, parent)
+            .await?
+            .expect("parent row");
+        assert_eq!(
+            row.git_ref.as_deref(),
+            Some("release/2.3"),
+            "the parent is pinned"
+        );
+
+        claim_and_complete(
+            &fx,
+            &worker,
+            parent,
+            "produce",
+            json!({"exit_code": 0, "output": {"token": REF_ONLY_SECRET}}),
+        )
+        .await;
+
+        let child: Uuid = sqlx::query_scalar("SELECT job_id FROM job WHERE parent_job_id = $1")
+            .bind(parent)
+            .fetch_one(&fx.pool)
+            .await?;
+        let child_row = stroem_db::JobRepo::get(&fx.pool, child)
+            .await?
+            .expect("child row");
+        assert_eq!(child_row.workspace, "billing");
+        assert_eq!(child_row.git_ref, None, "the child is live");
+        assert!(
+            child_row
+                .input
+                .as_ref()
+                .map(|v| v.to_string())
+                .unwrap_or_default()
+                .contains(REF_ONLY_SECRET),
+            "precondition: the rendered input carries the secret: {:?}",
+            child_row.input
+        );
+
+        assert_detail_masks_ref_only_secret(&fx, parent).await;
+        let detail = assert_detail_masks_ref_only_secret(&fx, child).await;
+        assert_eq!(detail["input"]["token"], json!(MASK), "{detail}");
         Ok(())
     })
     .await

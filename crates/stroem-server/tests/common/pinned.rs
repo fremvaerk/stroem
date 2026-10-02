@@ -990,6 +990,26 @@ pub fn mcp_is_error(resp: &Value) -> bool {
     resp.get("error").is_some() || resp["result"]["isError"].as_bool().unwrap_or(false)
 }
 
+/// Fire the scheduler trigger `etl/{trigger}` once (bounded) and return the
+/// newest job it created.
+pub async fn fire_etl_trigger(fx: &PinnedFixture, trigger: &str) -> Result<Uuid> {
+    let key = format!("etl/{trigger}");
+    tokio::time::timeout(
+        Duration::from_secs(120),
+        stroem_server::scheduler::fire_trigger_once(&fx.state, fx.mgr(), fx.mgr(), &key),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("fire_trigger_once({key}) timed out"))?;
+    let id: Uuid = sqlx::query_scalar(
+        "SELECT job_id FROM job WHERE source_type = 'trigger' AND source_id = $1 \
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(&key)
+    .fetch_one(&fx.pool)
+    .await?;
+    Ok(id)
+}
+
 /// Claim the next ready step with `worker` (it must be `job`'s `step`) and
 /// complete it with `result` (a worker `complete` body: `output`,
 /// `exit_code`, `error`).

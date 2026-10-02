@@ -136,6 +136,18 @@ pub struct RecentDurationRow {
     pub completed_at: DateTime<Utc>,
 }
 
+/// How far [`JobRepo::redaction_closure_pins`] walks. Every walk is bounded:
+/// a longer chain is cut, never followed forever.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClosureBounds {
+    /// `type: task` nesting: the levels walked up to a root, and down from it.
+    pub task_depth: i32,
+    /// `source_type = 'hook'` links followed to the job that fired the hook.
+    pub hook_hops: i32,
+    /// `source_type = 'restart'` links followed to the restarted job.
+    pub restart_hops: i32,
+}
+
 /// One pin referenced inside a job's redaction closure
 /// ([`JobRepo::redaction_closure_pins`]): the owner workspace, the ref as
 /// written and the commit it resolved to.
@@ -1049,16 +1061,21 @@ impl JobRepo {
     /// Every distinct pin referenced by `job_id`'s **redaction closure**
     /// (spec 2026-10-02 git refs § 7.4): the jobs whose content can be copied
     /// into this job's rows.
-    /// - The job itself.
-    /// - Its hook-source chain: while a job is `source_type = 'hook'`, the job
-    ///   that fired it. That is `source_job_id`, or the UUID prefix of
-    ///   `source_id` on a hook row written before migration 048 (the same
-    ///   fallback as the server's hook-chain walk). At most `max_hook_hops`
-    ///   links.
-    /// - Every descendant (`parent_job_id`) of each of those, at most
-    ///   `max_task_depth` levels below it.
     ///
-    /// Over that job set, a pin is a job's own (`workspace`, `git_ref`,
+    /// The **lineage** is the job plus the jobs it was made from. From any job
+    /// in it, the walk goes up to its parent (`parent_job_id`). From a
+    /// `source_type = 'hook'` job it goes to the job that fired it:
+    /// `source_job_id`, or the UUID prefix of `source_id` on a hook row written
+    /// before migration 048 (the same fallback as the server's hook-chain
+    /// walk). From a `source_type = 'restart'` job it goes to its source
+    /// (`source_job_id`). The closure is the **whole tree** of every lineage
+    /// job: its root and all the root's descendants. That covers values
+    /// copied up (a child's output into its parent step), down (a parent's
+    /// values into a child's input), across (a sibling's output into
+    /// another child's input), into a hook payload, and into a restart's
+    /// carried rows.
+    ///
+    /// Over the closure, a pin is a job's own (`workspace`, `git_ref`,
     /// `revision`), a step's action pin (`action_workspace`, defaulting to
     /// the job's workspace, `action_ref`, `action_revision`) or a step's task
     /// pin (`task_workspace`, `task_ref`, `task_revision`). Rows are distinct
@@ -1066,39 +1083,53 @@ impl JobRepo {
     pub async fn redaction_closure_pins(
         pool: &PgPool,
         job_id: Uuid,
-        max_task_depth: i32,
-        max_hook_hops: i32,
+        bounds: ClosureBounds,
     ) -> Result<Vec<ClosurePinRow>> {
         sqlx::query_as::<_, ClosurePinRow>(
             r#"
-            WITH RECURSIVE chain(job_id, hops) AS (
-                SELECT $1::uuid, 0
+            WITH RECURSIVE up(job_id, depth, hook_hops, restart_hops) AS (
+                SELECT $1::uuid, 0, 0, 0
                 UNION ALL
-                SELECT nxt.job_id, c.hops + 1
-                  FROM chain c
-                  JOIN job j ON j.job_id = c.job_id
+                SELECT e.job_id, e.depth, e.hook_hops, e.restart_hops
+                  FROM up u
+                  JOIN job j ON j.job_id = u.job_id
                  CROSS JOIN LATERAL (
-                     SELECT COALESCE(
-                         j.source_job_id,
-                         CASE WHEN split_part(j.source_id, '/', 1)
-                                   ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-                              THEN split_part(j.source_id, '/', 1)::uuid
-                         END
-                     ) AS job_id
-                 ) nxt
-                 WHERE j.source_type = 'hook'
-                   AND nxt.job_id IS NOT NULL
-                   AND c.hops < $3
+                     VALUES
+                         (j.parent_job_id, u.depth + 1, u.hook_hops, u.restart_hops,
+                          u.depth < $2),
+                         (CASE j.source_type
+                              WHEN 'hook' THEN COALESCE(
+                                  j.source_job_id,
+                                  CASE WHEN split_part(j.source_id, '/', 1)
+                                            ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                                       THEN split_part(j.source_id, '/', 1)::uuid
+                                  END)
+                              WHEN 'restart' THEN j.source_job_id
+                          END,
+                          0,
+                          u.hook_hops + (j.source_type = 'hook')::int,
+                          u.restart_hops + (j.source_type = 'restart')::int,
+                          (j.source_type = 'hook' AND u.hook_hops < $3)
+                              OR (j.source_type = 'restart' AND u.restart_hops < $4))
+                 ) AS e(job_id, depth, hook_hops, restart_hops, ok)
+                 WHERE e.ok AND e.job_id IS NOT NULL
             ),
             tree(job_id, depth) AS (
-                SELECT job_id, 0 FROM chain
+                SELECT DISTINCT u.job_id, 0
+                  FROM up u
+                  JOIN job j ON j.job_id = u.job_id
+                 WHERE j.parent_job_id IS NULL OR u.depth >= $2
                 UNION ALL
                 SELECT child.job_id, t.depth + 1
                   FROM tree t
                   JOIN job child ON child.parent_job_id = t.job_id
                  WHERE t.depth < $2
             ),
-            closure AS (SELECT DISTINCT job_id FROM tree)
+            closure AS (
+                SELECT job_id FROM up
+                UNION
+                SELECT job_id FROM tree
+            )
             SELECT DISTINCT workspace, git_ref, revision FROM (
                 SELECT j.workspace, j.git_ref, j.revision
                   FROM job j
@@ -1122,8 +1153,9 @@ impl JobRepo {
             "#,
         )
         .bind(job_id)
-        .bind(max_task_depth)
-        .bind(max_hook_hops)
+        .bind(bounds.task_depth)
+        .bind(bounds.hook_hops)
+        .bind(bounds.restart_hops)
         .fetch_all(pool)
         .await
         .context("Failed to read the job's redaction closure pins")
