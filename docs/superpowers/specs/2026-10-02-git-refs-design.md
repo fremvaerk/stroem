@@ -737,8 +737,11 @@ download is exhausted leaves it `pending`; the `advance` after that failure
 may run on the very replica that cannot load the pin. A `pending` job is
 listed only once it has a terminal step that is not carried over: one with
 none is a job whose creation-time init has not promoted its first steps yet,
-and is never advanced concurrently with that init (a restart's carried rows
-are terminal from creation on, so they do not count).
+and is left to that init (a restart's carried rows are terminal from creation
+on, so they do not count). The guard narrows, but does not exclude, an
+overlap with init: a ready-at-creation root step that fails at claim, or an
+init dispatch failure, can make a job listable while its init still runs —
+the same race class as that failure's own `advance`.
 
 It calls `Settlement::advance` for each job, with one heartbeat per job
 (CLAUDE.md § Health Check). `advance` is idempotent, so a job that is

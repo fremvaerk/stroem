@@ -1308,9 +1308,12 @@ impl JobRepo {
     /// whose tarball download was exhausted leaves it `pending`. Such a job
     /// is listed only once it has a TERMINAL step that is not carried over:
     /// a `pending` job with none is one whose creation-time init has not
-    /// promoted its first steps yet, and must never be advanced concurrently
-    /// with that init. A restart's carried-over rows are terminal from
-    /// creation on, so they do not count.
+    /// promoted its first steps yet, and is left to that init. This narrows
+    /// the overlap with init but does not exclude it: a ready-at-creation root
+    /// step that fails at claim, or an init dispatch failure, can make a job
+    /// listable while its init still runs — the same race class as the
+    /// failure's own `advance`. A restart's carried-over rows are terminal
+    /// from creation on, so they do not count.
     pub async fn get_stalled_pinned_jobs(pool: &PgPool) -> Result<Vec<Uuid>> {
         let ids = sqlx::query_scalar::<_, Uuid>(
             r#"
