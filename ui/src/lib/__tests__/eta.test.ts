@@ -38,6 +38,12 @@ function mkStep(partial: Partial<JobStep> & { step_name: string }): JobStep {
     approval_fields: null,
     carried_over: false,
     skip_reason: null,
+    action_workspace: null,
+    action_revision: null,
+    action_ref: null,
+    task_workspace: null,
+    task_ref: null,
+    task_revision: null,
   };
 }
 
@@ -58,6 +64,7 @@ function mkJob(partial: Partial<JobDetail> & { steps: JobStep[] }): JobDetail {
     parent_job_id: null,
     parent_step_name: null,
     revision: null,
+    ref: null,
     worker_id: null,
     created_at: new Date(NOW - 60_000).toISOString(),
     started_at: partial.started_at ?? new Date(NOW - 30_000).toISOString(),

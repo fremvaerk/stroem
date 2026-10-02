@@ -37,6 +37,12 @@ function makeStep(approvalFields: Record<string, unknown>): JobStep {
     approval_fields: approvalFields,
     carried_over: false,
     skip_reason: null,
+    action_workspace: null,
+    action_revision: null,
+    action_ref: null,
+    task_workspace: null,
+    task_ref: null,
+    task_revision: null,
   };
 }
 

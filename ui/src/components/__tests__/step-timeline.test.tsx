@@ -37,6 +37,12 @@ function makeStep(overrides: Partial<JobStep> = {}): JobStep {
     approval_fields: null,
     carried_over: false,
     skip_reason: null,
+    action_workspace: null,
+    action_revision: null,
+    action_ref: null,
+    task_workspace: null,
+    task_ref: null,
+    task_revision: null,
     ...overrides,
   };
 }
@@ -374,5 +380,27 @@ describe("StepTimeline", () => {
       expect(screen.getByText("when")).toBeInTheDocument();
       expect(screen.queryByTestId("step-skip-build")).not.toBeInTheDocument();
     });
+  });
+
+  it("shows a pin badge on a step that runs an action at a ref", () => {
+    renderTimeline([
+      makeStep({
+        step_name: "pinned",
+        action_ref: "release/2.3",
+        action_revision: "3f2a9c0e1b2c3d4e5f60718293a4b5c6d7e8f901",
+      }),
+      makeStep({ step_name: "plain" }),
+    ]);
+    expect(screen.getByTestId("step-pin-pinned").textContent).toBe(
+      "@ release/2.3 · 3f2a9c0",
+    );
+    expect(screen.queryByTestId("step-pin-plain")).toBeNull();
+  });
+
+  it("shows the task pin of a type: task step", () => {
+    renderTimeline([
+      makeStep({ step_name: "call", task_ref: "v4.1.0", task_revision: "abcdef1234" }),
+    ]);
+    expect(screen.getByTestId("step-pin-call").textContent).toBe("@ v4.1.0 · abcdef1");
   });
 });

@@ -83,6 +83,7 @@ export interface JobListItem {
   source_type: string;
   source_id: string | null;
   revision: string | null;
+  ref: string | null;
   created_at: string;
   started_at: string | null;
   completed_at: string | null;
@@ -96,6 +97,8 @@ export interface ChildJobRef {
   task_name: string;
   status: string;
   created_at: string;
+  ref?: string | null;
+  revision?: string | null;
 }
 
 export interface JobStep {
@@ -131,6 +134,12 @@ export interface JobStep {
   approval_fields: Record<string, unknown> | null;
   carried_over: boolean;
   skip_reason: SkipReason | null;
+  action_workspace: string | null;
+  action_revision: string | null;
+  action_ref: string | null;
+  task_workspace: string | null;
+  task_ref: string | null;
+  task_revision: string | null;
   child_jobs?: ChildJobRef[];
 }
 
@@ -150,6 +159,7 @@ export interface JobDetail {
   parent_job_id: string | null;
   parent_step_name: string | null;
   revision: string | null;
+  ref: string | null;
   worker_id: string | null;
   created_at: string;
   started_at: string | null;
