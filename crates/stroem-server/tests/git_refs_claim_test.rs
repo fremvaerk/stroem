@@ -1329,3 +1329,84 @@ async fn healthy_current_revision_keeps_the_live_tarball() -> anyhow::Result<()>
     })
     .await?
 }
+
+/// The cache write after a live build is detached; give it time to land.
+async fn claim_wait_for_detached_cache_put() {
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+}
+
+/// A revision first served live (cached WITH `.git`), then superseded, then
+/// requested again: the pinned branch must not reuse the live bytes.
+#[tokio::test]
+async fn live_cached_revision_once_superseded_is_served_without_git() -> anyhow::Result<()> {
+    tokio::time::timeout(CLAIM_TARBALL_TIMEOUT, async {
+        let fx = pinned_workspace_fixture(PinnedFixtureOpts::default()).await?;
+        let first = fx.etl.commit("main", "main", &[("data.txt", "v1")]);
+        fx.mgr().reload("etl").await?;
+        let (status, _, bytes) = claim_tarball_get(&fx.router, "etl", Some(&first)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(claim_tar_has_git_dir(&bytes), "live build carries .git");
+        claim_wait_for_detached_cache_put().await;
+
+        fx.etl.commit("main", "main", &[("data.txt", "v2")]);
+        fx.mgr().reload("etl").await?;
+        let (status, headers, bytes) = claim_tarball_get(&fx.router, "etl", Some(&first)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers["X-Revision"], first.as_str());
+        assert_eq!(headers["ETag"], format!("\"{first}\"").as_str());
+        assert_eq!(claim_tar_file(&bytes, "data.txt").as_deref(), Some("v1"));
+        assert!(!claim_tar_has_git_dir(&bytes), "pinned bytes carry no .git");
+        Ok(())
+    })
+    .await?
+}
+
+/// The reverse: a pinned build first, then that SHA becomes current and
+/// healthy again — the live path must serve its own `.git` bytes.
+#[tokio::test]
+async fn pinned_cached_revision_made_current_again_is_served_with_git() -> anyhow::Result<()> {
+    tokio::time::timeout(CLAIM_TARBALL_TIMEOUT, async {
+        let fx = pinned_workspace_fixture(PinnedFixtureOpts::default()).await?;
+        let (first, _second) = claim_two_main_commits(&fx).await?;
+        let (status, _, bytes) = claim_tarball_get(&fx.router, "etl", Some(&first)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!claim_tar_has_git_dir(&bytes));
+        claim_wait_for_detached_cache_put().await;
+
+        fx.etl.force_branch("main", &first);
+        fx.mgr().reload("etl").await?;
+        assert_eq!(
+            fx.mgr().get_revision("etl").as_deref(),
+            Some(first.as_str())
+        );
+        let (status, headers, bytes) = claim_tarball_get(&fx.router, "etl", Some(&first)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers["ETag"], format!("\"{first}\"").as_str());
+        assert!(
+            claim_tar_has_git_dir(&bytes),
+            "live path serves its .git bytes"
+        );
+        Ok(())
+    })
+    .await?
+}
+
+/// If-None-Match short-circuits on the plain SHA for the pinned path too.
+#[tokio::test]
+async fn pinned_revision_if_none_match_is_304() -> anyhow::Result<()> {
+    tokio::time::timeout(CLAIM_TARBALL_TIMEOUT, async {
+        use tower::ServiceExt;
+        let fx = pinned_workspace_fixture(PinnedFixtureOpts::default()).await?;
+        let (first, _second) = claim_two_main_commits(&fx).await?;
+        let req = axum::http::Request::builder()
+            .uri(format!("/worker/workspace/etl.tar.gz?revision={first}"))
+            .header("Authorization", format!("Bearer {FIXTURE_WORKER_TOKEN}"))
+            .header("If-None-Match", format!("\"{first}\""))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = fx.router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_MODIFIED);
+        Ok(())
+    })
+    .await?
+}

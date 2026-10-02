@@ -1,4 +1,5 @@
 use crate::state::AppState;
+use crate::tarball_cache::pinned_cache_key;
 use crate::web::error::AppError;
 use crate::workspace::pins::PinError;
 use anyhow::Context;
@@ -240,9 +241,11 @@ async fn serve_pinned_revision(
     ws_name: &str,
     revision: &str,
 ) -> Result<axum::response::Response, AppError> {
+    // Own cache key: live tarballs for the same SHA carry `.git`, pinned ones
+    // must not (see `pinned_cache_key`).
     let cache = Arc::clone(&state.tarball_cache);
-    let (ws_owned, rev_owned) = (ws_name.to_owned(), revision.to_owned());
-    let cached = tokio::task::spawn_blocking(move || cache.get(&ws_owned, &rev_owned))
+    let (ws_owned, key) = (ws_name.to_owned(), pinned_cache_key(revision));
+    let cached = tokio::task::spawn_blocking(move || cache.get(&ws_owned, &key))
         .await
         .map_err(|e| {
             AppError::Internal(anyhow::anyhow!(e).context("tarball cache get panicked"))
@@ -296,7 +299,7 @@ async fn serve_pinned_revision(
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e).context("tarball task panicked")))?
     .context("build pinned workspace tarball")?;
 
-    cache_put_detached(state, ws_name, revision, &tarball);
+    cache_put_detached(state, ws_name, &pinned_cache_key(revision), &tarball);
     Ok(build_tarball_response(tarball, revision).into_response())
 }
 

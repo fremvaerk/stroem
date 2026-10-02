@@ -513,6 +513,16 @@ async fn tarball_cache_cleanup(state: &AppState) {
         }
     }
 
+    // A pinned tarball lives under its own key (`pinned_cache_key`); keep it
+    // for exactly the revisions whose live entry is kept.
+    for revs in keep_map.values_mut() {
+        let pinned: Vec<String> = revs
+            .iter()
+            .map(|r| crate::tarball_cache::pinned_cache_key(r))
+            .collect();
+        revs.extend(pinned);
+    }
+
     // Clean up each workspace in the cache (removes stale workspaces entirely,
     // prunes stale revisions within known workspaces)
     let tarball_cache = state.tarball_cache.clone();

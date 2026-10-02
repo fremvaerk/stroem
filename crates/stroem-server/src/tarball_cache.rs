@@ -321,6 +321,16 @@ impl TarballCache {
     }
 }
 
+/// Cache key for a tarball built from the PinStore's immutable checkout.
+///
+/// Live tarballs (built from the live clone) carry `.git`; pinned ones do not,
+/// so the two must never share a `(workspace, revision)` entry. The `pin-`
+/// prefix is filename-safe and cannot collide with a hex commit SHA. Only this
+/// server-side key differs: the worker-facing `X-Revision`/ETag stay the SHA.
+pub fn pinned_cache_key(revision: &str) -> String {
+    format!("pin-{revision}")
+}
+
 /// Sanitize a revision string for use as a filename component.
 ///
 /// Any character that is not ASCII alphanumeric, `-`, `_`, or `.` is replaced
