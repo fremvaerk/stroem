@@ -290,7 +290,7 @@ async fn sweep(state: &AppState) -> Result<()> {
     }
 
     // Phase 4.5 (git refs, R7): re-advance pinned jobs with no live step.
-    readvance_stalled_pinned_jobs(state).await?;
+    readvance_stalled_pinned_jobs(state).await;
 
     // Phase 5: Data retention (rate-limited — runs at most once per retention_interval_secs)
     //
@@ -314,12 +314,23 @@ async fn sweep(state: &AppState) -> Result<()> {
 /// a step that failed at claim leaves a job that never started `pending`).
 /// An `advance` that could not load the job's pin on its replica (cold
 /// store + git outage) returns without effect, and the event that triggered
-/// it is gone — nothing else would re-enter the job. Idempotent: `advance` on a job with nothing to do changes nothing. A
-/// PERMANENT pin error settles the job `failed` inside `advance`, so it is
-/// never listed twice. One beat per job (CLAUDE.md § Health Check, "Beat =
-/// progress"); a unit is bounded by the pin-load budget.
-async fn readvance_stalled_pinned_jobs(state: &AppState) -> Result<()> {
-    let stalled = JobRepo::get_stalled_pinned_jobs(&state.pool).await?;
+/// it is gone — nothing else would re-enter the job. Idempotent: `advance`
+/// on a job with nothing to do changes nothing. A PERMANENT pin error
+/// settles the job `failed` inside `advance`, so it is not listed again
+/// (unless that write failed: the next sweep retries it). One beat per job
+/// (CLAUDE.md § Health Check, "Beat = progress"); a unit is bounded by the
+/// pin-load budget.
+///
+/// A failed listing query is logged and skipped: it must not cost the rest
+/// of the sweep (retention) its tick.
+async fn readvance_stalled_pinned_jobs(state: &AppState) {
+    let stalled = match JobRepo::get_stalled_pinned_jobs(&state.pool).await {
+        Ok(ids) => ids,
+        Err(e) => {
+            tracing::error!("Failed to list stalled pinned jobs: {:#}", e);
+            return;
+        }
+    };
     for job_id in &stalled {
         state.background_tasks.recovery_beat.beat();
         if let Err(e) = state.settlement().advance(*job_id).await {
@@ -330,7 +341,6 @@ async fn readvance_stalled_pinned_jobs(state: &AppState) -> Result<()> {
             );
         }
     }
-    Ok(())
 }
 
 /// Clean up stale workers and old log files based on retention config.

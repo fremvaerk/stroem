@@ -1097,7 +1097,7 @@ Feature: `ref:` (branch | tag | full SHA) on flow-step actions, `type: task` act
 - [ ] `stroem_common::git_ref::is_valid_refname` does not reject a leading `-` or a bare `HEAD` (surfaces later as a resolve error); `check_git_ref` discards the parsed spec, so later code re-parses.
 - [ ] `release_claim`: `pin_releases + 1 > max` vs `>=`; its terminal check treats unknown statuses as terminal; rollback errors dropped with `.ok()`. A failed release whose handler is gone is dropped silently (add `tracing::error!`).
 - [ ] The compile-time claim-budget assert compares literals — move the worker's default request timeout to stroem-common and warn at startup when `pin_store.claim_load_budget_secs` is not below it.
-- [ ] Stale comments: the HA-gate comment near the top of `recovery.rs::run_loop`, `recovery.rs` "never listed twice" (Phase 4.5 doc) and the `settlement/mod.rs` `resolve` doc.
+- [ ] Stale comments: the HA-gate comment near the top of `recovery.rs::run_loop` and the `settlement/mod.rs` `resolve` doc. (The Phase 4.5 "never listed twice" doc was fixed by the final review, M8.)
 - [ ] Worker detail repeats `acl::job_folder`'s live lookup, and runs it for pinned rows; the ACL → status mapping is duplicated in `web/api/tasks.rs` (a `require_run` helper); the `"redaction set unavailable, retry"` literal appears in four places (shared const).
 - [ ] Claim-time rendering after config selection is still unbounded by the claim budget (pre-existing, see "Claim-time `vals` rendering is unbounded").
 
