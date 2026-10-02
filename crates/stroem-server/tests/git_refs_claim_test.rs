@@ -934,3 +934,231 @@ async fn claim_dropped_mid_pin_load_releases_the_step() -> anyhow::Result<()> {
     assert!(log.contains("stopped waiting"), "{log}");
     Ok(())
 }
+
+// ─── Owner-side render errors are withheld at claim (§ 7.2, § 9) ────────
+
+/// `billing` main (live): an action whose BODY wraps an owner secret in a
+/// filter chain that fails, and a plain `export` for the caller-input case.
+/// The `"` in the secret makes `json_encode | round` quote a doubly
+/// JSON-escaped form that no scrub matches.
+const WH_BILLING_MAIN: &str = r#"
+secrets:
+  TOKEN: 'live"zq7-owner-secret'
+actions:
+  export:
+    type: script
+    script: "echo {{ input.token }}"
+    input:
+      token:
+        type: string
+  export-body:
+    type: script
+    script: "echo {{ secret.TOKEN | json_encode | round }}"
+"#;
+
+/// `billing` at tag `v4.1.0`: `TOKEN` has a value that exists ONLY at this
+/// commit (so only the pin's redaction values know it), wrapped by a failing
+/// filter chain in an input DEFAULT; and an unshared connection a caller may
+/// not name.
+const WH_BILLING_TAGGED: &str = r#"
+secrets:
+  TOKEN: 'tag"only-zq9-secret'
+connection_types:
+  pg:
+    host:
+      type: string
+connections:
+  private-db:
+    type: pg
+    host: private-host
+actions:
+  export:
+    type: script
+    script: "echo {{ input.token }}"
+    input:
+      token:
+        type: string
+        default: "{{ secret.TOKEN | json_encode | round }}"
+  export-db:
+    type: script
+    script: echo db
+    input:
+      db:
+        type: pg
+"#;
+
+/// `etl` main: callers of the foreign actions (pinned and live), two
+/// caller-side errors on a foreign step, and an own-workspace ref.
+const WH_ETL_MAIN: &str = r#"
+secrets:
+  CALLER_TOKEN: caller-secret-value
+  TOKEN2: own-secret-value
+tasks:
+  call-foreign-default:
+    flow:
+      s:
+        action: billing.export
+        ref: v4.1.0
+  call-foreign-body:
+    flow:
+      s:
+        action: billing.export-body
+  bad-caller-input:
+    flow:
+      s:
+        action: billing.export
+        input:
+          token: "{{ secret.CALLER_TOKEN | round }}"
+  bad-caller-connection:
+    flow:
+      s:
+        action: billing.export-db
+        ref: v4.1.0
+        input:
+          db: "{{ 'private-db' }}"
+  call-own-ref:
+    flow:
+      s:
+        action: export-local
+        ref: release/2.3
+"#;
+
+/// `etl` at `release/2.3`: a default that fails on an own secret. `TOKEN2`
+/// is defined at both commits, so the test does not depend on which config
+/// the owner role resolves against.
+const WH_ETL_RELEASE: &str = r#"
+secrets:
+  TOKEN2: own-secret-value
+actions:
+  export-local:
+    type: script
+    script: "echo {{ input.v }}"
+    input:
+      v:
+        type: string
+        default: "{{ secret.TOKEN2 | round }}"
+"#;
+
+async fn claim_withholding_fixture() -> anyhow::Result<PinnedFixture> {
+    pinned_workspace_fixture(PinnedFixtureOpts {
+        etl_main: Some(WH_ETL_MAIN.to_string()),
+        etl_release: Some(WH_ETL_RELEASE.to_string()),
+        billing_main: Some(WH_BILLING_MAIN.to_string()),
+        billing_tagged: Some(WH_BILLING_TAGGED.to_string()),
+        ..Default::default()
+    })
+    .await
+}
+
+/// Execute `etl/task` and claim its only step `s`, which must fail at claim:
+/// (status, body, the step's `error_message`, the job log). Bounded, so a
+/// hang fails the test (and drops its container) instead of stalling it.
+async fn claim_failure(fx: &PinnedFixture, task: &str) -> (StatusCode, Value, String, String) {
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        let job_id = claim_execute(&fx.router, "etl", task).await;
+        let worker = register_worker(&fx.router, &["script"]).await;
+        let (status, body) = claim_status(&fx.router, &worker).await;
+        let step = JobStepRepo::get_step(&fx.pool, job_id, "s")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(step.status, "failed", "{task}: {body}");
+        let log = job_log_text(&fx.pool, &fx.state, job_id).await;
+        (status, body, step.error_message.unwrap_or_default(), log)
+    })
+    .await
+    .expect("execute + claim answer within 60 s")
+}
+
+fn claim_assert_no_secret(text: &str, fragment: &str) {
+    assert!(!text.contains(fragment), "secret leaked: {text}");
+}
+
+/// The owner's input default at a ref fails on a secret that exists only at
+/// that commit: the fixed sentence everywhere, nothing of the value.
+#[tokio::test]
+async fn foreign_owner_default_render_error_is_withheld_at_claim() -> anyhow::Result<()> {
+    let fx = claim_withholding_fixture().await?;
+    let expected = "rendering action 'export' of workspace 'billing' failed; details withheld";
+    let (status, body, error, log) = claim_failure(&fx, "call-foreign-default").await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["error"], expected);
+    assert_eq!(error, expected);
+    assert!(log.contains(expected), "{log}");
+    for text in [body.to_string(), error, log] {
+        claim_assert_no_secret(&text, "zq9");
+    }
+    Ok(())
+}
+
+/// The owner's action BODY (live cross-workspace action, no ref) fails on an
+/// owner secret: withheld the same way.
+#[tokio::test]
+async fn foreign_owner_body_render_error_is_withheld_at_claim() -> anyhow::Result<()> {
+    let fx = claim_withholding_fixture().await?;
+    let expected = "rendering action 'export-body' of workspace 'billing' failed; details withheld";
+    let (status, body, error, log) = claim_failure(&fx, "call-foreign-body").await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["error"], expected);
+    assert_eq!(error, expected);
+    assert!(log.contains(expected), "{log}");
+    for text in [body.to_string(), error, log] {
+        claim_assert_no_secret(&text, "zq7");
+    }
+    Ok(())
+}
+
+/// The caller's own step `input:` on a FOREIGN step is the caller's template
+/// in the caller's context: visible, scrubbed.
+#[tokio::test]
+async fn caller_input_render_error_stays_visible_and_scrubbed() -> anyhow::Result<()> {
+    let fx = claim_withholding_fixture().await?;
+    let (status, body, error, log) = claim_failure(&fx, "bad-caller-input").await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(
+        error.contains("Failed to render step input template"),
+        "{error}"
+    );
+    assert!(error.contains("round"), "{error}");
+    assert!(!error.contains("details withheld"), "{error}");
+    assert_eq!(body["error"], error.as_str());
+    for text in [body.to_string(), error, log] {
+        claim_assert_no_secret(&text, "caller-secret-value");
+    }
+    Ok(())
+}
+
+/// A Caller-bucket `prepare_step_action_input` error on a foreign step at a
+/// ref — the caller names the owner's UNSHARED connection — is the caller's
+/// own mistake: visible.
+#[tokio::test]
+async fn cross_owner_caller_connection_error_stays_visible() -> anyhow::Result<()> {
+    let fx = claim_withholding_fixture().await?;
+    let (status, body, error, _log) = claim_failure(&fx, "bad-caller-connection").await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(
+        error.contains("'billing.private-db' exists but is not shared"),
+        "{error}"
+    );
+    assert!(!error.contains("details withheld"), "{error}");
+    assert_eq!(body["error"], error.as_str());
+    Ok(())
+}
+
+/// An own-workspace ref crosses no boundary: the owner-side error stays
+/// visible, scrubbed.
+#[tokio::test]
+async fn own_workspace_ref_render_error_stays_visible_and_scrubbed() -> anyhow::Result<()> {
+    let fx = claim_withholding_fixture().await?;
+    let (status, body, error, log) = claim_failure(&fx, "call-own-ref").await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(
+        error.contains("Failed to merge action input defaults"),
+        "{error}"
+    );
+    assert!(!error.contains("details withheld"), "{error}");
+    for text in [body.to_string(), error, log] {
+        claim_assert_no_secret(&text, "own-secret-value");
+    }
+    Ok(())
+}

@@ -410,8 +410,9 @@ struct ClaimFailure<'a> {
     /// Redaction values of every pin this claim loaded (job pin, step owner
     /// pin) — the live set alone misses a value that exists only at a ref.
     pin_secrets: &'a [String],
-    /// Value-free sentence persisted, logged and returned INSTEAD of the
-    /// error (owner-side render error across a workspace boundary, Task 13).
+    /// Value-free sentence (`rendering::withheld_owner_error`) persisted,
+    /// logged and returned INSTEAD of the error: an owner-side render error
+    /// across a workspace boundary (spec § 7.2).
     withheld: Option<String>,
 }
 
@@ -911,6 +912,13 @@ pub async fn claim_job(
         .action_workspace
         .clone()
         .unwrap_or_else(|| job.workspace.clone());
+    // Spec § 7.2: an error raised rendering the action OWNER's templates is
+    // withheld once that owner is another workspace (pinned or live). The
+    // boundary is the workspace NAME — an own-workspace ref crosses none.
+    let owner_side_withheld = || {
+        (owner_ws_name != job.workspace)
+            .then(|| rendering::withheld_owner_error(&step.action_name, &owner_ws_name))
+    };
     let ws_config = ws_handle.as_ref().map(ConfigHandle::arc);
     let owner_config = owner_handle.as_ref().map(ConfigHandle::arc);
 
@@ -1074,6 +1082,14 @@ pub async fn claim_job(
             Ok(input) => input,
             Err(e) => {
                 let msg = format!("{:#}", e);
+                // By origin: only the owner's defaults merge / owner
+                // connection pass is owner-side; a bad caller-supplied value
+                // is the caller's own.
+                let withheld = if rendering::is_owner_side_prepare_error(&e) {
+                    owner_side_withheld()
+                } else {
+                    None
+                };
                 return Ok(fail_claimed_step_with_collisions(
                     &state,
                     step.job_id,
@@ -1083,7 +1099,7 @@ pub async fn claim_job(
                     &ClaimFailure {
                         claim,
                         pin_secrets: &pin_secrets,
-                        withheld: None,
+                        withheld,
                     },
                     std::mem::take(&mut collision_lines),
                 )
@@ -1105,7 +1121,9 @@ pub async fn claim_job(
     );
     collision_lines.extend(body_ctx.log_lines());
 
-    // Render action_spec env/cmd/script/manifest templates
+    // Render action_spec env/cmd/script/manifest templates. The action body
+    // and image are the owner's templates rendered with the owner's secrets:
+    // the call site is the origin.
     let rendered_action_spec =
         match rendering::render_action_spec(step.action_spec.as_ref(), &body_ctx) {
             Ok(spec) => spec,
@@ -1120,7 +1138,7 @@ pub async fn claim_job(
                     &ClaimFailure {
                         claim,
                         pin_secrets: &pin_secrets,
-                        withheld: None,
+                        withheld: owner_side_withheld(),
                     },
                     std::mem::take(&mut collision_lines),
                 )
@@ -1142,7 +1160,7 @@ pub async fn claim_job(
                 &ClaimFailure {
                     claim,
                     pin_secrets: &pin_secrets,
-                    withheld: None,
+                    withheld: owner_side_withheld(),
                 },
                 std::mem::take(&mut collision_lines),
             )
@@ -1205,6 +1223,9 @@ pub async fn claim_job(
                     &ClaimFailure {
                         claim,
                         pin_secrets: &pin_secrets,
+                        // Prompts render in the CALLER's context (job input,
+                        // caller secrets — `Scope::AgentPrompt`): not
+                        // owner-side, so visible, scrubbed.
                         withheld: None,
                     },
                     std::mem::take(&mut collision_lines),

@@ -1049,6 +1049,12 @@ pub fn resolve_bucket_by_role(
 /// 3. Fields filled by defaults are the owner reading its own config: resolve
 ///    ungated in the owner. Fields resolved in pass 1 are objects by now and
 ///    pass through.
+///
+/// Each phase tags its error with a [`ProvenanceError`]: pass 1 `Caller`, the
+/// merge and pass 3 `ActionDefault` (the owner's own templates and config).
+/// Claim withholds an `ActionDefault` error across a workspace boundary
+/// (git-refs spec § 7.2). The tag adds one `resolving … inputs` link to the
+/// `{:#}` chain.
 pub fn prepare_action_input_roles(
     rendered_input: &serde_json::Value,
     action_input_schema: &HashMap<String, InputFieldDef>,
@@ -1062,18 +1068,29 @@ pub fn prepare_action_input_roles(
         owner,
         roles.others,
     )
+    .context(ProvenanceError {
+        bucket: ProvenanceBucket::Caller,
+    })
     .context("Failed to resolve action connection inputs")?;
 
     let secrets_ctx = serde_json::json!({ "secret": &owner.config.secrets });
     let merged = merge_action_defaults(&caller_resolved, action_input_schema, &secrets_ctx)
+        .context(ProvenanceError {
+            bucket: ProvenanceBucket::ActionDefault,
+        })
         .context("Failed to merge action input defaults")?;
 
     resolve_bucket_by_role(&merged, action_input_schema, owner, owner, roles.others)
+        .context(ProvenanceError {
+            bucket: ProvenanceBucket::ActionDefault,
+        })
         .context("Failed to resolve action connection inputs")
 }
 
 /// Which bucket of a `type: task` step's input a
-/// [`resolve_task_input_by_provenance`] failure came from.
+/// [`resolve_task_input_by_provenance`] failure came from — or, for a
+/// [`prepare_action_input_roles`] failure at claim, whether the caller's
+/// value or the action owner's defaults failed.
 ///
 /// Attached to the error chain via `.context(ProvenanceError { bucket })` so
 /// a caller (`settlement/dispatch.rs::handle_task_steps_pass`) can tell
@@ -1092,7 +1109,8 @@ pub enum ProvenanceBucket {
 }
 
 /// Error-chain marker recording which [`ProvenanceBucket`] a
-/// `resolve_task_input_by_provenance` failure originated in. Find it with
+/// `resolve_task_input_by_provenance` or `prepare_action_input_roles`
+/// failure originated in. Find it with
 /// `err.downcast_ref::<ProvenanceError>()` — `anyhow::Error::downcast_ref`
 /// (called on the `anyhow::Error` itself, not on a `.chain()` link) walks
 /// every `.context(...)` layer looking for a value of the given type; it
@@ -2476,6 +2494,70 @@ mod tests {
         // against the owner's secrets.
         assert_eq!(out["note"], "{{ secret.TOKEN }}");
         assert_eq!(out["ch"]["host"], "ch.jobs.internal");
+    }
+
+    /// Git-refs spec § 7.2: claim decides withholding by ORIGIN. Each phase
+    /// of `prepare_action_input_roles` tags its errors with the bucket it
+    /// serves — the caller pass `Caller`, the defaults merge and the owner
+    /// pass `ActionDefault`.
+    #[test]
+    fn test_cross_prepare_errors_carry_provenance_bucket() {
+        let mut ws = three_workspaces();
+        ws.configs
+            .get_mut("jobs")
+            .unwrap()
+            .secrets
+            .insert("TOKEN".to_string(), json!("owner-secret"));
+        let bucket_of = |input: serde_json::Value, schema: &HashMap<String, InputFieldDef>| {
+            let roles = RoleScope {
+                caller: RoleConfig {
+                    workspace: "caller",
+                    config: &ws.configs["caller"],
+                },
+                action_owner: Some(RoleConfig {
+                    workspace: "jobs",
+                    config: &ws.configs["jobs"],
+                }),
+                task_owner: None,
+                others: &ws,
+            };
+            let err = prepare_action_input_roles(&input, schema, &roles).unwrap_err();
+            (
+                err.downcast_ref::<ProvenanceError>().map(|p| p.bucket),
+                format!("{err:#}"),
+            )
+        };
+
+        // Caller supplies an UNSHARED owner connection bare → Caller.
+        let schema = HashMap::from([(
+            "ch".to_string(),
+            field("clickhouse", false, Some(json!("private-ch"))),
+        )]);
+        let (bucket, msg) = bucket_of(json!({"ch": "private-ch"}), &schema);
+        assert_eq!(bucket, Some(ProvenanceBucket::Caller), "{msg}");
+        assert!(msg.contains("is not shared"), "{msg}");
+
+        // Owner default that fails to render (defaults merge) → ActionDefault.
+        let schema = HashMap::from([(
+            "note".to_string(),
+            field("string", false, Some(json!("{{ secret.TOKEN | round }}"))),
+        )]);
+        let (bucket, msg) = bucket_of(json!({}), &schema);
+        assert_eq!(bucket, Some(ProvenanceBucket::ActionDefault), "{msg}");
+        assert!(
+            msg.contains("Failed to merge action input defaults"),
+            "{msg}"
+        );
+
+        // Owner default naming a connection the owner lacks (owner pass) →
+        // ActionDefault.
+        let schema = HashMap::from([(
+            "ch".to_string(),
+            field("clickhouse", false, Some(json!("missing-ch"))),
+        )]);
+        let (bucket, msg) = bucket_of(json!({}), &schema);
+        assert_eq!(bucket, Some(ProvenanceBucket::ActionDefault), "{msg}");
+        assert!(msg.contains("missing-ch"), "{msg}");
     }
 
     #[test]
