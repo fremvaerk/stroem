@@ -69,6 +69,20 @@ fn vals_filter_with(
     }
 }
 
+/// Name the `vals` filter is registered under.
+const VALS_FILTER: &str = "vals";
+
+/// True when `err` is, or wraps, a failure of the `vals` filter: the CLI is
+/// missing, `vals eval` failed, its deadline passed, or its output was bad.
+/// Typed (tera's `CallFilter` kind for this filter), never by message text.
+pub fn is_vals_failure(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause.downcast_ref::<tera::Error>().is_some_and(
+            |e| matches!(&e.kind, tera::ErrorKind::CallFilter(name) if name == VALS_FILTER),
+        )
+    })
+}
+
 /// Renders a single Tera template string against a JSON context
 pub fn render_template(template: &str, context: &serde_json::Value) -> Result<String> {
     render_template_with(template, context, &LoadBudget::unbounded())
@@ -88,7 +102,7 @@ pub fn render_template_with(
 
     let budget = *budget;
     tera.register_filter(
-        "vals",
+        VALS_FILTER,
         move |value: &tera::Value, args: &HashMap<String, tera::Value>| {
             vals_filter_with(value, args, budget)
         },
@@ -3762,6 +3776,25 @@ mod tests {
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("deadline"), "{err:#}");
+    }
+
+    /// The typed vals marker: tera's `CallFilter("vals")` anywhere in the
+    /// chain. Never the word "vals" in a message.
+    #[test]
+    fn is_vals_failure_recognises_the_vals_filter_and_nothing_else() {
+        let expired = crate::budget::LoadBudget::until(std::time::Instant::now());
+        let vals =
+            render_template_with("{{ 'ref+echo://x' | vals }}", &json!({}), &expired).unwrap_err();
+        assert!(is_vals_failure(&vals), "{vals:#}");
+        let wrapped = vals.context("Failed to render secret 'k'");
+        assert!(is_vals_failure(&wrapped), "{wrapped:#}");
+
+        let missing = render_template("{{ secret.vals }}", &json!({"secret": {}})).unwrap_err();
+        assert!(format!("{missing:#}").contains("vals"), "{missing:#}");
+        assert!(!is_vals_failure(&missing), "{missing:#}");
+
+        let other_filter = render_template("{{ 'vals' | round }}", &json!({})).unwrap_err();
+        assert!(!is_vals_failure(&other_filter), "{other_filter:#}");
     }
 
     #[test]

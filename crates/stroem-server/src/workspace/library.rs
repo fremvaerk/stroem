@@ -360,6 +360,18 @@ fn prefix_library(lib_name: &str, raw: WorkspaceConfig) -> WorkspaceConfig {
     result
 }
 
+/// Merge every resolved library into a freshly loaded workspace config. The
+/// one rule shared by a live load (`WorkspaceEntry::apply_load_result`) and
+/// a pinned load (`PinStore::ensure`).
+pub(crate) fn merge_libraries_into_workspace(
+    workspace: &mut WorkspaceConfig,
+    libs: &HashMap<String, ResolvedLibrary>,
+) {
+    for lib in libs.values() {
+        merge_library_into_workspace(workspace, lib);
+    }
+}
+
 /// Merge resolved library items into a workspace config.
 /// Called after workspace loading to add library actions, tasks, and connection types.
 pub fn merge_library_into_workspace(workspace: &mut WorkspaceConfig, lib: &ResolvedLibrary) {

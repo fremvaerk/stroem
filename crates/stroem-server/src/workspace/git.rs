@@ -222,7 +222,7 @@ impl GitSource {
 /// (`checkout_get_actions`) once `budget` expires. libgit2 cannot cancel the
 /// write phase that follows — see spec § 4.5. `notify_on` is required:
 /// notification types default to none.
-fn checkout_builder(budget: &LoadBudget) -> git2::build::CheckoutBuilder<'static> {
+pub(crate) fn checkout_builder(budget: &LoadBudget) -> git2::build::CheckoutBuilder<'static> {
     let budget = *budget;
     let mut checkout = git2::build::CheckoutBuilder::new();
     checkout.notify_on(

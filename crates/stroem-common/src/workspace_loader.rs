@@ -7,6 +7,18 @@ use crate::models::workflow::WorkspaceConfig;
 /// Maximum recursion depth for subdirectory scanning (matches `compute_revision`).
 const MAX_SCAN_DEPTH: usize = 10;
 
+/// Start of the warning for a SOPS file the loader could not decrypt: the
+/// loader's explicit sops-failure marker (see [`is_sops_failure_warning`]).
+const SOPS_FAILURE_WARNING_PREFIX: &str = "Skipping SOPS file '";
+
+/// True for the warning the loader emits when it could not decrypt a SOPS
+/// file. The load itself succeeds without that file, so a caller that must
+/// not freeze a possibly transient decryption failure (a pinned config)
+/// treats such a load as failed.
+pub fn is_sops_failure_warning(warning: &str) -> bool {
+    warning.starts_with(SOPS_FAILURE_WARNING_PREFIX)
+}
+
 /// Scans a directory for YAML workflow files, parses them, and merges them into
 /// a [`WorkspaceConfig`].
 ///
@@ -89,7 +101,11 @@ pub fn scan_and_merge_yaml_files_with(
             Ok(c) => c,
             Err(e) if is_deadline_exceeded(&e) => return Err(e),
             Err(e) => {
-                let msg = format!("Skipping '{}': failed to read file: {:#}", display_path, e);
+                let msg = if is_sops {
+                    format!("{SOPS_FAILURE_WARNING_PREFIX}{display_path}': {e:#}")
+                } else {
+                    format!("Skipping '{}': failed to read file: {:#}", display_path, e)
+                };
                 tracing::warn!("{}", msg);
                 warnings.push(msg);
                 continue;
@@ -452,6 +468,30 @@ mod tests {
         let expired = crate::budget::LoadBudget::until(std::time::Instant::now());
         let err = scan_and_merge_yaml_files_with(dir.path(), false, true, &expired).unwrap_err();
         assert!(crate::budget::is_deadline_exceeded(&err), "{err:#}");
+    }
+
+    /// The loader's explicit sops marker matches the warning for a SOPS file
+    /// it could not decrypt, and nothing else — not even a parse warning
+    /// whose path contains `.sops.yaml`.
+    #[test]
+    fn sops_failure_warning_marks_only_an_undecryptable_sops_file() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("creds.sops.yaml"),
+            "secrets:\n  k: ENC[AES256_GCM,data:abc]\nsops:\n  version: 3\n",
+        )
+        .unwrap();
+        let decoy = dir.path().join("vault.sops.yaml.d");
+        fs::create_dir(&decoy).unwrap();
+        fs::write(decoy.join("broken.yaml"), "actions: [unclosed\n").unwrap();
+        let (_, warnings) = scan_and_merge_yaml_files(dir.path(), false, false).unwrap();
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        let marked: Vec<&String> = warnings
+            .iter()
+            .filter(|w| is_sops_failure_warning(w))
+            .collect();
+        assert_eq!(marked.len(), 1, "{warnings:?}");
+        assert!(marked[0].contains("creds.sops.yaml"), "{marked:?}");
     }
 
     #[test]

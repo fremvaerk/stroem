@@ -5,27 +5,155 @@
 //! own load permits. `GitSource`'s working clone, the exec mutex,
 //! `Availability` and `apply_load_result` are never touched from here.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 #[cfg(test)]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use stroem_common::budget::LoadBudget;
+use stroem_common::budget::{is_deadline_exceeded, LoadBudget};
 use stroem_common::git_ref::{parse_git_ref, short_sha_hint, GitRefSpec};
+use stroem_common::models::workflow::WorkspaceConfig;
+use stroem_common::template::is_vals_failure;
+use stroem_common::workspace_loader::is_sops_failure_warning;
+use tokio::sync::{OnceCell, Semaphore, SemaphorePermit};
 
 use super::availability::ReloadSettings;
-use super::git::{git_error, GitSource};
-use super::library::ResolvedLibrary;
+use super::git::{checkout_builder, git_error, GitSource};
+use super::library::{merge_libraries_into_workspace, ResolvedLibrary};
 use crate::config::{GitAuthConfig, WorkspaceSourceDef};
 
-/// Prefix of an in-progress checkout directory under `{ws}/trees/`.
+/// Prefix of a dir under `{ws}/trees/` that is not a published checkout:
+/// one in progress, or one moved aside by `evict` for deletion.
 const TMP_PREFIX: &str = ".tmp-";
 /// `pin_store.keep_recent_per_workspace` default (spec § 10).
 pub const DEFAULT_KEEP_RECENT_PER_WORKSPACE: usize = 5;
+
+/// Pin loads in flight at once on this replica. Separate from the
+/// watchers' `MAX_CONCURRENT_WORKSPACE_LOADS` so creation-path pin loads
+/// never starve them (spec § 5.3).
+pub const MAX_CONCURRENT_PIN_LOADS: usize = 4;
+
+/// A checked-out commit. Immutable once published (tmp dir + rename);
+/// deleted only by `PinStore::evict`, once no caller holds it.
+#[derive(Debug)]
+pub struct PinnedTree {
+    pub dir: PathBuf,
+}
+
+/// The config of one workspace at one commit. Immutable. Holding it
+/// holds a lease on its checkout.
+pub struct Pinned {
+    pub config: Arc<WorkspaceConfig>,
+    pub dir: PathBuf,
+    /// `secrets` values + `secret: true` properties of connections typed
+    /// in this workspace ONLY. Not a redaction set: foreign-typed
+    /// connections need live configs. Redact with
+    /// `WorkspaceManager::pin_redaction_values` (the complete set).
+    pub secret_values: Vec<String>,
+    _tree: Arc<PinnedTree>,
+}
+
+// Never prints `config` (secrets) or `secret_values`.
+impl std::fmt::Debug for Pinned {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Pinned")
+            .field("dir", &self.dir)
+            .field(
+                "secret_values",
+                &format_args!("[REDACTED; {}]", self.secret_values.len()),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+/// `(workspace, commit)`.
+type Key = (String, String);
+
+/// One cache entry. `OnceCell` is the single-flight: concurrent callers
+/// await one initialisation; a failed one leaves the cell empty, so the
+/// next caller retries (errors are never cached).
+struct Slot<T> {
+    cell: Arc<OnceCell<Arc<T>>>,
+    last_used: Instant,
+}
+
+impl<T> Slot<T> {
+    fn new() -> Self {
+        Self {
+            cell: Arc::new(OnceCell::new()),
+            last_used: Instant::now(),
+        }
+    }
+
+    /// The lease (spec § 5.3). Both handles count: a caller holding the
+    /// value, and one holding the cell — an initialisation in flight, or a
+    /// single-flight waiter that has not cloned the value yet.
+    fn in_use(&self) -> bool {
+        Arc::strong_count(&self.cell) > 1
+            || self
+                .cell
+                .get()
+                .is_some_and(|value| Arc::strong_count(value) > 1)
+    }
+}
+
+/// The slot's cell, created on first use, its recency bumped. The map lock
+/// is released on return: it is never held across an await.
+fn slot_cell<T>(
+    map: &Mutex<HashMap<Key, Slot<T>>>,
+    ws: &str,
+    commit: &str,
+) -> Arc<OnceCell<Arc<T>>> {
+    let mut map = map.lock().unwrap_or_else(|e| e.into_inner());
+    let slot = map
+        .entry((ws.to_string(), commit.to_string()))
+        .or_insert_with(Slot::new);
+    slot.last_used = Instant::now();
+    Arc::clone(&slot.cell)
+}
+
+/// The `n` most recently used LOADED keys of every workspace. A failed or
+/// in-flight slot is never "recent": it would displace a real pin.
+fn most_recent<T>(map: &HashMap<Key, Slot<T>>, n: usize) -> HashSet<Key> {
+    let mut by_ws: HashMap<&str, Vec<(&Key, Instant)>> = HashMap::new();
+    for (key, slot) in map.iter().filter(|(_, slot)| slot.cell.initialized()) {
+        by_ws
+            .entry(key.0.as_str())
+            .or_default()
+            .push((key, slot.last_used));
+    }
+    let mut out = HashSet::new();
+    for (_, mut keys) in by_ws {
+        keys.sort_by_key(|&(_, used)| std::cmp::Reverse(used));
+        out.extend(keys.into_iter().take(n).map(|(k, _)| k.clone()));
+    }
+    out
+}
+
+/// The keys `evict` may drop: not kept, not recent, not leased.
+fn evictable<T>(map: &HashMap<Key, Slot<T>>, keep: &HashSet<Key>, keep_recent: usize) -> Vec<Key> {
+    let recent = most_recent(map, keep_recent);
+    map.iter()
+        .filter(|(key, slot)| !keep.contains(*key) && !recent.contains(*key) && !slot.in_use())
+        .map(|(key, _)| key.clone())
+        .collect()
+}
+
+fn result_label<T>(r: &Result<T, PinError>) -> &'static str {
+    match r {
+        Ok(_) => "ok",
+        Err(PinError::NotGit { .. }) => "not_git",
+        Err(PinError::RefNotFound { .. }) => "ref_not_found",
+        Err(PinError::CommitNotFound { .. }) => "commit_not_found",
+        Err(PinError::PinLoadFailed { .. }) => "load_failed",
+        Err(PinError::PinUnavailable { .. }) => "unavailable",
+    }
+}
 
 /// A ref of one workspace resolved to a commit.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -247,6 +375,12 @@ pub struct PinStore {
     /// overwrite a newer listing or an adoption with an older listing.
     resolve_locks: HashMap<String, Arc<tokio::sync::Mutex<()>>>,
     listings: Mutex<HashMap<String, Listing>>,
+    trees: Mutex<HashMap<Key, Slot<PinnedTree>>>,
+    configs: Mutex<HashMap<Key, Slot<Pinned>>>,
+    /// `MAX_CONCURRENT_PIN_LOADS` — never the watchers' semaphore.
+    permits: Semaphore,
+    /// Config loads started (test support).
+    loads: AtomicUsize,
     /// Test hook: pretend the remote refuses want-by-SHA.
     #[cfg(test)]
     skip_fetch_by_sha: AtomicBool,
@@ -311,6 +445,10 @@ impl PinStore {
             repo_locks,
             resolve_locks,
             listings: Mutex::new(HashMap::new()),
+            trees: Mutex::new(HashMap::new()),
+            configs: Mutex::new(HashMap::new()),
+            permits: Semaphore::new(MAX_CONCURRENT_PIN_LOADS),
+            loads: AtomicUsize::new(0),
             #[cfg(test)]
             skip_fetch_by_sha: AtomicBool::new(false),
         })
@@ -328,6 +466,10 @@ impl PinStore {
             repo_locks: HashMap::new(),
             resolve_locks: HashMap::new(),
             listings: Mutex::new(HashMap::new()),
+            trees: Mutex::new(HashMap::new()),
+            configs: Mutex::new(HashMap::new()),
+            permits: Semaphore::new(MAX_CONCURRENT_PIN_LOADS),
+            loads: AtomicUsize::new(0),
             #[cfg(test)]
             skip_fetch_by_sha: AtomicBool::new(false),
         }
@@ -352,6 +494,12 @@ impl PinStore {
 
     fn repo_dir(&self, ws: &str) -> PathBuf {
         self.cfg.dir.join(ws).join("repo.git")
+    }
+
+    /// `{dir}/{ws}/trees`: one published checkout per key, named by its
+    /// commit, plus `TMP_PREFIX` dirs.
+    fn trees_dir(&self, ws: &str) -> PathBuf {
+        self.cfg.dir.join(ws).join("trees")
     }
 
     /// Only called after `source(ws)` succeeded, so the entry exists.
@@ -544,6 +692,209 @@ impl PinStore {
         })
         .await
         .map_err(|e| unavailable(ws, e))?
+    }
+
+    /// A permit for one pin load, waiting at most until `budget`'s deadline.
+    async fn permit(&self, ws: &str, budget: &LoadBudget) -> Result<SemaphorePermit<'_>, PinError> {
+        let acquired = match budget.deadline() {
+            Some(deadline) => tokio::time::timeout_at(deadline.into(), self.permits.acquire())
+                .await
+                .map_err(|_elapsed| unavailable(ws, "pin load queue saturated"))?,
+            None => self.permits.acquire().await,
+        };
+        acquired.map_err(|_closed| unavailable(ws, "pin load permits closed"))
+    }
+
+    /// The commit's files at `{dir}/{ws}/trees/{commit}`, checked out on
+    /// first use. No config load, no sops/vals (spec § 5.3 `ensure_tree`).
+    #[tracing::instrument(skip_all, fields(workspace = %ws, commit = %commit))]
+    pub async fn ensure_tree(&self, ws: &str, commit: &str) -> Result<Arc<PinnedTree>, PinError> {
+        self.tree(ws, commit, LoadBudget::from_now(self.settings.load_timeout))
+            .await
+    }
+
+    /// `ensure_tree` under the caller's deadline: `ensure` passes the one
+    /// budget that covers its whole load.
+    async fn tree(
+        &self,
+        ws: &str,
+        commit: &str,
+        budget: LoadBudget,
+    ) -> Result<Arc<PinnedTree>, PinError> {
+        let src = self.source(ws)?;
+        let commit = normalize_commit(ws, commit)?;
+        let cell = slot_cell(&self.trees, ws, &commit);
+        let tree = cell
+            .get_or_try_init(|| async move {
+                let _permit = self.permit(ws, &budget).await?;
+                let repo_dir = self.repo_dir(ws);
+                let trees_dir = self.trees_dir(ws);
+                let lock = self.repo_lock(ws);
+                let by_sha = self.fetch_by_sha_enabled();
+                let ws_owned = ws.to_string();
+                let dir = tokio::task::spawn_blocking(move || {
+                    let peeled = {
+                        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+                        ensure_commit_local(&ws_owned, &repo_dir, &src, &commit, by_sha, &budget)?
+                    };
+                    // Checkout reads objects only: outside the write lock.
+                    checkout_commit(&ws_owned, &repo_dir, &trees_dir, &commit, &peeled, &budget)
+                })
+                .await
+                .map_err(|e| unavailable(ws, e))??;
+                Ok::<_, PinError>(Arc::new(PinnedTree { dir }))
+            })
+            .await?;
+        Ok(Arc::clone(tree))
+    }
+
+    /// The config of `ws` at `commit` (immutable, cached, single-flight).
+    #[tracing::instrument(skip_all, fields(workspace = %ws, commit = %commit))]
+    pub async fn ensure(&self, ws: &str, commit: &str) -> Result<Arc<Pinned>, PinError> {
+        let commit = normalize_commit(ws, commit)?;
+        let cell = slot_cell(&self.configs, ws, &commit);
+        let pinned = cell
+            .get_or_try_init(|| async {
+                // ONE deadline for the whole load: fetch, checkout, config.
+                let budget = LoadBudget::from_now(self.settings.load_timeout);
+                let result = self.load_pinned(ws, &commit, budget).await;
+                metrics::counter!(
+                    crate::metrics::STROEM_PIN_LOADS_TOTAL,
+                    "workspace" => ws.to_owned(),
+                    "result" => result_label(&result),
+                )
+                .increment(1);
+                result
+            })
+            .await?;
+        Ok(Arc::clone(pinned))
+    }
+
+    async fn load_pinned(
+        &self,
+        ws: &str,
+        commit: &str,
+        budget: LoadBudget,
+    ) -> Result<Arc<Pinned>, PinError> {
+        // Tree first, permit second: the tree phase takes its own permit,
+        // and nesting them could deadlock the semaphore.
+        let tree = self.tree(ws, commit, budget).await?;
+        let _permit = self.permit(ws, &budget).await?;
+        self.loads.fetch_add(1, Ordering::Relaxed);
+        let dir = tree.dir.clone();
+        let loaded = tokio::task::spawn_blocking(move || {
+            super::folder::load_folder_workspace_with(&dir, &budget)
+        })
+        .await
+        .map_err(|e| unavailable(ws, e))?;
+        let mut config = classify_load(ws, commit, loaded)?;
+        merge_libraries_into_workspace(&mut config, &self.libraries);
+        let secret_values = local_secret_values(ws, &config);
+        Ok(Arc::new(Pinned {
+            config: Arc::new(config),
+            dir: tree.dir.clone(),
+            secret_values,
+            _tree: tree,
+        }))
+    }
+
+    /// Drop every cached config and checkout that is not in `keep`, not
+    /// among the `keep_recent_per_workspace` most recently used loaded pins
+    /// of its workspace, and not leased (spec § 10). Configs go first, so
+    /// the tree leases they held are released in the same call.
+    ///
+    /// A checkout dir is moved aside (`.tmp-evict-*`) under the trees lock,
+    /// in the same critical section that removes its entry: a later
+    /// `ensure_tree` of that commit finds no dir and checks out afresh,
+    /// never reusing one about to be deleted. The moved dirs are deleted
+    /// after the lock is released. Blocking (dir deletion): call it on
+    /// `spawn_blocking`, never on a runtime thread.
+    pub fn evict(&self, keep: &HashSet<(String, String)>) {
+        let n = self.cfg.keep_recent_per_workspace;
+        let dropped: Vec<Slot<Pinned>> = {
+            let mut configs = self.configs.lock().unwrap_or_else(|e| e.into_inner());
+            evictable(&configs, keep, n)
+                .into_iter()
+                .filter_map(|key| configs.remove(&key))
+                .collect()
+        };
+        let configs_dropped = dropped.len();
+        // Releases their tree leases before the trees are examined.
+        drop(dropped);
+        let trash: Vec<PathBuf> = {
+            let mut trees = self.trees.lock().unwrap_or_else(|e| e.into_inner());
+            evictable(&trees, keep, n)
+                .into_iter()
+                .filter_map(|key| {
+                    trees.remove(&key);
+                    self.move_aside(&key.0, &key.1)
+                })
+                .collect()
+        };
+        for dir in &trash {
+            if let Err(e) = std::fs::remove_dir_all(dir) {
+                tracing::warn!("Pin store: could not delete {}: {e}", dir.display());
+            }
+        }
+        if configs_dropped > 0 || !trash.is_empty() {
+            tracing::debug!(
+                "Pin store: evicted {configs_dropped} config(s), {} checkout(s)",
+                trash.len()
+            );
+        }
+    }
+
+    /// Move the published checkout of `(ws, commit)` to a `.tmp-evict-*`
+    /// name. `None` when there is none, or when it cannot be moved: it then
+    /// stays published, complete, and a later `ensure_tree` reuses it.
+    fn move_aside(&self, ws: &str, commit: &str) -> Option<PathBuf> {
+        let trees = self.trees_dir(ws);
+        let dir = trees.join(commit);
+        let trash = trees.join(format!("{TMP_PREFIX}evict-{}", uuid::Uuid::new_v4()));
+        match std::fs::rename(&dir, &trash) {
+            Ok(()) => Some(trash),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => {
+                tracing::warn!(
+                    "Pin store: could not move {} aside for deletion: {e}",
+                    dir.display()
+                );
+                None
+            }
+        }
+    }
+
+    /// Loaded configs per workspace, sorted by name (the
+    /// `stroem_pins_cached` gauge). A workspace with none is absent.
+    pub fn cached_counts(&self) -> Vec<(String, usize)> {
+        let configs = self.configs.lock().unwrap_or_else(|e| e.into_inner());
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for ((ws, _), slot) in configs.iter() {
+            if slot.cell.initialized() {
+                *counts.entry(ws.clone()).or_default() += 1;
+            }
+        }
+        let mut out: Vec<(String, usize)> = counts.into_iter().collect();
+        out.sort();
+        out
+    }
+
+    /// Commits of `ws` whose config is loaded, sorted.
+    pub fn cached_commits(&self, ws: &str) -> Vec<String> {
+        let configs = self.configs.lock().unwrap_or_else(|e| e.into_inner());
+        let mut out: Vec<String> = configs
+            .iter()
+            .filter(|((w, _), slot)| w == ws && slot.cell.initialized())
+            .map(|((_, c), _)| c.clone())
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// Config loads started so far (test support).
+    #[doc(hidden)]
+    pub fn load_count(&self) -> usize {
+        self.loads.load(Ordering::Relaxed)
     }
 }
 
@@ -758,6 +1109,101 @@ fn commit_for_ref(
         .ok_or_else(not_found)
 }
 
+/// Check `commit`'s tree out to `{trees_dir}/{name}` via a tmp dir +
+/// rename, so a published dir is always complete. No `.git`, no index
+/// update. Reuses a dir published earlier. `name` is the store key, the
+/// dir `evict` deletes; `commit` is the commit it peels to.
+fn checkout_commit(
+    ws: &str,
+    repo_dir: &Path,
+    trees_dir: &Path,
+    name: &str,
+    commit: &str,
+    budget: &LoadBudget,
+) -> Result<PathBuf, PinError> {
+    let final_dir = trees_dir.join(name);
+    if final_dir.is_dir() {
+        return Ok(final_dir);
+    }
+    std::fs::create_dir_all(trees_dir).map_err(|e| unavailable(ws, e))?;
+    let tmp = trees_dir.join(format!("{TMP_PREFIX}{name}-{}", uuid::Uuid::new_v4()));
+    let result = (|| -> anyhow::Result<()> {
+        let repo = git2::Repository::open_bare(repo_dir).context("open pin repository")?;
+        let oid = git2::Oid::from_str(commit).context("parse commit")?;
+        let tree = repo
+            .find_commit(oid)
+            .and_then(|c| c.tree())
+            .context("read the commit's tree")?;
+        std::fs::create_dir_all(&tmp).context("create checkout dir")?;
+        let mut checkout = checkout_builder(budget);
+        checkout.force().update_index(false).target_dir(&tmp);
+        repo.checkout_tree(tree.as_object(), Some(&mut checkout))
+            .map_err(|e| git_error(e, budget, "checkout pinned tree"))?;
+        std::fs::rename(&tmp, &final_dir).context("publish checkout")
+    })();
+    match result {
+        Ok(()) => Ok(final_dir),
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&tmp);
+            // A cancelled earlier caller's detached checkout of the same
+            // commit may have published first; its content is identical.
+            if final_dir.is_dir() {
+                Ok(final_dir)
+            } else {
+                Err(unavailable(ws, e))
+            }
+        }
+    }
+}
+
+/// Map a folder-loader result to the pin taxonomy (spec § 5.3) by the
+/// loader's own markers, never by message text:
+/// - `DeadlineExceeded`, or a failure of the `vals` filter, is transient;
+/// - any other load error is permanent;
+/// - a SOPS file the loader could not decrypt is a WARNING, and the load
+///   succeeds without it. Caching that config would freeze a possibly
+///   transient decryption failure into an immutable pin, so it is
+///   transient too. Any other warning (a YAML parse error) keeps live-load
+///   semantics: the config loads without that file.
+fn classify_load(
+    ws: &str,
+    commit: &str,
+    loaded: anyhow::Result<(WorkspaceConfig, Vec<String>)>,
+) -> Result<WorkspaceConfig, PinError> {
+    match loaded {
+        Ok((config, warnings)) => {
+            if let Some(w) = warnings.iter().find(|w| is_sops_failure_warning(w)) {
+                return Err(unavailable(ws, w));
+            }
+            if !warnings.is_empty() {
+                tracing::warn!(
+                    "Pinned workspace '{ws}' at {commit}: {} file(s) skipped due to errors",
+                    warnings.len()
+                );
+            }
+            Ok(config)
+        }
+        Err(e) if is_deadline_exceeded(&e) || is_vals_failure(&e) => Err(unavailable(ws, e)),
+        Err(e) => Err(PinError::PinLoadFailed {
+            workspace: ws.to_string(),
+            commit: commit.to_string(),
+            message: format!("{e:#}"),
+        }),
+    }
+}
+
+/// `secrets` + same-workspace typed `secret: true` connection properties,
+/// from a `WorkspaceSet` holding only this config.
+fn local_secret_values(ws: &str, config: &WorkspaceConfig) -> Vec<String> {
+    let set = crate::workspace_set::WorkspaceSet::from_parts(
+        ws,
+        Some(config),
+        Vec::new(),
+        vec![ws.to_string()],
+    );
+    crate::workspace_set::collect_redaction_values(&set)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -767,11 +1213,21 @@ mod tests {
     const HOUR: Duration = Duration::from_secs(3600);
 
     fn store(url: &str, poll: Duration) -> (TempDir, PinStore) {
+        open_store(url, poll, 0, HashMap::new(), ReloadSettings::default())
+    }
+
+    fn open_store(
+        url: &str,
+        poll: Duration,
+        keep_recent: usize,
+        libraries: HashMap<String, ResolvedLibrary>,
+        settings: ReloadSettings,
+    ) -> (TempDir, PinStore) {
         let dir = TempDir::new().unwrap();
         let store = PinStore::open(
             PinStoreConfig {
                 dir: dir.path().join("pins"),
-                keep_recent_per_workspace: 0,
+                keep_recent_per_workspace: keep_recent,
             },
             HashMap::from([(
                 "w".to_string(),
@@ -781,8 +1237,8 @@ mod tests {
                     poll_interval: poll,
                 },
             )]),
-            Arc::new(HashMap::new()),
-            ReloadSettings::default(),
+            Arc::new(libraries),
+            settings,
         )
         .unwrap();
         (dir, store)
@@ -1276,5 +1732,402 @@ mod tests {
             message: "m".into()
         }
         .is_transient());
+    }
+
+    fn store_with(
+        url: &str,
+        keep_recent: usize,
+        libraries: HashMap<String, ResolvedLibrary>,
+    ) -> (TempDir, PinStore) {
+        open_store(url, HOUR, keep_recent, libraries, ReloadSettings::default())
+    }
+
+    fn store_with_settings(url: &str, settings: ReloadSettings) -> (TempDir, PinStore) {
+        open_store(url, HOUR, 0, HashMap::new(), settings)
+    }
+
+    fn script_of(p: &Pinned) -> String {
+        p.config.actions["greet"].script.clone().unwrap_or_default()
+    }
+
+    /// Entries of `w`'s trees dir that are in-progress checkouts or
+    /// renamed-for-deletion dirs.
+    fn tmp_entries(d: &TempDir) -> Vec<std::ffi::OsString> {
+        std::fs::read_dir(d.path().join("pins/w/trees"))
+            .map(|rd| {
+                rd.flatten()
+                    .map(|e| e.file_name())
+                    .filter(|n| n.to_string_lossy().starts_with(TMP_PREFIX))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn ensure_tree_checks_out_an_immutable_dir_without_dot_git() {
+        let (_r, url, c1) = bare_remote(&[("wf.yaml", &workflow("v1"))]);
+        let (d, store) = store(&url, HOUR);
+        let tree = store.ensure_tree("w", &c1).await.unwrap();
+        assert_eq!(tree.dir, d.path().join("pins/w/trees").join(&c1));
+        assert!(tree.dir.join("wf.yaml").is_file());
+        assert!(!tree.dir.join(".git").exists());
+        let again = store.ensure_tree("w", &c1).await.unwrap();
+        assert!(Arc::ptr_eq(&tree, &again));
+        assert!(
+            tmp_entries(&d).is_empty(),
+            "no tmp dir may survive a checkout"
+        );
+    }
+
+    /// The checkout dir is named by the requested key (eviction derives the
+    /// path from it); its content is the commit the SHA peels to.
+    #[tokio::test]
+    async fn ensure_tree_of_an_annotated_tag_object_checks_out_its_commit() {
+        let (remote, url, c1) = bare_remote(&[("wf.yaml", &workflow("v1"))]);
+        let tag_object = annotated_tag(remote.path(), "v1", &c1);
+        let (d, store) = store(&url, HOUR);
+        let tree = store.ensure_tree("w", &tag_object).await.unwrap();
+        assert_eq!(tree.dir, d.path().join("pins/w/trees").join(&tag_object));
+        assert!(tree.dir.join("wf.yaml").is_file());
+    }
+
+    #[tokio::test]
+    async fn ensure_loads_the_config_of_the_pinned_commit_not_the_tip() {
+        let (remote, url, c1) = bare_remote(&[("wf.yaml", &workflow("v1"))]);
+        let _c2 = commit_on(remote.path(), "main", &[("wf.yaml", &workflow("v2"))]);
+        let (_d, store) = store(&url, HOUR);
+        let pinned = store.ensure("w", &c1).await.unwrap();
+        assert_eq!(script_of(&pinned), "echo v1");
+    }
+
+    #[tokio::test]
+    async fn ensure_merges_server_libraries() {
+        let (_r, url, c1) = bare_remote(&[("wf.yaml", &workflow("v1"))]);
+        let lib_config: WorkspaceConfig = serde_yaml::from_str(
+            "actions:\n  common.ping:\n    type: script\n    script: echo ping\n",
+        )
+        .unwrap();
+        let libs = HashMap::from([(
+            "common".to_string(),
+            ResolvedLibrary {
+                config: lib_config,
+                path: PathBuf::from("/lib"),
+            },
+        )]);
+        let (_d, store) = store_with(&url, 0, libs);
+        let pinned = store.ensure("w", &c1).await.unwrap();
+        assert!(pinned.config.actions.contains_key("common.ping"));
+        assert!(pinned.config.actions.contains_key("greet"));
+    }
+
+    #[tokio::test]
+    async fn ensure_collects_the_commits_secret_values() {
+        let yaml = format!(
+            "{}secrets:\n  db_pass: pinned-secret-value\n",
+            workflow("v1")
+        );
+        let (_r, url, c1) = bare_remote(&[("wf.yaml", &yaml)]);
+        let (_d, store) = store(&url, HOUR);
+        let pinned = store.ensure("w", &c1).await.unwrap();
+        assert!(pinned
+            .secret_values
+            .contains(&"pinned-secret-value".to_string()));
+        let debug = format!("{pinned:?}");
+        assert!(
+            !debug.contains("pinned-secret-value"),
+            "Debug must not print secrets: {debug}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_unrenderable_connection_is_a_permanent_load_failure() {
+        let yaml = format!(
+            "{}connections:\n  db:\n    host: \"{{{{ secret.nope }}}}\"\n",
+            workflow("v1")
+        );
+        let (_r, url, c1) = bare_remote(&[("wf.yaml", &yaml)]);
+        let (_d, store) = store(&url, HOUR);
+        // The fixture must make the loader's load ITSELF fail — not a
+        // per-file warning, which would load (F33).
+        let tree = store.ensure_tree("w", &c1).await.unwrap();
+        assert!(
+            super::super::folder::load_folder_workspace_with(&tree.dir, &LoadBudget::unbounded())
+                .is_err(),
+            "the folder loader itself must reject this commit"
+        );
+        let err = store.ensure("w", &c1).await.unwrap_err();
+        assert!(matches!(err, PinError::PinLoadFailed { .. }), "{err:?}");
+        assert!(!err.is_transient());
+    }
+
+    /// Transience comes from the loader's typed markers, never from words in
+    /// the message: this error names `vals` and `sops` and is neither.
+    #[tokio::test]
+    async fn ensure_error_text_naming_vals_and_sops_is_still_permanent() {
+        let yaml = format!(
+            "{}connections:\n  db:\n    host: \"{{{{ secret.vals_and_sops }}}}\"\n",
+            workflow("v1")
+        );
+        let (_r, url, c1) = bare_remote(&[("wf.yaml", &yaml)]);
+        let (_d, store) = store(&url, HOUR);
+        let err = store.ensure("w", &c1).await.unwrap_err();
+        assert!(err.to_string().contains("vals_and_sops"), "{err}");
+        assert!(matches!(err, PinError::PinLoadFailed { .. }), "{err:?}");
+    }
+
+    /// A per-file YAML parse error keeps live-load semantics: the file is
+    /// skipped with a warning, the rest loads, and the pin is cached.
+    #[tokio::test]
+    async fn ensure_yaml_parse_warning_loads_the_rest_and_is_cached() {
+        let (_r, url, c1) = bare_remote(&[
+            ("wf.yaml", &workflow("v1")),
+            ("broken.yaml", "actions: [unclosed\n"),
+        ]);
+        let (_d, store) = store(&url, HOUR);
+        let pinned = store.ensure("w", &c1).await.unwrap();
+        assert_eq!(script_of(&pinned), "echo v1");
+        let again = store.ensure("w", &c1).await.unwrap();
+        assert!(Arc::ptr_eq(&pinned, &again));
+        assert_eq!(store.load_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn ensure_failed_sops_file_is_transient_and_not_cached() {
+        let (_r, url, c1) = bare_remote(&[
+            ("wf.yaml", &workflow("v1")),
+            (
+                "creds.sops.yaml",
+                "secrets:\n  k: ENC[AES256_GCM,data:abc]\nsops:\n  version: 3\n",
+            ),
+        ]);
+        let (_d, store) = store(&url, HOUR);
+        let err = store.ensure("w", &c1).await.unwrap_err();
+        assert!(err.is_transient(), "{err:?}");
+        let _ = store.ensure("w", &c1).await;
+        assert_eq!(
+            store.load_count(),
+            2,
+            "a transient failure is retried, not cached"
+        );
+    }
+
+    /// Fails whether or not `vals` is installed: the CLI is missing, or the
+    /// file it is asked to read is.
+    #[tokio::test]
+    async fn ensure_failed_vals_reference_is_transient_and_not_cached() {
+        let yaml = format!(
+            "{}secrets:\n  token: \"{{{{ 'ref+file:///definitely/missing/stroem-pin-test' | vals }}}}\"\n",
+            workflow("v1")
+        );
+        let (_r, url, c1) = bare_remote(&[("wf.yaml", &yaml)]);
+        let (_d, store) = store(&url, HOUR);
+        let err = store.ensure("w", &c1).await.unwrap_err();
+        assert!(err.is_transient(), "{err:?}");
+        let _ = store.ensure("w", &c1).await;
+        assert_eq!(store.load_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn ensure_past_its_deadline_is_transient() {
+        let (_r, url, c1) = bare_remote(&[("wf.yaml", &workflow("v1"))]);
+        let (_d, store) = store_with_settings(
+            &url,
+            ReloadSettings {
+                load_timeout: Duration::ZERO,
+                ..ReloadSettings::default()
+            },
+        );
+        let err = store.ensure("w", &c1).await.unwrap_err();
+        assert!(err.is_transient(), "{err:?}");
+    }
+
+    /// One deadline covers a whole `ensure`: the config phase runs under
+    /// the budget the call started with, never a fresh one of its own.
+    #[tokio::test]
+    async fn the_config_load_runs_under_the_callers_deadline() {
+        let (_r, url, c1) = bare_remote(&[("wf.yaml", &workflow("v1"))]);
+        let (_d, store) = store(&url, HOUR);
+        store.ensure_tree("w", &c1).await.unwrap();
+        let err = store
+            .load_pinned("w", &c1, LoadBudget::until(Instant::now()))
+            .await
+            .unwrap_err();
+        assert!(err.is_transient(), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn a_pin_load_waits_for_a_permit_at_most_until_its_deadline() {
+        let (_r, url, c1) = bare_remote(&[("wf.yaml", &workflow("v1"))]);
+        let (_d, store) = store_with_settings(
+            &url,
+            ReloadSettings {
+                load_timeout: Duration::from_millis(200),
+                ..ReloadSettings::default()
+            },
+        );
+        let _all = store
+            .permits
+            .acquire_many(MAX_CONCURRENT_PIN_LOADS as u32)
+            .await
+            .unwrap();
+        let started = Instant::now();
+        let err = store.ensure("w", &c1).await.unwrap_err();
+        assert!(
+            matches!(&err, PinError::PinUnavailable { message, .. } if message.contains("saturated")),
+            "{err:?}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    #[tokio::test]
+    async fn ensure_is_single_flight_per_commit() {
+        let (_r, url, c1) = bare_remote(&[("wf.yaml", &workflow("v1"))]);
+        let (_d, store) = store(&url, HOUR);
+        let (a, b) = tokio::join!(store.ensure("w", &c1), store.ensure("w", &c1));
+        let (a, b) = (a.unwrap(), b.unwrap());
+        assert!(Arc::ptr_eq(&a, &b));
+        assert_eq!(store.load_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn ensure_unknown_commit_is_commit_not_found() {
+        let (_r, url, _c1) = bare_remote(&[("wf.yaml", &workflow("v1"))]);
+        let (_d, store) = store(&url, HOUR);
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        assert!(matches!(
+            store.ensure("w", sha).await.unwrap_err(),
+            PinError::CommitNotFound { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn evict_honours_the_keep_set_held_handles_and_recent_pins() {
+        let (remote, url, c1) = bare_remote(&[("wf.yaml", &workflow("v1"))]);
+        let c2 = commit_on(remote.path(), "main", &[("wf.yaml", &workflow("v2"))]);
+        let c3 = commit_on(remote.path(), "main", &[("wf.yaml", &workflow("v3"))]);
+        let (d, store) = store_with(&url, 1, HashMap::new());
+        drop(store.ensure("w", &c1).await.unwrap());
+        let held = store.ensure("w", &c2).await.unwrap();
+        drop(store.ensure("w", &c3).await.unwrap()); // most recently used
+
+        let keep = HashSet::from([("w".to_string(), c1.clone())]);
+        store.evict(&keep);
+        let mut expected = vec![c1.clone(), c2.clone(), c3.clone()];
+        expected.sort();
+        assert_eq!(
+            store.cached_commits("w"),
+            expected,
+            "keep-set, held handle, recent"
+        );
+
+        drop(held);
+        store.evict(&HashSet::new());
+        assert_eq!(
+            store.cached_commits("w"),
+            vec![c3.clone()],
+            "only the recent pin survives"
+        );
+        assert!(
+            !d.path().join("pins/w/trees").join(&c2).exists(),
+            "evicted checkout deleted"
+        );
+        assert!(d.path().join("pins/w/trees").join(&c3).exists());
+        assert!(
+            tmp_entries(&d).is_empty(),
+            "renamed-for-deletion dirs are gone"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_evicted_pin_is_checked_out_again_on_demand() {
+        let (_r, url, c1) = bare_remote(&[("wf.yaml", &workflow("v1"))]);
+        let (_d, store) = store_with(&url, 0, HashMap::new());
+        drop(store.ensure("w", &c1).await.unwrap());
+        store.evict(&HashSet::new());
+        assert!(store.cached_commits("w").is_empty());
+        let pinned = store.ensure("w", &c1).await.unwrap();
+        assert!(pinned.dir.join("wf.yaml").is_file());
+        assert_eq!(store.load_count(), 2);
+    }
+
+    /// Leases (spec § 5.3): a checkout a caller holds is never deleted; once
+    /// released it is evicted, and a later request checks it out afresh.
+    #[tokio::test]
+    async fn evict_never_deletes_a_checkout_a_caller_holds() {
+        let (_r, url, c1) = bare_remote(&[("wf.yaml", &workflow("v1"))]);
+        let (d, store) = store(&url, HOUR);
+        let tree = store.ensure_tree("w", &c1).await.unwrap();
+        store.evict(&HashSet::new());
+        assert!(
+            tree.dir.join("wf.yaml").is_file(),
+            "a held checkout survives eviction"
+        );
+        let dir = tree.dir.clone();
+        drop(tree);
+        store.evict(&HashSet::new());
+        assert!(!dir.exists(), "a released checkout is evicted");
+        let again = store.ensure_tree("w", &c1).await.unwrap();
+        assert_eq!(again.dir, dir);
+        assert!(again.dir.join("wf.yaml").is_file(), "checked out afresh");
+        assert!(tmp_entries(&d).is_empty());
+    }
+
+    /// F22: once the cell is initialised, a single-flight waiter may hold the
+    /// cell without a clone of the value yet. That is a lease too.
+    #[test]
+    fn a_slot_is_in_use_while_anyone_holds_its_cell_or_its_value() {
+        let slot: Slot<u8> = Slot::new();
+        assert!(!slot.in_use());
+        let waiter = Arc::clone(&slot.cell);
+        assert!(slot.in_use(), "an initialisation in flight");
+        slot.cell.set(Arc::new(1)).unwrap();
+        assert!(
+            slot.in_use(),
+            "initialised, and a waiter still holds the cell"
+        );
+        drop(waiter);
+        assert!(!slot.in_use());
+        let value = Arc::clone(slot.cell.get().unwrap());
+        assert!(slot.in_use(), "a caller holds the value");
+        drop(value);
+        assert!(!slot.in_use());
+    }
+
+    /// F34: a failed load is never "recently used". Here it is the most
+    /// recent entry, and with `keep_recent = 1` it must not displace c1.
+    #[tokio::test]
+    async fn failed_loads_do_not_count_toward_keep_recent() {
+        let (_r, url, c1) = bare_remote(&[("wf.yaml", &workflow("v1"))]);
+        let (d, store) = store_with(&url, 1, HashMap::new());
+        drop(store.ensure("w", &c1).await.unwrap());
+        let missing = "0123456789abcdef0123456789abcdef01234567";
+        assert!(store.ensure("w", missing).await.is_err());
+        store.evict(&HashSet::new());
+        assert_eq!(store.cached_commits("w"), vec![c1.clone()]);
+        assert!(d.path().join("pins/w/trees").join(&c1).exists());
+        assert_eq!(
+            store.configs.lock().unwrap().len(),
+            1,
+            "failed slot dropped"
+        );
+        assert_eq!(store.trees.lock().unwrap().len(), 1, "failed slot dropped");
+    }
+
+    #[tokio::test]
+    async fn cached_counts_reports_loaded_configs_per_workspace() {
+        let (_r, url, c1) = bare_remote(&[("wf.yaml", &workflow("v1"))]);
+        let (_d, store) = store(&url, HOUR);
+        assert!(store.cached_counts().is_empty());
+        let _p = store.ensure("w", &c1).await.unwrap();
+        assert_eq!(store.cached_counts(), vec![("w".to_string(), 1)]);
+    }
+
+    /// Awaited from axum handlers and the claim path, which need `Send`.
+    #[test]
+    fn ensure_futures_are_send() {
+        fn assert_send<T: Send>(_: &T) {}
+        let store = PinStore::disabled();
+        assert_send(&store.ensure("w", "x"));
+        assert_send(&store.ensure_tree("w", "x"));
     }
 }

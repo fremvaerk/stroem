@@ -51,6 +51,13 @@ pub const STROEM_WORKSPACE_LOAD_PERMITS_AVAILABLE: &str = "stroem_workspace_load
 /// rendering (seconds). Label: entry (`claim`, `advance`, `init`).
 pub const STROEM_SNAPSHOT_RESOLVE_SECONDS: &str = "stroem_snapshot_resolve_seconds";
 
+/// `counter` — pinned-config loads (cache misses of `PinStore::ensure`).
+/// Labels: workspace, result (`ok`, `not_git`, `ref_not_found`,
+/// `commit_not_found`, `load_failed`, `unavailable`).
+pub const STROEM_PIN_LOADS_TOTAL: &str = "stroem_pin_loads_total";
+/// `gauge` — pinned configs held in memory on THIS replica. Label: workspace.
+pub const STROEM_PINS_CACHED: &str = "stroem_pins_cached";
+
 use anyhow::{Context, Result};
 use axum::extract::{MatchedPath, Request};
 use axum::middleware::Next;
@@ -288,6 +295,8 @@ mod tests {
             STROEM_WORKSPACE_LAST_SUCCESSFUL_LOAD_AGE_SECONDS,
             STROEM_WORKSPACE_LOAD_OVERDUE,
             STROEM_WORKSPACE_LOAD_PERMITS_AVAILABLE,
+            STROEM_PIN_LOADS_TOTAL,
+            STROEM_PINS_CACHED,
         ];
         let unique: std::collections::HashSet<_> = names.iter().collect();
         assert_eq!(unique.len(), names.len(), "metric names must be unique");
