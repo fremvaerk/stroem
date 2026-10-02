@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
-use stroem_common::depends_on::DependsOnEntry;
+use stroem_common::depends_on::{AcceptSet, DependsOnEntry, Outcome, StepEntry};
 use stroem_common::models::workflow::{
     ActionDef, AgentToolRef, ConnectionDef, ConnectionPropertyDef, ConnectionTypeDef, FlowStep,
     HookDef, InputFieldDef, TaskDef, TriggerDef, WorkspaceConfig,
@@ -40,6 +40,21 @@ use uuid::Uuid;
 const ALL: u64 = 16 * 1024 * 1024;
 
 // ─── Test helpers ───────────────────────────────────────────────────────
+
+/// A `depends_on` entry on `step` accepting `Completed` plus `extra`
+/// outcomes. The new-model replacement for a dependency's own
+/// `continue_on_failure`/`continue_when_skipped` flag broadcasting
+/// tolerance to every dependent alike (both retired as producer-side
+/// broadcasts, spec 2026-10-01 §2/§6/§9) — the tolerance now lives on the
+/// DEPENDENT's edge to that specific step instead.
+fn accept(step: &str, extra: &[Outcome]) -> DependsOnEntry {
+    let mut outcomes = vec![Outcome::Completed];
+    outcomes.extend_from_slice(extra);
+    DependsOnEntry::Step(StepEntry {
+        step: step.to_string(),
+        accept: AcceptSet::Outcomes(outcomes),
+    })
+}
 
 /// Pool-only stand-in for the orchestrator call: a minimal workspace holding
 /// just this task, since the cascade requires a config for rendering.
@@ -10549,7 +10564,7 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
                 action: "greet".to_string(),
                 name: None,
                 description: None,
-                depends_on: vec![DependsOnEntry::Name("step1".to_string())],
+                depends_on: vec![accept("step1", &[Outcome::Failed])],
                 input: HashMap::new(),
                 continue_on_failure: false,
                 legacy_continue_when_skipped: None,
@@ -10652,8 +10667,8 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
     JobStepRepo::mark_failed(&pool, job_id, "step1", "Command failed").await?;
     after_step(&pool, job_id, &task).await?;
 
-    // step2 should be promoted to ready (step1's own continue_on_failure
-    // catches step1's failure)
+    // step2 should be promoted to ready: its own edge to step1 accepts
+    // step1's failure.
     let mid_steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
     let step2 = mid_steps.iter().find(|s| s.step_name == "step2").unwrap();
     assert_eq!(step2.status, "ready");
@@ -25726,8 +25741,9 @@ async fn test_step_retry_claim_respects_retry_at() -> Result<()> {
 }
 
 /// Test 4: a downstream step is only promoted after the retried upstream
-/// step reaches a terminal state; the upstream step's own
-/// `continue_on_failure` then catches its exhausted-retry failure.
+/// step reaches a terminal state; the downstream step's own edge to it
+/// (`accept: [completed, failed]`) then accepts its exhausted-retry
+/// failure.
 #[tokio::test]
 async fn test_step_retry_with_continue_on_failure() -> Result<()> {
     use stroem_common::duration::HumanDuration;
@@ -25845,7 +25861,7 @@ async fn test_step_retry_with_continue_on_failure() -> Result<()> {
             action: "noop".to_string(),
             name: None,
             description: None,
-            depends_on: vec![DependsOnEntry::Name("step-a".to_string())],
+            depends_on: vec![accept("step-a", &[Outcome::Failed])],
             input: HashMap::new(),
             continue_on_failure: false,
             legacy_continue_when_skipped: None,
@@ -25944,7 +25960,7 @@ async fn test_step_retry_with_continue_on_failure() -> Result<()> {
         .await?;
 
     // step-a is now permanently failed; step-b should be promoted to ready
-    // because step-a's own continue_on_failure catches step-a's failure.
+    // because its own edge to step-a accepts a failure.
     let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
     let step_a = steps.iter().find(|s| s.step_name == "step-a").unwrap();
     assert_eq!(
@@ -25954,7 +25970,7 @@ async fn test_step_retry_with_continue_on_failure() -> Result<()> {
     let step_b = steps.iter().find(|s| s.step_name == "step-b").unwrap();
     assert_eq!(
         step_b.status, "ready",
-        "step-b should be promoted to ready: step-a's own continue_on_failure catches it"
+        "step-b should be promoted to ready: its own edge to step-a accepts a failure"
     );
 
     Ok(())
@@ -31397,14 +31413,19 @@ async fn test_task_dispatch_failure_path_evaluates_when_against_task_state() -> 
     seed_task_state_for(&pool, "other-task", json!({"after": false})).await?;
 
     // `spawn` is a type: task step naming a task that does not exist, so its
-    // dispatch fails and `fail_task_step` re-cascades. `spawn`'s own
-    // `continue_on_failure` catches that failure, so `after` runs and its
-    // `when:` is evaluated by THAT cascade.
+    // dispatch fails and `fail_task_step` re-cascades. `spawn` carries its
+    // own `continue_on_failure` so its failure doesn't fail the job
+    // (self-scoped, spec 2026-10-01 §6), and `after`'s own edge to `spawn`
+    // accepts a failure, so `after` runs and its `when:` is evaluated by
+    // THAT cascade.
     let task = task_with_flow(vec![
         ("spawn", guarded_flow_step(&[], None, true)),
         (
             "after",
-            guarded_flow_step(&["spawn"], Some("{{ state.after }}"), false),
+            FlowStep {
+                depends_on: vec![accept("spawn", &[Outcome::Failed])],
+                ..guarded_flow_step(&[], Some("{{ state.after }}"), false)
+            },
         ),
     ]);
     let mut ws = test_workspace();
@@ -31778,7 +31799,20 @@ async fn test_ws_backfill_is_a_tail() -> Result<()> {
 
 // ─── Dependency gate: full settlement (spec 2026-09-26 §12.3) ───────────
 
-fn gate_workspace(extra_flow: &str, max_attempts: u32) -> WorkspaceConfig {
+/// `pred_cof`: whether `pred` itself carries `continue_on_failure`. Spec
+/// 2026-10-01 §6/§9: job status now reads ONLY a failed row's own flag — the
+/// old structural "caught somewhere downstream via an unrelated dependent's
+/// flag" walk is retired (`settlement/settle.rs::decide`) — so whether
+/// `pred`'s failure counts against the job is controlled here, not by
+/// `imp`'s flag. `imp` carries no flag of its own: it is always SKIPPED
+/// (never FAILED) in every scenario this workspace models, and only a
+/// failed row's own flag is ever consulted for job status.
+fn gate_workspace(extra_flow: &str, max_attempts: u32, pred_cof: bool) -> WorkspaceConfig {
+    let pred_flow = if pred_cof {
+        "pred: { action: ok, continue_on_failure: true }"
+    } else {
+        "pred: { action: ok }"
+    };
     let yaml = format!(
         r#"
 actions:
@@ -31793,9 +31827,9 @@ tasks:
     on_error: [{{ action: hook-err, input: {{ tolerated: "{{{{ hook.failed_steps | map(attribute='tolerated') | join(sep=',') }}}}" }} }}]
     on_cancel: [{{ action: hook-cancel }}]
     flow:
-      pred: {{ action: ok }}
-      imp: {{ action: ok, depends_on: [pred], continue_on_failure: true }}
-      merge: {{ action: ok, depends_on: [imp] }}
+      {pred_flow}
+      imp: {{ action: ok, depends_on: [pred] }}
+      merge: {{ action: ok, depends_on: [{{ step: imp, accept: [completed, omitted] }}] }}
 {extra_flow}
 "#
     );
@@ -31839,8 +31873,10 @@ async fn complete_step(
 
 #[tokio::test]
 async fn test_gate_caught_failure_completes_fires_on_success_no_retry() -> Result<()> {
-    // Replay of prod job 9691df79 (spec §3.1).
-    let ws = gate_workspace("", 2);
+    // Replay of prod job 9691df79 (spec §3.1). `pred` carries its own
+    // continue_on_failure so its failure doesn't count against the job
+    // (spec 2026-10-01 §6/§9 — only the failing row's own flag decides).
+    let ws = gate_workspace("", 2, true);
     let (state, pool, _tmp, _c) = setup_state_with_workspace(ws.clone()).await?;
     let job_id = create_job_for_task(
         &pool,
@@ -31900,7 +31936,11 @@ async fn test_gate_caught_failure_completes_fires_on_success_no_retry() -> Resul
 
 #[tokio::test]
 async fn test_gate_escaping_failure_with_retry_budget_retries_without_hook() -> Result<()> {
-    let ws = gate_workspace("      side: { action: ok, depends_on: [pred] }", 2);
+    // `pred` carries no continue_on_failure of its own, so its failure is
+    // uncaught regardless of `side`/`imp` (spec 2026-10-01 §6/§9 retires the
+    // old "every downstream path must catch it" structural walk — only
+    // pred's own flag is ever consulted now).
+    let ws = gate_workspace("      side: { action: ok, depends_on: [pred] }", 2, false);
     let (state, pool, _tmp, _c) = setup_state_with_workspace(ws.clone()).await?;
     let job_id = create_job_for_task(
         &pool,
@@ -31922,7 +31962,7 @@ async fn test_gate_escaping_failure_with_retry_budget_retries_without_hook() -> 
     complete_step(&state, &pool, job_id, "merge", w).await?;
 
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
-    assert_eq!(job.status, "failed", "escaped through `side`");
+    assert_eq!(job.status, "failed", "pred's own failure is uncaught");
     assert!(job.retry_job_id.is_some(), "retry job created");
     assert!(
         hook_actions(&pool).await.is_empty(),
@@ -31933,7 +31973,7 @@ async fn test_gate_escaping_failure_with_retry_budget_retries_without_hook() -> 
 
 #[tokio::test]
 async fn test_gate_escaping_failure_without_retry_budget_fires_on_error() -> Result<()> {
-    let ws = gate_workspace("      side: { action: ok, depends_on: [pred] }", 1);
+    let ws = gate_workspace("      side: { action: ok, depends_on: [pred] }", 1, false);
     let (state, pool, _tmp, _c) = setup_state_with_workspace(ws.clone()).await?;
     let job_id = create_job_for_task(
         &pool,
@@ -31975,12 +32015,14 @@ async fn test_gate_escaping_failure_without_retry_budget_fires_on_error() -> Res
 
 #[tokio::test]
 async fn test_gate_on_error_payload_marks_caught_and_uncaught_failures() -> Result<()> {
-    // Two independent failures: `pred` is caught downstream by `imp`'s
-    // continue_on_failure (chain reaches `merge`, unaffected); `pred2` is an
-    // independent leaf with no dependents and no flag, so it fails the job
-    // uncaught. on_error's failed_steps must report tolerated: true for the
-    // first and tolerated: false for the second.
-    let ws = gate_workspace("      pred2: { action: ok }", 1);
+    // Two independent failures: `pred` carries its own continue_on_failure,
+    // so its failure is caught (chain reaches `merge`, unaffected); `pred2`
+    // is an independent leaf with no flag of its own, so it fails the job
+    // uncaught (spec 2026-10-01 §6/§9 — only a failed row's own flag is
+    // ever consulted, never a downstream dependent's). on_error's
+    // failed_steps must report tolerated: true for the first and
+    // tolerated: false for the second.
+    let ws = gate_workspace("      pred2: { action: ok }", 1, true);
     let (state, pool, _tmp, _c) = setup_state_with_workspace(ws.clone()).await?;
     let job_id = create_job_for_task(
         &pool,
@@ -32034,8 +32076,9 @@ async fn test_gate_on_error_payload_marks_caught_and_uncaught_failures() -> Resu
 async fn test_gate_cancelled_step_keeps_job_cancelled() -> Result<()> {
     // Codex round-1 high finding: a cancelled step (e.g. a cancelled child
     // job under a `type: task` step) skips its dependents as `unreachable`,
-    // but the job ends `cancelled` — on_cancel, no retry.
-    let ws = gate_workspace("", 2);
+    // but the job ends `cancelled` — on_cancel, no retry. `pred`'s own
+    // continue_on_failure is irrelevant here (it's cancelled, not failed).
+    let ws = gate_workspace("", 2, false);
     let (state, pool, _tmp, _c) = setup_state_with_workspace(ws.clone()).await?;
     let job_id = create_job_for_task(
         &pool,
@@ -32058,8 +32101,9 @@ async fn test_gate_cancelled_step_keeps_job_cancelled() -> Result<()> {
     JobStepRepo::mark_running(&pool, job_id, "pred", w).await?;
     JobStepRepo::mark_cancelled(&pool, job_id, "pred").await?;
     state.settlement().advance(job_id).await?;
-    // `imp` (cof) is skipped `unreachable` by `pred`'s cancellation but its
-    // own flag lets `merge` treat it as satisfied; finish `merge`.
+    // `imp` is skipped `unreachable` by `pred`'s cancellation; `merge`'s own
+    // edge to `imp` accepts `omitted`, so it's force-completed below
+    // regardless (this test doesn't exercise merge's natural promotion).
     let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
     let imp = steps.iter().find(|s| s.step_name == "imp").unwrap();
     assert_eq!(
@@ -32083,9 +32127,9 @@ actions:
 tasks:
   pipe:
     flow:
-      gate: { action: gate-action }
-      after: { action: ok, depends_on: [gate], continue_on_failure: true }
-      last: { action: ok, depends_on: [after] }
+      gate: { action: gate-action, continue_on_failure: true }
+      after: { action: ok, depends_on: [gate] }
+      last: { action: ok, depends_on: [{ step: after, accept: [completed, omitted] }] }
 "#;
     serde_yaml::from_str(yaml).expect("approval gate workspace yaml")
 }
@@ -32121,15 +32165,16 @@ async fn test_gate_approval_reject_caught_downstream_completes() -> Result<()> {
         .await?;
     assert_eq!(resp.status(), StatusCode::OK);
 
-    // `after` carries `continue_on_failure`, but §2.1: a step's own flag
-    // never lets IT run past a dependency without the flag — `gate` has none.
+    // `after`'s own edge to `gate` is the plain default — `gate` being
+    // rejected (failed) is not accepted, so `after` is omitted.
     let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
     let after = steps.iter().find(|s| s.step_name == "after").unwrap();
     assert_eq!(
         (after.status.as_str(), after.skip_reason.as_deref()),
         ("skipped", Some("unreachable"))
     );
-    // `last` treats `after` as satisfied because `after` itself carries the flag.
+    // `last`'s own edge to `after` accepts `omitted`, so it runs despite
+    // `after` being blocked.
     let last = steps.iter().find(|s| s.step_name == "last").unwrap();
     assert_eq!(last.status, "ready");
 
@@ -32143,6 +32188,9 @@ async fn test_gate_approval_reject_caught_downstream_completes() -> Result<()> {
         .await?;
     assert_eq!(resp.status(), StatusCode::OK);
 
+    // `gate`'s own continue_on_failure excuses its rejection from job status
+    // (spec 2026-10-01 §6) — unrelated to `after`/`last` both running via
+    // their own accept edges, which is a completely orthogonal concern now.
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
     assert_eq!(job.status, "completed");
     Ok(())
@@ -32155,9 +32203,9 @@ actions:
 tasks:
   pipe:
     flow:
-      pred: { action: ok, retry: { max_attempts: 2 } }
-      imp: { action: ok, depends_on: [pred], continue_on_failure: true }
-      merge: { action: ok, depends_on: [imp] }
+      pred: { action: ok, retry: { max_attempts: 2 }, continue_on_failure: true }
+      imp: { action: ok, depends_on: [pred] }
+      merge: { action: ok, depends_on: [{ step: imp, accept: [completed, omitted] }] }
 "#;
     serde_yaml::from_str(yaml).expect("step retry gate workspace yaml")
 }
@@ -32246,14 +32294,37 @@ tasks:
   pipe:
     flow:
       loop: { action: ok, for_each: [1, 2], sequential: true }
-      c: { action: ok, depends_on: [loop], continue_on_failure: true }
-      d: { action: ok, depends_on: [c] }
+      c: { action: ok, depends_on: [loop] }
+      d: { action: ok, depends_on: [{ step: c, accept: [completed, omitted] }] }
 "#;
     serde_yaml::from_str(yaml).expect("sequential loop gate workspace yaml")
 }
 
+/// Originally named `..._caught_downstream_completes` and built around the
+/// OLD structural-catch mechanism: `c`'s own `continue_on_failure` used to
+/// let the JOB complete despite the loop's failure, while the LOOP's own
+/// lack of `continue_on_failure` still correctly stopped the sequential
+/// loop at the first failure (`cascade.rs::phase_rollup`'s R5 reads the
+/// placeholder's own `continue_on_failure` to decide whether to skip
+/// remaining pending instances). Spec 2026-10-01 §6/§9 retires that
+/// structural catch — job status now reads ONLY the failed row's own flag
+/// (`settlement/settle.rs::decide`) — and there is no longer any way to
+/// decouple "the loop stops after an untolerated instance failure" from
+/// "the loop's failure doesn't count against the job": both questions read
+/// the SAME `loop.continue_on_failure` flag, and setting it to stop the
+/// accounting failure would ALSO disable the sequential-stop behavior this
+/// test wants to pin (verified directly against `phase_rollup`'s `any_bad
+/// && !cof` branch — not a guess). So this test now pins the new, more
+/// surprising invariant instead: an untolerated failure anywhere
+/// UNCONDITIONALLY fails the job (spec §6's "no amount of downstream
+/// accept/cof tuning substitutes for the origin's own flag"), even while
+/// `c`'s and `d`'s own `depends_on` edges let them run to completion
+/// completely independent of that job-level outcome — the two concerns are
+/// now orthogonal, not entangled the way the old structural catch made
+/// them.
 #[tokio::test]
-async fn test_gate_failed_sequential_loop_caught_downstream_completes() -> Result<()> {
+async fn test_gate_failed_sequential_loop_untolerated_fails_job_despite_downstream_accept(
+) -> Result<()> {
     let ws = sequential_loop_gate_workspace();
     let (state, pool, _tmp, _c) = setup_state_with_workspace(ws.clone()).await?;
     let job_id = create_job_for_task(
@@ -32294,13 +32365,16 @@ async fn test_gate_failed_sequential_loop_caught_downstream_completes() -> Resul
     let d = steps.iter().find(|s| s.step_name == "d").unwrap();
     assert_eq!(
         d.status, "ready",
-        "d treats `c` as satisfied because `c` itself carries continue_on_failure"
+        "d's own edge to c accepts c's omitted outcome"
     );
 
     complete_step(&state, &pool, job_id, "d", w).await?;
 
+    // The loop's own failure is untolerated (no continue_on_failure of its
+    // own) — the job fails UNCONDITIONALLY, regardless of c and d both
+    // running to completion via their own accept edges.
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
-    assert_eq!(job.status, "completed");
+    assert_eq!(job.status, "failed");
     Ok(())
 }
 

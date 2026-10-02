@@ -476,12 +476,17 @@ async fn list_hook_artifacts(
 /// Pure: one `FailedStepInfo` per failed row, both flags read directly from
 /// the failed row's own flow step (spec 2026-10-01 §6 — self-scoped only, no
 /// downstream propagation). A loop instance is judged by its placeholder
-/// (`flow_step_name`). Split out from `build_hook_context` so this can be
-/// unit-tested without a DB pool.
+/// (`flow_step_name`) — and a failed loop instance's OWN row is excluded
+/// here, since its failure is already represented by the placeholder's
+/// single rolled-up `Failed` row (`cascade.rs::phase_rollup`'s R6); counting
+/// both would double-report the same underlying failure (e.g. `["true",
+/// "true"]` for one actual failure instead of `["true"]`). Split out from
+/// `build_hook_context` so this can be unit-tested without a DB pool.
 fn build_failed_steps(task: &TaskDef, steps: &[JobStepRow]) -> Vec<FailedStepInfo> {
     steps
         .iter()
         .filter(|s| s.status == StepStatus::Failed.as_ref())
+        .filter(|s| s.loop_source.is_none())
         .map(|s| {
             let flow_name =
                 stroem_common::gate::flow_step_name(&s.step_name, s.loop_source.as_deref());
@@ -835,6 +840,21 @@ mod tests {
         let a_entry = failed_steps.iter().find(|f| f.step_name == "a").unwrap();
         assert!(!a_entry.tolerated);
         assert!(!a_entry.continue_on_failure);
+    }
+
+    #[test]
+    fn a_failed_loop_instance_is_not_double_counted_with_its_rolled_up_placeholder() {
+        // A for_each placeholder's failure rolls up onto its own row
+        // (cascade.rs::phase_rollup R6) while the failed INSTANCE row also
+        // stays `failed` in the DB — build_failed_steps must report the
+        // placeholder once, not the instance a second time.
+        let task = task_with_flow(vec![("loop", flow_step(&[], true))]);
+        let mut instance = step_row("loop[0]", "failed");
+        instance.loop_source = Some("loop".to_string());
+        let placeholder = step_row("loop", "failed");
+        let failed_steps = build_failed_steps(&task, &[instance, placeholder]);
+        assert_eq!(failed_steps.len(), 1);
+        assert_eq!(failed_steps[0].step_name, "loop");
     }
 
     #[test]
