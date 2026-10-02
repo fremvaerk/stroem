@@ -14,7 +14,6 @@ use http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use sqlx::PgPool;
-#[allow(unused_imports)] // the job ACL tests (Task 18)
 use stroem_server::config::{AclAction, AclConfig, AclRule};
 use stroem_server::state::AppState;
 use stroem_server::workspace::pins::PinError;
@@ -1259,6 +1258,495 @@ async fn sync_webhook_fails_closed_with_job_id() -> Result<()> {
         assert_eq!(body["job_id"], json!(job_id.to_string()));
         assert_eq!(body["error"], json!(RP_REDACTION_UNAVAILABLE));
         assert!(!body.to_string().contains(SECRET_23));
+        Ok(())
+    })
+    .await
+}
+
+// ── Task 18: job ACL ───────────────────────────────────────────────────
+
+const VIEWER: &str = "viewer@test.com";
+const RUNNER: &str = "runner@test.com";
+const ADMIN: &str = "admin@test.com";
+/// A task that exists only on a release: absent from the live config.
+const RP_RELEASE_ONLY_TASK: &str = "hotfix";
+/// The REST denial of a job-scoped path (`AppError::not_found("Job")`).
+const RP_JOB_NOT_FOUND: &str = "Job not found";
+
+/// `viewers` may View, and RUNNER may Run, `etl` tasks in folder `public`.
+/// Everything else is denied.
+fn rp_acl_opts() -> PinnedFixtureOpts {
+    let mut o = rp_opts();
+    o.mcp = true;
+    o.acl = Some(AclConfig {
+        default: AclAction::Deny,
+        rules: vec![
+            AclRule {
+                workspace: "etl".to_string(),
+                tasks: vec!["public/*".to_string()],
+                action: AclAction::View,
+                groups: vec!["viewers".to_string()],
+                users: vec![],
+            },
+            AclRule {
+                workspace: "etl".to_string(),
+                tasks: vec!["public/*".to_string()],
+                action: AclAction::Run,
+                groups: vec![],
+                users: vec![RUNNER.to_string()],
+            },
+        ],
+    });
+    o.users = vec![
+        FixtureUser {
+            email: VIEWER,
+            groups: vec!["viewers"],
+            admin: false,
+        },
+        FixtureUser {
+            email: RUNNER,
+            groups: vec![],
+            admin: false,
+        },
+        FixtureUser {
+            email: ADMIN,
+            groups: vec![],
+            admin: true,
+        },
+    ];
+    o
+}
+
+struct RpAclJobs {
+    /// Unpinned; the live `nightly` is in folder `public` → allowed.
+    live: Uuid,
+    /// release/2.4, `task_folder` `public` → allowed.
+    pin24: Uuid,
+    /// release/2.3, `task_folder` `restricted` → denied, although its live
+    /// namesake sits in the allowed folder `public`.
+    pin23: Uuid,
+    /// A release-only task (absent live), `task_folder` `public` → allowed.
+    rel_public: Uuid,
+    /// The same release-only task, `task_folder` `restricted` → denied.
+    rel_restricted: Uuid,
+}
+
+impl RpAclJobs {
+    fn allowed(&self) -> [Uuid; 3] {
+        [self.live, self.pin24, self.rel_public]
+    }
+
+    fn denied(&self) -> [Uuid; 2] {
+        [self.pin23, self.rel_restricted]
+    }
+}
+
+/// Five completed jobs, each with one completed `run` step on `worker`. The
+/// two denied jobs are the most recent, so a LIMIT-before-filter bug lets
+/// them fill the first page.
+async fn rp_seed_acl_jobs(fx: &PinnedFixture, worker: Uuid) -> RpAclJobs {
+    let c24 = rp_release_24(fx);
+    let c23 = fx.commits.etl_release.clone();
+    let live = rp_seed_job(
+        &fx.pool,
+        RpJob {
+            age_secs: 180.0,
+            ..Default::default()
+        },
+    )
+    .await;
+    let pin24 = rp_seed_job(
+        &fx.pool,
+        RpJob {
+            git_ref: Some("release/2.4"),
+            revision: Some(c24),
+            task_folder: Some("public"),
+            age_secs: 120.0,
+            ..Default::default()
+        },
+    )
+    .await;
+    let rel_public = rp_seed_job(
+        &fx.pool,
+        RpJob {
+            task: RP_RELEASE_ONLY_TASK,
+            git_ref: Some("release/2.3"),
+            revision: Some(c23.clone()),
+            task_folder: Some("public"),
+            age_secs: 90.0,
+            ..Default::default()
+        },
+    )
+    .await;
+    let pin23 = rp_seed_job(
+        &fx.pool,
+        RpJob {
+            git_ref: Some("release/2.3"),
+            revision: Some(c23.clone()),
+            task_folder: Some("restricted"),
+            age_secs: 60.0,
+            ..Default::default()
+        },
+    )
+    .await;
+    let rel_restricted = rp_seed_job(
+        &fx.pool,
+        RpJob {
+            task: RP_RELEASE_ONLY_TASK,
+            git_ref: Some("release/2.3"),
+            revision: Some(c23),
+            task_folder: Some("restricted"),
+            age_secs: 30.0,
+            ..Default::default()
+        },
+    )
+    .await;
+    for id in [live, pin24, rel_public, pin23, rel_restricted] {
+        rp_seed_step(
+            &fx.pool,
+            id,
+            RpStep {
+                step: "run",
+                action_type: "script",
+                status: "completed",
+                output: None,
+                error: None,
+                worker_id: Some(worker),
+            },
+        )
+        .await;
+    }
+    RpAclJobs {
+        live,
+        pin24,
+        pin23,
+        rel_public,
+        rel_restricted,
+    }
+}
+
+/// The `job_id`s of a REST job list body.
+fn rp_list_ids(body: &Value) -> Vec<String> {
+    body["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no items in {body}"))
+        .iter()
+        .map(|j| j["job_id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// The job-scoped REST requests of one job: `(method, uri, body)`.
+fn rp_job_paths(id: Uuid) -> Vec<(&'static str, String, Option<Value>)> {
+    vec![
+        ("GET", format!("/api/jobs/{id}"), None),
+        ("GET", format!("/api/jobs/{id}/logs"), None),
+        ("GET", format!("/api/jobs/{id}/steps/run/logs"), None),
+        ("GET", format!("/api/jobs/{id}/artifacts"), None),
+        ("GET", format!("/api/jobs/{id}/artifacts/out.txt"), None),
+        ("POST", format!("/api/jobs/{id}/cancel"), None),
+        (
+            "POST",
+            format!("/api/jobs/{id}/restart"),
+            Some(json!({"from_step": "run", "dry_run": true})),
+        ),
+        (
+            "POST",
+            format!("/api/jobs/{id}/steps/run/approve"),
+            Some(json!({"approved": true})),
+        ),
+    ]
+}
+
+#[tokio::test]
+async fn pinned_job_in_denied_folder_is_denied_on_every_rest_path() -> Result<()> {
+    rp_bounded(async {
+        let fx = pinned_workspace_fixture(rp_acl_opts()).await?;
+        let worker = rp_worker(&fx).await;
+        let jobs = rp_seed_acl_jobs(&fx, worker).await;
+        let viewer = fx.login(VIEWER).await;
+        let t = Some(viewer.as_str());
+
+        // Every job-scoped path denies both denied jobs, as an unknown job.
+        for id in jobs.denied() {
+            for (method, uri, body) in rp_job_paths(id) {
+                let (s, b) = api_req(&fx.router, method, &uri, t, body).await;
+                assert_eq!(
+                    s,
+                    StatusCode::NOT_FOUND,
+                    "{method} {uri} must be denied: {b}"
+                );
+                assert_eq!(b["error"], json!(RP_JOB_NOT_FOUND), "{method} {uri}: {b}");
+            }
+        }
+
+        // The allowed jobs: readable, and the mutating paths answer View-only
+        // (403), proving the ACL saw `View` rather than `Deny`.
+        for id in jobs.allowed() {
+            let (s, b) = api_req(&fx.router, "GET", &format!("/api/jobs/{id}"), t, None).await;
+            assert_eq!(s, StatusCode::OK, "{id}: {b}");
+            let (s, b) = api_req(
+                &fx.router,
+                "GET",
+                &format!("/api/jobs/{id}/artifacts"),
+                t,
+                None,
+            )
+            .await;
+            assert_eq!(s, StatusCode::OK, "{id}: {b}");
+            for (method, uri, body) in rp_job_paths(id).into_iter().filter(|p| p.0 == "POST") {
+                let (s, b) = api_req(&fx.router, method, &uri, t, body).await;
+                assert_eq!(s, StatusCode::FORBIDDEN, "{method} {uri}: {b}");
+            }
+        }
+
+        // Lists, counts and dashboard stats agree, release-only task included.
+        let (s, b) = api_req(&fx.router, "GET", "/api/jobs", t, None).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        let ids = rp_list_ids(&b);
+        for id in jobs.allowed() {
+            assert!(ids.contains(&id.to_string()), "{id} missing: {b}");
+        }
+        for id in jobs.denied() {
+            assert!(!ids.contains(&id.to_string()), "{id} leaked: {b}");
+        }
+        assert_eq!(b["total"], json!(3), "{b}");
+        let (_, b) = api_req(&fx.router, "GET", "/api/jobs?limit=1", t, None).await;
+        assert_eq!(rp_list_ids(&b), vec![jobs.rel_public.to_string()], "{b}");
+        assert_eq!(b["total"], json!(3), "{b}");
+        let (_, b) = api_req(&fx.router, "GET", "/api/jobs?workspace=etl", t, None).await;
+        assert_eq!(b["total"], json!(3), "{b}");
+        let (_, b) = api_req(
+            &fx.router,
+            "GET",
+            "/api/jobs?workspace=etl&task_name=nightly",
+            t,
+            None,
+        )
+        .await;
+        assert_eq!(b["total"], json!(2), "{b}");
+        let (_, b) = api_req(
+            &fx.router,
+            "GET",
+            &format!("/api/jobs?workspace=etl&task_name={RP_RELEASE_ONLY_TASK}"),
+            t,
+            None,
+        )
+        .await;
+        assert_eq!(rp_list_ids(&b), vec![jobs.rel_public.to_string()], "{b}");
+        assert_eq!(b["total"], json!(1), "{b}");
+        let (s, b) = api_req(&fx.router, "GET", "/api/stats", t, None).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(b["completed"], json!(3), "{b}");
+
+        // Worker detail hides the denied jobs' steps.
+        let (s, b) = api_req(
+            &fx.router,
+            "GET",
+            &format!("/api/workers/{worker}"),
+            t,
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        let rows = rp_list_ids(&b["steps"]);
+        assert_eq!(rows.len(), 3, "{b}");
+        for id in jobs.denied() {
+            assert!(!rows.contains(&id.to_string()), "{id} leaked: {b}");
+        }
+
+        // The admin still sees all five.
+        let admin = fx.login(ADMIN).await;
+        let a = Some(admin.as_str());
+        let (_, b) = api_req(&fx.router, "GET", "/api/jobs", a, None).await;
+        assert_eq!(b["total"], json!(5), "{b}");
+        let (_, b) = api_req(&fx.router, "GET", "/api/stats", a, None).await;
+        assert_eq!(b["completed"], json!(5), "{b}");
+
+        // Re-run source: RUNNER may Run the live `nightly`, but not read a
+        // source job whose own folder is denied.
+        sqlx::query("UPDATE job SET raw_input = '{}'::jsonb WHERE job_id = ANY($1)")
+            .bind(vec![jobs.pin23, jobs.pin24])
+            .execute(&fx.pool)
+            .await?;
+        let runner = fx.login(RUNNER).await;
+        let r = Some(runner.as_str());
+        let rerun = |src: Uuid| json!({"input": {}, "source_job_id": src});
+        let (s, b) = api_req(
+            &fx.router,
+            "POST",
+            "/api/workspaces/etl/tasks/nightly/execute",
+            r,
+            Some(rerun(jobs.pin23)),
+        )
+        .await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "{b}");
+        assert_eq!(
+            b["error"],
+            json!("Not authorized to read source job"),
+            "{b}"
+        );
+        let (s, b) = api_req(
+            &fx.router,
+            "POST",
+            "/api/workspaces/etl/tasks/nightly/execute",
+            r,
+            Some(rerun(jobs.pin24)),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn pinned_job_in_denied_folder_is_denied_on_the_websocket() -> Result<()> {
+    rp_bounded(async {
+        let fx = pinned_workspace_fixture(rp_acl_opts()).await?;
+        let worker = rp_worker(&fx).await;
+        let jobs = rp_seed_acl_jobs(&fx, worker).await;
+        let token = fx.login(VIEWER).await;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+        let router = fx.router.clone();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let url =
+            |id: Uuid| format!("ws://127.0.0.1:{port}/api/jobs/{id}/logs/stream?token={token}");
+        for id in jobs.denied() {
+            match tokio_tungstenite::connect_async(url(id)).await {
+                Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => {
+                    assert_eq!(resp.status(), 404, "{id}");
+                    let body =
+                        String::from_utf8_lossy(resp.body().as_deref().unwrap_or(&[])).into_owned();
+                    assert!(body.contains(RP_JOB_NOT_FOUND), "{id}: {body}");
+                }
+                Err(e) => panic!("expected an HTTP 404 handshake rejection, got: {e}"),
+                Ok(_) => panic!("denied job {id} must not upgrade"),
+            }
+        }
+        for id in jobs.allowed() {
+            let res = tokio_tungstenite::connect_async(url(id)).await;
+            assert!(res.is_ok(), "{id}: {:?}", res.err());
+        }
+
+        server.abort();
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn pinned_job_in_denied_folder_is_denied_over_mcp_and_list_paginates_after_acl() -> Result<()>
+{
+    rp_bounded(async {
+        let fx = pinned_workspace_fixture(rp_acl_opts()).await?;
+        let worker = rp_worker(&fx).await;
+        let jobs = rp_seed_acl_jobs(&fx, worker).await;
+        // `/mcp` rejects login JWTs (no audience); an API key authenticates.
+        let viewer = fx.api_key(VIEWER, false).await;
+        let t = Some(viewer.as_str());
+
+        let call = |tool: &'static str, args: Value| rp_mcp_call(&fx.router, t, tool, args);
+        let deny_message = |resp: &Value| resp["error"]["message"].clone();
+
+        for id in jobs.denied() {
+            let job = json!({"job_id": id.to_string()});
+            for tool in [
+                "get_job_status",
+                "get_job_logs",
+                "list_artifacts",
+                "cancel_job",
+            ] {
+                let resp = call(tool, job.clone()).await;
+                assert_eq!(
+                    deny_message(&resp),
+                    json!(RP_JOB_NOT_FOUND),
+                    "{tool} {id}: {resp}"
+                );
+            }
+            let resp = call(
+                "get_artifact",
+                json!({"job_id": id.to_string(), "name": "out.txt"}),
+            )
+            .await;
+            assert_eq!(
+                deny_message(&resp),
+                json!(RP_JOB_NOT_FOUND),
+                "get_artifact {id}: {resp}"
+            );
+        }
+
+        for id in jobs.allowed() {
+            let job = json!({"job_id": id.to_string()});
+            for tool in ["get_job_status", "get_job_logs", "list_artifacts"] {
+                let resp = call(tool, job.clone()).await;
+                assert!(!rp_mcp_is_error(&resp), "{tool} {id}: {resp}");
+            }
+            // Past the job ACL: the artifact itself is what is missing.
+            let resp = call(
+                "get_artifact",
+                json!({"job_id": id.to_string(), "name": "out.txt"}),
+            )
+            .await;
+            assert_eq!(
+                deny_message(&resp),
+                json!("Artifact not found"),
+                "{id}: {resp}"
+            );
+            let resp = call("cancel_job", job).await;
+            assert_eq!(
+                deny_message(&resp),
+                json!("Insufficient permissions: cancel requires Run access"),
+                "{id}: {resp}"
+            );
+        }
+
+        let resp = call("list_jobs", json!({})).await;
+        assert!(!rp_mcp_is_error(&resp), "{resp}");
+        let list = rp_mcp_json(&resp);
+        assert_eq!(list["count"], json!(3), "{list}");
+        let listed: Vec<Value> = list["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|j| j["job_id"].clone())
+            .collect();
+        for id in jobs.denied() {
+            assert!(
+                !listed.contains(&json!(id.to_string())),
+                "{id} leaked: {list}"
+            );
+        }
+
+        // The denied jobs are the most recent: filtering after LIMIT returns 0.
+        let list = rp_mcp_json(&call("list_jobs", json!({"limit": 1})).await);
+        assert_eq!(list["count"], json!(1), "{list}");
+        assert_eq!(
+            list["jobs"][0]["job_id"],
+            json!(jobs.rel_public.to_string()),
+            "{list}"
+        );
+
+        let list = rp_mcp_json(
+            &call(
+                "list_jobs",
+                json!({"workspace": "etl", "task_name": RP_RELEASE_ONLY_TASK}),
+            )
+            .await,
+        );
+        assert_eq!(list["count"], json!(1), "{list}");
+        assert_eq!(
+            list["jobs"][0]["job_id"],
+            json!(jobs.rel_public.to_string()),
+            "{list}"
+        );
+
+        // An admin API key lists all five.
+        let admin = fx.api_key(ADMIN, true).await;
+        let resp = rp_mcp_call(&fx.router, Some(admin.as_str()), "list_jobs", json!({})).await;
+        assert_eq!(rp_mcp_json(&resp)["count"], json!(5), "{resp}");
         Ok(())
     })
     .await

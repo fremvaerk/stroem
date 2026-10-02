@@ -504,13 +504,7 @@ pub async fn execute_task(
             ));
         }
         // Authorization: user must have at least View on the source job's task path.
-        let perm = crate::web::api::jobs::check_job_acl(
-            &state,
-            &auth_user,
-            &source_job.workspace,
-            &source_job.task_name,
-        )
-        .await?;
+        let perm = crate::web::api::jobs::check_job_acl(&state, &auth_user, &source_job).await?;
         if matches!(perm, TaskPermission::Deny) {
             return Err(AppError::Forbidden(
                 "Not authorized to read source job".into(),

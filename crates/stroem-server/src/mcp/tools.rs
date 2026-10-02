@@ -1,4 +1,4 @@
-use super::auth::{check_task_acl, resolve_acl_scope, McpAuthContext};
+use super::auth::{check_task_acl, resolve_acl_scope, resolve_job_acl_scope, McpAuthContext};
 use super::handler::StromMcpHandler;
 use crate::acl::TaskPermission;
 use crate::log_storage::JobLogMeta;
@@ -288,19 +288,14 @@ fn source_id_for_audit(auth: &Option<McpAuthContext>) -> Option<String> {
     auth.as_ref().map(|a| a.claims.email.clone())
 }
 
-/// Check ACL for a job by looking up its workspace/task.
+/// Check ACL for a job: its workspace and its ACL folder ([`crate::acl::job_folder`]).
 /// Deny → not_found("Job"), View/Run → Ok(perm).
 async fn check_job_acl(
     handler: &StromMcpHandler,
     job: &stroem_db::JobRow,
 ) -> Result<TaskPermission, rmcp::ErrorData> {
-    // Look up the task's folder from workspace config for proper ACL path
-    let folder = handler
-        .state
-        .workspaces
-        .get_config(&job.workspace)
-        .await
-        .and_then(|ws| ws.tasks.get(&job.task_name).and_then(|t| t.folder.clone()));
+    // Spec § 7.8: a pinned job is authorised by its own commit's folder.
+    let folder = crate::acl::job_folder(&handler.state, job).await;
 
     let perm =
         check_task_permission(handler, &job.workspace, &job.task_name, folder.as_deref()).await?;
@@ -710,34 +705,35 @@ impl StromMcpHandler {
 
         let limit = params.limit.unwrap_or(20).clamp(1, 100);
         let status = params.status.as_deref();
-        let scope = resolve_scope(self).await?;
+        let scope = resolve_job_acl_scope(&self.state, &self.auth)
+            .await
+            .map_err(acl_err)?;
 
-        let jobs = match (params.workspace.as_deref(), params.task_name.as_deref()) {
-            (Some(ws), Some(task)) => {
+        // ACL is applied in SQL, BEFORE ordering and LIMIT (spec § 7.8):
+        // filtering after the fetch let denied recent jobs fill the page.
+        let jobs = match (
+            scope,
+            params.workspace.as_deref(),
+            params.task_name.as_deref(),
+        ) {
+            (Some(scope), ws, task) => {
+                let effective = crate::acl::narrow_job_scope(&scope, ws, task);
+                JobRepo::list_with_acl(&self.state.pool, &effective, status, None, None, limit, 0)
+                    .await
+                    .map_err(|e| internal_err(format!("DB error: {e}")))?
+            }
+            (None, Some(ws), Some(task)) => {
                 JobRepo::list_by_task(&self.state.pool, ws, task, status, None, limit, 0)
                     .await
                     .map_err(|e| internal_err(format!("DB error: {e}")))?
             }
-            _ => {
-                let ws = params.workspace.as_deref();
-                JobRepo::list(&self.state.pool, ws, status, None, None, limit, 0)
-                    .await
-                    .map_err(|e| internal_err(format!("DB error: {e}")))?
-            }
+            (None, ws, _) => JobRepo::list(&self.state.pool, ws, status, None, None, limit, 0)
+                .await
+                .map_err(|e| internal_err(format!("DB error: {e}")))?,
         };
 
-        // Filter jobs by ACL scope
         let jobs_json: Vec<serde_json::Value> = jobs
             .iter()
-            .filter(|job| {
-                if let Some(ref allowed) = scope {
-                    allowed
-                        .iter()
-                        .any(|(w, t, _)| w == &job.workspace && t == &job.task_name)
-                } else {
-                    true
-                }
-            })
             .map(|job| {
                 serde_json::json!({
                     "job_id": job.job_id,

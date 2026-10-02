@@ -1,4 +1,4 @@
-use crate::acl::{load_user_acl_context, make_task_path, AllowedScope, TaskPermission};
+use crate::acl::{load_user_acl_context, narrow_job_scope, TaskPermission};
 use crate::state::AppState;
 use crate::web::api::middleware::AuthUser;
 use crate::web::api::{default_limit, parse_uuid_param};
@@ -17,6 +17,7 @@ use sqlx;
 use std::collections::HashMap;
 use std::sync::Arc;
 use stroem_common::models::job::StepStatus;
+use stroem_db::JobAclScope;
 use stroem_db::{JobRepo, JobStepRepo};
 use uuid::Uuid;
 
@@ -75,18 +76,12 @@ pub async fn get_stats(
     auth_user: Option<AuthUser>,
 ) -> Result<impl IntoResponse, AppError> {
     // Resolve ACL scope when auth is present and ACL is configured
-    let acl_pairs = resolve_acl_scope(&state, &auth_user).await?;
+    let acl_scope = resolve_acl_scope(&state, &auth_user).await?;
 
-    let counts = match acl_pairs {
-        Some(ref pairs) => JobRepo::get_status_counts_with_acl(
-            &state.pool,
-            &stroem_db::JobAclScope {
-                live_pairs: pairs.clone(),
-                pinned_triples: Vec::new(),
-            },
-        )
-        .await
-        .context("get status counts with ACL")?,
+    let counts = match acl_scope {
+        Some(ref scope) => JobRepo::get_status_counts_with_acl(&state.pool, scope)
+            .await
+            .context("get status counts with ACL")?,
         None => JobRepo::get_status_counts(&state.pool)
             .await
             .context("get status counts")?,
@@ -158,36 +153,23 @@ pub async fn list_jobs(
     }
 
     // Resolve ACL scope
-    let acl_pairs = resolve_acl_scope(&state, &auth_user).await?;
+    let acl_scope = resolve_acl_scope(&state, &auth_user).await?;
 
     let status = query.status.as_deref();
     let source_type = query.source_type.as_deref();
 
-    let (result, total) = match acl_pairs {
+    let (result, total) = match acl_scope {
         // ACL filtering is active — use ACL-aware queries
-        Some(ref pairs) => {
-            // If the query has a workspace/task filter, intersect with allowed pairs
-            let effective_pairs: Vec<(String, String)> =
-                match (query.workspace.as_deref(), query.task_name.as_deref()) {
-                    (Some(ws), Some(task)) => pairs
-                        .iter()
-                        .filter(|(p_ws, p_task)| p_ws == ws && p_task == task)
-                        .cloned()
-                        .collect(),
-                    (Some(ws), None) => pairs
-                        .iter()
-                        .filter(|(p_ws, _)| p_ws == ws)
-                        .cloned()
-                        .collect(),
-                    _ => pairs.clone(),
-                };
-            let scope = stroem_db::JobAclScope {
-                live_pairs: effective_pairs,
-                pinned_triples: Vec::new(),
-            };
+        Some(ref scope) => {
+            // Intersect the scope with the query's workspace / task filter.
+            let effective = narrow_job_scope(
+                scope,
+                query.workspace.as_deref(),
+                query.task_name.as_deref(),
+            );
             let jobs = JobRepo::list_with_acl(
                 &state.pool,
-                &scope,
+                &effective,
                 status,
                 source_type,
                 search,
@@ -196,7 +178,7 @@ pub async fn list_jobs(
             )
             .await;
             let count =
-                JobRepo::count_with_acl(&state.pool, &scope, status, source_type, search).await;
+                JobRepo::count_with_acl(&state.pool, &effective, status, source_type, search).await;
             (jobs, count)
         }
         // No ACL filtering — use existing queries
@@ -310,7 +292,7 @@ pub async fn get_job(
         .ok_or_else(|| AppError::not_found("Job"))?;
 
     // ACL check
-    let perm = check_job_acl(&state, &auth_user, &job.workspace, &job.task_name).await?;
+    let perm = check_job_acl(&state, &auth_user, &job).await?;
     if matches!(perm, TaskPermission::Deny) {
         return Err(AppError::not_found("Job"));
     }
@@ -551,7 +533,7 @@ pub async fn cancel_job(
         .ok_or_else(|| AppError::not_found("Job"))?;
 
     // ACL check — cancel requires Run permission
-    let perm = check_job_acl(&state, &auth_user, &job.workspace, &job.task_name).await?;
+    let perm = check_job_acl(&state, &auth_user, &job).await?;
     match perm {
         TaskPermission::Deny => {
             return Err(AppError::not_found("Job"));
@@ -641,7 +623,7 @@ pub async fn restart_job(
         .ok_or_else(|| AppError::not_found("Job"))?;
 
     // Restart creates a job, so it needs Run — like execute and cancel.
-    match check_job_acl(&state, &auth_user, &source.workspace, &source.task_name).await? {
+    match check_job_acl(&state, &auth_user, &source).await? {
         TaskPermission::Deny => return Err(AppError::not_found("Job")),
         TaskPermission::View => {
             return Err(AppError::Forbidden(
@@ -797,7 +779,7 @@ pub async fn approve_step(
         .ok_or_else(|| AppError::not_found("Job"))?;
 
     // ACL check — approve/reject requires Run permission
-    let perm = check_job_acl(&state, &auth_user, &job.workspace, &job.task_name).await?;
+    let perm = check_job_acl(&state, &auth_user, &job).await?;
     match perm {
         TaskPermission::Deny => return Err(AppError::not_found("Job")),
         TaskPermission::View => {
@@ -1055,15 +1037,15 @@ pub async fn approve_step(
     }
 }
 
-/// Check ACL permission for a specific job's workspace/task.
+/// Check ACL permission for a specific job.
 ///
-/// Returns the user's permission level, or an `AppError` on failure.
+/// The task path comes from [`crate::acl::job_task_path`] (spec § 7.8): a
+/// pinned job is authorised by the folder its own commit declared.
 /// Returns `Ok(TaskPermission::Run)` when ACL is not configured or auth is absent.
 pub(crate) async fn check_job_acl(
     state: &AppState,
     auth_user: &Option<AuthUser>,
-    workspace: &str,
-    task_name: &str,
+    job: &stroem_db::JobRow,
 ) -> Result<TaskPermission, AppError> {
     let auth = match auth_user {
         Some(a) => a,
@@ -1076,26 +1058,22 @@ pub(crate) async fn check_job_acl(
     let (is_admin, groups) = load_user_acl_context(&state.pool, user_id, auth.is_admin())
         .await
         .context("load ACL context")?;
-    let folder = state
-        .get_workspace(workspace)
-        .await
-        .and_then(|ws| ws.tasks.get(task_name).and_then(|t| t.folder.clone()));
-    let task_path = make_task_path(folder.as_deref(), task_name);
-    Ok(state
-        .acl
-        .evaluate(workspace, &task_path, &auth.claims.email, &groups, is_admin))
+    let task_path = crate::acl::job_task_path(state, job).await;
+    Ok(state.acl.evaluate(
+        &job.workspace,
+        &task_path,
+        &auth.claims.email,
+        &groups,
+        is_admin,
+    ))
 }
 
-/// Build the ACL-filtered list of (workspace, task_name) pairs allowed for this user.
-///
-/// Returns:
-/// - `Ok(None)` when no ACL filtering is needed (no auth user, ACL not configured, or admin)
-/// - `Ok(Some(pairs))` when filtering is active
-/// - `Err(AppError)` on failure (user_id parse error or DB error)
+/// The job-list scope for this user (spec § 7.8). `Ok(None)` = no filtering
+/// (no auth user, ACL not configured, or admin).
 async fn resolve_acl_scope(
     state: &AppState,
     auth_user: &Option<AuthUser>,
-) -> Result<Option<Vec<(String, String)>>, AppError> {
+) -> Result<Option<JobAclScope>, AppError> {
     let auth = match auth_user {
         Some(a) => a,
         None => return Ok(None),
@@ -1103,33 +1081,15 @@ async fn resolve_acl_scope(
     if !state.acl.is_configured() {
         return Ok(None);
     }
-
     let user_id = auth.user_id()?;
     let (is_admin, groups) = load_user_acl_context(&state.pool, user_id, auth.is_admin())
         .await
         .context("load ACL context")?;
-
-    // Collect all workspace tasks
-    let mut all_tasks = Vec::new();
-    for (ws_name, ws_config) in state.workspaces.get_all_configs().await {
-        for (task_name, task_def) in &ws_config.tasks {
-            all_tasks.push((ws_name.clone(), task_name.clone(), task_def.folder.clone()));
-        }
-    }
-
-    match state
-        .acl
-        .allowed_scope(&all_tasks, &auth.claims.email, &groups, is_admin)
-    {
-        AllowedScope::All => Ok(None),
-        AllowedScope::Filtered(items) => {
-            let pairs = items
-                .into_iter()
-                .map(|(ws, task, _perm)| (ws, task))
-                .collect();
-            Ok(Some(pairs))
-        }
-    }
+    Ok(
+        crate::acl::build_job_acl_scope(state, &auth.claims.email, &groups, is_admin)
+            .await
+            .context("build job ACL scope")?,
+    )
 }
 
 #[cfg(test)]

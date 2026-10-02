@@ -240,6 +240,10 @@ pub struct WorkerStepRow {
     pub workspace: String,
     pub task_name: String,
     pub job_status: String,
+    /// The job's ref (pinned job) — decides its ACL folder (spec § 7.8).
+    pub git_ref: Option<String>,
+    /// The pinned job's own task folder.
+    pub task_folder: Option<String>,
 }
 
 /// Per-step duration aggregates over a window of completed runs of a task.
@@ -1432,7 +1436,8 @@ impl JobStepRepo {
             r#"
             SELECT js.job_id, js.step_name, js.action_type, js.status,
                    js.started_at, js.completed_at, js.error_message,
-                   j.workspace, j.task_name, j.status AS job_status
+                   j.workspace, j.task_name, j.status AS job_status,
+                   j.git_ref, j.task_folder
             FROM job_step js
             JOIN job j ON j.job_id = js.job_id
             WHERE js.worker_id = $1

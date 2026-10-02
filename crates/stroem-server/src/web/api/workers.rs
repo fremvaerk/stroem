@@ -100,12 +100,18 @@ pub async fn get_worker(
                     steps
                         .into_iter()
                         .filter(|s| {
-                            let folder = all_configs
+                            let live_folder = all_configs
                                 .iter()
                                 .find(|(ws_name, _)| ws_name == &s.workspace)
                                 .and_then(|(_, ws)| {
                                     ws.tasks.get(&s.task_name).and_then(|t| t.folder.clone())
                                 });
+                            // Spec § 7.8: a pinned job's own folder, never the live one.
+                            let folder = crate::acl::acl_folder(
+                                s.git_ref.as_deref(),
+                                s.task_folder.as_deref(),
+                                live_folder.as_deref(),
+                            );
                             let task_path = make_task_path(folder.as_deref(), &s.task_name);
                             let perm = state.acl.evaluate(
                                 &s.workspace,
