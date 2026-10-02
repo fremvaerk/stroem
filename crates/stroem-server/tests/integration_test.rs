@@ -5281,6 +5281,10 @@ async fn test_worker_register_and_claim() -> Result<()> {
     .await?;
 
     let steps = vec![NewJobStep {
+        action_ref: None,
+        task_workspace: None,
+        task_ref: None,
+        task_revision: None,
         job_id,
         step_name: "greet".to_string(),
         action_name: "greet".to_string(),
@@ -5361,6 +5365,10 @@ async fn test_claim_renders_job_revision_in_action_spec_and_image() -> Result<()
     .await?;
 
     let steps = vec![NewJobStep {
+        action_ref: None,
+        task_workspace: None,
+        task_ref: None,
+        task_revision: None,
         job_id,
         step_name: "greet".to_string(),
         action_name: "greet".to_string(),
@@ -6019,6 +6027,10 @@ async fn test_orchestrator_with_failure_db() -> Result<()> {
     .await?;
 
     let steps = vec![NewJobStep {
+        action_ref: None,
+        task_workspace: None,
+        task_ref: None,
+        task_revision: None,
         job_id,
         step_name: "step1".to_string(),
         action_name: "greet".to_string(),
@@ -6151,6 +6163,10 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
 
     let steps = vec![
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "step1".to_string(),
             action_name: "greet".to_string(),
@@ -6177,6 +6193,10 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             action_revision: None,
         },
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "step2".to_string(),
             action_name: "greet".to_string(),
@@ -6203,6 +6223,10 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             action_revision: None,
         },
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "step3".to_string(),
             action_name: "greet".to_string(),
@@ -7870,6 +7894,10 @@ async fn test_script_rendering_failure_fails_step_inline() -> Result<()> {
     JobStepRepo::create_steps(
         &pool,
         &[NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "run".to_string(),
             action_name: "test-action".to_string(),
@@ -7971,6 +7999,10 @@ async fn test_env_rendering_failure_fails_step() -> Result<()> {
     JobStepRepo::create_steps(
         &pool,
         &[NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "run".to_string(),
             action_name: "test-action".to_string(),
@@ -8063,6 +8095,10 @@ async fn test_script_rendering_failure_fails_step() -> Result<()> {
     JobStepRepo::create_steps(
         &pool,
         &[NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "run".to_string(),
             action_name: "test-action".to_string(),
@@ -8156,6 +8192,10 @@ async fn test_manifest_rendering_failure_fails_step() -> Result<()> {
     JobStepRepo::create_steps(
         &pool,
         &[NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "run".to_string(),
             action_name: "test-action".to_string(),
@@ -8255,6 +8295,10 @@ async fn test_image_rendering_failure_fails_step() -> Result<()> {
     JobStepRepo::create_steps(
         &pool,
         &[NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "run".to_string(),
             action_name: "test-action".to_string(),
@@ -9668,6 +9712,10 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
 
     let steps = vec![
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "step1".to_string(),
             action_name: "greet".to_string(),
@@ -9694,6 +9742,10 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
             action_revision: None,
         },
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "step2".to_string(),
             action_name: "greet".to_string(),
@@ -9816,6 +9868,10 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
 
     let steps = vec![
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "step1".to_string(),
             action_name: "greet".to_string(),
@@ -9842,6 +9898,10 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
             action_revision: None,
         },
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "step2".to_string(),
             action_name: "greet".to_string(),
@@ -9984,6 +10044,10 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
 
     let steps = vec![
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "step1".to_string(),
             action_name: "greet".to_string(),
@@ -10010,6 +10074,10 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             action_revision: None,
         },
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "step2".to_string(),
             action_name: "greet".to_string(),
@@ -10036,6 +10104,10 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             action_revision: None,
         },
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "step3".to_string(),
             action_name: "greet".to_string(),
@@ -10183,6 +10255,10 @@ async fn test_failing_job_status_with_jsonl_logs() -> Result<()> {
 
     // Create a single step
     let steps = vec![NewJobStep {
+        action_ref: None,
+        task_workspace: None,
+        task_ref: None,
+        task_revision: None,
         job_id,
         step_name: "doom".to_string(),
         action_name: "greet".to_string(),
@@ -10344,6 +10420,10 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
 
     let steps = vec![
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "step-ok".to_string(),
             action_name: "greet".to_string(),
@@ -10370,6 +10450,10 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
             action_revision: None,
         },
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "step-fail".to_string(),
             action_name: "greet".to_string(),
@@ -10515,6 +10599,10 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
 
     let steps = vec![
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "step1".to_string(),
             action_name: "greet".to_string(),
@@ -10541,6 +10629,10 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
             action_revision: None,
         },
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "step2".to_string(),
             action_name: "greet".to_string(),
@@ -10665,6 +10757,10 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
 
     let steps = vec![
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "step1".to_string(),
             action_name: "greet".to_string(),
@@ -10691,6 +10787,10 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
             action_revision: None,
         },
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "step2".to_string(),
             action_name: "greet".to_string(),
@@ -10824,6 +10924,10 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
 
     let steps = vec![
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "step1".to_string(),
             action_name: "greet".to_string(),
@@ -10850,6 +10954,10 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
             action_revision: None,
         },
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "step2".to_string(),
             action_name: "greet".to_string(),
@@ -10980,6 +11088,10 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
 
     let steps = vec![
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "step1".to_string(),
             action_name: "greet".to_string(),
@@ -11006,6 +11118,10 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
             action_revision: None,
         },
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "step2".to_string(),
             action_name: "greet".to_string(),
@@ -11149,6 +11265,10 @@ async fn test_cascading_skip() -> Result<()> {
 
     let steps = vec![
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "step1".to_string(),
             action_name: "greet".to_string(),
@@ -11175,6 +11295,10 @@ async fn test_cascading_skip() -> Result<()> {
             action_revision: None,
         },
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "step2".to_string(),
             action_name: "greet".to_string(),
@@ -11201,6 +11325,10 @@ async fn test_cascading_skip() -> Result<()> {
             action_revision: None,
         },
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "step3".to_string(),
             action_name: "greet".to_string(),
@@ -12174,6 +12302,10 @@ async fn test_worker_claim_has_workspace_field() -> Result<()> {
     .await?;
 
     let steps = vec![NewJobStep {
+        action_ref: None,
+        task_workspace: None,
+        task_ref: None,
+        task_revision: None,
         job_id,
         step_name: "run-deploy".to_string(),
         action_name: "deploy".to_string(),
@@ -13060,6 +13192,10 @@ async fn test_worker_claim_across_workspaces() -> Result<()> {
     JobStepRepo::create_steps(
         &pool,
         &[NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id: job_id_default,
             step_name: "greet".to_string(),
             action_name: "greet".to_string(),
@@ -13105,6 +13241,10 @@ async fn test_worker_claim_across_workspaces() -> Result<()> {
     JobStepRepo::create_steps(
         &pool,
         &[NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id: job_id_ops,
             step_name: "run-deploy".to_string(),
             action_name: "deploy".to_string(),
@@ -15840,6 +15980,10 @@ async fn test_task_action_not_claimed_by_worker() -> Result<()> {
     .await?;
 
     let step = NewJobStep {
+        action_ref: None,
+        task_workspace: None,
+        task_ref: None,
+        task_revision: None,
         job_id,
         step_name: "task-step".to_string(),
         action_name: "run-cleanup".to_string(),
@@ -17360,6 +17504,10 @@ async fn test_get_worker_with_steps() -> Result<()> {
 
     // Create a step and assign it to the worker
     let steps = vec![NewJobStep {
+        action_ref: None,
+        task_workspace: None,
+        task_ref: None,
+        task_revision: None,
         job_id,
         step_name: "say-hello".to_string(),
         action_name: "say-hello".to_string(),
@@ -19649,7 +19797,7 @@ async fn test_scheduler_fires_cron_trigger() -> Result<()> {
     let jobs = sqlx::query_as::<_, stroem_db::JobRow>(
         "SELECT job_id, workspace, task_name, mode, input, output, status, source_type, \
          source_id, worker_id, revision, created_at, started_at, completed_at, log_path, \
-         parent_job_id, parent_step_name, timeout_secs, retry_of_job_id, retry_job_id, retry_attempt, max_retries, raw_input, source_job_id, restart_from_step FROM job WHERE source_type = $1",
+         parent_job_id, parent_step_name, timeout_secs, retry_of_job_id, retry_job_id, retry_attempt, max_retries, raw_input, source_job_id, restart_from_step, git_ref, task_folder FROM job WHERE source_type = $1",
     )
     .bind("trigger")
     .fetch_all(&pool)
@@ -19815,7 +19963,7 @@ async fn test_scheduler_passes_trigger_input_to_job() -> Result<()> {
     let jobs = sqlx::query_as::<_, stroem_db::JobRow>(
         "SELECT job_id, workspace, task_name, mode, input, output, status, source_type, \
          source_id, worker_id, revision, created_at, started_at, completed_at, log_path, \
-         parent_job_id, parent_step_name, timeout_secs, retry_of_job_id, retry_job_id, retry_attempt, max_retries, raw_input, source_job_id, restart_from_step FROM job WHERE source_type = $1 LIMIT 1",
+         parent_job_id, parent_step_name, timeout_secs, retry_of_job_id, retry_job_id, retry_attempt, max_retries, raw_input, source_job_id, restart_from_step, git_ref, task_folder FROM job WHERE source_type = $1 LIMIT 1",
     )
     .bind("trigger")
     .fetch_all(&pool)
@@ -19988,6 +20136,10 @@ async fn test_multi_workspace_worker_claims_from_correct_workspace() -> Result<(
     JobStepRepo::create_steps(
         &pool,
         &[NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id: job_id_default,
             step_name: "say-hello".to_string(),
             action_name: "greet".to_string(),
@@ -20032,6 +20184,10 @@ async fn test_multi_workspace_worker_claims_from_correct_workspace() -> Result<(
     JobStepRepo::create_steps(
         &pool,
         &[NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id: job_id_ops,
             step_name: "run-deploy".to_string(),
             action_name: "deploy".to_string(),
@@ -21934,7 +22090,7 @@ async fn test_scheduler_triggered_job_stores_revision() -> Result<()> {
     let jobs = sqlx::query_as::<_, stroem_db::JobRow>(
         "SELECT job_id, workspace, task_name, mode, input, output, status, source_type, \
          source_id, worker_id, revision, created_at, started_at, completed_at, log_path, \
-         parent_job_id, parent_step_name, timeout_secs, retry_of_job_id, retry_job_id, retry_attempt, max_retries, raw_input, source_job_id, restart_from_step FROM job WHERE source_type = $1",
+         parent_job_id, parent_step_name, timeout_secs, retry_of_job_id, retry_job_id, retry_attempt, max_retries, raw_input, source_job_id, restart_from_step, git_ref, task_folder FROM job WHERE source_type = $1",
     )
     .bind("trigger")
     .fetch_all(&pool)
@@ -25031,6 +25187,10 @@ fn make_loop_step(
     loop_item: Option<Value>,
 ) -> NewJobStep {
     NewJobStep {
+        action_ref: None,
+        task_workspace: None,
+        task_ref: None,
+        task_revision: None,
         job_id,
         step_name: name.to_string(),
         action_name: "noop".to_string(),
@@ -29951,6 +30111,10 @@ async fn test_claim_fails_agent_step_with_real_prompt_render_error() -> Result<(
 
     let steps = vec![
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "think".to_string(),
             action_name: "assistant".to_string(),
@@ -29985,6 +30149,10 @@ async fn test_claim_fails_agent_step_with_real_prompt_render_error() -> Result<(
         // the same job: the collision must be flushed to the job log even
         // though the claim ultimately fails on the "think" step's prompt.
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "secret".to_string(),
             action_name: "greet".to_string(),
@@ -30122,6 +30290,10 @@ async fn test_claim_renders_each_item_in_agent_prompt_for_loop_instance() -> Res
     .await?;
 
     let steps = vec![NewJobStep {
+        action_ref: None,
+        task_workspace: None,
+        task_ref: None,
+        task_revision: None,
         job_id,
         step_name: "think[0]".to_string(),
         action_name: "assistant".to_string(),
@@ -30220,6 +30392,10 @@ async fn test_claim_render_error_does_not_leak_secret_values() -> Result<()> {
     .await?;
 
     let steps = vec![NewJobStep {
+        action_ref: None,
+        task_workspace: None,
+        task_ref: None,
+        task_revision: None,
         job_id,
         step_name: "leaky".to_string(),
         action_name: "greet".to_string(),
@@ -30938,6 +31114,10 @@ async fn test_claim_renders_state_in_image_and_agent_prompt() -> Result<()> {
     .await?;
     let steps = vec![
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "img".to_string(),
             action_name: "greet".to_string(),
@@ -30964,6 +31144,10 @@ async fn test_claim_renders_state_in_image_and_agent_prompt() -> Result<()> {
             action_revision: None,
         },
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "think".to_string(),
             action_name: "assistant".to_string(),
@@ -31075,6 +31259,10 @@ async fn test_claim_omits_state_keys_when_state_storage_unconfigured() -> Result
     )
     .await?;
     let steps = vec![NewJobStep {
+        action_ref: None,
+        task_workspace: None,
+        task_ref: None,
+        task_revision: None,
         job_id,
         step_name: "greet".to_string(),
         action_name: "greet".to_string(),
@@ -31208,6 +31396,10 @@ async fn test_claim_renders_state_from_archive_for_pre_047_row() -> Result<()> {
     )
     .await?;
     let steps = vec![NewJobStep {
+        action_ref: None,
+        task_workspace: None,
+        task_ref: None,
+        task_revision: None,
         job_id,
         step_name: "legacy".to_string(),
         action_name: "greet".to_string(),
@@ -31344,6 +31536,10 @@ fn pending_step(
     when_condition: Option<&str>,
 ) -> NewJobStep {
     NewJobStep {
+        action_ref: None,
+        task_workspace: None,
+        task_ref: None,
+        task_revision: None,
         job_id,
         step_name: step_name.to_string(),
         action_name: "greet".to_string(),

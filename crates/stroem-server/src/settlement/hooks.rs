@@ -681,6 +681,7 @@ async fn fire_single_hook(
         Some(source_job_id),
         None,
         None, // max_retries: hook jobs have no task-level retry
+        None, // pin: hook jobs of pinned jobs are wired by the settlement task
     )
     .await
     .context("Failed to create hook job")?;

@@ -11,7 +11,7 @@ use uuid::Uuid;
 /// [`JobRepo::get_settled_descendants_with_running_parent_step`].
 const MAX_TASK_DEPTH: i32 = 10;
 
-const JOB_COLUMNS: &str = "job_id, workspace, task_name, mode, input, output, status, source_type, source_id, worker_id, revision, created_at, started_at, completed_at, log_path, parent_job_id, parent_step_name, timeout_secs, retry_of_job_id, retry_job_id, retry_attempt, max_retries, raw_input, source_job_id, restart_from_step";
+const JOB_COLUMNS: &str = "job_id, workspace, task_name, mode, input, output, status, source_type, source_id, worker_id, revision, created_at, started_at, completed_at, log_path, parent_job_id, parent_step_name, timeout_secs, retry_of_job_id, retry_job_id, retry_attempt, max_retries, raw_input, source_job_id, restart_from_step, git_ref, task_folder";
 
 /// Escape LIKE/ILIKE special characters so the search term is a pure substring match.
 fn escape_like(input: &str) -> String {
@@ -49,6 +49,12 @@ pub struct JobRow {
     pub raw_input: Option<JsonValue>,
     pub source_job_id: Option<Uuid>,
     pub restart_from_step: Option<String>,
+    /// The spec's `job.ref` (2026-10-02 § 6): the ref string as written, for a
+    /// job created in owner@ref. `revision` holds its commit. `Some` ⇔ pinned job.
+    pub git_ref: Option<String>,
+    /// For a pinned job, the task's `folder` in the pinned config (`None` = no
+    /// folder). The pinned job's ACL folder (§ 7.8).
+    pub task_folder: Option<String>,
 }
 
 impl JobRow {
@@ -82,6 +88,8 @@ impl JobRow {
             raw_input: None,
             source_job_id: None,
             restart_from_step: None,
+            git_ref: None,
+            task_folder: None,
         }
     }
 }
@@ -129,6 +137,14 @@ pub struct RecentDurationRow {
 }
 
 /// Repository for job operations
+/// Pin columns of a job created in owner@ref (spec 2026-10-02 § 6). The commit
+/// itself goes in the `revision` parameter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobPinCols {
+    pub git_ref: String,
+    pub task_folder: Option<String>,
+}
+
 pub struct JobRepo;
 
 impl JobRepo {
@@ -197,7 +213,8 @@ impl JobRepo {
             raw_input,
             source_job_id,
             restart_from_step,
-            None,
+            None, // max_retries
+            None, // pin
         )
         .await
     }
@@ -224,6 +241,7 @@ impl JobRepo {
         source_job_id: Option<Uuid>,
         restart_from_step: Option<&str>,
         max_retries: Option<i32>,
+        pin: Option<&JobPinCols>,
     ) -> Result<Uuid>
     where
         E: sqlx::Executor<'e, Database = sqlx::Postgres>,
@@ -245,6 +263,7 @@ impl JobRepo {
             source_job_id,
             restart_from_step,
             max_retries,
+            pin,
         )
         .await
     }
@@ -268,14 +287,15 @@ impl JobRepo {
         source_job_id: Option<Uuid>,
         restart_from_step: Option<&str>,
         max_retries: Option<i32>,
+        pin: Option<&JobPinCols>,
     ) -> Result<Uuid>
     where
         E: sqlx::Executor<'e, Database = sqlx::Postgres>,
     {
         sqlx::query(
             r#"
-            INSERT INTO job (job_id, workspace, task_name, mode, input, source_type, source_id, parent_job_id, parent_step_name, timeout_secs, revision, raw_input, source_job_id, restart_from_step, max_retries)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+            INSERT INTO job (job_id, workspace, task_name, mode, input, source_type, source_id, parent_job_id, parent_step_name, timeout_secs, revision, raw_input, source_job_id, restart_from_step, max_retries, git_ref, task_folder)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
             "#,
         )
         .bind(job_id)
@@ -293,6 +313,8 @@ impl JobRepo {
         .bind(source_job_id)
         .bind(restart_from_step)
         .bind(max_retries)
+        .bind(pin.map(|p| p.git_ref.as_str()))
+        .bind(pin.and_then(|p| p.task_folder.as_deref()))
         .execute(executor)
         .await
         .context("Failed to create job")?;
@@ -313,12 +335,13 @@ impl JobRepo {
         source_type: &str,
         source_id: Option<&str>,
         revision: Option<&str>,
+        pin: Option<&JobPinCols>,
     ) -> Result<Uuid> {
         let job_id = Uuid::new_v4();
         sqlx::query(
             r#"
-            INSERT INTO job (job_id, workspace, task_name, mode, input, status, source_type, source_id, completed_at, revision)
-            VALUES ($1, $2, $3, 'distributed', $4, 'skipped', $5, $6, NOW(), $7)
+            INSERT INTO job (job_id, workspace, task_name, mode, input, status, source_type, source_id, completed_at, revision, git_ref, task_folder)
+            VALUES ($1, $2, $3, 'distributed', $4, 'skipped', $5, $6, NOW(), $7, $8, $9)
             "#,
         )
         .bind(job_id)
@@ -328,6 +351,8 @@ impl JobRepo {
         .bind(source_type)
         .bind(source_id)
         .bind(revision)
+        .bind(pin.map(|p| p.git_ref.as_str()))
+        .bind(pin.and_then(|p| p.task_folder.as_deref()))
         .execute(pool)
         .await
         .context("Failed to create skipped job")?;
@@ -1210,7 +1235,9 @@ impl JobRepo {
     /// Only includes jobs with `status = 'completed'` and non-NULL `started_at` /
     /// `completed_at`. Excludes `source_type = 'restart'` jobs (spec §6.4) —
     /// restart jobs re-run only a suffix of the flow, so their duration is not
-    /// comparable to a full run and would skew percentiles. Returns zero-sample
+    /// comparable to a full run and would skew percentiles. Also excludes pinned
+    /// jobs (`git_ref IS NOT NULL`, spec 2026-10-02 § 7.8): stats describe the live
+    /// task, and a release's runs, with their own flows, are not its runs. Returns zero-sample
     /// row (all fields `None`) when no runs match — never returns `Err` for
     /// "no data".
     pub async fn get_task_duration_stats(
@@ -1237,6 +1264,7 @@ impl JobRepo {
                WHERE workspace = $1 AND task_name = $2 \
                  AND status = 'completed' \
                  AND source_type <> 'restart' \
+                 AND git_ref IS NULL \
                  AND started_at IS NOT NULL AND completed_at IS NOT NULL \
                  AND completed_at >= started_at \
                ORDER BY completed_at DESC, job_id \
@@ -1256,7 +1284,7 @@ impl JobRepo {
     ///
     /// Companion to [`get_task_duration_stats`] for sparkline rendering. The
     /// caller typically reverses the slice so the sparkline reads oldest→newest
-    /// left-to-right.
+    /// left-to-right. Excludes pinned jobs (`git_ref IS NOT NULL`, spec 2026-10-02 § 7.8).
     pub async fn get_recent_durations(
         pool: &PgPool,
         workspace: &str,
@@ -1272,6 +1300,7 @@ impl JobRepo {
              WHERE workspace = $1 AND task_name = $2 \
                AND status = 'completed' \
                AND source_type <> 'restart' \
+               AND git_ref IS NULL \
                AND started_at IS NOT NULL AND completed_at IS NOT NULL \
                AND completed_at >= started_at \
              ORDER BY completed_at DESC, job_id \

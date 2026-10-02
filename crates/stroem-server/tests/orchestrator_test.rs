@@ -66,6 +66,10 @@ async fn create_job(pool: &PgPool) -> Uuid {
 /// Build a `NewJobStep` with sensible defaults for orchestrator tests.
 fn step(job_id: Uuid, name: &str, status: &str) -> NewJobStep {
     NewJobStep {
+        action_ref: None,
+        task_workspace: None,
+        task_ref: None,
+        task_revision: None,
         job_id,
         step_name: name.to_string(),
         action_name: "noop".to_string(),

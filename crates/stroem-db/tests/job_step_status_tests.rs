@@ -36,6 +36,10 @@ async fn make_job(pool: &PgPool, task_name: &str) -> Result<Uuid> {
 /// need to differ between most test cases; everything else can be shared.
 fn make_step(job_id: Uuid, step_name: &str, status: &str) -> NewJobStep {
     NewJobStep {
+        action_ref: None,
+        task_workspace: None,
+        task_ref: None,
+        task_revision: None,
         job_id,
         step_name: step_name.to_string(),
         action_name: "test-action".to_string(),
@@ -597,6 +601,7 @@ async fn test_transaction_commit_persists_child_job_and_steps() -> Result<()> {
         None,
         None,
         None,
+        None,
     )
     .await?;
 
@@ -643,6 +648,7 @@ async fn test_transaction_rollback_discards_child_job_and_steps() -> Result<()> 
         None,
         Some(parent_id),
         Some("spawn-step"),
+        None,
         None,
         None,
         None,

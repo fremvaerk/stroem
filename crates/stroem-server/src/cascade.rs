@@ -552,6 +552,10 @@ fn phase_placeholders(
                     retry_jitter: r.retry_jitter,
                     action_workspace: r.action_workspace.clone(),
                     action_revision: r.action_revision.clone(),
+                    action_ref: None,
+                    task_workspace: None,
+                    task_ref: None,
+                    task_revision: None,
                 }
             })
             .collect();
@@ -896,6 +900,8 @@ mod tests {
 
     fn job(input: Option<Value>) -> JobRow {
         JobRow {
+            git_ref: None,
+            task_folder: None,
             job_id: Uuid::new_v4(),
             workspace: "default".to_string(),
             task_name: "t".to_string(),

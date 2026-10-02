@@ -40,6 +40,10 @@ async fn set_status(pool: &PgPool, id: Uuid, status: &str) -> Result<()> {
 
 async fn cross_ws_step(pool: &PgPool, job_id: Uuid, owner: &str, owner_rev: &str) -> Result<()> {
     let step = NewJobStep {
+        action_ref: None,
+        task_workspace: None,
+        task_ref: None,
+        task_revision: None,
         job_id,
         step_name: "s".to_string(),
         action_name: format!("{owner}.act"),

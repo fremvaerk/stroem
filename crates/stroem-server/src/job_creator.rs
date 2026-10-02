@@ -510,6 +510,7 @@ pub(crate) fn create_job_for_task_inner<'a>(
             task.retry
                 .as_ref()
                 .map(|r| i32::try_from(r.max_attempts - 1).expect("max_attempts fits i32")),
+            None, // pin: set by the git-refs creation task
         )
         .await
         .context("Failed to create job")?;
@@ -664,6 +665,10 @@ pub(crate) fn build_step(
         retry_jitter: retry.as_ref().is_some_and(|r| r.jitter),
         action_workspace,
         action_revision,
+        action_ref: None,
+        task_workspace: None,
+        task_ref: None,
+        task_revision: None,
     }
 }
 
