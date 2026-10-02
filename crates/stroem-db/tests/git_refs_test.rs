@@ -8,7 +8,7 @@ use common::{create_job, setup_db};
 use sqlx::PgPool;
 use stroem_db::{
     ClaimIdentity, ClosureBounds, FailOutcome, JobAclScope, JobPinCols, JobRepo, JobStepRepo,
-    NewJobStep, ReleaseOutcome, TaskStateRepo, WorkerRepo, WorkspaceStateRepo,
+    NewJobStep, RedactionClosure, ReleaseOutcome, TaskStateRepo, WorkerRepo, WorkspaceStateRepo,
 };
 use uuid::Uuid;
 
@@ -706,12 +706,15 @@ const C6: &str = "6666666666666666666666666666666666666666";
 const C7: &str = "7777777777777777777777777777777777777777";
 const C8: &str = "8888888888888888888888888888888888888888";
 const C9: &str = "9999999999999999999999999999999999999999";
+const CF: &str = "ffffffffffffffffffffffffffffffffffffffff";
 
 /// The server's bounds (`redaction::CLOSURE_BOUNDS`).
 const BOUNDS: ClosureBounds = ClosureBounds {
     task_depth: 10,
     hook_hops: 3,
     restart_hops: 32,
+    retry_hops: 33,
+    max_jobs: 20_000,
 };
 
 /// Lineage of one seeded job.
@@ -721,6 +724,7 @@ struct Lineage<'a> {
     source_job_id: Option<Uuid>,
     source_id: Option<String>,
     parent_job_id: Option<Uuid>,
+    retry_of_job_id: Option<Uuid>,
     /// The job's own pin: (workspace, ref, commit).
     pin: Option<(&'a str, &'a str, &'a str)>,
 }
@@ -738,8 +742,8 @@ async fn seed_closure_job(pool: &PgPool, l: Lineage<'_>) -> Uuid {
     };
     sqlx::query(
         "INSERT INTO job (job_id, workspace, task_name, status, source_type, source_job_id, \
-                          source_id, parent_job_id, git_ref, revision) \
-         VALUES ($1, $2, 't', 'completed', $3, $4, $5, $6, $7, $8)",
+                          source_id, parent_job_id, retry_of_job_id, git_ref, revision) \
+         VALUES ($1, $2, 't', 'completed', $3, $4, $5, $6, $7, $8, $9)",
     )
     .bind(job_id)
     .bind(workspace)
@@ -747,6 +751,7 @@ async fn seed_closure_job(pool: &PgPool, l: Lineage<'_>) -> Uuid {
     .bind(l.source_job_id)
     .bind(l.source_id)
     .bind(l.parent_job_id)
+    .bind(l.retry_of_job_id)
     .bind(git_ref)
     .bind(revision)
     .execute(pool)
@@ -783,21 +788,34 @@ async fn seed_closure_step(
     .expect("seed closure step");
 }
 
-async fn closure(pool: &PgPool, job: Uuid, bounds: ClosureBounds) -> Vec<(String, String, String)> {
-    JobRepo::redaction_closure_pins(pool, job, bounds)
+/// The closure's pins as triples; `None` = [`RedactionClosure::Truncated`].
+async fn closure(
+    pool: &PgPool,
+    job: Uuid,
+    bounds: ClosureBounds,
+) -> Option<Vec<(String, String, String)>> {
+    match JobRepo::redaction_closure_pins(pool, job, bounds)
         .await
         .expect("closure pins")
-        .into_iter()
-        .map(|r| (r.workspace, r.git_ref, r.revision))
-        .collect()
+    {
+        RedactionClosure::Pins(rows) => Some(
+            rows.into_iter()
+                .map(|r| (r.workspace, r.git_ref, r.revision))
+                .collect(),
+        ),
+        RedactionClosure::Truncated => None,
+    }
 }
 
 /// The closure is the whole tree (root + all descendants) of every job in the
-/// source lineage: the job, its parents up to the root, and the hook and
-/// restart sources it was made from. Nothing else: no hook or restart OF a
-/// job, no re-run lineage, no unrelated job. Every bound cuts where it says.
+/// source lineage: the job, its parents up to the root, and the hook,
+/// restart and task-retry sources it was made from. Nothing else: no hook or
+/// restart OF a job, no re-run lineage, no unrelated job. Every bound fails
+/// closed: an edge it refuses, or too many jobs, answers `Truncated`, and the
+/// exact bound itself still passes.
 #[tokio::test]
-async fn redaction_closure_pins_cover_the_whole_tree_of_the_source_lineage() -> Result<()> {
+async fn redaction_closure_pins_cover_the_whole_tree_of_the_source_lineage_and_fail_closed_at_a_bound(
+) -> Result<()> {
     tokio::time::timeout(std::time::Duration::from_secs(240), async {
         let pool = setup_db().await;
         // S0 (unpinned) runs a step at etl@release/2.3. Its children: K,
@@ -921,6 +939,28 @@ async fn redaction_closure_pins_cover_the_whole_tree_of_the_source_lineage() -> 
         .await;
         let unrelated = seed_closure_job(&pool, Lineage::default()).await;
         seed_closure_step(&pool, unrelated, "u", None, Some(("etl", "release/9", C9))).await;
+        // RT: a task retry of the hook job H1 (it replays H1's input).
+        let rt = seed_closure_job(
+            &pool,
+            Lineage {
+                source_type: "retry",
+                retry_of_job_id: Some(h1),
+                ..Default::default()
+            },
+        )
+        .await;
+        // F: a two-level tree (F → FC), deep enough for `task_depth: 1`.
+        let f = seed_closure_job(&pool, Lineage::default()).await;
+        seed_closure_step(&pool, f, "f", Some((None, "release/f", CF)), None).await;
+        let fc = seed_closure_job(
+            &pool,
+            Lineage {
+                source_type: "task",
+                parent_job_id: Some(f),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let s0_tree = triples(&[
             ("billing", "v4.1.0", C2),
@@ -937,67 +977,138 @@ async fn redaction_closure_pins_cover_the_whole_tree_of_the_source_lineage() -> 
 
         // Any job of S0's tree: the whole tree — root, ancestors, siblings.
         for job in [s0, k, k2, g] {
-            assert_eq!(closure(&pool, job, BOUNDS).await, s0_tree, "{job}");
+            assert_eq!(
+                closure(&pool, job, BOUNDS).await,
+                Some(s0_tree.clone()),
+                "{job}"
+            );
         }
         // A hook job and its whole tree: their tree plus the source's tree;
         // never a sibling hook of the same source (C7).
         let hook_tree = with(&[("etl", "release/2.4", C4)]);
         for job in [h1, hk, h2] {
-            assert_eq!(closure(&pool, job, BOUNDS).await, hook_tree, "{job}");
+            assert_eq!(
+                closure(&pool, job, BOUNDS).await,
+                Some(hook_tree.clone()),
+                "{job}"
+            );
         }
+        // A task retry of H1 reaches H1, and through it S0.
+        assert_eq!(closure(&pool, rt, BOUNDS).await, Some(hook_tree.clone()));
         // A sibling hook: its own pin and the source's tree, not H1's child.
         assert_eq!(
             closure(&pool, hx, BOUNDS).await,
-            with(&[("etl", "release/7", C7)])
+            Some(with(&[("etl", "release/7", C7)]))
         );
         // A pre-048 hook row reaches its source through `source_id`.
-        assert_eq!(closure(&pool, hpre, BOUNDS).await, s0_tree);
+        assert_eq!(closure(&pool, hpre, BOUNDS).await, Some(s0_tree.clone()));
         // A restart (and a restart of a restart) covers its source's tree.
         let restart_tree = with(&[("etl", "release/2.5", C5)]);
-        assert_eq!(closure(&pool, r, BOUNDS).await, restart_tree);
-        assert_eq!(closure(&pool, r2, BOUNDS).await, restart_tree);
+        assert_eq!(closure(&pool, r, BOUNDS).await, Some(restart_tree.clone()));
+        assert_eq!(closure(&pool, r2, BOUNDS).await, Some(restart_tree.clone()));
         // A re-run is not a copy: only its own pin.
         assert_eq!(
             closure(&pool, rerun, BOUNDS).await,
-            triples(&[("etl", "release/8", C8)])
+            Some(triples(&[("etl", "release/8", C8)]))
         );
 
-        // Bounds. One hook hop from H2 reaches H1's tree, not S0.
+        // Bounds fail closed. A hop cap: the exact cap passes (H1 → S0 is
+        // one hook hop, S0 has no source), one more is refused (H2 → H1 →
+        // S0).
         let one_hook = ClosureBounds {
             hook_hops: 1,
             ..BOUNDS
         };
-        assert_eq!(
-            closure(&pool, h2, one_hook).await,
-            triples(&[("etl", "release/2.4", C4)])
-        );
-        // One restart hop from R2 reaches R, not S0.
+        assert_eq!(closure(&pool, h1, one_hook).await, Some(hook_tree.clone()));
+        assert_eq!(closure(&pool, h2, one_hook).await, None);
         let one_restart = ClosureBounds {
             restart_hops: 1,
             ..BOUNDS
         };
         assert_eq!(
-            closure(&pool, r2, one_restart).await,
-            triples(&[("etl", "release/2.5", C5)])
+            closure(&pool, r, one_restart).await,
+            Some(restart_tree.clone())
         );
-        // One task level: from G up to K (not S0), and K's subtree; from S0
-        // down to K and K2, not G.
+        assert_eq!(closure(&pool, r2, one_restart).await, None);
+        let no_retry = ClosureBounds {
+            retry_hops: 0,
+            ..BOUNDS
+        };
+        assert_eq!(closure(&pool, rt, no_retry).await, None);
+        assert_eq!(closure(&pool, h1, no_retry).await, Some(hook_tree.clone()));
+
+        // The depth bound: F's two levels fit one level exactly, from either
+        // end. S0's three levels do not, from any of its jobs: a parent or a
+        // child at the limit is a refused edge.
         let one_level = ClosureBounds {
             task_depth: 1,
             ..BOUNDS
         };
-        assert_eq!(
-            closure(&pool, g, one_level).await,
-            triples(&[("billing", "v4.1.0", C2), ("docs", "main", C3)])
-        );
-        assert_eq!(
-            closure(&pool, s0, one_level).await,
-            triples(&[
-                ("billing", "v4.1.0", C2),
-                ("etl", "release/2.3", C1),
-                ("etl", "release/2.6", C6),
-            ])
-        );
+        let f_tree = Some(triples(&[("etl", "release/f", CF)]));
+        assert_eq!(closure(&pool, f, one_level).await, f_tree);
+        assert_eq!(closure(&pool, fc, one_level).await, f_tree);
+        for job in [s0, k, k2, g] {
+            assert_eq!(closure(&pool, job, one_level).await, None, "{job}");
+        }
+
+        // The node cap: S0's tree holds 4 jobs.
+        let cap = |max_jobs| ClosureBounds { max_jobs, ..BOUNDS };
+        assert_eq!(closure(&pool, s0, cap(4)).await, Some(s0_tree.clone()));
+        assert_eq!(closure(&pool, s0, cap(3)).await, None);
+        Ok::<(), anyhow::Error>(())
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("test timed out"))?
+}
+
+/// The redaction short-circuit's probe: true as soon as ANY job is pinned or
+/// any step carries an action or task pin, false otherwise.
+#[tokio::test]
+async fn any_pinned_rows_sees_a_pinned_job_or_a_pinned_step() -> Result<()> {
+    tokio::time::timeout(std::time::Duration::from_secs(240), async {
+        let pool = setup_db().await;
+        let any = || JobRepo::any_pinned_rows(&pool);
+        assert!(!any().await?, "empty database");
+        let plain = seed_closure_job(&pool, Lineage::default()).await;
+        seed_closure_step(&pool, plain, "s", None, None).await;
+        assert!(!any().await?, "no pin anywhere");
+
+        let remove = |job: Uuid| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query("DELETE FROM job_step WHERE job_id = $1")
+                    .bind(job)
+                    .execute(&pool)
+                    .await?;
+                sqlx::query("DELETE FROM job WHERE job_id = $1")
+                    .bind(job)
+                    .execute(&pool)
+                    .await?;
+                anyhow::Ok(())
+            }
+        };
+
+        let action = seed_closure_job(&pool, Lineage::default()).await;
+        seed_closure_step(&pool, action, "a", Some((None, "release/2.3", C1)), None).await;
+        assert!(any().await?, "a step's action pin");
+        remove(action).await?;
+        assert!(!any().await?);
+
+        let task = seed_closure_job(&pool, Lineage::default()).await;
+        seed_closure_step(&pool, task, "t", None, Some(("etl", "release/2.3", C1))).await;
+        assert!(any().await?, "a step's task pin");
+        remove(task).await?;
+        assert!(!any().await?);
+
+        seed_closure_job(
+            &pool,
+            Lineage {
+                pin: Some(("etl", "release/2.3", C1)),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert!(any().await?, "a pinned job");
         Ok::<(), anyhow::Error>(())
     })
     .await

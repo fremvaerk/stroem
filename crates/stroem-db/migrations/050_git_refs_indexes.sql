@@ -19,12 +19,14 @@
 --     ON workspace_state (workspace, git_ref, created_at DESC, id DESC);
 --   CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_job_pinned_tasks
 --     ON job (workspace, task_name, task_folder) WHERE git_ref IS NOT NULL;
+--   CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_job_step_pinned
+--     ON job_step (job_id) WHERE action_ref IS NOT NULL OR task_ref IS NOT NULL;
 --   DROP INDEX CONCURRENTLY IF EXISTS idx_task_state_lookup;
 --   DROP INDEX CONCURRENTLY IF EXISTS idx_workspace_state_lookup;
 -- The IF NOT EXISTS / IF EXISTS clauses make 049 and this migration no-ops
 -- afterward. Without the pre-run, idx_job_pinned_tasks scans all of `job`
--- under a SHARE lock (blocks job writes for the scan); the state tables are
--- empty in practice.
+-- and idx_job_step_pinned all of `job_step`, each under a SHARE lock (blocks
+-- writes to that table for the scan); the state tables are empty in practice.
 
 CREATE INDEX IF NOT EXISTS idx_task_state_lookup_ref
     ON task_state (workspace, task_name, git_ref, created_at DESC, id DESC);
@@ -33,6 +35,10 @@ CREATE INDEX IF NOT EXISTS idx_workspace_state_lookup_ref
 -- ACL scope for pinned jobs (§ 7.8): distinct (workspace, task, folder).
 CREATE INDEX IF NOT EXISTS idx_job_pinned_tasks
     ON job (workspace, task_name, task_folder) WHERE git_ref IS NOT NULL;
+-- Redaction short-circuit (§ 7.4): does any step reference a pin at all?
+-- (The job side of the probe uses idx_job_pinned_tasks.)
+CREATE INDEX IF NOT EXISTS idx_job_step_pinned
+    ON job_step (job_id) WHERE action_ref IS NOT NULL OR task_ref IS NOT NULL;
 
 DROP INDEX IF EXISTS idx_task_state_lookup;
 DROP INDEX IF EXISTS idx_workspace_state_lookup;

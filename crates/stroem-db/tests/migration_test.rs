@@ -196,9 +196,21 @@ async fn test_049_050_git_ref_columns_and_indexes() -> Result<()> {
         "idx_task_state_lookup_ref",
         "idx_workspace_state_lookup_ref",
         "idx_job_pinned_tasks",
+        "idx_job_step_pinned",
     ] {
         assert!(names.contains(&want), "{want} missing: {names:?}");
     }
+    // The redaction short-circuit's step probe is the partial index's own
+    // predicate, so the planner can answer it from the (tiny) index.
+    let (def,): (String,) = sqlx::query_as(
+        "SELECT indexdef::text FROM pg_indexes WHERE indexname = 'idx_job_step_pinned'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        def.contains("(action_ref IS NOT NULL) OR (task_ref IS NOT NULL)"),
+        "{def}"
+    );
     for gone in ["idx_task_state_lookup", "idx_workspace_state_lookup"] {
         assert!(!names.contains(&gone), "{gone} should be dropped");
     }

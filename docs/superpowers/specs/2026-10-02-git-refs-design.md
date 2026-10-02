@@ -840,37 +840,95 @@ whole, which is safe only while they hold identifiers (§ 7.8).
   `job.ref`; its own step has none;
 - **into a restart:** a restart's carried rows copy the source's step
   `output` / `error_message` (`JobStepRepo::seed_steps_tx`) into rows
-  stamped with the pins of the commit the restart runs at.
+  stamped with the pins of the commit the restart runs at;
+- **into a task retry:** a retry job replays the failed job's `input`
+  (`settlement/retry.rs::create_retry_job`), so a retried hook job carries
+  its source's payload.
 
 So the set of the job's own pins alone misses a value copied in from
 another job. Rule: a job's redaction set is the live values plus
 `pin_redaction_values` of every distinct `(workspace, commit)` pin
 referenced (`job.ref`, and each step's `action_ref` and `task_ref`) by any
 job in the **whole tree of every job in its source lineage**:
-- **Source lineage:** the job, plus the jobs it was made from. From a
-  `source_type = 'hook'` job, that is the job that fired it
-  (`source_job_id`, or the UUID prefix of `source_id` on a pre-048 hook
-  row). From a `source_type = 'restart'` job, it is the restarted job
-  (`source_job_id`). The walk goes up `parent_job_id` too, so a child of a
-  hook or restart job reaches that job's source. A re-run is not a copy (it
-  replays the user's raw input) and is not followed.
+- **Source lineage:** the job, plus the jobs it was made from:
+  - from a `source_type = 'hook'` job, the job that fired it
+    (`source_job_id`, or the UUID prefix of `source_id` on a pre-048 hook
+    row);
+  - from a `source_type = 'restart'` job, the restarted job
+    (`source_job_id`);
+  - from a task retry, the job it re-runs (`retry_of_job_id`, always the
+    root original).
+
+  The walk goes up `parent_job_id` too, so a child of a hook, restart or
+  retry job reaches that job's source. A re-run is not a copy (it replays
+  the user's raw input) and is not followed.
 - **Whole tree:** for each lineage job, its root (walking `parent_job_id`
   up) and every descendant of that root.
-- **Bounds:** `MAX_TASK_DEPTH` levels up and down, `MAX_HOOK_CHAIN_DEPTH`
-  hook links, and `redaction::MAX_RESTART_LINEAGE_HOPS` (32) restart links.
-  Restart chains have no cap of their own, and the hook cap would drop
-  values carried through a short chain.
 
-One recursive query reads the distinct pins
-(`JobRepo::redaction_closure_pins`, bounds `redaction::CLOSURE_BOUNDS`). It
-is merged with the job's own pins from the rows the outlet shows
-(`redaction::closure_pins`). No copy path is special-cased.
+**Bounds fail closed.** The walk is bounded:
+- `MAX_TASK_DEPTH` levels up and down;
+- `MAX_HOOK_CHAIN_DEPTH` hook links;
+- `redaction::MAX_RESTART_LINEAGE_HOPS` (32) restart links. Restart chains
+  have no cap of their own;
+- `redaction::MAX_RETRY_LINEAGE_HOPS` (33) retry links. One per retry
+  generation, more only when restarts and retries interleave;
+- `redaction::MAX_REDACTION_CLOSURE_JOBS` (20 000) jobs per walk.
 
-Fail-closed is unchanged, over the whole closure: a transient pin failure
-anywhere in it answers 503, and a permanent one masks everything. A
-closure that cannot be read (a DB error) answers 503. The price: an
-outlet loads every pin of the tree, so a cold pin anywhere in it can 503
-an otherwise unrelated job's detail.
+A bound never cuts silently. A refused edge makes the closure
+**truncated**: a parent or a child at the depth limit, or a hop past its
+cap. So does a walk with more jobs than the node cap. A truncated closure
+answers `MaskAll`: retrying would hit the same bound.
+
+Every bound is reachable:
+- restart chains are otherwise unbounded;
+- agent task-tool children skip the `MAX_TASK_DEPTH` check;
+- `hook_chain_depth` fails open.
+
+The depth bound equals the creation cap: the deepest tree `type: task`
+dispatch allows (a child with 10 ancestors) fits exactly. The recursion
+reads at most `max_jobs + 1` rows of each walk, so the node cap also
+bounds the work done on every outlet call.
+
+One recursive query reads the distinct pins and the truncation flag
+(`JobRepo::redaction_closure_pins` → `RedactionClosure::{Pins, Truncated}`,
+bounds `redaction::CLOSURE_BOUNDS`). It is merged with the job's own pins
+from the rows the outlet shows (`redaction::closure_pins`). No copy path is
+special-cased.
+
+**Short-circuit.** When no row anywhere references a pin, every closure's
+pin set is empty. A pinned row is `job.git_ref IS NOT NULL`, or a step's
+`action_ref` / `task_ref`. In that case the redaction set is the live
+values alone, and the walk is skipped. Truncation cannot hide a pin that
+does not exist.
+- `JobRepo::any_pinned_rows` makes two `EXISTS` probes, on
+  `idx_job_pinned_tasks` and the partial index `idx_job_step_pinned`
+  (migration 050).
+- It runs after the outlet has read the rows it will show. Any pinned row
+  whose values could appear in them already existed by then.
+- A deployment that never uses refs pays two index probes per outlet call,
+  not a tree walk.
+
+**Memo.** Worker detail redacts up to 50 jobs per request through one
+`RedactionMemo`. The short-circuit probe, each job's closure (by job id) and
+each pin's values (by `(workspace, commit)`, failures included) are
+computed once per request.
+
+Fail-closed is otherwise unchanged, over the whole closure:
+- a transient pin failure anywhere in it answers 503;
+- a permanent one masks everything;
+- a closure that cannot be read (a DB error) answers 503.
+
+The price: an outlet loads every pin of the tree, so a cold pin anywhere in
+it can 503 an otherwise unrelated job's detail.
+
+**Known gaps** (not covered by the closure):
+- An event-source emitted job has no link to its consumer job: the emitted
+  JSON becomes the target job's input with no lineage column.
+- Retention deletes a source before its receivers. The lineage foreign keys
+  are `ON DELETE SET NULL`, so in that window a receiver's closure can lose
+  the deleted source's pins.
+- Agent task-tool children skip the `MAX_TASK_DEPTH` check. A tree deeper
+  than the cap is now handled by the depth bound, which fails closed.
 
 These outlets were found by grep and are checked again by the audit task in
 § 7.9. The audit at `324f0b1` found no outlet route missing from this list.
@@ -1080,12 +1138,18 @@ missing § 7.4 outlet route. Every job-scoped path already had its test from
 the task that changed it.
 
 The audit's review found one hole. A value can be copied INTO a job from
-another job, and the job's own pins did not cover it. The copies run up
-(a child's output), down and across (a parent's or sibling's values
-rendered into a child's input), into a hook payload, and into a restart's
-carried rows. The § 7.4 redaction closure, the whole tree of every job in
-the source lineage, fixes it. New tests cover `child_jobs[]` and every copy
-direction.
+another job, and the job's own pins did not cover it. The copies run:
+- up (a child's output);
+- down and across (a parent's or sibling's values rendered into a child's
+  input);
+- into a hook payload;
+- into a restart's carried rows;
+- into a task retry's replayed input.
+
+The § 7.4 redaction closure, the whole tree of every job in the source
+lineage, fixes it. Its bounds fail closed, and a global short-circuit
+skips it when no pin exists anywhere. New tests cover `child_jobs[]`, every
+copy direction, truncation and the short-circuit.
 
 Hook jobs: a single-step hook job is named `_hook:{action}`. That name
 matches no task, and a pinned hook job stamps no `task_folder`, so it is
@@ -1101,7 +1165,7 @@ ordinary job of its task and is authorised by that task's folder.
 | Job-scoped per row | `GET /api/workers/{id}` (recent steps) | yes, per row | `pinned_job_in_denied_folder_is_denied_on_every_rest_path`, `worker_detail_masks_error_and_fails_closed_per_row` |
 | List / count predicate | `GET /api/jobs`, `GET /api/stats`, MCP `list_jobs` | no (metadata only) | the same deny tests |
 | The parent's ACL | `child_jobs[]` and the lineage ids in job detail | identifiers, skipped | `read_path_audit_test.rs::child_job_summary_in_job_detail_is_identifiers_only_and_the_child_stays_job_scoped` |
-| Content copied between jobs (redaction closure, § 7.4) | a child's output in its parent's step (up); a pinned parent's values in a live child's input (down); a hook payload in the hook job's input; a restart's carried rows | yes: the receiving job's set covers the whole tree of every job in its source lineage | `read_path_audit_test.rs`: `parent_job_detail_masks_a_secret_of_its_childs_step_pin`, `child_job_detail_masks_a_secret_its_pinned_parent_rendered_into_its_input`, `hook_job_detail_masks_a_secret_of_its_sources_step_pin`; `pinned_rerun_restart_test.rs::restart_masks_a_carried_secret_of_the_source_commit`; stroem-db `git_refs_test.rs::redaction_closure_pins_cover_the_whole_tree_of_the_source_lineage` |
+| Content copied between jobs (redaction closure, § 7.4) | a child's output in its parent's step (up); a pinned parent's values in a live child's input (down); a hook payload in the hook job's input; a restart's carried rows; a task retry's replayed input | yes: the receiving job's set covers the whole tree of every job in its source lineage; a truncated closure masks everything; no pin anywhere → the live set alone | `read_path_audit_test.rs`: `parent_job_detail_masks_a_secret_of_its_childs_step_pin`, `child_job_detail_masks_a_secret_its_pinned_parent_rendered_into_its_input`, `hook_job_detail_masks_a_secret_of_its_sources_step_pin`, `retried_hook_job_detail_masks_a_secret_of_its_hook_source`, `job_detail_masks_everything_when_its_redaction_closure_is_truncated`; `pinned_rerun_restart_test.rs::restart_masks_a_carried_secret_of_the_source_commit`; stroem-db `git_refs_test.rs`: `redaction_closure_pins_cover_the_whole_tree_of_the_source_lineage_and_fail_closed_at_a_bound`, `any_pinned_rows_sees_a_pinned_job_or_a_pinned_step` |
 | Job-scoped, hook job (pre-existing) | single-step hook jobs on every job-scoped path: task path `_hook:{action}`, root folder | as any job | the job-scoped deny tests (the rule is the same `check_job_acl`) |
 | Task-scoped (live), pinned jobs excluded | `GET /api/workspaces/{ws}/tasks/{name}/stats` | no | stroem-db `git_refs_test.rs::duration_stats_exclude_pinned_jobs` |
 | Task-scoped (live) | workspaces and refresh, task list and detail, triggers, execute (not a re-run), manual state upload; MCP `list_workspaces`, `list_tasks`, `get_task`, `execute_task` | no | unchanged |

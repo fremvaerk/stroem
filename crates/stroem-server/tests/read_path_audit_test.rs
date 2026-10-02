@@ -191,6 +191,9 @@ actions:
   call-child:
     type: task
     task: child
+  notify-task:
+    type: task
+    task: notify-flaky
 tasks:
   failing:
     on_error:
@@ -210,6 +213,25 @@ tasks:
       leak:
         action: emit
         ref: release/2.3
+  failing-task-hook:
+    on_error:
+      - action: notify-task
+        input:
+          msg: "{{ hook.error_message }}"
+    flow:
+      boom:
+        action: boom
+        ref: release/2.3
+  notify-flaky:
+    input:
+      msg:
+        type: string
+    retry:
+      max_attempts: 2
+      delay: 1s
+    flow:
+      tell:
+        action: notify
 "#;
 
 const CLOSURE_RELEASE: &str = r#"
@@ -447,6 +469,148 @@ async fn child_job_detail_masks_a_secret_its_pinned_parent_rendered_into_its_inp
         assert_detail_masks_ref_only_secret(&fx, parent).await;
         let detail = assert_detail_masks_ref_only_secret(&fx, child).await;
         assert_eq!(detail["input"]["token"], json!(MASK), "{detail}");
+        Ok(())
+    })
+    .await
+}
+
+/// Task retry: a `type: task` hook job, whose input quotes its source's
+/// release-only secret, fails and is retried. The retry replays the hook
+/// job's input and references no pin; only its lineage (retry → hook job →
+/// source) reaches release/2.3.
+#[tokio::test(flavor = "multi_thread")]
+async fn retried_hook_job_detail_masks_a_secret_of_its_hook_source() -> Result<()> {
+    bounded(async {
+        let fx = pinned_workspace_fixture(closure_opts()).await?;
+        let worker = register_worker(&fx.router, &["script"]).await;
+        let (st, body) =
+            execute_task(&fx.router, "etl", "failing-task-hook", json!({}), None).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        let source: Uuid = body["job_id"].as_str().expect("job_id").parse()?;
+        claim_and_complete(
+            &fx,
+            &worker,
+            source,
+            "boom",
+            json!({"exit_code": 1, "error": format!("auth rejected token {REF_ONLY_SECRET}")}),
+        )
+        .await;
+
+        let hook: Uuid = sqlx::query_scalar(
+            "SELECT job_id FROM job WHERE source_type = 'hook' AND source_job_id = $1",
+        )
+        .bind(source)
+        .fetch_one(&fx.pool)
+        .await?;
+        claim_and_complete(
+            &fx,
+            &worker,
+            hook,
+            "tell",
+            json!({"exit_code": 1, "error": "notify broke"}),
+        )
+        .await;
+
+        let retry: Uuid = sqlx::query_scalar("SELECT job_id FROM job WHERE retry_of_job_id = $1")
+            .bind(hook)
+            .fetch_one(&fx.pool)
+            .await?;
+        let row = stroem_db::JobRepo::get(&fx.pool, retry)
+            .await?
+            .expect("retry row");
+        assert_eq!(row.source_type, "retry");
+        assert_eq!(row.git_ref, None, "the retry is unpinned");
+        assert!(
+            row.input
+                .as_ref()
+                .map(|v| v.to_string())
+                .unwrap_or_default()
+                .contains(REF_ONLY_SECRET),
+            "precondition: the retry replays the hook payload: {:?}",
+            row.input
+        );
+
+        assert_detail_masks_ref_only_secret(&fx, hook).await;
+        let detail = assert_detail_masks_ref_only_secret(&fx, retry).await;
+        assert_eq!(
+            detail["input"]["msg"],
+            json!(format!("Step 'boom': auth rejected token {MASK}")),
+            "{detail}"
+        );
+        Ok(())
+    })
+    .await
+}
+
+/// One job row, inserted directly: an unpinned `etl` job (a child of
+/// `parent` when given), with one completed step whose output is `output`.
+async fn seed_job_with_output(
+    pool: &sqlx::PgPool,
+    parent: Option<Uuid>,
+    output: serde_json::Value,
+) -> Result<Uuid> {
+    let job_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO job (job_id, workspace, task_name, status, source_type, \
+                          parent_job_id, parent_step_name) \
+         VALUES ($1, 'etl', 'deep', 'completed', $2, $3, $4)",
+    )
+    .bind(job_id)
+    .bind(if parent.is_some() { "task" } else { "api" })
+    .bind(parent)
+    .bind(parent.map(|_| "call"))
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO job_step (job_id, step_name, action_name, action_type, status, output) \
+         VALUES ($1, 'leaf', 'leaf', 'script', 'completed', $2)",
+    )
+    .bind(job_id)
+    .bind(output)
+    .execute(pool)
+    .await?;
+    Ok(job_id)
+}
+
+/// Fail closed at a bound (spec § 7.4). A job nested deeper than
+/// `MAX_TASK_DEPTH` (agent task-tool children skip that check) has a
+/// redaction closure the walk cannot finish. Once any pinned row exists, its
+/// detail masks every content string. Before that, the global short-circuit
+/// applies: with no pin anywhere, no pin can hide beyond the bound, and the
+/// detail is redacted with the live set alone.
+#[tokio::test(flavor = "multi_thread")]
+async fn job_detail_masks_everything_when_its_redaction_closure_is_truncated() -> Result<()> {
+    bounded(async {
+        let fx = pinned_workspace_fixture(closure_opts()).await?;
+        const PLAIN: &str = "plain-visible-value";
+        // A root and 11 nested children: the leaf has 11 ancestors, one more
+        // than `type: task` dispatch allows.
+        let mut job = seed_job_with_output(&fx.pool, None, json!({})).await?;
+        for _ in 0..11 {
+            job = seed_job_with_output(&fx.pool, Some(job), json!({"v": PLAIN})).await?;
+        }
+        let leaf = job;
+        let leaf_output = |detail: &serde_json::Value| detail["steps"][0]["output"]["v"].clone();
+
+        let (st, detail) = api_req(&fx.router, "GET", &format!("/api/jobs/{leaf}"), None, None).await;
+        assert_eq!(st, StatusCode::OK, "{detail}");
+        assert_eq!(leaf_output(&detail), json!(PLAIN), "no pin anywhere: {detail}");
+
+        // Any pinned row, unrelated to the leaf, turns the closure walk on.
+        sqlx::query(
+            "INSERT INTO job (job_id, workspace, task_name, status, source_type, git_ref, revision) \
+             VALUES ($1, 'etl', 'other', 'completed', 'api', 'release/2.3', $2)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(&fx.commits.etl_release)
+        .execute(&fx.pool)
+        .await?;
+
+        let (st, detail) = api_req(&fx.router, "GET", &format!("/api/jobs/{leaf}"), None, None).await;
+        assert_eq!(st, StatusCode::OK, "{detail}");
+        assert_eq!(leaf_output(&detail), json!(MASK), "truncated → mask all: {detail}");
+        assert_eq!(detail["job_id"], json!(leaf.to_string()), "identifiers stay: {detail}");
+        assert_eq!(detail["status"], json!("completed"), "{detail}");
         Ok(())
     })
     .await

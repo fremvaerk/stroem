@@ -3,25 +3,31 @@
 //! Every API outlet that returns a job's input/output, step output or
 //! `error_message` masks with the live workspaces' values PLUS the secret
 //! values of every pin referenced by the job's **redaction closure**: the
-//! whole job tree of every job in its source lineage (the job, the hook and
-//! restart sources it was made from), see [`closure_pins`]. Content is copied
-//! between those jobs: a child's output settles into its parent step, a
-//! parent's or sibling's values render into a child's input, a hook payload
-//! quotes its source's step errors, and a restart carries its source's step
-//! output. So a job's own pins alone would let a copied value through. A
-//! pinned commit's sops values (or how its vals references render) can differ
-//! from the live config, so the live set alone would let an older or
-//! ref-only secret through. A pin that cannot be loaded, or a closure that
-//! cannot be read, makes the set incomplete; an incomplete set is never
-//! used. A TRANSIENT failure fails closed ([`RedactionUnavailable`] → 503 /
-//! an MCP error, retry later); a PERMANENT one can never be retried away, so
-//! the outlet answers with every content string masked
-//! ([`JobRedaction::MaskAll`]).
+//! whole job tree of every job in its source lineage (the job, and the hook,
+//! restart and task-retry sources it was made from), see [`closure_pins`].
+//! Content is copied between those jobs:
+//! - a child's output settles into its parent step;
+//! - a parent's or sibling's values render into a child's input;
+//! - a hook payload quotes its source's step errors;
+//! - a restart carries its source's step output;
+//! - a task retry replays its source's input.
+//!
+//! So a job's own pins alone would let a copied value through. A pinned
+//! commit's sops values (or how its vals references render) can differ from
+//! the live config, so the live set alone would let an older or ref-only
+//! secret through.
+//!
+//! A pin that cannot be loaded, a closure that cannot be read, or a closure
+//! cut by one of its bounds makes the set incomplete, and an incomplete set
+//! is never used. A TRANSIENT failure fails closed ([`RedactionUnavailable`]
+//! → 503 / an MCP error, retry later). A PERMANENT one (a pin that can never
+//! load, a truncated closure) can never be retried away, so the outlet answers
+//! with every content string masked ([`JobRedaction::MaskAll`]).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use serde_json::Value;
-use stroem_db::{ClosureBounds, ClosurePinRow, JobRepo, JobRow, JobStepRow};
+use stroem_db::{ClosureBounds, ClosurePinRow, JobRepo, JobRow, JobStepRow, RedactionClosure};
 
 use crate::state::AppState;
 use crate::workspace::pins::{PinError, PinLoadWithheld, PinRef};
@@ -29,17 +35,29 @@ use crate::workspace_set::{
     collect_redaction_values, redact_secrets_in_str, WorkspaceSet, REDACTED,
 };
 
-/// A pin in the job's redaction closure could not be loaded, or the closure
-/// itself could not be read, so some secret values are unknown. Callers must
-/// not answer with a partial redaction set.
+/// Why a job's redaction set is incomplete.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnavailableCause {
+    /// A pin of the closure could not be loaded.
+    Pin { commit: String },
+    /// The closure (or the short-circuit probe) could not be read: a DB
+    /// error.
+    ClosureUnreadable,
+    /// A bound refused an edge of the closure, or it holds more than
+    /// [`MAX_REDACTION_CLOSURE_JOBS`] jobs: pins beyond the bound are unknown.
+    ClosureTruncated,
+}
+
+/// The job's redaction set is incomplete: a pin of its closure could not be
+/// loaded, or the closure itself could not be read or was cut by a bound.
+/// Some secret values are unknown, so callers must not answer with a
+/// partial redaction set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RedactionUnavailable {
     pub workspace: String,
-    /// The pin that failed. `None`: the closure could not be read (a DB
-    /// error), so which pins it holds is unknown.
-    pub commit: Option<String>,
-    /// [`PinError::is_transient`] of the failure: `true` = a retry may
-    /// succeed (answer 503); `false` = it never will (mask everything).
+    pub cause: UnavailableCause,
+    /// `true` = a retry may succeed (answer 503); `false` = it never will
+    /// (mask everything). For a pin, [`PinError::is_transient`].
     pub transient: bool,
 }
 
@@ -47,7 +65,9 @@ impl RedactionUnavailable {
     pub fn from_pin_error(ws: &str, pin: &PinRef, e: &PinError) -> Self {
         RedactionUnavailable {
             workspace: ws.to_string(),
-            commit: Some(pin.commit.clone()),
+            cause: UnavailableCause::Pin {
+                commit: pin.commit.clone(),
+            },
             transient: e.is_transient(),
         }
     }
@@ -57,8 +77,18 @@ impl RedactionUnavailable {
     pub fn closure_unreadable(ws: &str) -> Self {
         RedactionUnavailable {
             workspace: ws.to_string(),
-            commit: None,
+            cause: UnavailableCause::ClosureUnreadable,
             transient: true,
+        }
+    }
+
+    /// The closure of a job in `ws` was cut by a bound. Permanent: a retry
+    /// walks the same rows into the same bound.
+    pub fn closure_truncated(ws: &str) -> Self {
+        RedactionUnavailable {
+            workspace: ws.to_string(),
+            cause: UnavailableCause::ClosureTruncated,
+            transient: false,
         }
     }
 }
@@ -70,16 +100,19 @@ impl std::fmt::Display for RedactionUnavailable {
         } else {
             "permanent"
         };
-        match &self.commit {
-            Some(commit) => write!(
+        let ws = &self.workspace;
+        match &self.cause {
+            UnavailableCause::Pin { commit } => write!(
                 f,
-                "redaction set unavailable: pin {}@{commit} could not be loaded ({kind})",
-                self.workspace
+                "redaction set unavailable: pin {ws}@{commit} could not be loaded ({kind})"
             ),
-            None => write!(
+            UnavailableCause::ClosureUnreadable => write!(
                 f,
-                "redaction set unavailable: the redaction closure of a job in {} could not be read ({kind})",
-                self.workspace
+                "redaction set unavailable: the redaction closure of a job in {ws} could not be read ({kind})"
+            ),
+            UnavailableCause::ClosureTruncated => write!(
+                f,
+                "redaction set unavailable: the redaction closure of a job in {ws} exceeds its bounds ({kind})"
             ),
         }
     }
@@ -202,81 +235,171 @@ pub fn merge_pins(
     out
 }
 
-/// Restart links the redaction closure follows. Nothing else caps a chain of
-/// restarts (each one is a user action on a top-level job), so the walk
-/// needs its own bound. A restart carries rows from its immediate source,
-/// which may carry from its own, so a cap as low as the hook cap would drop
-/// values carried through a short chain.
+/// Restart links the redaction closure follows before it gives up (fail
+/// closed). Nothing else caps a chain of restarts: each one is a user action
+/// on a top-level job.
 pub const MAX_RESTART_LINEAGE_HOPS: i32 = 32;
 
-/// How far [`closure_pins`] walks: the server's task-nesting and hook-chain
-/// caps, and [`MAX_RESTART_LINEAGE_HOPS`].
+/// Task-retry links the redaction closure follows before it gives up (fail
+/// closed). A retry points at the root original (`retry_of_job_id`), so a
+/// chain needs more than one retry hop only when restarts and retries
+/// interleave, and the restart cap bounds that.
+pub const MAX_RETRY_LINEAGE_HOPS: i32 = MAX_RESTART_LINEAGE_HOPS + 1;
+
+/// Jobs a redaction closure may hold before it gives up (fail closed). It also
+/// bounds the walk's work on every outlet call.
+pub const MAX_REDACTION_CLOSURE_JOBS: i64 = 20_000;
+
+/// The bounds of every redaction closure:
+/// - the server's task-nesting cap (`job_creator::MAX_TASK_DEPTH`);
+/// - the hook-chain cap (`settlement::hooks::MAX_HOOK_CHAIN_DEPTH`);
+/// - [`MAX_RESTART_LINEAGE_HOPS`], [`MAX_RETRY_LINEAGE_HOPS`] and
+///   [`MAX_REDACTION_CLOSURE_JOBS`].
+///
+/// Hitting any of them makes the closure TRUNCATED, and the outlet masks
+/// everything ([`JobRedaction::MaskAll`]); nothing is cut silently. That is
+/// reachable: restart chains are otherwise unbounded, agent task-tool
+/// children skip the `MAX_TASK_DEPTH` check, and the hook-chain walk fails
+/// open.
 pub const CLOSURE_BOUNDS: ClosureBounds = ClosureBounds {
     task_depth: crate::job_creator::MAX_TASK_DEPTH as i32,
     hook_hops: crate::settlement::hooks::MAX_HOOK_CHAIN_DEPTH as i32,
     restart_hops: MAX_RESTART_LINEAGE_HOPS,
+    retry_hops: MAX_RETRY_LINEAGE_HOPS,
+    max_jobs: MAX_REDACTION_CLOSURE_JOBS,
 };
+
+/// Per-request memo for an outlet that redacts several jobs (worker detail).
+/// Each piece is computed at most once per request:
+/// - the global short-circuit probe;
+/// - each job's closure, by job id;
+/// - each pin's values, by `(workspace, commit)`, failures included, so a
+///   failing pin is not retried for every job.
+///
+/// A one-job outlet uses a fresh memo.
+#[derive(Debug, Default)]
+pub struct RedactionMemo {
+    any_pinned: Option<bool>,
+    closures: HashMap<uuid::Uuid, RedactionClosure>,
+    pin_values: HashMap<(String, String), Result<Vec<String>, RedactionUnavailable>>,
+}
 
 /// Every distinct pin of the job's **redaction closure** (spec § 7.4): the
 /// job's own [`referenced_pins`] (from the rows the outlet is about to show),
 /// plus the pins of every job whose content can be copied into it. That is
 /// the whole job tree (root and all descendants) of every job in the job's
-/// source lineage: the job itself and, following parents up and hook and
-/// restart sources back, every job it was made from. Bounded by
-/// [`CLOSURE_BOUNDS`].
+/// source lineage: the job itself and, following parents up and hook,
+/// restart and task-retry sources back, every job it was made from. Bounded
+/// by [`CLOSURE_BOUNDS`], fail closed.
+///
+/// **Short-circuit.** When no row anywhere references a pin, every closure's
+/// pin set is empty, so the job's own (empty) pins are the answer and the
+/// closure walk is skipped. Truncation cannot hide a pin that does not exist.
+/// This holds because the probe runs AFTER the outlet read the rows it will
+/// show: a pinned row whose values could be in them existed by then.
 #[tracing::instrument(skip_all, fields(job_id = %job.job_id))]
 pub async fn closure_pins(
     state: &AppState,
     job: &JobRow,
     steps: &[JobStepRow],
-) -> anyhow::Result<Vec<(String, PinRef)>> {
-    let rows = JobRepo::redaction_closure_pins(&state.pool, job.job_id, CLOSURE_BOUNDS).await?;
-    Ok(merge_pins(referenced_pins(job, steps), rows))
+    memo: &mut RedactionMemo,
+) -> Result<Vec<(String, PinRef)>, RedactionUnavailable> {
+    let own = referenced_pins(job, steps);
+    let unreadable = |e: anyhow::Error| {
+        // A DB error: no config text, safe to log whole.
+        tracing::warn!(
+            job_id = %job.job_id,
+            "redaction set unavailable: redaction closure unreadable: {e:#}"
+        );
+        RedactionUnavailable::closure_unreadable(&job.workspace)
+    };
+    let any_pinned = match memo.any_pinned {
+        Some(any) => any,
+        None => {
+            let any = JobRepo::any_pinned_rows(&state.pool)
+                .await
+                .map_err(unreadable)?;
+            memo.any_pinned = Some(any);
+            any
+        }
+    };
+    if !any_pinned {
+        return Ok(own);
+    }
+    let closure = match memo.closures.get(&job.job_id) {
+        Some(closure) => closure.clone(),
+        None => {
+            let closure = JobRepo::redaction_closure_pins(&state.pool, job.job_id, CLOSURE_BOUNDS)
+                .await
+                .map_err(unreadable)?;
+            memo.closures.insert(job.job_id, closure.clone());
+            closure
+        }
+    };
+    match closure {
+        RedactionClosure::Pins(rows) => Ok(merge_pins(own, rows)),
+        RedactionClosure::Truncated => {
+            tracing::warn!(
+                job_id = %job.job_id,
+                "redaction set unavailable: the redaction closure exceeds its bounds; masking everything"
+            );
+            Err(RedactionUnavailable::closure_truncated(&job.workspace))
+        }
+    }
 }
 
 /// The live redaction set plus the secret values of every pin of the job's
 /// redaction closure ([`closure_pins`], spec § 7.4). `Err` = the closure
-/// could not be read (transient), or some pin could not be loaded (the first
-/// failing pin decides the error's kind). Outlets normally go through
-/// [`job_redaction`], which turns a permanent failure into
-/// [`JobRedaction::MaskAll`].
-#[tracing::instrument(skip_all, fields(job_id = %job.job_id, workspace = %job.workspace))]
+/// could not be read (transient) or was truncated (permanent), or some pin
+/// could not be loaded (the first failing pin decides the error's kind).
+/// Outlets normally go through [`job_redaction`], which turns a permanent
+/// failure into [`JobRedaction::MaskAll`].
 pub async fn job_redaction_values(
     state: &AppState,
     job: &JobRow,
     steps: &[JobStepRow],
 ) -> Result<Vec<String>, RedactionUnavailable> {
+    job_redaction_values_memo(state, job, steps, &mut RedactionMemo::default()).await
+}
+
+/// [`job_redaction_values`] with a caller-held [`RedactionMemo`].
+#[tracing::instrument(skip_all, fields(job_id = %job.job_id, workspace = %job.workspace))]
+pub async fn job_redaction_values_memo(
+    state: &AppState,
+    job: &JobRow,
+    steps: &[JobStepRow],
+    memo: &mut RedactionMemo,
+) -> Result<Vec<String>, RedactionUnavailable> {
     let set = WorkspaceSet::load(&state.workspaces, &job.workspace, None).await;
     let mut values = collect_redaction_values(&set);
-    let pins = match closure_pins(state, job, steps).await {
-        Ok(pins) => pins,
-        Err(e) => {
-            // A DB error: no config text, safe to log whole.
-            tracing::warn!(
-                job_id = %job.job_id,
-                "redaction set unavailable: redaction closure unreadable: {e:#}"
-            );
-            return Err(RedactionUnavailable::closure_unreadable(&job.workspace));
-        }
-    };
-    for (ws, pin) in pins {
-        match state.workspaces.pins().ensure(&ws, &pin.commit).await {
-            // The pin's complete set (R5): its secrets AND the `secret: true`
-            // properties of its connections, whichever workspace types them.
-            Ok(pinned) => values.extend(state.workspaces.pin_redaction_values(&ws, &pinned).await),
-            Err(e) => {
-                let unavailable = RedactionUnavailable::from_pin_error(&ws, &pin, &e);
-                tracing::warn!(
-                    job_id = %job.job_id,
-                    workspace = %ws,
-                    commit = %pin.commit,
-                    transient = unavailable.transient,
-                    "redaction set unavailable: {}",
-                    pin_failure_log_text(&ws, &pin, &e)
-                );
-                return Err(unavailable);
+    for (ws, pin) in closure_pins(state, job, steps, memo).await? {
+        let key = (ws.clone(), pin.commit.clone());
+        let pin_values = match memo.pin_values.get(&key) {
+            Some(cached) => cached.clone(),
+            None => {
+                let loaded = match state.workspaces.pins().ensure(&ws, &pin.commit).await {
+                    // The pin's complete set (R5): its secrets AND the
+                    // `secret: true` properties of its connections,
+                    // whichever workspace types them.
+                    Ok(pinned) => Ok(state.workspaces.pin_redaction_values(&ws, &pinned).await),
+                    Err(e) => {
+                        let unavailable = RedactionUnavailable::from_pin_error(&ws, &pin, &e);
+                        tracing::warn!(
+                            job_id = %job.job_id,
+                            workspace = %ws,
+                            commit = %pin.commit,
+                            transient = unavailable.transient,
+                            "redaction set unavailable: {}",
+                            pin_failure_log_text(&ws, &pin, &e)
+                        );
+                        Err(unavailable)
+                    }
+                };
+                memo.pin_values.insert(key, loaded.clone());
+                loaded
             }
-        }
+        };
+        values.extend(pin_values?);
     }
     Ok(values)
 }
@@ -286,9 +409,10 @@ pub async fn job_redaction_values(
 pub enum JobRedaction {
     /// Every referenced pin loaded: mask these values wherever they occur.
     Values(Vec<String>),
-    /// A referenced pin can never load (permanent [`PinError`]): its secret
-    /// values are unknowable for good, so every content string is masked
-    /// whole. Identifiers, statuses and timestamps stay readable.
+    /// A referenced pin can never load (permanent [`PinError`]), or the
+    /// closure was cut by a bound: some secret values are unknowable for
+    /// good, so every content string is masked whole. Identifiers, statuses
+    /// and timestamps stay readable.
     MaskAll,
 }
 
@@ -335,14 +459,24 @@ impl JobRedaction {
 }
 
 /// [`job_redaction_values`] through [`JobRedaction::from_result`]: `Err` only
-/// for a TRANSIENT pin failure.
-#[tracing::instrument(skip_all, fields(job_id = %job.job_id, workspace = %job.workspace))]
+/// for a TRANSIENT failure.
 pub async fn job_redaction(
     state: &AppState,
     job: &JobRow,
     steps: &[JobStepRow],
 ) -> Result<JobRedaction, RedactionUnavailable> {
-    JobRedaction::from_result(job_redaction_values(state, job, steps).await)
+    job_redaction_memo(state, job, steps, &mut RedactionMemo::default()).await
+}
+
+/// [`job_redaction`] with a caller-held [`RedactionMemo`] (worker detail).
+#[tracing::instrument(skip_all, fields(job_id = %job.job_id, workspace = %job.workspace))]
+pub async fn job_redaction_memo(
+    state: &AppState,
+    job: &JobRow,
+    steps: &[JobStepRow],
+    memo: &mut RedactionMemo,
+) -> Result<JobRedaction, RedactionUnavailable> {
+    JobRedaction::from_result(job_redaction_values_memo(state, job, steps, memo).await)
 }
 
 /// Redact a job's `output` (webhook responses). Loads the job's steps for
@@ -646,9 +780,12 @@ mod tests {
         ];
         let u = RedactionUnavailable::from_pin_error("etl", &pin_23(), &transient);
         assert!(u.transient);
+        assert_eq!(u.workspace, "etl");
         assert_eq!(
-            (u.workspace.as_str(), u.commit.as_deref()),
-            ("etl", Some(SHA_A))
+            u.cause,
+            UnavailableCause::Pin {
+                commit: SHA_A.to_string()
+            }
         );
         for e in &permanent {
             assert!(
@@ -683,7 +820,7 @@ mod tests {
     fn closure_unreadable_is_transient_and_names_no_pin() {
         let u = RedactionUnavailable::closure_unreadable("etl");
         assert!(u.transient);
-        assert_eq!(u.commit, None);
+        assert_eq!(u.cause, UnavailableCause::ClosureUnreadable);
         assert_eq!(JobRedaction::from_result(Err(u.clone())), Err(u.clone()));
         let text = u.to_string();
         assert!(text.contains("redaction closure"), "{text}");
@@ -698,6 +835,41 @@ mod tests {
         assert!(pin.to_string().contains(&format!("etl@{SHA_A}")), "{pin}");
     }
 
+    /// A closure cut by a bound: its pins beyond the bound are unknown for
+    /// good (a retry walks into the same bound), so the outlet masks
+    /// everything rather than answering with a partial set or a 503 loop.
+    #[test]
+    fn closure_truncated_is_permanent_and_masks_everything() {
+        let u = RedactionUnavailable::closure_truncated("etl");
+        assert!(!u.transient);
+        assert_eq!(u.cause, UnavailableCause::ClosureTruncated);
+        assert_eq!(
+            JobRedaction::from_result(Err(u.clone())),
+            Ok(JobRedaction::MaskAll)
+        );
+        let text = u.to_string();
+        assert!(text.contains("exceeds its bounds"), "{text}");
+        assert!(text.contains("permanent"), "{text}");
+    }
+
+    /// Every bound of the closure is set, and the depth bound is exactly the
+    /// creation cap: the deepest tree `type: task` dispatch allows (a child
+    /// with `MAX_TASK_DEPTH` ancestors) fits without truncation.
+    #[test]
+    fn closure_bounds_match_the_server_caps() {
+        assert_eq!(
+            CLOSURE_BOUNDS.task_depth,
+            crate::job_creator::MAX_TASK_DEPTH as i32
+        );
+        assert_eq!(
+            CLOSURE_BOUNDS.hook_hops,
+            crate::settlement::hooks::MAX_HOOK_CHAIN_DEPTH as i32
+        );
+        assert_eq!(CLOSURE_BOUNDS.restart_hops, MAX_RESTART_LINEAGE_HOPS);
+        assert_eq!(CLOSURE_BOUNDS.retry_hops, MAX_RESTART_LINEAGE_HOPS + 1);
+        assert_eq!(CLOSURE_BOUNDS.max_jobs, 20_000);
+    }
+
     #[test]
     fn job_redaction_splits_on_the_error_kind() {
         let values = JobRedaction::from_result(Ok(vec!["s".to_string()]));
@@ -705,7 +877,9 @@ mod tests {
 
         let permanent = RedactionUnavailable {
             workspace: "etl".into(),
-            commit: Some(SHA_A.into()),
+            cause: UnavailableCause::Pin {
+                commit: SHA_A.into(),
+            },
             transient: false,
         };
         assert_eq!(
@@ -715,7 +889,9 @@ mod tests {
 
         let transient = RedactionUnavailable {
             workspace: "etl".into(),
-            commit: Some(SHA_A.into()),
+            cause: UnavailableCause::Pin {
+                commit: SHA_A.into(),
+            },
             transient: true,
         };
         assert_eq!(

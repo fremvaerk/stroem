@@ -141,9 +141,12 @@ pub async fn get_worker(
     // Per-job redaction of `error_message` (spec § 7.4): one per distinct job
     // that has an error to show. A job whose set cannot be built (a pin not
     // loadable, transiently or for good, or the row gone) has its rows' error
-    // masked whole — fail closed per row, not per page.
+    // masked whole — fail closed per row, not per page. One memo for the
+    // request: the short-circuit probe, each closure (by job id) and each
+    // pin's values are computed once, however many rows share them.
     let mut redactions: HashMap<uuid::Uuid, Option<crate::redaction::JobRedaction>> =
         HashMap::new();
+    let mut memo = crate::redaction::RedactionMemo::default();
     for s in &steps {
         if s.error_message.is_none() || redactions.contains_key(&s.job_id) {
             continue;
@@ -153,7 +156,7 @@ pub async fn get_worker(
             JobStepRepo::get_steps_for_job(&state.pool, s.job_id).await,
         ) {
             (Ok(Some(job)), Ok(job_steps)) => {
-                crate::redaction::job_redaction(&state, &job, &job_steps)
+                crate::redaction::job_redaction_memo(&state, &job, &job_steps, &mut memo)
                     .await
                     .ok()
             }

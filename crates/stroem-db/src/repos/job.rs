@@ -136,8 +136,9 @@ pub struct RecentDurationRow {
     pub completed_at: DateTime<Utc>,
 }
 
-/// How far [`JobRepo::redaction_closure_pins`] walks. Every walk is bounded:
-/// a longer chain is cut, never followed forever.
+/// The bounds of [`JobRepo::redaction_closure_pins`]. A bound never cuts a
+/// walk silently. An edge it refuses, or a closure larger than `max_jobs`,
+/// makes the result [`RedactionClosure::Truncated`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClosureBounds {
     /// `type: task` nesting: the levels walked up to a root, and down from it.
@@ -146,6 +147,21 @@ pub struct ClosureBounds {
     pub hook_hops: i32,
     /// `source_type = 'restart'` links followed to the restarted job.
     pub restart_hops: i32,
+    /// `retry_of_job_id` links followed to the job a task retry re-runs.
+    pub retry_hops: i32,
+    /// Jobs in the closure (each walk counted separately).
+    pub max_jobs: i64,
+}
+
+/// What [`JobRepo::redaction_closure_pins`] found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RedactionClosure {
+    /// The whole closure was read: these are its distinct pins.
+    Pins(Vec<ClosurePinRow>),
+    /// A bound refused an edge (a parent, a child, a hook, restart or retry
+    /// source), or the closure holds more than `max_jobs` jobs. Pins beyond
+    /// the bound are unknown, so the caller must fail closed.
+    Truncated,
 }
 
 /// One pin referenced inside a job's redaction closure
@@ -1063,39 +1079,53 @@ impl JobRepo {
     /// into this job's rows.
     ///
     /// The **lineage** is the job plus the jobs it was made from. From any job
-    /// in it, the walk goes up to its parent (`parent_job_id`). From a
-    /// `source_type = 'hook'` job it goes to the job that fired it:
-    /// `source_job_id`, or the UUID prefix of `source_id` on a hook row written
-    /// before migration 048 (the same fallback as the server's hook-chain
-    /// walk). From a `source_type = 'restart'` job it goes to its source
-    /// (`source_job_id`). The closure is the **whole tree** of every lineage
-    /// job: its root and all the root's descendants. That covers values
-    /// copied up (a child's output into its parent step), down (a parent's
-    /// values into a child's input), across (a sibling's output into
-    /// another child's input), into a hook payload, and into a restart's
-    /// carried rows.
+    /// in it, the walk follows these edges:
+    /// - up to its parent (`parent_job_id`);
+    /// - from a `source_type = 'hook'` job, to the job that fired it:
+    ///   `source_job_id`, or the UUID prefix of `source_id` on a hook row
+    ///   written before migration 048 (the same fallback as the server's
+    ///   hook-chain walk);
+    /// - from a `source_type = 'restart'` job, to its source (`source_job_id`);
+    /// - from a task retry, to the job it re-runs (`retry_of_job_id`).
     ///
-    /// Over the closure, a pin is a job's own (`workspace`, `git_ref`,
-    /// `revision`), a step's action pin (`action_workspace`, defaulting to
-    /// the job's workspace, `action_ref`, `action_revision`) or a step's task
-    /// pin (`task_workspace`, `task_ref`, `task_revision`). Rows are distinct
-    /// and sorted.
+    /// The closure is the **whole tree** of every lineage job: its root and
+    /// all the root's descendants. That covers values copied up (a child's
+    /// output into its parent step), down (a parent's values into a child's
+    /// input), across (a sibling's output into another child's input), into
+    /// a hook payload, into a restart's carried rows, and into a task retry's
+    /// replayed input.
+    ///
+    /// Over the closure, a pin is one of three kinds:
+    /// - a job's own (`workspace`, `git_ref`, `revision`);
+    /// - a step's action pin (`action_workspace`, defaulting to the job's
+    ///   workspace, `action_ref`, `action_revision`);
+    /// - a step's task pin (`task_workspace`, `task_ref`, `task_revision`).
+    ///
+    /// Rows are distinct and sorted.
+    ///
+    /// Every bound fails closed. An edge refused by a bound (a parent or a
+    /// child at the depth limit, a hop past its cap) or more than
+    /// `bounds.max_jobs` jobs answers [`RedactionClosure::Truncated`]. The
+    /// recursion reads at most `max_jobs + 1` rows of each walk, so the cap
+    /// also bounds the work.
     pub async fn redaction_closure_pins(
         pool: &PgPool,
         job_id: Uuid,
         bounds: ClosureBounds,
-    ) -> Result<Vec<ClosurePinRow>> {
-        sqlx::query_as::<_, ClosurePinRow>(
+    ) -> Result<RedactionClosure> {
+        let rows = sqlx::query_as::<_, (bool, Option<String>, Option<String>, Option<String>)>(
             r#"
-            WITH RECURSIVE up(job_id, depth, hook_hops, restart_hops) AS (
-                SELECT $1::uuid, 0, 0, 0
+            WITH RECURSIVE up(job_id, depth, hook_hops, restart_hops, retry_hops, refused) AS (
+                SELECT $1::uuid, 0, 0, 0, 0, false
                 UNION ALL
-                SELECT e.job_id, e.depth, e.hook_hops, e.restart_hops
+                -- A refused edge is recorded (refused = true) and not walked.
+                SELECT e.job_id, e.depth, e.hook_hops, e.restart_hops, e.retry_hops, NOT e.ok
                   FROM up u
                   JOIN job j ON j.job_id = u.job_id
                  CROSS JOIN LATERAL (
                      VALUES
-                         (j.parent_job_id, u.depth + 1, u.hook_hops, u.restart_hops,
+                         (j.parent_job_id, u.depth + 1,
+                          u.hook_hops, u.restart_hops, u.retry_hops,
                           u.depth < $2),
                          (CASE j.source_type
                               WHEN 'hook' THEN COALESCE(
@@ -1109,56 +1139,108 @@ impl JobRepo {
                           0,
                           u.hook_hops + (j.source_type = 'hook')::int,
                           u.restart_hops + (j.source_type = 'restart')::int,
-                          (j.source_type = 'hook' AND u.hook_hops < $3)
-                              OR (j.source_type = 'restart' AND u.restart_hops < $4))
-                 ) AS e(job_id, depth, hook_hops, restart_hops, ok)
-                 WHERE e.ok AND e.job_id IS NOT NULL
+                          u.retry_hops,
+                          CASE j.source_type
+                              WHEN 'hook' THEN u.hook_hops < $3
+                              ELSE u.restart_hops < $4
+                          END),
+                         (j.retry_of_job_id, 0,
+                          u.hook_hops, u.restart_hops, u.retry_hops + 1,
+                          u.retry_hops < $5)
+                 ) AS e(job_id, depth, hook_hops, restart_hops, retry_hops, ok)
+                 WHERE NOT u.refused AND e.job_id IS NOT NULL
             ),
-            tree(job_id, depth) AS (
-                SELECT DISTINCT u.job_id, 0
-                  FROM up u
+            up_capped AS (SELECT job_id, refused FROM up LIMIT $6 + 1),
+            tree(job_id, depth, refused) AS (
+                SELECT DISTINCT u.job_id, 0, false
+                  FROM up_capped u
                   JOIN job j ON j.job_id = u.job_id
-                 WHERE j.parent_job_id IS NULL OR u.depth >= $2
+                 WHERE NOT u.refused AND j.parent_job_id IS NULL
                 UNION ALL
-                SELECT child.job_id, t.depth + 1
+                SELECT child.job_id, t.depth + 1, t.depth >= $2
                   FROM tree t
                   JOIN job child ON child.parent_job_id = t.job_id
-                 WHERE t.depth < $2
+                 WHERE NOT t.refused
             ),
+            tree_capped AS (SELECT job_id, refused FROM tree LIMIT $6 + 1),
             closure AS (
-                SELECT job_id FROM up
+                SELECT job_id FROM up_capped WHERE NOT refused
                 UNION
-                SELECT job_id FROM tree
+                SELECT job_id FROM tree_capped WHERE NOT refused
+            ),
+            flags AS (
+                SELECT EXISTS (SELECT 1 FROM up_capped WHERE refused)
+                    OR EXISTS (SELECT 1 FROM tree_capped WHERE refused)
+                    OR (SELECT count(*) FROM up_capped) > $6
+                    OR (SELECT count(*) FROM tree_capped) > $6 AS truncated
+            ),
+            pins AS (
+                SELECT DISTINCT workspace, git_ref, revision FROM (
+                    SELECT j.workspace, j.git_ref, j.revision
+                      FROM job j
+                      JOIN closure cl ON cl.job_id = j.job_id
+                     WHERE j.git_ref IS NOT NULL AND j.revision IS NOT NULL
+                    UNION ALL
+                    SELECT COALESCE(s.action_workspace, j.workspace), s.action_ref, s.action_revision
+                      FROM job_step s
+                      JOIN closure cl ON cl.job_id = s.job_id
+                      JOIN job j ON j.job_id = s.job_id
+                     WHERE s.action_ref IS NOT NULL AND s.action_revision IS NOT NULL
+                    UNION ALL
+                    SELECT s.task_workspace, s.task_ref, s.task_revision
+                      FROM job_step s
+                      JOIN closure cl ON cl.job_id = s.job_id
+                     WHERE s.task_workspace IS NOT NULL
+                       AND s.task_ref IS NOT NULL
+                       AND s.task_revision IS NOT NULL
+                ) p
             )
-            SELECT DISTINCT workspace, git_ref, revision FROM (
-                SELECT j.workspace, j.git_ref, j.revision
-                  FROM job j
-                  JOIN closure cl ON cl.job_id = j.job_id
-                 WHERE j.git_ref IS NOT NULL AND j.revision IS NOT NULL
-                UNION ALL
-                SELECT COALESCE(s.action_workspace, j.workspace), s.action_ref, s.action_revision
-                  FROM job_step s
-                  JOIN closure cl ON cl.job_id = s.job_id
-                  JOIN job j ON j.job_id = s.job_id
-                 WHERE s.action_ref IS NOT NULL AND s.action_revision IS NOT NULL
-                UNION ALL
-                SELECT s.task_workspace, s.task_ref, s.task_revision
-                  FROM job_step s
-                  JOIN closure cl ON cl.job_id = s.job_id
-                 WHERE s.task_workspace IS NOT NULL
-                   AND s.task_ref IS NOT NULL
-                   AND s.task_revision IS NOT NULL
-            ) pins
-            ORDER BY workspace, revision, git_ref
+            SELECT f.truncated, p.workspace, p.git_ref, p.revision
+              FROM flags f
+              LEFT JOIN pins p ON NOT f.truncated
+             ORDER BY p.workspace, p.revision, p.git_ref
             "#,
         )
         .bind(job_id)
         .bind(bounds.task_depth)
         .bind(bounds.hook_hops)
         .bind(bounds.restart_hops)
+        .bind(bounds.retry_hops)
+        .bind(bounds.max_jobs)
         .fetch_all(pool)
         .await
-        .context("Failed to read the job's redaction closure pins")
+        .context("Failed to read the job's redaction closure pins")?;
+
+        if rows.first().is_none_or(|r| r.0) {
+            return Ok(RedactionClosure::Truncated);
+        }
+        Ok(RedactionClosure::Pins(
+            rows.into_iter()
+                .filter_map(|(_, workspace, git_ref, revision)| {
+                    Some(ClosurePinRow {
+                        workspace: workspace?,
+                        git_ref: git_ref?,
+                        revision: revision?,
+                    })
+                })
+                .collect(),
+        ))
+    }
+
+    /// Whether ANY row references a pin: a pinned job (`git_ref`), or a step
+    /// with an action or task pin. With none, every redaction closure's pin
+    /// set is empty, so the redaction set is the live values alone. Two
+    /// `EXISTS` probes on the partial indexes `idx_job_pinned_tasks` and
+    /// `idx_job_step_pinned`.
+    pub async fn any_pinned_rows(pool: &PgPool) -> Result<bool> {
+        sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM job WHERE git_ref IS NOT NULL) \
+                 OR EXISTS (SELECT 1 FROM job_step \
+                             WHERE action_ref IS NOT NULL OR task_ref IS NOT NULL)",
+        )
+        .fetch_one(pool)
+        .await
+        .context("Failed to check for pinned rows")
     }
 
     /// Get job counts grouped by status (used for dashboard stats)
