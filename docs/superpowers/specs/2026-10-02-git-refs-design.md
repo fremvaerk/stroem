@@ -20,6 +20,8 @@ side, each from its own definitions and files. Line numbers cite
   re-resolved commit (§ 7.3).
 - M2: the redaction closure follows re-run sources too, under one cap with
   restarts, `MAX_SOURCE_LINEAGE_HOPS` (was `MAX_RESTART_LINEAGE_HOPS`) (§ 7.4).
+- M1: § 7.4 / § 9 describe the sets `fail_claimed_step` / `fail_task_step`
+  actually scrub with (not the closure set).
 
 **Revision 9 (2026-10-02, execution pre-flight).** Two rulings from the
 pre-flight conflict scan:
@@ -848,8 +850,22 @@ unchanged.
   returns `error_message` raw. The page lists steps of many jobs, so it
   builds one redaction set per distinct job;
 - every branch of the webhook job-status poll (`web/hooks.rs:305-311`,
-  `:360-390`, `:457-467`), which today returns `job.output` raw;
-- `fail_claimed_step` and `fail_task_step`.
+  `:360-390`, `:457-467`), which today returns `job.output` raw.
+
+The two write-time scrubs do NOT use the closure set; each scrubs with the
+values it has at hand:
+- `fail_claimed_step` (`web/worker_api/jobs.rs`) with `claim_redaction_values`:
+  the live set plus `pin_redaction_values` of every pin the claim loaded (the
+  job pin, the step owner's pin);
+- `fail_task_step` (`settlement/dispatch.rs`) with the `secrets:` values of
+  the job's config and of the action owner's and task owner's configs, each
+  at its pin (`collect_config_secret_values`);
+- the `[pin] … not available yet` / `cannot be loaded` lines with the live
+  set alone (`WorkspaceManager::scrub_live`): the pin is what failed to load.
+
+A persisted `job_step.error_message` is masked again on read with the closure
+set; the job-log line written at the same time is not (job logs are not
+value-redacted, § 16).
 
 Redaction applies to the **whole response object**, not to named source
 fields. Job detail copies `output.approval_message` into a separate step
@@ -1248,9 +1264,9 @@ on some replica, so this needs a cold replica plus a git outage.
   - `workspace_set::collect_redaction_values` (`workspace_set.rs:227`) —
     the job-detail response (`input`, `raw_input`, step output);
   - the secret list passed to `redact_secrets_in_str` (`:163`) in
-    `fail_claimed_step`, `fail_task_step` and the new `[pin]` log line
-    (§ 7.2).
-  These are assembled as the per-job redaction set (§ 7.4), which fails
+    `fail_claimed_step` and `fail_task_step` (§ 7.4 lists the exact sets:
+    the pins the claim loaded, and the job's / owners' configs at their pins).
+  The read outlets assemble the per-job redaction set (§ 7.4), which fails
   closed when a pin cannot be loaded.
 - Secret values in a pinned config are rendered once, at pin load, and stay
   until the pin is evicted (same as the live config, which re-renders only on
