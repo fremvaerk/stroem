@@ -371,6 +371,7 @@ pub fn configure_global_timeouts(connect_ms: u32, read_ms: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workspace::git_test_support::{bare_remote, commit_on};
     use stroem_common::budget::{is_deadline_exceeded, LoadBudget};
     use tempfile::TempDir;
 
@@ -429,76 +430,9 @@ mod tests {
         );
     }
 
-    /// Create a bare git repo with an initial commit on `main` containing the given files.
-    /// Returns (TempDir, file:// URL).
-    fn create_bare_repo(files: &[(&str, &str)]) -> (TempDir, String) {
-        let bare_dir = TempDir::new().unwrap();
-        let bare_repo = git2::Repository::init_bare(bare_dir.path()).unwrap();
-
-        // Build a tree from the given files
-        let mut tb = bare_repo.treebuilder(None).unwrap();
-        for &(name, content) in files {
-            let oid = bare_repo.blob(content.as_bytes()).unwrap();
-            tb.insert(name, oid, 0o100644).unwrap();
-        }
-        let tree_oid = tb.write().unwrap();
-        let tree = bare_repo.find_tree(tree_oid).unwrap();
-
-        let sig = git2::Signature::now("test", "test@test.com").unwrap();
-        let commit_oid = bare_repo
-            .commit(Some("refs/heads/main"), &sig, &sig, "initial", &tree, &[])
-            .unwrap();
-
-        // Set HEAD to main
-        bare_repo
-            .reference("HEAD", commit_oid, true, "set HEAD")
-            .ok();
-        bare_repo.set_head("refs/heads/main").unwrap();
-
-        let url = format!("file://{}", bare_dir.path().display());
-        (bare_dir, url)
-    }
-
-    /// Add a new commit on top of the given branch with new/modified files.
-    fn add_commit(
-        repo_path: &Path,
-        branch: &str,
-        files: &[(&str, &str)],
-        message: &str,
-    ) -> git2::Oid {
-        let repo = git2::Repository::open_bare(repo_path).unwrap();
-        let parent_ref = format!("refs/heads/{}", branch);
-        let parent_commit = repo
-            .find_reference(&parent_ref)
-            .unwrap()
-            .peel_to_commit()
-            .unwrap();
-
-        // Start from the parent tree and apply changes
-        let parent_tree = parent_commit.tree().unwrap();
-        let mut tb = repo.treebuilder(Some(&parent_tree)).unwrap();
-        for &(name, content) in files {
-            let oid = repo.blob(content.as_bytes()).unwrap();
-            tb.insert(name, oid, 0o100644).unwrap();
-        }
-        let tree_oid = tb.write().unwrap();
-        let tree = repo.find_tree(tree_oid).unwrap();
-
-        let sig = git2::Signature::now("test", "test@test.com").unwrap();
-        repo.commit(
-            Some(&parent_ref),
-            &sig,
-            &sig,
-            message,
-            &tree,
-            &[&parent_commit],
-        )
-        .unwrap()
-    }
-
     #[test]
     fn test_clone_local_repo_loads_config() {
-        let (_bare_dir, url) = create_bare_repo(&[(
+        let (_bare_dir, url, _) = bare_remote(&[(
             "deploy.yaml",
             "actions:\n  greet:\n    type: script\n    script: echo hello\ntasks:\n  hello:\n    flow:\n      step1:\n        action: greet\n",
         )]);
@@ -515,7 +449,7 @@ mod tests {
 
     #[test]
     fn test_clone_sets_revision_to_git_oid() {
-        let (_bare_dir, url) = create_bare_repo(&[(
+        let (_bare_dir, url, _) = bare_remote(&[(
             "test.yaml",
             "actions:\n  a:\n    type: script\n    script: echo hi\n",
         )]);
@@ -535,7 +469,7 @@ mod tests {
 
     #[test]
     fn test_fetch_detects_new_commit() {
-        let (bare_dir, url) = create_bare_repo(&[(
+        let (bare_dir, url, _) = bare_remote(&[(
             "test.yaml",
             "actions:\n  a:\n    type: script\n    script: echo v1\n",
         )]);
@@ -550,14 +484,13 @@ mod tests {
             .unwrap();
 
         // Push a new commit to the bare repo
-        add_commit(
+        commit_on(
             bare_dir.path(),
             "main",
             &[(
                 "test.yaml",
                 "actions:\n  a:\n    type: script\n    script: echo v2\n",
             )],
-            "update",
         );
 
         let rev2 = source
@@ -571,7 +504,7 @@ mod tests {
 
     #[test]
     fn test_reload_no_changes_same_revision() {
-        let (_bare_dir, url) = create_bare_repo(&[(
+        let (_bare_dir, url, _) = bare_remote(&[(
             "test.yaml",
             "actions:\n  a:\n    type: script\n    script: echo stable\n",
         )]);
@@ -595,7 +528,7 @@ mod tests {
 
     #[test]
     fn test_config_updates_after_commit() {
-        let (bare_dir, url) = create_bare_repo(&[(
+        let (bare_dir, url, _) = bare_remote(&[(
             "test.yaml",
             "actions:\n  greet:\n    type: script\n    script: echo hello\ntasks:\n  t1:\n    flow:\n      s1:\n        action: greet\n",
         )]);
@@ -607,15 +540,13 @@ mod tests {
         assert_eq!(config1.actions.len(), 1);
 
         // Add a second action
-        add_commit(
+        commit_on(
             bare_dir.path(),
             "main",
             &[(
                 "test.yaml",
                 "actions:\n  greet:\n    type: script\n    script: echo hello\n  build:\n    type: script\n    script: make\ntasks:\n  t1:\n    flow:\n      s1:\n        action: greet\n",
-            )],
-            "add build action",
-        );
+            )]);
 
         let config2 = source.load(&LoadBudget::unbounded()).unwrap().config;
         assert_eq!(config2.actions.len(), 2);
@@ -625,7 +556,7 @@ mod tests {
 
     #[test]
     fn test_clone_specific_branch() {
-        let (bare_dir, url) = create_bare_repo(&[(
+        let (bare_dir, url, _) = bare_remote(&[(
             "test.yaml",
             "actions:\n  main_action:\n    type: script\n    script: echo main\n",
         )]);
@@ -646,14 +577,13 @@ mod tests {
             )
             .unwrap();
 
-        add_commit(
+        commit_on(
             bare_dir.path(),
             "develop",
             &[(
                 "test.yaml",
                 "actions:\n  dev_action:\n    type: script\n    script: echo develop\n",
             )],
-            "develop commit",
         );
 
         let clone_dir = TempDir::new().unwrap();
@@ -673,7 +603,7 @@ mod tests {
 
     #[test]
     fn test_clone_creates_working_directory() {
-        let (_bare_dir, url) = create_bare_repo(&[(
+        let (_bare_dir, url, _) = bare_remote(&[(
             "deploy.yaml",
             "actions:\n  a:\n    type: script\n    script: echo hi\n",
         )]);
@@ -694,7 +624,7 @@ mod tests {
 
     #[test]
     fn test_multiple_yaml_files_merged() {
-        let (_bare_dir, url) = create_bare_repo(&[
+        let (_bare_dir, url, _) = bare_remote(&[
             (
                 "actions.yaml",
                 "actions:\n  greet:\n    type: script\n    script: echo hi\n  build:\n    type: script\n    script: make\n",
@@ -982,7 +912,7 @@ mod tests {
 
     #[test]
     fn test_peek_revision_matches_revision_after_load() {
-        let (_bare_dir, url) = create_bare_repo(&[(
+        let (_bare_dir, url, _) = bare_remote(&[(
             "test.yaml",
             "actions:\n  a:\n    type: script\n    script: echo hi\n",
         )]);
@@ -1008,7 +938,7 @@ mod tests {
 
     #[test]
     fn test_peek_revision_detects_new_commit() {
-        let (bare_dir, url) = create_bare_repo(&[(
+        let (bare_dir, url, _) = bare_remote(&[(
             "test.yaml",
             "actions:\n  a:\n    type: script\n    script: echo v1\n",
         )]);
@@ -1023,14 +953,13 @@ mod tests {
             .unwrap();
 
         // Push a new commit to the bare repo
-        add_commit(
+        commit_on(
             bare_dir.path(),
             "main",
             &[(
                 "test.yaml",
                 "actions:\n  a:\n    type: script\n    script: echo v2\n",
             )],
-            "update",
         );
 
         let peeked_revision = match source.peek_revision(&LoadBudget::unbounded()) {
@@ -1159,7 +1088,7 @@ mod tests {
         // install a `credentials` callback at all — confirming the fail-fast
         // logic above is scoped to configured ssh_key/token auth and never
         // interferes with unauthenticated sources.
-        let (_bare_dir, url) = create_bare_repo(&[(
+        let (_bare_dir, url, _) = bare_remote(&[(
             "test.yaml",
             "actions:\n  a:\n    type: script\n    script: echo hi\n",
         )]);
@@ -1193,7 +1122,7 @@ mod tests {
     #[test]
     fn load_runs_outside_any_tokio_runtime() {
         // block_in_place would panic here: loading must be plain blocking code.
-        let (_bare, url) = create_bare_repo(&[("test.yaml", YAML_V1)]);
+        let (_bare, url, _) = bare_remote(&[("test.yaml", YAML_V1)]);
         let dir = TempDir::new().unwrap();
         let source = GitSource::with_clone_dir(&url, "main", None, dir.path().join("repo"));
         let out = source.load(&unbounded()).unwrap();
@@ -1227,7 +1156,7 @@ mod tests {
 
     #[test]
     fn peek_classifies_a_missing_origin_as_local_invalid() {
-        let (_bare, url) = create_bare_repo(&[("test.yaml", YAML_V1)]);
+        let (_bare, url, _) = bare_remote(&[("test.yaml", YAML_V1)]);
         let dir = TempDir::new().unwrap();
         let clone = dir.path().join("repo");
         let source = GitSource::with_clone_dir(&url, "main", None, clone.clone());
@@ -1244,7 +1173,7 @@ mod tests {
 
     #[test]
     fn peek_classifies_an_unreachable_remote_as_failed() {
-        let (bare, url) = create_bare_repo(&[("test.yaml", YAML_V1)]);
+        let (bare, url, _) = bare_remote(&[("test.yaml", YAML_V1)]);
         let dir = TempDir::new().unwrap();
         let source = GitSource::with_clone_dir(&url, "main", None, dir.path().join("repo"));
         source.load(&unbounded()).unwrap();
@@ -1257,7 +1186,7 @@ mod tests {
 
     #[test]
     fn peek_classifies_a_missing_branch_as_failed() {
-        let (_bare, url) = create_bare_repo(&[("test.yaml", YAML_V1)]);
+        let (_bare, url, _) = bare_remote(&[("test.yaml", YAML_V1)]);
         let dir = TempDir::new().unwrap();
         let clone = dir.path().join("repo");
         GitSource::with_clone_dir(&url, "main", None, clone.clone())
@@ -1269,7 +1198,7 @@ mod tests {
 
     #[test]
     fn peek_revision_matches_the_loaded_revision() {
-        let (_bare, url) = create_bare_repo(&[("test.yaml", YAML_V1)]);
+        let (_bare, url, _) = bare_remote(&[("test.yaml", YAML_V1)]);
         let dir = TempDir::new().unwrap();
         let source = GitSource::with_clone_dir(&url, "main", None, dir.path().join("repo"));
         let loaded = source.load(&unbounded()).unwrap().revision.unwrap();
@@ -1281,12 +1210,12 @@ mod tests {
 
     #[test]
     fn expired_budget_fails_before_touching_the_checkout() {
-        let (bare, url) = create_bare_repo(&[("test.yaml", YAML_V1)]);
+        let (bare, url, _) = bare_remote(&[("test.yaml", YAML_V1)]);
         let dir = TempDir::new().unwrap();
         let clone = dir.path().join("repo");
         let source = GitSource::with_clone_dir(&url, "main", None, clone.clone());
         source.load(&unbounded()).unwrap();
-        add_commit(bare.path(), "main", &[("test.yaml", YAML_V2)], "v2");
+        commit_on(bare.path(), "main", &[("test.yaml", YAML_V2)]);
         let expired = LoadBudget::until(std::time::Instant::now());
         let err = source.load(&expired).unwrap_err();
         assert!(is_deadline_exceeded(&err), "{err:#}");
@@ -1296,7 +1225,7 @@ mod tests {
 
     #[test]
     fn an_empty_clone_dir_is_recloned() {
-        let (_bare, url) = create_bare_repo(&[("test.yaml", YAML_V1)]);
+        let (_bare, url, _) = bare_remote(&[("test.yaml", YAML_V1)]);
         let dir = TempDir::new().unwrap();
         let clone = dir.path().join("repo");
         // Simulate an aborted clone: the directory exists (libgit2 created it)
@@ -1311,7 +1240,7 @@ mod tests {
 
     #[test]
     fn a_corrupt_clone_dir_is_recloned() {
-        let (_bare, url) = create_bare_repo(&[("test.yaml", YAML_V1)]);
+        let (_bare, url, _) = bare_remote(&[("test.yaml", YAML_V1)]);
         let dir = TempDir::new().unwrap();
         let clone = dir.path().join("repo");
         std::fs::create_dir_all(&clone).unwrap();

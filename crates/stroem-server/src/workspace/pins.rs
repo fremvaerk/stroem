@@ -216,6 +216,9 @@ struct Listing {
 /// The ref listing `resolve` decides on.
 struct Listed {
     refs: Arc<HashMap<String, String>>,
+    /// Served from the cache within the TTL without asking the remote: a ref
+    /// missing from it may have been pushed since.
+    from_cache: bool,
     /// Set when listing the remote just failed and `refs` is the last
     /// successful listing: a ref missing from it is not proof of absence.
     refresh_error: Option<String>,
@@ -238,6 +241,11 @@ pub struct PinStore {
     _dir_lock: Option<File>,
     /// Serialises bare-repo writes (init, fetch) per workspace.
     repo_locks: HashMap<String, Arc<Mutex<()>>>,
+    /// Serialises ref resolution per workspace — listing check, fetch,
+    /// adoption — and with it the ls-remote. Concurrent resolves of a moving
+    /// ref can then never hand out an older commit after a newer one, nor
+    /// overwrite a newer listing or an adoption with an older listing.
+    resolve_locks: HashMap<String, Arc<tokio::sync::Mutex<()>>>,
     listings: Mutex<HashMap<String, Listing>>,
     /// Test hook: pretend the remote refuses want-by-SHA.
     #[cfg(test)]
@@ -290,6 +298,10 @@ impl PinStore {
             .keys()
             .map(|name| (name.clone(), Arc::new(Mutex::new(()))))
             .collect();
+        let resolve_locks = sources
+            .keys()
+            .map(|name| (name.clone(), Arc::new(tokio::sync::Mutex::new(()))))
+            .collect();
         Ok(Self {
             cfg,
             sources,
@@ -297,6 +309,7 @@ impl PinStore {
             settings,
             _dir_lock: Some(lock),
             repo_locks,
+            resolve_locks,
             listings: Mutex::new(HashMap::new()),
             #[cfg(test)]
             skip_fetch_by_sha: AtomicBool::new(false),
@@ -313,6 +326,7 @@ impl PinStore {
             settings: ReloadSettings::default(),
             _dir_lock: None,
             repo_locks: HashMap::new(),
+            resolve_locks: HashMap::new(),
             listings: Mutex::new(HashMap::new()),
             #[cfg(test)]
             skip_fetch_by_sha: AtomicBool::new(false),
@@ -366,22 +380,34 @@ impl PinStore {
         };
         let candidates = match parse_git_ref(git_ref).map_err(|_| not_found())? {
             GitRefSpec::Commit(sha) => {
-                self.ensure_commit(ws, &src, &sha).await?;
+                let commit = self.ensure_commit(ws, &src, &sha).await?;
                 return Ok(Pin {
                     workspace: ws.to_string(),
                     git_ref: git_ref.to_string(),
-                    commit: sha,
+                    commit,
                 });
             }
             GitRefSpec::Branch(n) => vec![format!("refs/heads/{n}")],
             GitRefSpec::Tag(n) => vec![format!("refs/tags/{n}")],
             GitRefSpec::Name(n) => vec![format!("refs/heads/{n}"), format!("refs/tags/{n}")],
         };
-        let listed = self.listing(ws, &src).await?;
-        let Some((name, advertised)) = candidates
-            .into_iter()
-            .find_map(|c| listed.refs.get(&c).cloned().map(|oid| (c, oid)))
-        else {
+        let lookup = |refs: &HashMap<String, String>| {
+            candidates
+                .iter()
+                .find_map(|c| refs.get(c).map(|oid| (c.clone(), oid.clone())))
+        };
+        // `source(ws)` succeeded, so the entry exists.
+        let serial = Arc::clone(&self.resolve_locks[ws]);
+        let _serial = serial.lock().await;
+        let mut listed = self.listing(ws, &src, false).await?;
+        let mut found = lookup(&listed.refs);
+        if found.is_none() && listed.from_cache {
+            // The ref may have been pushed since the cached listing: ask the
+            // remote once before answering.
+            listed = self.listing(ws, &src, true).await?;
+            found = lookup(&listed.refs);
+        }
+        let Some((name, advertised)) = found else {
             // Absence is only proof when the remote was just listed.
             return Err(match listed.refresh_error {
                 Some(e) => unavailable(
@@ -397,8 +423,7 @@ impl PinStore {
         let repo_dir = self.repo_dir(ws);
         let lock = self.repo_lock(ws);
         let budget = LoadBudget::from_now(self.settings.load_timeout);
-        let (ws_owned, ref_owned) = (ws.to_string(), git_ref.to_string());
-        let (name_owned, advertised_owned) = (name.clone(), advertised.clone());
+        let (ws_owned, ref_owned, name_owned) = (ws.to_string(), git_ref.to_string(), name.clone());
         let resolved = tokio::task::spawn_blocking(move || {
             let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
             commit_for_ref(
@@ -407,7 +432,7 @@ impl PinStore {
                 &repo_dir,
                 &src,
                 &name_owned,
-                &advertised_owned,
+                &advertised,
                 &budget,
             )
         })
@@ -416,7 +441,7 @@ impl PinStore {
         let commit = match resolved {
             RefCommit::Advertised(commit) => commit,
             RefCommit::Adopted(commit) => {
-                self.adopt_into_listing(ws, &name, &advertised, &commit);
+                self.adopt_into_listing(ws, &name, &commit);
                 commit
             }
         };
@@ -427,16 +452,20 @@ impl PinStore {
         })
     }
 
-    /// Cached ls-remote listing (TTL = the source's poll interval). On
-    /// failure the last listing is served with a warning and NOT refreshed,
-    /// so the next call retries; with no listing it is `PinUnavailable`.
-    async fn listing(&self, ws: &str, src: &PinSource) -> Result<Listed, PinError> {
-        {
+    /// Cached ls-remote listing (TTL = the source's poll interval; `force`
+    /// bypasses it). On failure the last listing is served with a warning
+    /// and NOT refreshed, so the next call retries; with no listing it is
+    /// `PinUnavailable`. Only called under the workspace's resolve lock, so
+    /// one ls-remote per workspace runs at a time and listings are written
+    /// in order.
+    async fn listing(&self, ws: &str, src: &PinSource, force: bool) -> Result<Listed, PinError> {
+        if !force {
             let listings = self.listings.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(l) = listings.get(ws) {
                 if l.fetched_at.elapsed() < src.poll_interval {
                     return Ok(Listed {
                         refs: Arc::clone(&l.refs),
+                        from_cache: true,
                         refresh_error: None,
                     });
                 }
@@ -461,6 +490,7 @@ impl PinStore {
                 );
                 Ok(Listed {
                     refs,
+                    from_cache: false,
                     refresh_error: None,
                 })
             }
@@ -473,6 +503,7 @@ impl PinStore {
                     );
                     Ok(Listed {
                         refs: Arc::clone(&l.refs),
+                        from_cache: false,
                         refresh_error: Some(format!("{e:#}")),
                     })
                 }
@@ -483,20 +514,24 @@ impl PinStore {
 
     /// Record an adopted tip in the cached listing (spec § 5.2), so later
     /// resolutions within the TTL never go back to the stale advertised
-    /// object. Only replaces the entry that still advertises `stale`: a
-    /// listing refreshed meanwhile is at least as new and is kept.
-    fn adopt_into_listing(&self, ws: &str, name: &str, stale: &str, adopted: &str) {
+    /// object. Runs under the workspace's resolve lock: no listing can have
+    /// been written since `resolve` read the one it adopted against.
+    fn adopt_into_listing(&self, ws: &str, name: &str, adopted: &str) {
         let mut listings = self.listings.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(l) = listings.get_mut(ws) {
-            if l.refs.get(name).is_some_and(|oid| oid == stale) {
-                Arc::make_mut(&mut l.refs).insert(name.to_string(), adopted.to_string());
-            }
+            Arc::make_mut(&mut l.refs).insert(name.to_string(), adopted.to_string());
         }
     }
 
     /// Make `commit` present in the local bare repo (fetch by SHA, falling
-    /// back to all heads and tags).
-    async fn ensure_commit(&self, ws: &str, src: &PinSource, commit: &str) -> Result<(), PinError> {
+    /// back to all heads and tags) and return the commit it peels to: a
+    /// 40-hex SHA may name an annotated tag object.
+    async fn ensure_commit(
+        &self,
+        ws: &str,
+        src: &PinSource,
+        commit: &str,
+    ) -> Result<String, PinError> {
         let commit = normalize_commit(ws, commit)?;
         let repo_dir = self.repo_dir(ws);
         let lock = self.repo_lock(ws);
@@ -648,6 +683,9 @@ fn local_commit(repo: &git2::Repository, oid: &str) -> Option<String> {
     object.peel_to_commit().ok().map(|c| c.id().to_string())
 }
 
+/// Make `commit` present in the bare repo and return the commit it peels to
+/// (a 40-hex SHA may name an annotated tag object; a pin always records the
+/// commit).
 fn ensure_commit_local(
     ws: &str,
     repo_dir: &Path,
@@ -655,10 +693,10 @@ fn ensure_commit_local(
     commit: &str,
     by_sha: bool,
     budget: &LoadBudget,
-) -> Result<(), PinError> {
+) -> Result<String, PinError> {
     let repo = open_or_init_bare(repo_dir, &src.url).map_err(|e| unavailable(ws, e))?;
-    if local_commit(&repo, commit).is_some() {
-        return Ok(());
+    if let Some(peeled) = local_commit(&repo, commit) {
+        return Ok(peeled);
     }
     if by_sha {
         if let Err(e) = fetch(&repo, src, &[commit], budget) {
@@ -667,8 +705,8 @@ fn ensure_commit_local(
                  falling back to all heads and tags"
             );
         }
-        if local_commit(&repo, commit).is_some() {
-            return Ok(());
+        if let Some(peeled) = local_commit(&repo, commit) {
+            return Ok(peeled);
         }
     }
     fetch(
@@ -678,14 +716,10 @@ fn ensure_commit_local(
         budget,
     )
     .map_err(|e| unavailable(ws, e))?;
-    if local_commit(&repo, commit).is_some() {
-        Ok(())
-    } else {
-        Err(PinError::CommitNotFound {
-            workspace: ws.to_string(),
-            commit: commit.to_string(),
-        })
-    }
+    local_commit(&repo, commit).ok_or_else(|| PinError::CommitNotFound {
+        workspace: ws.to_string(),
+        commit: commit.to_string(),
+    })
 }
 
 /// Commit for an advertised ref. If the advertised object is already here,
@@ -1069,6 +1103,79 @@ mod tests {
                 git_ref: "release".into()
             }
         );
+    }
+
+    /// A cached-listing miss asks the remote once before answering: a branch
+    /// pushed after the last ls-remote is not a 400 for a poll interval.
+    #[tokio::test]
+    async fn resolve_branch_pushed_after_the_cached_listing_is_found_within_the_ttl() {
+        let (remote, url, c1) = bare_remote(&[("wf.yaml", &workflow("v1"))]);
+        let (_d, store) = store(&url, HOUR);
+        assert_eq!(store.resolve("w", "main").await.unwrap().commit, c1);
+        let late = commit_on(remote.path(), "late", &[("wf.yaml", &workflow("v2"))]);
+        assert_eq!(store.resolve("w", "late").await.unwrap().commit, late);
+    }
+
+    #[tokio::test]
+    async fn resolve_missing_ref_within_the_ttl_is_ref_not_found_after_one_refresh() {
+        let (_r, url, _c1) = bare_remote(&[("wf.yaml", &workflow("v1"))]);
+        let (_d, store) = store(&url, HOUR);
+        store.resolve("w", "main").await.unwrap();
+        let listed_at = || store.listings.lock().unwrap()["w"].fetched_at;
+        let before = listed_at();
+        assert_eq!(
+            store.resolve("w", "nope").await.unwrap_err(),
+            PinError::RefNotFound {
+                workspace: "w".into(),
+                git_ref: "nope".into()
+            }
+        );
+        assert!(listed_at() > before, "the miss refreshed the listing");
+    }
+
+    #[tokio::test]
+    async fn resolve_missing_ref_within_the_ttl_is_unavailable_when_the_refresh_fails() {
+        let (remote, url, c1) = bare_remote(&[("wf.yaml", &workflow("v1"))]);
+        let (_d, store) = store(&url, HOUR);
+        assert_eq!(store.resolve("w", "main").await.unwrap().commit, c1);
+        commit_on(remote.path(), "late", &[("wf.yaml", &workflow("v2"))]);
+        std::fs::remove_dir_all(remote.path()).unwrap();
+        let err = store.resolve("w", "late").await.unwrap_err();
+        assert!(matches!(err, PinError::PinUnavailable { .. }), "{err:?}");
+        assert_eq!(
+            store.resolve("w", "main").await.unwrap().commit,
+            c1,
+            "a cached hit needs no remote"
+        );
+    }
+
+    /// Two resolves racing over one stale listing entry: the first fetches
+    /// and adopts c2; without serialisation the second still reads c1, finds
+    /// it local (c2's parent) and hands out the OLDER commit.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_resolves_after_a_branch_move_return_the_same_commit() {
+        let (remote, url, _c0) = bare_remote(&[("wf.yaml", &workflow("v0"))]);
+        commit_on(remote.path(), "release", &[("wf.yaml", &workflow("v1"))]);
+        let (_d, store) = store(&url, HOUR);
+        // Lists release → c1 and fetches nothing.
+        assert!(matches!(
+            store.resolve("w", "missing").await,
+            Err(PinError::RefNotFound { .. })
+        ));
+        let c2 = commit_on(remote.path(), "release", &[("wf.yaml", &workflow("v2"))]);
+        let (a, b) = tokio::join!(store.resolve("w", "release"), store.resolve("w", "release"));
+        assert_eq!(a.unwrap().commit, c2);
+        assert_eq!(b.unwrap().commit, c2);
+    }
+
+    #[tokio::test]
+    async fn resolve_full_sha_of_an_annotated_tag_object_pins_its_commit() {
+        let (remote, url, c1) = bare_remote(&[("wf.yaml", &workflow("v1"))]);
+        let tag_object = annotated_tag(remote.path(), "v1", &c1);
+        let (_d, store) = store(&url, HOUR);
+        let pin = store.resolve("w", &tag_object).await.unwrap();
+        assert_eq!(pin.commit, c1, "Pin.commit is always a commit");
+        assert_eq!(pin.git_ref, tag_object, "the ref stays as written");
     }
 
     /// Only heads and tags are ever resolved (§ 4.2). A host's other refs

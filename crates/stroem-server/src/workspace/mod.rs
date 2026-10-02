@@ -2486,46 +2486,17 @@ tasks:
 
     // ─── concurrent startup loading ────────────────────────────────────
 
-    /// Minimal copy of `git::tests::create_bare_repo` (private to that
-    /// module) — creates a bare git repo with an initial commit on `main`
-    /// containing the given files, returning (TempDir, file:// URL).
-    fn create_bare_repo_for_test(files: &[(&str, &str)]) -> (TempDir, String) {
-        let bare_dir = TempDir::new().unwrap();
-        let bare_repo = git2::Repository::init_bare(bare_dir.path()).unwrap();
-
-        let mut tb = bare_repo.treebuilder(None).unwrap();
-        for &(name, content) in files {
-            let oid = bare_repo.blob(content.as_bytes()).unwrap();
-            tb.insert(name, oid, 0o100644).unwrap();
-        }
-        let tree_oid = tb.write().unwrap();
-        let tree = bare_repo.find_tree(tree_oid).unwrap();
-
-        let sig = git2::Signature::now("test", "test@test.com").unwrap();
-        let commit_oid = bare_repo
-            .commit(Some("refs/heads/main"), &sig, &sig, "initial", &tree, &[])
-            .unwrap();
-
-        bare_repo
-            .reference("HEAD", commit_oid, true, "set HEAD")
-            .ok();
-        bare_repo.set_head("refs/heads/main").unwrap();
-
-        let url = format!("file://{}", bare_dir.path().display());
-        (bare_dir, url)
-    }
-
     /// `WorkspaceManager::new` must load workspaces concurrently: two git
     /// sources (backed by local bare repos, exercising the real blocking
     /// clone path) plus a folder source pointing at a non-existent path all
     /// load correctly, and none blocks the others.
     #[tokio::test(flavor = "multi_thread")]
     async fn test_new_loads_git_and_folder_workspaces_concurrently() {
-        let (_bare1, url1) = create_bare_repo_for_test(&[(
+        let (_bare1, url1, _) = crate::workspace::git_test_support::bare_remote(&[(
             "deploy.yaml",
             "actions:\n  a:\n    type: script\n    script: echo hi\n",
         )]);
-        let (_bare2, url2) = create_bare_repo_for_test(&[(
+        let (_bare2, url2, _) = crate::workspace::git_test_support::bare_remote(&[(
             "deploy.yaml",
             "actions:\n  b:\n    type: script\n    script: echo hi\n",
         )]);
