@@ -132,13 +132,14 @@ pub async fn get_worker(
 
     let total = steps.len() as i64;
 
-    // Per-job redaction of `error_message` (spec § 7.4): one set per distinct
-    // job that has an error to show. A job whose set cannot be built (pin not
-    // loadable, row gone) has its rows' error masked whole — fail closed per
-    // row, not per page.
-    let mut sets: HashMap<uuid::Uuid, Option<Vec<String>>> = HashMap::new();
+    // Per-job redaction of `error_message` (spec § 7.4): one per distinct job
+    // that has an error to show. A job whose set cannot be built (a pin not
+    // loadable, transiently or for good, or the row gone) has its rows' error
+    // masked whole — fail closed per row, not per page.
+    let mut redactions: HashMap<uuid::Uuid, Option<crate::redaction::JobRedaction>> =
+        HashMap::new();
     for s in &steps {
-        if s.error_message.is_none() || sets.contains_key(&s.job_id) {
+        if s.error_message.is_none() || redactions.contains_key(&s.job_id) {
             continue;
         }
         let set = match (
@@ -146,25 +147,25 @@ pub async fn get_worker(
             JobStepRepo::get_steps_for_job(&state.pool, s.job_id).await,
         ) {
             (Ok(Some(job)), Ok(job_steps)) => {
-                crate::redaction::job_redaction_values(&state, &job, &job_steps)
+                crate::redaction::job_redaction(&state, &job, &job_steps)
                     .await
                     .ok()
             }
             _ => None,
         };
-        sets.insert(s.job_id, set);
+        redactions.insert(s.job_id, set);
     }
 
     let steps_json: Vec<serde_json::Value> = steps
         .iter()
         .map(|s| {
-            let error_message = s
-                .error_message
-                .as_deref()
-                .map(|m| match sets.get(&s.job_id) {
-                    Some(Some(secrets)) => crate::redaction::redact_str(m, secrets),
-                    _ => crate::workspace_set::REDACTED.to_string(),
-                });
+            let error_message =
+                s.error_message
+                    .as_deref()
+                    .map(|m| match redactions.get(&s.job_id) {
+                        Some(Some(redaction)) => redaction.apply_str(m),
+                        _ => crate::workspace_set::REDACTED.to_string(),
+                    });
             json!({
                 "job_id": s.job_id,
                 "workspace": s.workspace,

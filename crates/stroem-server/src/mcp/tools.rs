@@ -583,8 +583,9 @@ impl StromMcpHandler {
             })
             .collect();
 
-        // Same per-job set as job detail (spec § 7.4); fail closed.
-        let secrets = crate::redaction::job_redaction_values(&self.state, &job, &steps)
+        // Same per-job redaction as job detail (spec § 7.4): a transient pin
+        // failure fails closed, a permanent one masks every content string.
+        let redaction = crate::redaction::job_redaction(&self.state, &job, &steps)
             .await
             .map_err(|e| {
                 tracing::warn!(job_id = %job.job_id, "MCP get_job_status fails closed: {e}");
@@ -603,7 +604,7 @@ impl StromMcpHandler {
             "completed_at": job.completed_at.map(|dt| dt.to_rfc3339()),
             "steps": steps_json,
         });
-        crate::redaction::redact_job_response(&mut result, &secrets);
+        redaction.apply_job_response(&mut result);
 
         Ok(json_result(&result))
     }

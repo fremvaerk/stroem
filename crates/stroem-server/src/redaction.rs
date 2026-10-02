@@ -6,7 +6,10 @@
 //! how its vals references render) can differ from the live config, so the
 //! live set alone would let an older or ref-only secret through. A pin that
 //! cannot be loaded makes the set incomplete; an incomplete set is never
-//! used — callers fail closed on [`RedactionUnavailable`].
+//! used. A TRANSIENT failure fails closed ([`RedactionUnavailable`] → 503 /
+//! an MCP error, retry later); a PERMANENT one can never be retried away, so
+//! the outlet answers with every content string masked
+//! ([`JobRedaction::MaskAll`]).
 
 use std::collections::BTreeSet;
 
@@ -14,7 +17,7 @@ use serde_json::Value;
 use stroem_db::{JobRow, JobStepRow};
 
 use crate::state::AppState;
-use crate::workspace::pins::PinRef;
+use crate::workspace::pins::{PinError, PinLoadWithheld, PinRef};
 use crate::workspace_set::{
     collect_redaction_values, redact_secrets_in_str, WorkspaceSet, REDACTED,
 };
@@ -25,14 +28,33 @@ use crate::workspace_set::{
 pub struct RedactionUnavailable {
     pub workspace: String,
     pub commit: String,
+    /// [`PinError::is_transient`] of the failure: `true` = a retry may
+    /// succeed (answer 503); `false` = it never will (mask everything).
+    pub transient: bool,
+}
+
+impl RedactionUnavailable {
+    pub fn from_pin_error(ws: &str, pin: &PinRef, e: &PinError) -> Self {
+        RedactionUnavailable {
+            workspace: ws.to_string(),
+            commit: pin.commit.clone(),
+            transient: e.is_transient(),
+        }
+    }
 }
 
 impl std::fmt::Display for RedactionUnavailable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "redaction set unavailable: pin {}@{} could not be loaded",
-            self.workspace, self.commit
+            "redaction set unavailable: pin {}@{} could not be loaded ({})",
+            self.workspace,
+            self.commit,
+            if self.transient {
+                "transient"
+            } else {
+                "permanent"
+            }
         )
     }
 }
@@ -130,7 +152,10 @@ pub fn referenced_pins(job: &JobRow, steps: &[JobStepRow]) -> Vec<(String, PinRe
 }
 
 /// The live redaction set plus the secret values of every pin the job
-/// references (spec § 7.4). `Err` = some pin could not be loaded.
+/// references (spec § 7.4). `Err` = some pin could not be loaded; the first
+/// failing pin decides the error's kind. Outlets normally go through
+/// [`job_redaction`], which turns a permanent failure into
+/// [`JobRedaction::MaskAll`].
 #[tracing::instrument(skip_all, fields(job_id = %job.job_id, workspace = %job.workspace))]
 pub async fn job_redaction_values(
     state: &AppState,
@@ -145,25 +170,91 @@ pub async fn job_redaction_values(
             // properties of its connections, whichever workspace types them.
             Ok(pinned) => values.extend(state.workspaces.pin_redaction_values(&ws, &pinned).await),
             Err(e) => {
+                let unavailable = RedactionUnavailable::from_pin_error(&ws, &pin, &e);
                 tracing::warn!(
                     job_id = %job.job_id,
                     workspace = %ws,
                     commit = %pin.commit,
-                    "redaction set unavailable: {e}"
+                    transient = unavailable.transient,
+                    "redaction set unavailable: {}",
+                    pin_failure_log_text(&ws, &pin, &e)
                 );
-                return Err(RedactionUnavailable {
-                    workspace: ws,
-                    commit: pin.commit,
-                });
+                return Err(unavailable);
             }
         }
     }
     Ok(values)
 }
 
+/// How an outlet treats a job's content once its pins are known.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JobRedaction {
+    /// Every referenced pin loaded: mask these values wherever they occur.
+    Values(Vec<String>),
+    /// A referenced pin can never load (permanent [`PinError`]): its secret
+    /// values are unknowable for good, so every content string is masked
+    /// whole. Identifiers, statuses and timestamps stay readable.
+    MaskAll,
+}
+
+impl JobRedaction {
+    /// The outlet split: a set → [`Values`](Self::Values); a PERMANENT pin
+    /// failure → [`MaskAll`](Self::MaskAll) (a retry would fail the same
+    /// way); a TRANSIENT one stays `Err` — the outlet answers 503 / an MCP
+    /// error "redaction set unavailable, retry".
+    pub fn from_result(
+        result: Result<Vec<String>, RedactionUnavailable>,
+    ) -> Result<JobRedaction, RedactionUnavailable> {
+        match result {
+            Ok(values) => Ok(JobRedaction::Values(values)),
+            Err(e) if e.transient => Err(e),
+            Err(_) => Ok(JobRedaction::MaskAll),
+        }
+    }
+
+    pub fn masks_all(&self) -> bool {
+        matches!(self, JobRedaction::MaskAll)
+    }
+
+    pub fn apply_str(&self, s: &str) -> String {
+        match self {
+            JobRedaction::Values(secrets) => redact_str(s, secrets),
+            JobRedaction::MaskAll => REDACTED.to_string(),
+        }
+    }
+
+    pub fn apply_value(&self, v: &mut Value) {
+        match self {
+            JobRedaction::Values(secrets) => redact_value_tree(v, secrets),
+            JobRedaction::MaskAll => mask_value_tree(v),
+        }
+    }
+
+    /// [`redact_job_response`] or [`mask_job_response`].
+    pub fn apply_job_response(&self, job: &mut Value) {
+        match self {
+            JobRedaction::Values(secrets) => redact_job_response(job, secrets),
+            JobRedaction::MaskAll => mask_job_response(job),
+        }
+    }
+}
+
+/// [`job_redaction_values`] through [`JobRedaction::from_result`]: `Err` only
+/// for a TRANSIENT pin failure.
+#[tracing::instrument(skip_all, fields(job_id = %job.job_id, workspace = %job.workspace))]
+pub async fn job_redaction(
+    state: &AppState,
+    job: &JobRow,
+    steps: &[JobStepRow],
+) -> Result<JobRedaction, RedactionUnavailable> {
+    JobRedaction::from_result(job_redaction_values(state, job, steps).await)
+}
+
 /// Redact a job's `output` (webhook responses). Loads the job's steps for
-/// their pins. A [`RedactionUnavailable`] is returned inside the `anyhow`
-/// error; callers `downcast_ref` it to answer 503.
+/// their pins and applies the same split as job detail: a permanent pin
+/// failure masks every string of the output (`Ok`); only a TRANSIENT one is
+/// an error — a [`RedactionUnavailable`] with `transient: true` inside the
+/// `anyhow` error, which callers `downcast_ref` to answer 503.
 #[tracing::instrument(skip_all, fields(job_id = %job.job_id))]
 pub async fn redact_job_output(
     state: &AppState,
@@ -174,8 +265,9 @@ pub async fn redact_job_output(
         return Ok(None);
     };
     let steps = stroem_db::JobStepRepo::get_steps_for_job(&state.pool, job.job_id).await?;
-    let secrets = job_redaction_values(state, job, &steps).await?;
-    redact_value_tree(&mut output, &secrets);
+    job_redaction(state, job, &steps)
+        .await?
+        .apply_value(&mut output);
     Ok(Some(output))
 }
 
@@ -189,16 +281,26 @@ pub fn redact_str(s: &str, secrets: &[String]) -> String {
 
 /// Mask secret values (and vals `ref+` references) in every string of a JSON tree.
 pub fn redact_value_tree(value: &mut Value, secrets: &[String]) {
+    map_strings(value, &|s| redact_str(s, secrets));
+}
+
+/// Replace every string of a JSON tree with the mask; numbers, booleans and
+/// nulls are kept.
+pub fn mask_value_tree(value: &mut Value) {
+    map_strings(value, &|_| REDACTED.to_string());
+}
+
+fn map_strings(value: &mut Value, f: &dyn Fn(&str) -> String) {
     match value {
-        Value::String(s) => *s = redact_str(s, secrets),
+        Value::String(s) => *s = f(s),
         Value::Object(map) => {
             for v in map.values_mut() {
-                redact_value_tree(v, secrets);
+                map_strings(v, f);
             }
         }
         Value::Array(arr) => {
             for v in arr.iter_mut() {
-                redact_value_tree(v, secrets);
+                map_strings(v, f);
             }
         }
         _ => {}
@@ -210,33 +312,61 @@ pub fn redact_value_tree(value: &mut Value, secrets: &[String]) {
 /// [`STEP_IDENTIFIER_KEYS`]. Fields copied out of step output — e.g.
 /// `approval_message` — are covered without being named here.
 pub fn redact_job_response(job: &mut Value, secrets: &[String]) {
+    walk_job_content(job, &|v| redact_value_tree(v, secrets));
+}
+
+/// [`redact_job_response`]'s walk with every content string masked whole —
+/// the answer when a referenced pin is permanently unloadable. Identifiers,
+/// statuses and timestamps stay intact.
+pub fn mask_job_response(job: &mut Value) {
+    walk_job_content(job, &mask_value_tree);
+}
+
+/// Apply `f` to every content value of a serialised job: each top-level value
+/// but the identifier keys, and each step entry's value but the step
+/// identifier keys. A non-array `steps` is content too.
+fn walk_job_content(job: &mut Value, f: &dyn Fn(&mut Value)) {
     let Value::Object(map) = job else {
-        redact_value_tree(job, secrets);
+        f(job);
         return;
     };
     for (key, v) in map.iter_mut() {
         if key == "steps" {
-            if let Value::Array(steps) = v {
-                for step in steps.iter_mut() {
-                    redact_object_except(step, secrets, STEP_IDENTIFIER_KEYS);
+            match v {
+                Value::Array(steps) => {
+                    for step in steps.iter_mut() {
+                        walk_object_except(step, STEP_IDENTIFIER_KEYS, f);
+                    }
                 }
+                other => f(other),
             }
         } else if !JOB_IDENTIFIER_KEYS.contains(&key.as_str()) {
-            redact_value_tree(v, secrets);
+            f(v);
         }
     }
 }
 
-fn redact_object_except(v: &mut Value, secrets: &[String], skip: &[&str]) {
+fn walk_object_except(v: &mut Value, skip: &[&str], f: &dyn Fn(&mut Value)) {
     match v {
         Value::Object(map) => {
             for (k, x) in map.iter_mut() {
                 if !skip.contains(&k.as_str()) {
-                    redact_value_tree(x, secrets);
+                    f(x);
                 }
             }
         }
-        other => redact_value_tree(other, secrets),
+        other => f(other),
+    }
+}
+
+/// The log text for a pin failure. A `PinLoadFailed` carries the raw loader
+/// chain, which can quote secret values — the very values this pin's set
+/// would mask, unknowable here — so it is logged as the fixed
+/// [`PinLoadWithheld`] sentence. Every other variant carries no config text.
+fn pin_failure_log_text(ws: &str, pin: &PinRef, e: &PinError) -> String {
+    match e {
+        PinError::PinLoadFailed { .. } => PinLoadWithheld::new(ws, pin).to_string(),
+        other => other.to_string(),
     }
 }
 
@@ -388,6 +518,166 @@ mod tests {
             v["steps"][0]["retry_history"][0]["error"],
             json!(format!("boom {REDACTED}"))
         );
+    }
+
+    // ── permanent vs transient pin failures (fix round 1) ──────────────
+
+    fn pin_23() -> PinRef {
+        PinRef {
+            git_ref: "release/2.3".to_string(),
+            commit: SHA_A.to_string(),
+        }
+    }
+
+    #[test]
+    fn redaction_unavailable_kind_follows_the_pin_error() {
+        let transient = PinError::PinUnavailable {
+            workspace: "etl".into(),
+            message: "network down".into(),
+        };
+        let permanent = [
+            PinError::CommitNotFound {
+                workspace: "etl".into(),
+                commit: SHA_A.into(),
+            },
+            PinError::NotGit {
+                workspace: "etl".into(),
+            },
+            PinError::PinLoadFailed {
+                workspace: "etl".into(),
+                commit: SHA_A.into(),
+                message: "bad yaml".into(),
+            },
+        ];
+        let u = RedactionUnavailable::from_pin_error("etl", &pin_23(), &transient);
+        assert!(u.transient);
+        assert_eq!((u.workspace.as_str(), u.commit.as_str()), ("etl", SHA_A));
+        for e in &permanent {
+            assert!(
+                !RedactionUnavailable::from_pin_error("etl", &pin_23(), e).transient,
+                "{e:?} is permanent"
+            );
+        }
+    }
+
+    #[test]
+    fn pin_failure_log_text_withholds_the_loader_message() {
+        let e = PinError::PinLoadFailed {
+            workspace: "etl".into(),
+            commit: SHA_A.into(),
+            message: "Variable `secret.token` = s3cr3t-in-chain".into(),
+        };
+        let text = pin_failure_log_text("etl", &pin_23(), &e);
+        assert!(!text.contains("s3cr3t-in-chain"), "{text}");
+        assert!(text.contains("etl@release/2.3"), "{text}");
+
+        // Every other variant carries no config text: logged as is.
+        let e = PinError::PinUnavailable {
+            workspace: "etl".into(),
+            message: "connection refused".into(),
+        };
+        assert!(pin_failure_log_text("etl", &pin_23(), &e).contains("connection refused"));
+    }
+
+    #[test]
+    fn job_redaction_splits_on_the_error_kind() {
+        let values = JobRedaction::from_result(Ok(vec!["s".to_string()]));
+        assert_eq!(values, Ok(JobRedaction::Values(vec!["s".to_string()])));
+
+        let permanent = RedactionUnavailable {
+            workspace: "etl".into(),
+            commit: SHA_A.into(),
+            transient: false,
+        };
+        assert_eq!(
+            JobRedaction::from_result(Err(permanent)),
+            Ok(JobRedaction::MaskAll)
+        );
+
+        let transient = RedactionUnavailable {
+            workspace: "etl".into(),
+            commit: SHA_A.into(),
+            transient: true,
+        };
+        assert_eq!(
+            JobRedaction::from_result(Err(transient.clone())),
+            Err(transient)
+        );
+    }
+
+    #[test]
+    fn job_redaction_mask_all_masks_every_string() {
+        let mask = JobRedaction::MaskAll;
+        assert!(mask.masks_all());
+        assert_eq!(mask.apply_str("exit 1: anything"), REDACTED);
+
+        let mut v = json!({"a": "x", "n": 3, "list": ["y", true, null]});
+        mask.apply_value(&mut v);
+        assert_eq!(
+            v,
+            json!({"a": REDACTED, "n": 3, "list": [REDACTED, true, null]})
+        );
+
+        let values = JobRedaction::Values(vec!["tok".to_string()]);
+        assert!(!values.masks_all());
+        assert_eq!(values.apply_str("a tok b"), format!("a {REDACTED} b"));
+    }
+
+    #[test]
+    fn mask_job_response_masks_content_and_keeps_identifiers() {
+        let child = json!({"id": "c1", "workspace": "etl", "task_name": "t",
+                           "status": "completed", "created_at": "2026-10-02T00:00:00Z"});
+        let mut v = json!({
+            "job_id": "j1",
+            "workspace": "etl",
+            "task_name": "nightly",
+            "status": "failed",
+            "revision": SHA_A,
+            "created_at": "2026-10-02T00:00:00Z",
+            "input": {"env": "prod"},
+            "output": {"r": "anything"},
+            "retry_attempt": 0,
+            "steps": [{
+                "step_name": "gate",
+                "status": "completed",
+                "started_at": "2026-10-02T00:00:00Z",
+                "approval_message": "approve?",
+                "error_message": "exit 1",
+                "output": {"approval_message": "approve?"},
+                "child_jobs": [child.clone()],
+                "retry_attempt": 2
+            }]
+        });
+        mask_job_response(&mut v);
+        assert_eq!(v["job_id"], json!("j1"));
+        assert_eq!(v["workspace"], json!("etl"));
+        assert_eq!(v["task_name"], json!("nightly"));
+        assert_eq!(v["status"], json!("failed"));
+        assert_eq!(v["revision"], json!(SHA_A));
+        assert_eq!(v["created_at"], json!("2026-10-02T00:00:00Z"));
+        assert_eq!(v["input"]["env"], json!(REDACTED));
+        assert_eq!(v["output"]["r"], json!(REDACTED));
+        let step = &v["steps"][0];
+        assert_eq!(step["step_name"], json!("gate"));
+        assert_eq!(step["status"], json!("completed"));
+        assert_eq!(step["started_at"], json!("2026-10-02T00:00:00Z"));
+        assert_eq!(step["child_jobs"], json!([child]));
+        assert_eq!(step["retry_attempt"], json!(2));
+        assert_eq!(step["approval_message"], json!(REDACTED));
+        assert_eq!(step["error_message"], json!(REDACTED));
+        assert_eq!(step["output"]["approval_message"], json!(REDACTED));
+    }
+
+    /// A `steps` value that is not an array is content like any other: it is
+    /// walked, never passed through raw.
+    #[test]
+    fn job_response_walks_a_non_array_steps_value() {
+        let mut v = json!({"steps": {"odd": "tok-1"}});
+        redact_job_response(&mut v, &["tok-1".to_string()]);
+        assert_eq!(v["steps"]["odd"], json!(REDACTED));
+        let mut v = json!({"steps": "raw"});
+        mask_job_response(&mut v);
+        assert_eq!(v["steps"], json!(REDACTED));
     }
 
     // ── referenced_pins ────────────────────────────────────────────────

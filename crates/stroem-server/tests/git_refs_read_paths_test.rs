@@ -16,6 +16,8 @@ use serde_json::{json, Value};
 use sqlx::PgPool;
 #[allow(unused_imports)] // the job ACL tests (Task 18)
 use stroem_server::config::{AclAction, AclConfig, AclRule};
+use stroem_server::state::AppState;
+use stroem_server::workspace::pins::PinError;
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -25,7 +27,6 @@ const RP_YAML_PATH: &str = "workflow.yaml";
 const SECRET_23: &str = "ref-only-s3cret-2-3";
 const MASK: &str = "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}";
 /// A well-formed commit id that exists in no repository.
-#[allow(dead_code)] // the permanent-failure tests (Tasks 17–19)
 const MISSING_COMMIT: &str = "00000000000000000000000000000000000000ff";
 
 /// Every test in this file runs under this bound (testcontainers + git).
@@ -340,13 +341,54 @@ async fn rp_cold_replica_during_outage(fx: &PinnedFixture) -> Result<Replica> {
     Ok(replica)
 }
 
-/// The pin `commit` of `etl` fails transiently on `replica` (proves the
-/// fail-closed path ran on a `PinUnavailable`, not a permanent error).
-async fn rp_assert_pin_transient(replica: &Replica, commit: &str) {
-    match replica.state.workspaces.pins().ensure("etl", commit).await {
-        Ok(_) => panic!("the remote is broken: the pin cannot load"),
-        Err(err) => assert!(err.is_transient(), "expected PinUnavailable, got {err:?}"),
+/// The error of loading `etl` at `commit` on `state`'s replica.
+async fn rp_pin_error(state: &AppState, commit: &str) -> PinError {
+    match state.workspaces.pins().ensure("etl", commit).await {
+        Ok(_) => panic!("the pin {commit} must not load here"),
+        Err(err) => err,
     }
+}
+
+/// The pin `commit` of `etl` fails transiently on this replica (proves the
+/// fail-closed path ran on a `PinUnavailable`, not a permanent error).
+async fn rp_assert_pin_transient(state: &AppState, commit: &str) {
+    let err = rp_pin_error(state, commit).await;
+    assert!(err.is_transient(), "expected PinUnavailable, got {err:?}");
+}
+
+/// The pin `commit` of `etl` fails permanently on this replica (e.g.
+/// `CommitNotFound`): no retry can ever build its redaction set.
+async fn rp_assert_pin_permanent(state: &AppState, commit: &str) {
+    let err = rp_pin_error(state, commit).await;
+    assert!(
+        !err.is_transient(),
+        "expected a permanent error, got {err:?}"
+    );
+}
+
+/// A step entry of a job-detail / MCP-status body, by name.
+fn rp_step(body: &Value, name: &str) -> Value {
+    body["steps"]
+        .as_array()
+        .expect("steps")
+        .iter()
+        .find(|s| s["step_name"] == name)
+        .unwrap_or_else(|| panic!("no step {name} in {body}"))
+        .clone()
+}
+
+/// Identifiers, statuses and timestamps survive a masked answer.
+fn rp_assert_identifiers_intact(body: &Value, job_id: Uuid) {
+    assert_eq!(body["job_id"], json!(job_id), "{body}");
+    assert_eq!(body["workspace"], json!("etl"));
+    assert_eq!(body["task_name"], json!("nightly"));
+    assert_eq!(body["status"], json!("failed"));
+    assert_eq!(body["revision"], json!(MISSING_COMMIT));
+    assert!(body["created_at"].as_str().is_some_and(|t| t != MASK));
+    let run = rp_step(body, "run");
+    assert_eq!(run["status"], json!("failed"));
+    assert_eq!(run["action_name"], json!("run"));
+    assert_eq!(rp_step(body, "gate")["status"], json!("completed"));
 }
 
 #[tokio::test]
@@ -407,7 +449,7 @@ async fn job_detail_fails_closed_when_a_pin_cannot_be_loaded() -> Result<()> {
             None,
         )
         .await;
-        rp_assert_pin_transient(&replica, &fx.commits.etl_release).await;
+        rp_assert_pin_transient(&replica.state, &fx.commits.etl_release).await;
         fx.etl.restore_remote();
 
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
@@ -456,7 +498,7 @@ async fn mcp_get_job_status_masks_ref_only_secret_and_fails_closed() -> Result<(
             json!({"job_id": broken.to_string()}),
         )
         .await;
-        rp_assert_pin_transient(&replica, &fx.commits.etl_release).await;
+        rp_assert_pin_transient(&replica.state, &fx.commits.etl_release).await;
         fx.etl.restore_remote();
 
         assert!(rp_mcp_is_error(&resp), "must fail closed: {resp}");
@@ -572,7 +614,7 @@ async fn worker_detail_masks_error_and_fails_closed_per_row() -> Result<()> {
             None,
         )
         .await;
-        rp_assert_pin_transient(&replica, &release_24).await;
+        rp_assert_pin_transient(&replica.state, &release_24).await;
         fx.etl.restore_remote();
 
         assert_eq!(status, StatusCode::OK, "{body}");
@@ -595,6 +637,120 @@ async fn worker_detail_masks_error_and_fails_closed_per_row() -> Result<()> {
             json!("exit 1: plain"),
             "fail closed per row, not per page"
         );
+        Ok(())
+    })
+    .await
+}
+
+// ── Task 16 fix round 1: permanent pin failures, own live secrets ──────
+
+/// A pin that can NEVER load (`CommitNotFound`) must not answer 503 forever:
+/// job detail answers 200 with every content string masked whole.
+#[tokio::test]
+async fn job_detail_masks_everything_when_a_pin_is_permanently_unloadable() -> Result<()> {
+    rp_bounded(async {
+        let fx = pinned_workspace_fixture(rp_opts()).await?;
+        let job_id = rp_seed_pinned_23(&fx, MISSING_COMMIT.to_string()).await;
+
+        let (status, body) = api_req(
+            &fx.router,
+            "GET",
+            &format!("/api/jobs/{job_id}"),
+            None,
+            None,
+        )
+        .await;
+        rp_assert_pin_permanent(&fx.state, MISSING_COMMIT).await;
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            !body.to_string().contains(SECRET_23),
+            "secret leaked: {body}"
+        );
+        assert_eq!(body["output"]["leak"], json!(MASK));
+        assert_eq!(rp_step(&body, "gate")["approval_message"], json!(MASK));
+        assert_eq!(rp_step(&body, "run")["error_message"], json!(MASK));
+        rp_assert_identifiers_intact(&body, job_id);
+        Ok(())
+    })
+    .await
+}
+
+/// MCP status applies the same split: a permanent pin failure is a normal
+/// result with every content string masked.
+#[tokio::test]
+async fn mcp_get_job_status_masks_everything_when_a_pin_is_permanently_unloadable() -> Result<()> {
+    rp_bounded(async {
+        let mut o = rp_opts();
+        o.mcp = true;
+        let fx = pinned_workspace_fixture(o).await?;
+        let job_id = rp_seed_pinned_23(&fx, MISSING_COMMIT.to_string()).await;
+
+        let resp = rp_mcp_call(
+            &fx.router,
+            None,
+            "get_job_status",
+            json!({"job_id": job_id.to_string()}),
+        )
+        .await;
+        rp_assert_pin_permanent(&fx.state, MISSING_COMMIT).await;
+
+        assert!(!rp_mcp_is_error(&resp), "{resp}");
+        assert!(
+            !resp.to_string().contains(SECRET_23),
+            "secret leaked: {resp}"
+        );
+        let status = rp_mcp_json(&resp);
+        assert_eq!(rp_step(&status, "run")["error_message"], json!(MASK));
+        rp_assert_identifiers_intact(&status, job_id);
+        Ok(())
+    })
+    .await
+}
+
+/// A secret that exists ONLY in the live config of the job's own workspace
+/// (not at the pinned commit). `pin_redaction_values` reads the pinned
+/// workspace from its pin, so only the live set covers this value.
+const RP_LIVE_ONLY_SECRET: &str = "live-only-s3cret-main";
+
+#[tokio::test]
+async fn job_detail_of_a_pinned_job_masks_its_own_workspace_live_secret() -> Result<()> {
+    rp_bounded(async {
+        let mut o = rp_opts();
+        o.etl_main = Some(format!(
+            "\nsecrets:\n  LIVE: \"{RP_LIVE_ONLY_SECRET}\"{RP_MAIN}"
+        ));
+        let fx = pinned_workspace_fixture(o).await?;
+        let job_id = rp_seed_job(
+            &fx.pool,
+            RpJob {
+                git_ref: Some("release/2.3"),
+                revision: Some(fx.commits.etl_release.clone()),
+                status: "failed",
+                output: Some(json!({
+                    "live": format!("token={RP_LIVE_ONLY_SECRET}"),
+                    "pinned": SECRET_23,
+                })),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let (status, body) = api_req(
+            &fx.router,
+            "GET",
+            &format!("/api/jobs/{job_id}"),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            !body.to_string().contains(RP_LIVE_ONLY_SECRET),
+            "live secret leaked: {body}"
+        );
+        assert_eq!(body["output"]["live"], json!(format!("token={MASK}")));
+        assert_eq!(body["output"]["pinned"], json!(MASK));
         Ok(())
     })
     .await

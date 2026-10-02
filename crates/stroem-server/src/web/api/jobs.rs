@@ -390,10 +390,12 @@ pub async fn get_job(
         .collect();
 
     // Live set + every referenced pin's secrets (spec § 7.4). Computed while
-    // `job` and `steps` are still whole; never answer with a partial set.
-    // Before `config_for` below: a pin that cannot load fails here once,
-    // and one that loads is cached for `config_for`.
-    let secret_values = crate::redaction::job_redaction_values(&state, &job, &steps)
+    // `job` and `steps` are still whole; never answer with a partial set. A
+    // transient pin failure fails closed (503, retry); a permanent one masks
+    // every content string (a retry would fail the same way). Before
+    // `config_for` below: a pin that cannot load is tried once, and one that
+    // loads is cached for `config_for`.
+    let redaction = crate::redaction::job_redaction(&state, &job, &steps)
         .await
         .map_err(|e| {
             tracing::warn!(job_id = %job.job_id, "job detail fails closed: {e}");
@@ -402,17 +404,22 @@ pub async fn get_job(
 
     // The job's own config (spec § 7.4): a pinned job sorts by the flow of its
     // commit. `None` (pin not loadable, workspace unavailable) leaves the
-    // steps unsorted.
-    let workspace = state
-        .workspaces
-        .config_for(
-            &job.workspace,
-            crate::workspace::pins::PinRef::of_job(&job).as_ref(),
-        )
-        .await
-        .ok()
-        .flatten()
-        .map(|h| h.arc());
+    // steps unsorted. Skipped after a permanent pin failure: no second fetch
+    // of a pin that cannot load.
+    let workspace = if redaction.masks_all() {
+        None
+    } else {
+        state
+            .workspaces
+            .config_for(
+                &job.workspace,
+                crate::workspace::pins::PinRef::of_job(&job).as_ref(),
+            )
+            .await
+            .ok()
+            .flatten()
+            .map(|h| h.arc())
+    };
 
     // Sort steps by topological order (dependency-first) using the task flow
     if let Some(ref ws) = workspace {
@@ -521,9 +528,10 @@ pub async fn get_job(
 
     // Whole-response redaction (spec § 7.4): every content string of the job
     // and of each step entry, including fields copied out of step output
-    // such as `approval_message`.
+    // such as `approval_message` (or all of them masked whole, after a
+    // permanent pin failure).
     let mut value = serde_json::to_value(&response).context("serialise job detail")?;
-    crate::redaction::redact_job_response(&mut value, &secret_values);
+    redaction.apply_job_response(&mut value);
     Ok(Json(value))
 }
 
