@@ -19,6 +19,7 @@ pub mod metrics;
 pub mod oauth;
 pub mod oidc;
 pub mod recovery;
+pub mod refs;
 pub mod render_context;
 pub mod restart;
 pub mod runtime;
