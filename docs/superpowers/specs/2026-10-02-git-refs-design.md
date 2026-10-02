@@ -1,6 +1,6 @@
 # Git Refs on Action, Task and Trigger References — Design
 
-Status: revision 8 — Codex READY FOR PLAN at rev 7 (thread `01a0fb54`); rev 8 adds plan-time amendments, owner-approved spec
+Status: revision 9 — Codex READY FOR PLAN at rev 7 (thread `01a0fb54`); revs 8–9 add plan/pre-flight amendments; owner-approved
 Ships in: next minor (migrations `049` + `050`)
 
 Lets a flow step's `action:`, a `type: task` action's `task:` and a
@@ -10,6 +10,14 @@ side, each from its own definitions and files. Line numbers cite
 `anatolii/Revisions` at `b367b6c`.
 
 ## Revision history
+
+**Revision 9 (2026-10-02, execution pre-flight).** Two rulings from the
+pre-flight conflict scan:
+- A permanent pin error during `advance` fails the job, so the re-advance
+  phase cannot loop on it (§ 7.3).
+- The webhook keeps its pre-refresh check against the cached secret, so an
+  unauthenticated caller cannot trigger a git refresh. A failed refresh
+  answers 500 (§ 7.5).
 
 **Revision 8 (2026-10-02, implementation planning).** Three amendments found
 while writing the plan:
@@ -698,6 +706,12 @@ It calls `Settlement::advance` for each job, with one heartbeat per job
 (CLAUDE.md § Health Check). `advance` is idempotent, so a job that is
 merely between events loses nothing.
 
+A **permanent** pin error (`NotGit`, `CommitNotFound`, `PinLoadFailed`) in
+`Settlement::resolve` behaves differently from a transient one. It does not
+return `Ok(None)`. It settles the non-terminal job `failed` with a
+`[pin] {ws}@{ref} ({short sha}) cannot be loaded` server-log line, so the
+re-advance phase can never loop on it.
+
 **Re-run and restart of a pinned source.** Both reject non-top-level sources
 (`is_top_level_job`, `web/api/jobs.rs:629`), so this concerns pinned jobs
 created by a ref'd trigger. Today both look the task up in the **live**
@@ -856,10 +870,15 @@ creates the job from those captured values with no revalidation
 (`web/hooks.rs:48`, `:67`). With refs, that would let a refresh that changed
 or removed a webhook's `ref` still run the old release. New order:
 
-1. Match the webhook by name.
-2. If its definition has `force_refresh`, reload.
+1. Match the webhook by name, and authenticate against the **cached**
+   definition's secret. This pre-check is today's behaviour. It is kept so
+   that an unauthenticated caller can never trigger a git refresh.
+   Consequence: a caller holding only a newly rotated-in secret gets 401
+   until the server has loaded that secret (watcher poll or another refresh).
+2. If its definition has `force_refresh`, reload. If the workspace errored on
+   reload (no config), answer 500, never 404.
 3. **Match it again** in the refreshed config. If it is gone, answer 404.
-4. Authenticate against the **fresh** definition's secret.
+4. Authenticate again, against the **fresh** definition's secret.
 5. Resolve the target (steps 1–2 above) from the fresh definition.
 
 Errors map as in § 8 (400/500; MISSED is a scheduler term). The initial
