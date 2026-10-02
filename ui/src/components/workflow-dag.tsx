@@ -14,7 +14,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { cn, formatActionName } from "@/lib/utils";
 import { statusIconsSmall } from "@/lib/status-icons";
-import type { JobStep, FlowStep } from "@/lib/types";
+import { collectDependsOnNames, type JobStep, type FlowStep } from "@/lib/types";
 
 const NODE_WIDTH = 200;
 const NODE_HEIGHT = 72;
@@ -252,7 +252,7 @@ export function WorkflowDag({
                 : undefined,
           } satisfies StepNodeData,
         });
-        for (const dep of step.depends_on ?? []) {
+        for (const dep of collectDependsOnNames(step.depends_on ?? [])) {
           targets.add(dep);
           hasDeps.add(step.step_name);
           const sourceStatus = statusMap.get(dep);
@@ -325,7 +325,7 @@ export function WorkflowDag({
             hasForEach: flowStep.for_each !== undefined,
           } satisfies StepNodeData,
         });
-        for (const dep of flowStep.depends_on ?? []) {
+        for (const dep of collectDependsOnNames(flowStep.depends_on ?? [])) {
           targets.add(dep);
           hasDeps.add(name);
           rawEdges.push({

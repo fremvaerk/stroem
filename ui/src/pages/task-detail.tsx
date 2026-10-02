@@ -27,7 +27,7 @@ import { SECRET_SENTINEL } from "@/components/task/constants";
 import { getTask, listJobs, executeTask } from "@/lib/api";
 import { buildExecuteInput } from "@/lib/execute-input";
 import { useTitle } from "@/hooks/use-title";
-import type { TaskDetail, JobListItem, FlowStep } from "@/lib/types";
+import { collectDependsOnNames, type TaskDetail, type JobListItem, type FlowStep } from "@/lib/types";
 import { formatActionName } from "@/lib/utils";
 import { formatTime, formatDuration, formatFutureTime } from "@/lib/formatting";
 
@@ -41,7 +41,7 @@ function topoSortFlow(
   const entries = Object.entries(flow);
   const inDegree = new Map<string, number>();
   for (const [name, step] of entries) {
-    inDegree.set(name, step.depends_on?.length ?? 0);
+    inDegree.set(name, collectDependsOnNames(step.depends_on ?? []).length);
   }
 
   const sorted: [string, FlowStep][] = [];
@@ -57,7 +57,7 @@ function topoSortFlow(
     sorted.push([name, flow[name]]);
     // Decrease in-degree for dependents
     for (const [dep, step] of entries) {
-      if (step.depends_on?.includes(name)) {
+      if (collectDependsOnNames(step.depends_on ?? []).includes(name)) {
         const d = (inDegree.get(dep) ?? 1) - 1;
         inDegree.set(dep, d);
         if (d === 0) {
@@ -426,7 +426,7 @@ export function TaskDetailPage() {
                   <p className="text-xs text-muted-foreground">
                     action: {formatActionName(step.action)}
                     {step.depends_on && step.depends_on.length > 0 && (
-                      <> &middot; depends on: {step.depends_on.join(", ")}</>
+                      <> &middot; depends on: {collectDependsOnNames(step.depends_on).join(", ")}</>
                     )}
                     {step.when && (
                       <> &middot; when: <code className="rounded bg-muted px-1 py-0.5 text-[10px]">{step.when}</code></>

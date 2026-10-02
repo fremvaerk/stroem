@@ -38,12 +38,45 @@ export interface InputField {
   order?: number;
 }
 
+/** Every dependency resolves, once terminal, to exactly one of these.
+ *  Mirrors `stroem_common::depends_on::Outcome`. */
+export type Outcome = "completed" | "failed" | "cancelled" | "skipped" | "omitted";
+
+/** One entry in a `depends_on` list. Mirrors
+ *  `stroem_common::depends_on::DependsOnEntry` (untagged on the wire):
+ *  a bare step name, a `{step, accept}` pair, or an `all`/`any` group. */
+export type DependsOnEntry =
+  | string
+  | { step: string; accept?: Outcome[] | "terminal" }
+  | { all: DependsOnEntry[] }
+  | { any: DependsOnEntry[] };
+
+/** All step names referenced anywhere in a `depends_on` tree, duplicates
+ *  preserved — mirrors `stroem_common::depends_on::collect_names`. For
+ *  callers (DAG edges, topo sort) that only need bare names and don't care
+ *  about accept-set/grouping structure. */
+export function collectDependsOnNames(entries: DependsOnEntry[]): string[] {
+  const names: string[] = [];
+  for (const entry of entries) {
+    if (typeof entry === "string") {
+      names.push(entry);
+    } else if ("step" in entry) {
+      names.push(entry.step);
+    } else if ("all" in entry) {
+      names.push(...collectDependsOnNames(entry.all));
+    } else if ("any" in entry) {
+      names.push(...collectDependsOnNames(entry.any));
+    }
+  }
+  return names;
+}
+
 export interface FlowStep {
   action: string;
   name?: string;
   description?: string;
   input?: Record<string, unknown>;
-  depends_on?: string[];
+  depends_on?: DependsOnEntry[];
   continue_on_failure?: boolean;
   continue_when_skipped?: boolean;
   when?: string;
@@ -113,7 +146,7 @@ export interface JobStep {
   suspended_at: string | null;
   error_message: string | null;
   when_condition: string | null;
-  depends_on: string[];
+  depends_on: DependsOnEntry[];
   for_each_expr: string | null;
   loop_source: string | null;
   loop_index: number | null;
