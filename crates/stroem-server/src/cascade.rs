@@ -39,7 +39,11 @@ pub enum Change {
 #[derive(Debug, Clone, PartialEq)]
 pub enum RollupOutcome {
     Completed(Value),
-    Failed(String),
+    /// The loop's output array (spec §4/§12: one element per existing
+    /// instance, null where it produced none) is built the same way for a
+    /// failed rollup as for a completed one — never dropped to nothing just
+    /// because the rollup didn't tolerate the failure.
+    Failed(String, Value),
 }
 
 /// What one `run` decided, in production order.
@@ -209,9 +213,10 @@ impl Snapshot {
                             r.status = COMPLETED.to_string();
                             r.output = Some(out.clone());
                         }
-                        RollupOutcome::Failed(e) => {
+                        RollupOutcome::Failed(e, out) => {
                             r.status = FAILED.to_string();
                             r.error_message = Some(e.clone());
+                            r.output = Some(out.clone());
                         }
                     }
                 }
@@ -342,18 +347,22 @@ fn phase_rollup(snap: &Snapshot, task: &TaskDef) -> Vec<Change> {
                 .filter(|i| i.status == FAILED)
                 .filter_map(|i| i.loop_index)
                 .collect();
+            // Build the output array unconditionally now — one element per
+            // existing instance, null where it produced none — regardless of
+            // whether the rollup ends up Completed or Failed (spec §4).
+            let output_array = Value::Array(
+                instances
+                    .iter()
+                    .map(|i| i.output.clone().unwrap_or(Value::Null))
+                    .collect(),
+            );
             let outcome = if any_failed && !cof {
-                RollupOutcome::Failed(format!(
-                    "for_each loop failed: instances {:?} failed",
-                    failed_indices
-                ))
+                RollupOutcome::Failed(
+                    format!("for_each loop failed: instances {:?} failed", failed_indices),
+                    output_array,
+                )
             } else {
-                RollupOutcome::Completed(Value::Array(
-                    instances
-                        .iter()
-                        .map(|i| i.output.clone().unwrap_or(Value::Null))
-                        .collect(),
-                ))
+                RollupOutcome::Completed(output_array)
             };
             out.push(Change::Rollup {
                 placeholder: ph.step_name.clone(),
@@ -795,7 +804,10 @@ pub async fn apply(
                         JobStepRepo::complete_placeholder_tx(&mut **tx, job_id, placeholder, out)
                             .await?
                     }
-                    RollupOutcome::Failed(err) => {
+                    RollupOutcome::Failed(err, _out) => {
+                        // TEMP (Task 6 checkpoint split, reverted 2 edits from
+                        // now): job_step.rs's fail_placeholder_tx doesn't take
+                        // output yet at this commit point.
                         JobStepRepo::fail_placeholder_tx(&mut **tx, job_id, placeholder, err)
                             .await?
                     }
@@ -979,10 +991,13 @@ mod tests {
             action: "noop".to_string(),
             name: None,
             description: None,
-            depends_on: deps.iter().map(|d| d.to_string()).collect(),
+            depends_on: deps
+                .iter()
+                .map(|d| stroem_common::depends_on::DependsOnEntry::Name(d.to_string()))
+                .collect(),
             input: HashMap::new(),
             continue_on_failure: false,
-            continue_when_skipped: false,
+            legacy_continue_when_skipped: None,
             timeout: None,
             when: None,
             for_each: None,
@@ -997,9 +1012,14 @@ mod tests {
             ..fs(deps)
         }
     }
+    /// Kept for the pre-0.18.0 continue_when_skipped/skip-reason test block
+    /// below (Task 7's territory, per the dependency-conditions plan — this
+    /// helper only needs to compile against the renamed, detection-only
+    /// field; its many call sites' assertions still exercise retired
+    /// gate_for semantics and are not this task's scope).
     fn fs_cws(deps: &[&str]) -> FlowStep {
         FlowStep {
-            continue_when_skipped: true,
+            legacy_continue_when_skipped: Some(true),
             ..fs(deps)
         }
     }
@@ -1082,7 +1102,7 @@ mod tests {
                 }
                 Change::Rollup {
                     placeholder,
-                    outcome: RollupOutcome::Failed(_),
+                    outcome: RollupOutcome::Failed(_, _),
                 } => {
                     format!("rollup-fail:{placeholder}")
                 }
@@ -1745,7 +1765,7 @@ mod tests {
             "x",
             FlowStep {
                 continue_on_failure: true,
-                continue_when_skipped: false,
+                legacy_continue_when_skipped: None,
                 ..fs_seq(&[])
             },
         )]);
@@ -1857,6 +1877,53 @@ mod tests {
         }
     }
 
+    /// spec §4/§12: a failed (untolerated) rollup must build the SAME output
+    /// array a completed rollup would — one element per existing instance,
+    /// null where it produced none — not drop it. The pre-fix code only
+    /// built the array on the `Completed` branch.
+    ///
+    /// Deliberately NOT `fs_cof` — the placeholder has no `continue_on_failure`
+    /// of its own, so the rollup is genuinely `Failed` (a `cof`'d placeholder
+    /// would roll up `Completed` instead, which `rollup_failed_text_and_cof`
+    /// below already covers).
+    #[test]
+    fn rollup_builds_the_output_array_on_failure_too_not_just_completion() {
+        let task = task(vec![("p", fs(&[]))]);
+        let rows = vec![
+            placeholder("p", "running", "[2]"),
+            instance("p", 0, "completed", Some(json!({"n": 1}))),
+            instance("p", 1, "failed", None),
+        ];
+        let plan_changes = phase_rollup(&Snapshot::new(rows), &task);
+        let rollup = plan_changes
+            .iter()
+            .find_map(|c| match c {
+                Change::Rollup {
+                    outcome: RollupOutcome::Failed(_, out),
+                    ..
+                } => Some(out.clone()),
+                _ => None,
+            })
+            .expect("expected a Failed rollup");
+        assert_eq!(rollup, json!([{"n": 1}, null]));
+    }
+
+    /// Same fix, one layer up: `Snapshot::apply`'s `Rollup` arm must copy the
+    /// `Failed` outcome's output into the in-memory row too, not just the
+    /// error — same-pass visibility (a downstream `when` reading the rollup
+    /// output in the SAME `run` call) needs this, mirroring the `Completed`
+    /// arm it already had.
+    #[test]
+    fn snapshot_apply_copies_output_on_a_failed_rollup_too() {
+        let mut snap = Snapshot::new(vec![placeholder("p", "running", "[1]")]);
+        snap.apply(&Change::Rollup {
+            placeholder: "p".to_string(),
+            outcome: RollupOutcome::Failed("boom".into(), json!([null])),
+        });
+        assert_eq!(snap.status("p"), Some("failed"));
+        assert_eq!(snap.rows[0].output, Some(json!([null])));
+    }
+
     #[test]
     fn rollup_failed_text_and_cof() {
         let t = task(vec![("x", fs(&[])), ("y", fs_cof(&[]))]);
@@ -1882,7 +1949,7 @@ mod tests {
             match c {
                 Change::Rollup {
                     placeholder,
-                    outcome: RollupOutcome::Failed(e),
+                    outcome: RollupOutcome::Failed(e, _),
                 } => fails.push((placeholder.clone(), e.clone())),
                 Change::Rollup {
                     placeholder,
@@ -1924,7 +1991,7 @@ mod tests {
             "no successor promotion for an index-less instance"
         );
         let Change::Rollup {
-            outcome: RollupOutcome::Failed(e),
+            outcome: RollupOutcome::Failed(e, _),
             ..
         } = &plan.changes[0]
         else {
