@@ -377,8 +377,25 @@ async fn collect_desired(state: &AppState) -> Vec<DesiredEventSource> {
             state.background_tasks.event_source_beat.beat();
             let (task, target_task, input, env, restart_policy, backoff_secs, max_in_flight) =
                 match trigger_def {
+                    // `ref` on event sources is out of v1 (git-refs spec § 4.6):
+                    // serde would otherwise drop it and run the default branch.
+                    // Never started (so step 4 cancels any consumer it had);
+                    // logged once per reconcile — `collect_desired` runs once
+                    // per pass.
                     TriggerDef::EventSource {
-                        git_ref: _,
+                        git_ref: Some(_),
+                        enabled: true,
+                        ..
+                    } => {
+                        tracing::warn!(
+                            "EventSourceManager: `ref` is not supported on event_source triggers yet; '{}/{}' is not started",
+                            ws_name,
+                            trigger_name
+                        );
+                        continue;
+                    }
+                    TriggerDef::EventSource {
+                        git_ref: None,
                         task,
                         target_task,
                         enabled,
@@ -940,6 +957,43 @@ mod tests {
         assert_eq!(desired.len(), 1, "only the enabled workspace contributes");
         assert_eq!(desired[0].workspace, "loud");
         assert_eq!(desired[0].trigger_name, "queue");
+    }
+
+    #[tokio::test]
+    async fn collect_desired_skips_event_source_with_ref() {
+        use crate::state::test_app_state_with_workspaces;
+        use crate::workspace::WorkspaceManager;
+        use std::collections::HashMap;
+        use stroem_common::models::workflow::{TriggerDef, WorkspaceConfig};
+
+        let source = |git_ref: Option<&str>| TriggerDef::EventSource {
+            task: "consumer".to_string(),
+            target_task: "handler".to_string(),
+            enabled: true,
+            input: HashMap::new(),
+            env: HashMap::new(),
+            restart_policy: RestartPolicy::Always,
+            backoff_secs: 5,
+            max_in_flight: None,
+            git_ref: git_ref.map(str::to_string),
+        };
+        let mut config = WorkspaceConfig::new();
+        config.triggers.insert("plain".to_string(), source(None));
+        config
+            .triggers
+            .insert("pinned".to_string(), source(Some("release/2.3")));
+
+        let mgr = WorkspaceManager::from_configs(vec![("etl".to_string(), config, None)]);
+        let temp = tempfile::TempDir::new().unwrap();
+        let state = test_app_state_with_workspaces(mgr, temp.path());
+
+        let desired = collect_desired(&state).await;
+        assert_eq!(
+            desired.len(),
+            1,
+            "an event source with `ref` is never started"
+        );
+        assert_eq!(desired[0].trigger_name, "plain");
     }
 
     #[tokio::test]

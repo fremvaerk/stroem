@@ -534,14 +534,7 @@ impl StromMcpHandler {
 
         // Fire on_suspended hooks for any root-level approval steps that were
         // suspended during job creation (FIX 2).
-        crate::settlement::dispatch::fire_initial_suspended_hooks(
-            &self.state,
-            &ws_config,
-            &params.workspace,
-            &params.task_name,
-            job_id,
-        )
-        .await;
+        crate::settlement::dispatch::fire_initial_suspended_hooks(&self.state, job_id).await;
         self.state.settlement().job_created(created).await;
 
         Ok(json_result(

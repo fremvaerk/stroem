@@ -523,14 +523,7 @@ async fn fire_trigger(app_state: &AppState, workspaces: &WorkspaceManager, tstat
             tracing::info!("Trigger '{}' created job {}", source_id, job_id);
             // Fire on_suspended hooks for any root-level approval steps that were
             // suspended during job creation (FIX 2).
-            crate::settlement::dispatch::fire_initial_suspended_hooks(
-                app_state,
-                &config,
-                &tstate.workspace,
-                &tstate.task,
-                job_id,
-            )
-            .await;
+            crate::settlement::dispatch::fire_initial_suspended_hooks(app_state, job_id).await;
             app_state.settlement().job_created(created).await;
         }
         Err(e) => {

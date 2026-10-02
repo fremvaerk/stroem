@@ -17,10 +17,12 @@ use uuid::Uuid;
 
 use crate::config::JobDefaults;
 use crate::job_creator::{
-    compute_depth, create_job_for_task_inner, resolve_task_ref, CreationMode, MAX_TASK_DEPTH,
+    compute_depth, create_job_for_task_inner, resolve_task_ref, task_at, CreationMode, OwnerConfig,
+    ResolvedTask, MAX_TASK_DEPTH,
 };
 use crate::render_context::{self, JobContext, LoopSlot, Scope, Snapshots};
-use crate::workspace::WorkspaceManager;
+use crate::workspace::pins::{cannot_be_loaded, PinRef};
+use crate::workspace::{ConfigHandle, WorkspaceManager};
 use crate::workspace_set::WorkspaceSet;
 
 /// Create sub-jobs for any "ready" type:task steps in a job.
@@ -133,6 +135,48 @@ fn withheld_owner_render_error(step_name: &str, owner: &str) -> String {
     )
 }
 
+/// `ws` at `pin`, a pin stamped on the step being dispatched (git-refs spec §
+/// 7.3). On failure, the `[pin] … cannot be loaded` text the step fails with:
+/// it keeps the pin error (F37), and a `PinLoadFailed` only ever as its fixed
+/// sentence (`config_for_user`).
+async fn load_step_pin(
+    workspaces: &WorkspaceManager,
+    ws: &str,
+    pin: &PinRef,
+) -> std::result::Result<ConfigHandle, String> {
+    match workspaces.config_for_user(ws, Some(pin)).await {
+        Ok(Some(handle)) => Ok(handle),
+        Ok(None) => Err(cannot_be_loaded(
+            ws,
+            pin,
+            &anyhow::anyhow!("workspace '{ws}' is not available"),
+        )),
+        Err(e) => Err(cannot_be_loaded(ws, pin, &e)),
+    }
+}
+
+/// The task a step's `task_*` stamp names (git-refs spec § 7.3): `T`@commit,
+/// looked up by its full key first (library-flattened names) and its bare
+/// name otherwise. The pinned config is immutable, so the answer never drifts.
+async fn resolve_stamped_task(
+    workspaces: &WorkspaceManager,
+    t_ws: &str,
+    pin: &PinRef,
+    task_ref: &str,
+) -> Result<ResolvedTask> {
+    let cfg = load_step_pin(workspaces, t_ws, pin)
+        .await
+        .map_err(anyhow::Error::msg)?
+        .arc();
+    let (task_name, task) = task_at(t_ws, &cfg, task_ref, &pin.git_ref)?;
+    Ok(ResolvedTask {
+        workspace: t_ws.to_string(),
+        task_name,
+        task,
+        config: OwnerConfig::Foreign(cfg),
+    })
+}
+
 /// One dispatch pass over the currently-ready `type: task` steps.
 /// Returns `true` if any step was marked failed during this pass.
 #[allow(clippy::too_many_arguments)]
@@ -197,18 +241,33 @@ async fn handle_task_steps_pass(
             continue;
         }
 
-        // 1. Action owner O and its config snapshot.
+        // 1. Action owner O and its config: the action's pin when the step was
+        //    resolved through `ref:` (git-refs spec § 7.3), else today's rule.
         let base_ws: &str = step.action_workspace.as_deref().unwrap_or(workspace_name);
-        let base_arc = if base_ws == workspace_name {
-            None
-        } else {
-            workspaces.get_config(base_ws).await
-        };
-        let base_cfg: &WorkspaceConfig = if base_ws == workspace_name {
-            workspace_config
-        } else {
-            match base_arc.as_deref() {
-                Some(c) => c,
+        let base_handle: Option<ConfigHandle> = match PinRef::of_step_action(step) {
+            Some(pin) => match load_step_pin(workspaces, base_ws, &pin).await {
+                Ok(handle) => Some(handle),
+                Err(line) => {
+                    let err = format!("{} (owner of action '{}')", line, step.action_name);
+                    fail_task_step(
+                        pool,
+                        job_id,
+                        &step.step_name,
+                        &err,
+                        task,
+                        workspace_config,
+                        snapshots,
+                        &[],
+                        None,
+                    )
+                    .await?;
+                    failed_any = true;
+                    continue;
+                }
+            },
+            None if base_ws == workspace_name => None,
+            None => match workspaces.get_config(base_ws).await {
+                Some(c) => Some(ConfigHandle::Live(c)),
                 None => {
                     let err = format!(
                         "workspace '{}' is not available (owner of action '{}')",
@@ -229,12 +288,23 @@ async fn handle_task_steps_pass(
                     failed_any = true;
                     continue;
                 }
-            }
+            },
         };
+        let base_cfg: &WorkspaceConfig = base_handle
+            .as_ref()
+            .map(|h| h.config())
+            .unwrap_or(workspace_config);
         let mut scrub = crate::workspace_set::collect_config_secret_values(base_cfg);
 
-        // 2. Task owner T.
-        let resolved = match resolve_task_ref(workspaces, base_ws, base_cfg, task_ref).await {
+        // 2. Task owner T: the `task_*` stamp when there is one (git-refs spec
+        //    § 7.3 — never inferred from the parent job), else today's live
+        //    resolution.
+        let task_stamp = PinRef::of_step_task(step);
+        let resolved_result = match &task_stamp {
+            Some((t_ws, pin)) => resolve_stamped_task(workspaces, t_ws, pin, task_ref).await,
+            None => resolve_task_ref(workspaces, base_ws, base_cfg, task_ref).await,
+        };
+        let resolved = match resolved_result {
             Ok(r) => r,
             Err(e) => {
                 let err = format!(
@@ -488,16 +558,20 @@ async fn handle_task_steps_pass(
 
         let source_id = format!("{}/{}", job_id, step.step_name);
 
-        // 7. Revision: inherit the parent's for a same-workspace child; the
-        //    owner's current one for a foreign child (spec § 3.3 step 7).
-        let revision: Option<String> = if resolved.workspace == job.workspace {
-            job.revision.clone()
-        } else {
-            workspaces.get_revision(&resolved.workspace)
+        // 7. Revision + pin (git-refs spec § 7.3): a stamped task runs its
+        //    stamped commit; an unstamped same-workspace child of an UNPINNED
+        //    parent inherits the parent's revision (spec § 3.3 step 7); any
+        //    other unstamped child is live and takes T's current revision.
+        let (revision, child_git_ref): (Option<String>, Option<String>) = match &task_stamp {
+            Some((_, pin)) => (Some(pin.commit.clone()), Some(pin.git_ref.clone())),
+            None if resolved.workspace == job.workspace && job.git_ref.is_none() => {
+                (job.revision.clone(), None)
+            }
+            None => (workspaces.get_revision(&resolved.workspace), None),
         };
 
-        // Create child job with parent tracking (inherits parent revision, or
-        // the task owner's current revision for a foreign child).
+        // Create child job with parent tracking, at the revision (and pin)
+        // chosen in step 7.
         // agents_config is not available here (handle_task_steps only has pool),
         // so agent steps in child jobs will be dispatched by the orchestrator
         // when it processes the child job's ready steps. `defaults` is threaded
@@ -517,7 +591,7 @@ async fn handle_task_steps_pass(
             CreationMode::Normal, // child task jobs never inherit re-run/restart lineage
             None,                 // agents_config not available; orchestrator will dispatch
             defaults,
-            None,
+            child_git_ref.as_deref(),
         )
         .await
         {
@@ -762,14 +836,11 @@ pub async fn handle_approval_steps(
 /// `create_job_for_task_inner`, but at that point we only have a `&PgPool` and
 /// cannot call into the hooks module.  This function bridges the gap by doing a
 /// lightweight post-creation sweep.
-#[tracing::instrument(skip(state, workspace_config))]
-pub async fn fire_initial_suspended_hooks(
-    state: &crate::state::AppState,
-    workspace_config: &stroem_common::models::workflow::WorkspaceConfig,
-    workspace_name: &str,
-    task_name: &str,
-    job_id: uuid::Uuid,
-) {
+///
+/// The config comes from the job row (git-refs spec § 7.4), never from the
+/// creating caller: for a cross-workspace or pinned target it is the target's.
+#[tracing::instrument(skip_all, fields(job_id = %job_id))]
+pub async fn fire_initial_suspended_hooks(state: &crate::state::AppState, job_id: uuid::Uuid) {
     let steps = match JobStepRepo::get_steps_for_job(&state.pool, job_id).await {
         Ok(s) => s,
         Err(e) => {
@@ -798,12 +869,43 @@ pub async fn fire_initial_suspended_hooks(
         }
     };
 
-    let task = match workspace_config.tasks.get(task_name) {
+    // The job's OWN config (git-refs spec § 7.4): a pinned job reads its commit.
+    let pin = PinRef::of_job(&job);
+    let handle = match state
+        .workspaces
+        .config_for_user(&job.workspace, pin.as_ref())
+        .await
+    {
+        Ok(Some(h)) => h,
+        Ok(None) => {
+            tracing::warn!(
+                job_id = %job_id,
+                "fire_initial_suspended_hooks: workspace '{}' not available",
+                job.workspace
+            );
+            return;
+        }
+        Err(e) => {
+            // `config_for_user` already withheld a `PinLoadFailed` (its
+            // scrubbed chain went to `tracing::error!` only).
+            tracing::error!(
+                job_id = %job_id,
+                "fire_initial_suspended_hooks: workspace '{}' at ref '{}' not available: {:#}",
+                job.workspace,
+                job.git_ref.as_deref().unwrap_or(""),
+                e
+            );
+            return;
+        }
+    };
+    let workspace_config = handle.config();
+
+    let task = match workspace_config.tasks.get(&job.task_name) {
         Some(t) => t,
         None => {
             tracing::warn!(
                 job_id = %job_id,
-                task = %task_name,
+                task = %job.task_name,
                 "fire_initial_suspended_hooks: task not found in workspace"
             );
             return;

@@ -1092,21 +1092,40 @@ pub async fn agent_task_tool(
 
     if let Some(ref spec) = step.action_spec {
         if let Some(tools) = spec.get("tools").and_then(|v| v.as_array()) {
-            let allowed = tools
+            let entry = tools
                 .iter()
-                .any(|t| t.get("task").and_then(|v| v.as_str()) == Some(&req.task_name));
-            if !allowed {
-                return Err(AppError::BadRequest(format!(
-                    "Task '{}' is not in the agent step's allowed tools list",
-                    req.task_name
-                )));
+                .find(|t| t.get("task").and_then(|v| v.as_str()) == Some(&req.task_name));
+            match entry {
+                None => {
+                    return Err(AppError::BadRequest(format!(
+                        "Task '{}' is not in the agent step's allowed tools list",
+                        req.task_name
+                    )));
+                }
+                // `ref` on agent task tools is out of v1 (git-refs spec § 4.6):
+                // serde would otherwise drop it and run the default branch.
+                // The persisted action_spec serialises `AgentToolRef::Task.git_ref`
+                // as `ref`.
+                Some(t) if t.get("ref").is_some_and(|r| !r.is_null()) => {
+                    return Err(AppError::BadRequest(format!(
+                        "`ref` is not supported on agent task tools yet (task tool '{}')",
+                        req.task_name
+                    )));
+                }
+                Some(_) => {}
             }
         }
     }
 
-    let workspace = state
-        .get_workspace(&job.workspace)
+    // The job's OWN config (git-refs spec § 7.3): a pinned job's tool tasks
+    // come from its commit, and the child inherits the pin. A `PinLoadFailed`
+    // is withheld by `config_for_user`; the body of an `Internal` is generic.
+    let pin = crate::workspace::pins::PinRef::of_job(&job);
+    let handle = state
+        .workspaces
+        .config_for_user(&job.workspace, pin.as_ref())
         .await
+        .map_err(AppError::Internal)?
         .ok_or_else(|| AppError::not_found("Workspace"))?;
 
     let source_id = format!("{}/{}", job_id, step_name);
@@ -1114,7 +1133,7 @@ pub async fn agent_task_tool(
     let created = crate::job_creator::create_child_job_for_task_detailed(
         &state.workspaces,
         &state.pool,
-        &workspace,
+        handle.config(),
         &job.workspace,
         &req.task_name,
         into_exposed(req.input),
@@ -1124,6 +1143,7 @@ pub async fn agent_task_tool(
         &step_name,
         job.revision.as_deref(),
         crate::config::JobDefaults::from(state.config.as_ref()),
+        job.git_ref.as_deref(),
     )
     .await
     .context("create child job for task tool")?;

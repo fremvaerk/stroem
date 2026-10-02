@@ -143,14 +143,7 @@ async fn webhook_handler(
 
     // Fire on_suspended hooks for any root-level approval steps that were
     // suspended during job creation (FIX 2).
-    crate::settlement::dispatch::fire_initial_suspended_hooks(
-        &state,
-        &config,
-        &wh.ws_name,
-        &wh.task,
-        job_id,
-    )
-    .await;
+    crate::settlement::dispatch::fire_initial_suspended_hooks(&state, job_id).await;
     state.settlement().job_created(created).await;
 
     if is_sync {

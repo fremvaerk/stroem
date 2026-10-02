@@ -137,21 +137,54 @@ pub(super) async fn create_retry_job(
     };
 
     let input = failed_job.input.clone().unwrap_or_default();
-    let created = crate::job_creator::create_job_for_task_detailed(
-        &s.workspaces,
-        &s.pool,
-        workspace,
-        &failed_job.workspace,
-        &failed_job.task_name,
-        input,
-        "retry",
-        Some(&failed_job.job_id.to_string()),
+    let source_id = failed_job.job_id.to_string();
+    // A pinned job retries at the same ref AND commit (git-refs spec § 7.3);
+    // `workspace` is then that commit's config (`Settlement::resolve`).
+    let created = match (
+        failed_job.git_ref.as_deref(),
         failed_job.revision.as_deref(),
-        None, // source_job_id: automatic retries don't prefill from source
-        None,
-        s.defaults,
-    )
-    .await
+    ) {
+        (Some(git_ref), Some(commit)) => {
+            crate::job_creator::create_job_for_task_pinned(
+                &s.workspaces,
+                &s.pool,
+                workspace,
+                &failed_job.workspace,
+                &failed_job.task_name,
+                input,
+                "retry",
+                Some(&source_id),
+                commit,
+                git_ref,
+                crate::job_creator::CreationMode::Normal,
+                None,
+                s.defaults,
+            )
+            .await
+        }
+        (Some(git_ref), None) => Err(anyhow::anyhow!(
+            "job {} carries ref '{}' without its commit",
+            failed_job.job_id,
+            git_ref
+        )),
+        (None, revision) => {
+            crate::job_creator::create_job_for_task_detailed(
+                &s.workspaces,
+                &s.pool,
+                workspace,
+                &failed_job.workspace,
+                &failed_job.task_name,
+                input,
+                "retry",
+                Some(&source_id),
+                revision,
+                None, // source_job_id: automatic retries don't prefill from source
+                None,
+                s.defaults,
+            )
+            .await
+        }
+    }
     .context("Failed to create retry job")?;
     let retry_job_id = created.job_id;
 

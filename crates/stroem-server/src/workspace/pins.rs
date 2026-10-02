@@ -325,6 +325,19 @@ fn short_sha(commit: &str) -> &str {
     commit.get(..7).unwrap_or(commit)
 }
 
+/// `[pin] {ws}@{ref} ({short sha}) cannot be loaded: …` for a pin that does
+/// not load (spec § 7.3). `err` comes from
+/// [`WorkspaceManager::config_for_user`](super::WorkspaceManager::config_for_user):
+/// a withheld load failure is its own fixed sentence, and any other error's
+/// text is appended (it carries no config text; callers scrub the line).
+pub fn cannot_be_loaded(ws: &str, pin: &PinRef, err: &anyhow::Error) -> String {
+    if err.downcast_ref::<PinLoadWithheld>().is_some() {
+        err.to_string()
+    } else {
+        format!("[pin] {} cannot be loaded: {:#}", pin_label(ws, pin), err)
+    }
+}
+
 /// All a user ever sees of a [`PinError::PinLoadFailed`] (T6 review #9).
 /// Its message is the raw loader chain and can quote secret values, so it
 /// goes only to the server log, scrubbed
@@ -1959,6 +1972,31 @@ mod tests {
             message: "m".into()
         }
         .is_transient());
+    }
+
+    #[test]
+    fn cannot_be_loaded_appends_the_error_or_is_the_withheld_sentence() {
+        let pin = PinRef {
+            git_ref: "release/2.3".into(),
+            commit: "0123456789abcdef0123456789abcdef01234567".into(),
+        };
+        let gone = anyhow::Error::new(PinError::CommitNotFound {
+            workspace: "etl".into(),
+            commit: pin.commit.clone(),
+        });
+        assert_eq!(
+            cannot_be_loaded("etl", &pin, &gone),
+            format!(
+                "[pin] etl@release/2.3 (0123456) cannot be loaded: commit {} not found in \
+                 workspace 'etl'",
+                pin.commit
+            )
+        );
+        let withheld = anyhow::Error::new(PinLoadWithheld::new("etl", &pin));
+        assert_eq!(
+            cannot_be_loaded("etl", &pin, &withheld),
+            "[pin] etl@release/2.3 (0123456) cannot be loaded: its configuration does not load"
+        );
     }
 
     fn store_with(

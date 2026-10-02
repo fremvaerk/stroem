@@ -11,7 +11,8 @@ use stroem_common::git_ref::GitRefError;
 use stroem_db::{JobRepo, JobRow, JobStepRepo, JobStepRow};
 use stroem_server::config::JobDefaults;
 use stroem_server::job_creator::{
-    create_job_for_task_detailed, create_job_for_task_pinned, CreationMode,
+    create_child_job_for_task_detailed, create_job_for_task_detailed, create_job_for_task_pinned,
+    CreationMode,
 };
 use stroem_server::refs::RefResolveError;
 use stroem_server::workspace::pins::{PinError, PinLoadWithheld};
@@ -73,7 +74,6 @@ async fn cr_step(pool: &sqlx::PgPool, job_id: Uuid, name: &str) -> JobStepRow {
         .unwrap_or_else(|| panic!("step {name} exists"))
 }
 
-#[allow(dead_code)] // the Part C settlement tests use it
 async fn cr_jobs_where(pool: &sqlx::PgPool, sql: &str, id: Uuid) -> Vec<JobRow> {
     let ids: Vec<Uuid> = sqlx::query_scalar(sql)
         .bind(id)
@@ -88,7 +88,6 @@ async fn cr_jobs_where(pool: &sqlx::PgPool, sql: &str, id: Uuid) -> Vec<JobRow> 
 }
 
 /// release/2.3 one commit later: `nightly` gains step `c`.
-#[allow(dead_code)] // the Part C settlement tests use it
 fn cr_etl_release_v2() -> String {
     ETL_RELEASE.replace(
         "      # nightly-end\n",
@@ -526,5 +525,503 @@ async fn pinned_job_literal_precheck_runs_against_job_commit() -> Result<()> {
         .await
         .unwrap_err();
     assert!(format!("{err:#}").contains("does not exist"), "{err:#}");
+    Ok(())
+}
+
+// ─── Task 11: settlement, dispatch, hooks, retry, agent tools, recovery ────
+
+/// Spec § 4.4 / D5: a branch moving mid-job never splits the job across two
+/// commits. The child task and a later ref'd step keep the creation-time commit.
+#[tokio::test]
+async fn branch_move_mid_job_keeps_original_commit() -> Result<()> {
+    let fx = pinned_workspace_fixture(PinnedFixtureOpts::default()).await?;
+    let c1 = fx.commits.etl_release.clone();
+    let job_id = cr_create_etl(&fx, "manifest").await?;
+
+    // release/2.3 moves to C2, whose `nightly` has a third step.
+    let c2 = fx.etl.commit(
+        "release/2.3",
+        "main",
+        &[("workflow.yaml", &cr_etl_release_v2())],
+    );
+    assert_eq!(
+        fx.mgr().pins().resolve("etl", "release/2.3").await?.commit,
+        c2
+    );
+
+    JobStepRepo::mark_completed(&fx.pool, job_id, "first", None).await?;
+    fx.state.settlement().advance(job_id).await?;
+
+    let children = JobRepo::list_children(&fx.pool, job_id).await?;
+    assert_eq!(children.len(), 1, "{children:?}");
+    let child = &children[0];
+    assert_eq!(child.git_ref.as_deref(), Some("release/2.3"));
+    assert_eq!(child.revision.as_deref(), Some(c1.as_str()));
+    assert_eq!(child.task_folder.as_deref(), Some("nightlies"));
+    let mut names: Vec<String> = JobStepRepo::get_steps_for_job(&fx.pool, child.job_id)
+        .await?
+        .into_iter()
+        .map(|s| s.step_name)
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["a", "b"], "the child runs C1's flow, not C2's");
+
+    let later = cr_step(&fx.pool, job_id, "later").await;
+    assert_eq!(later.action_revision.as_deref(), Some(c1.as_str()));
+    Ok(())
+}
+
+#[tokio::test]
+async fn pinned_local_task_action_dispatches_pinned_child() -> Result<()> {
+    let fx = pinned_workspace_fixture(PinnedFixtureOpts::default()).await?;
+    // `wrapper`'s root step dispatches during creation (dispatch::init).
+    let job_id = cr_create_pinned_etl(&fx, "wrapper").await?;
+    let children = JobRepo::list_children(&fx.pool, job_id).await?;
+    assert_eq!(children.len(), 1, "{children:?}");
+    assert_eq!(children[0].task_name, "nightly");
+    assert_eq!(children[0].git_ref.as_deref(), Some("release/2.3"));
+    assert_eq!(
+        children[0].revision.as_deref(),
+        Some(fx.commits.etl_release.as_str())
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn live_foreign_task_action_in_pinned_job_dispatches_live_child() -> Result<()> {
+    let fx = pinned_workspace_fixture(PinnedFixtureOpts::default()).await?;
+    let job_id = cr_create_pinned_etl(&fx, "wrapper-foreign").await?;
+    let children = JobRepo::list_children(&fx.pool, job_id).await?;
+    assert_eq!(children.len(), 1, "{children:?}");
+    assert_eq!(children[0].workspace, "billing");
+    assert!(children[0].git_ref.is_none());
+    assert_eq!(
+        children[0].revision.as_deref(),
+        Some(fx.commits.billing_main.as_str())
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn for_each_instances_keep_the_action_pin() -> Result<()> {
+    let fx = pinned_workspace_fixture(PinnedFixtureOpts::default()).await?;
+    let job_id = cr_create_etl(&fx, "fan").await?;
+    for name in ["each[0]", "each[1]"] {
+        let s = cr_step(&fx.pool, job_id, name).await;
+        assert_eq!(s.action_ref.as_deref(), Some("release/2.3"), "{name}");
+        assert_eq!(
+            s.action_revision.as_deref(),
+            Some(fx.commits.etl_release.as_str()),
+            "{name}"
+        );
+        assert_eq!(s.action_workspace.as_deref(), Some("etl"), "{name}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn hook_job_of_pinned_job_inherits_pin() -> Result<()> {
+    let fx = pinned_workspace_fixture(PinnedFixtureOpts::default()).await?;
+    let job_id = cr_create_pinned_etl(&fx, "failing").await?;
+
+    JobStepRepo::mark_failed(&fx.pool, job_id, "only", "boom").await?;
+    fx.state.settlement().advance(job_id).await?;
+
+    let hooks = cr_jobs_where(
+        &fx.pool,
+        "SELECT job_id FROM job WHERE source_job_id = $1 AND source_type = 'hook'",
+        job_id,
+    )
+    .await;
+    assert_eq!(hooks.len(), 1, "{hooks:?}");
+    assert_eq!(hooks[0].git_ref.as_deref(), Some("release/2.3"));
+    assert_eq!(
+        hooks[0].revision.as_deref(),
+        Some(fx.commits.etl_release.as_str())
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn hook_with_ref_or_ref_task_action_is_not_fired() -> Result<()> {
+    let fx = pinned_workspace_fixture(PinnedFixtureOpts::default()).await?;
+    for task in ["ref-hook", "task-ref-hook"] {
+        let job_id = cr_create_pinned_etl(&fx, task).await?;
+        JobStepRepo::mark_failed(&fx.pool, job_id, "only", "boom").await?;
+        fx.state.settlement().advance(job_id).await?;
+        let hooks = cr_jobs_where(
+            &fx.pool,
+            "SELECT job_id FROM job WHERE source_job_id = $1 AND source_type = 'hook'",
+            job_id,
+        )
+        .await;
+        assert!(
+            hooks.is_empty(),
+            "{task}: a ref'd hook must not fire: {hooks:?}"
+        );
+        let log = job_log_text(&fx.pool, &fx.state, job_id).await;
+        assert!(log.contains("not supported on hooks yet"), "{task}: {log}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn task_retry_of_pinned_job_keeps_pin() -> Result<()> {
+    let fx = pinned_workspace_fixture(PinnedFixtureOpts::default()).await?;
+    let job_id = cr_create_pinned_etl(&fx, "flaky").await?;
+
+    JobStepRepo::mark_failed(&fx.pool, job_id, "only", "boom").await?;
+    fx.state.settlement().advance(job_id).await?;
+
+    let retries = cr_jobs_where(
+        &fx.pool,
+        "SELECT job_id FROM job WHERE retry_of_job_id = $1",
+        job_id,
+    )
+    .await;
+    assert_eq!(retries.len(), 1, "{retries:?}");
+    assert_eq!(retries[0].source_type, "retry");
+    assert_eq!(retries[0].git_ref.as_deref(), Some("release/2.3"));
+    assert_eq!(
+        retries[0].revision.as_deref(),
+        Some(fx.commits.etl_release.as_str())
+    );
+    Ok(())
+}
+
+/// `approval-root` exists only at release/2.3: firing the initial `on_suspended`
+/// hooks from the caller's (live main) config would find no task at all.
+#[tokio::test]
+async fn initial_suspended_hooks_use_the_jobs_pinned_config() -> Result<()> {
+    let fx = pinned_workspace_fixture(PinnedFixtureOpts::default()).await?;
+    let job_id = cr_create_pinned_etl(&fx, "approval-root").await?;
+    assert_eq!(cr_step(&fx.pool, job_id, "wait").await.status, "suspended");
+
+    stroem_server::settlement::dispatch::fire_initial_suspended_hooks(&fx.state, job_id).await;
+
+    let hooks = cr_jobs_where(
+        &fx.pool,
+        "SELECT job_id FROM job WHERE source_job_id = $1 AND source_type = 'hook'",
+        job_id,
+    )
+    .await;
+    assert_eq!(hooks.len(), 1, "{hooks:?}");
+    assert_eq!(hooks[0].git_ref.as_deref(), Some("release/2.3"));
+    Ok(())
+}
+
+/// `sub` exists only at release/2.3: the tool child must come from the job's
+/// pinned config and carry the pin.
+#[tokio::test]
+async fn agent_task_tool_child_uses_pinned_config() -> Result<()> {
+    let fx = pinned_workspace_fixture(PinnedFixtureOpts::default()).await?;
+    let job_id = cr_create_pinned_etl(&fx, "agent-wrap").await?;
+
+    let (status, body) = worker_req(
+        &fx.router,
+        "POST",
+        &format!("/worker/jobs/{job_id}/steps/think/task-tool"),
+        Some(json!({"task_name": "sub", "input": {}})),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+
+    let children = JobRepo::get_child_jobs(&fx.pool, job_id).await?;
+    assert_eq!(children.len(), 1, "{children:?}");
+    assert_eq!(children[0].git_ref.as_deref(), Some("release/2.3"));
+    assert_eq!(
+        children[0].revision.as_deref(),
+        Some(fx.commits.etl_release.as_str())
+    );
+    Ok(())
+}
+
+/// Spec § 4.6: an agent task tool carrying `ref` is refused at call time —
+/// serde would otherwise run the default branch. The YAML is overridden for
+/// this test only (the workspace loader does not validate, so it loads).
+#[tokio::test]
+async fn agent_task_tool_with_ref_is_rejected() -> Result<()> {
+    let release = ETL_RELEASE
+        .replace(
+            "actions:\n  hello:\n",
+            "actions:\n  ask-ref:\n    type: agent\n    provider: anthropic\n    model: claude-sonnet-5\n    prompt: hi\n    tools:\n      - task: sub\n        ref: release/2.3\n  hello:\n",
+        )
+        .replace(
+            "tasks:\n  nightly:\n",
+            "tasks:\n  agent-ref-wrap:\n    flow:\n      think:\n        action: ask-ref\n  nightly:\n",
+        );
+    let fx = pinned_workspace_fixture(PinnedFixtureOpts {
+        etl_release: Some(release),
+        ..Default::default()
+    })
+    .await?;
+    let job_id = cr_create_pinned_etl(&fx, "agent-ref-wrap").await?;
+
+    let (status, body) = worker_req(
+        &fx.router,
+        "POST",
+        &format!("/worker/jobs/{job_id}/steps/think/task-tool"),
+        Some(json!({"task_name": "sub", "input": {}})),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body.to_string()
+            .contains("not supported on agent task tools yet"),
+        "{body}"
+    );
+    assert!(JobRepo::get_child_jobs(&fx.pool, job_id).await?.is_empty());
+    Ok(())
+}
+
+/// R7: a step completion that lands on a replica whose pin cannot load (cold
+/// store + remote down) leaves the job `running` with nothing live; one
+/// recovery tick after the remote returns re-advances it.
+#[tokio::test]
+async fn stalled_pinned_job_is_readvanced_by_recovery() -> Result<()> {
+    let fx = pinned_workspace_fixture(PinnedFixtureOpts::default()).await?;
+    let job_id = cr_create_pinned_etl(&fx, "nightly").await?;
+    // Step `a` ran on some worker and completed; the job is running. (F11: no
+    // `mark_running` — its worker id is an FK; `mark_completed` needs none.)
+    JobRepo::mark_running_if_pending_server(&fx.pool, job_id).await?;
+    JobStepRepo::mark_completed(&fx.pool, job_id, "a", None).await?;
+
+    // The completion is advanced on a cold replica while the remote is down.
+    let replica = fx.second_replica().await?;
+    fx.etl.break_remote();
+    replica.state.settlement().advance(job_id).await?;
+    assert_eq!(
+        JobRepo::get(&fx.pool, job_id).await?.unwrap().status,
+        "running"
+    );
+    assert_eq!(cr_step(&fx.pool, job_id, "b").await.status, "pending");
+    assert_eq!(
+        JobRepo::get_stalled_pinned_jobs(&fx.pool).await?,
+        vec![job_id]
+    );
+    let log = job_log_text(&fx.pool, &replica.state, job_id).await;
+    assert!(log.contains("[pin] etl@release/2.3 ("), "{log}");
+    assert!(log.contains("not available yet"), "{log}");
+
+    // The remote returns: one recovery tick on that replica re-advances the job.
+    fx.etl.restore_remote();
+    stroem_server::recovery::sweep_once(&replica.state).await?;
+    assert_eq!(cr_step(&fx.pool, job_id, "b").await.status, "ready");
+    assert!(JobRepo::get_stalled_pinned_jobs(&fx.pool).await?.is_empty());
+
+    JobStepRepo::mark_completed(&fx.pool, job_id, "b", None).await?;
+    replica.state.settlement().advance(job_id).await?;
+    assert_eq!(
+        JobRepo::get(&fx.pool, job_id).await?.unwrap().status,
+        "completed"
+    );
+    Ok(())
+}
+
+/// F4 (spec § 7.3): a PERMANENT pin error at advance settles the job `failed`
+/// with one `[pin] … cannot be loaded` line, so the stalled-job phase can
+/// never loop on it. A `PinLoadFailed` shows only the fixed sentence: its
+/// loader chain can quote secret values (T6 review #9).
+#[tokio::test]
+async fn permanent_pin_error_at_advance_fails_the_job_once() -> Result<()> {
+    let fx = pinned_workspace_fixture(PinnedFixtureOpts::default()).await?;
+    let broken = fx
+        .etl
+        .commit("broken", "main", &[("workflow.yaml", CR_BROKEN)]);
+    let gone = "0123456789abcdef0123456789abcdef01234567";
+
+    let mut cases = Vec::new();
+    for (commit, line) in [
+        (
+            gone.to_string(),
+            format!(
+                "[pin] etl@release/2.3 (0123456) cannot be loaded: commit {gone} not found in \
+                 workspace 'etl'"
+            ),
+        ),
+        (
+            broken.clone(),
+            format!(
+                "[pin] etl@release/2.3 ({}) cannot be loaded: its configuration does not load",
+                &broken[..7]
+            ),
+        ),
+    ] {
+        let job_id = cr_create_pinned_etl(&fx, "nightly").await?;
+        JobRepo::mark_running_if_pending_server(&fx.pool, job_id).await?;
+        JobStepRepo::mark_completed(&fx.pool, job_id, "a", None).await?;
+        // The job's commit is gone (force-push + gc) or no longer loads.
+        sqlx::query("UPDATE job SET revision = $1 WHERE job_id = $2")
+            .bind(&commit)
+            .bind(job_id)
+            .execute(&fx.pool)
+            .await?;
+        fx.state.settlement().advance(job_id).await?;
+
+        assert_eq!(
+            JobRepo::get(&fx.pool, job_id).await?.unwrap().status,
+            "failed"
+        );
+        assert_eq!(
+            cr_step(&fx.pool, job_id, "b").await.status,
+            "cancelled",
+            "nothing of a failed job may still start"
+        );
+        cases.push((job_id, line));
+    }
+
+    assert!(JobRepo::get_stalled_pinned_jobs(&fx.pool).await?.is_empty());
+    stroem_server::recovery::sweep_once(&fx.state).await?;
+    for (job_id, line) in cases {
+        let log = job_log_text(&fx.pool, &fx.state, job_id).await;
+        assert_eq!(log.matches("[pin]").count(), 1, "{log}");
+        assert!(log.contains(&line), "{line}\n---\n{log}");
+        assert!(!log.contains("s3cr3t"), "{log}");
+    }
+    Ok(())
+}
+
+/// F4: a pinned CHILD whose pin can never load is settled `failed` and still
+/// takes its terminal claim, so the failure reaches the parent step — the
+/// parent must not wait on it forever.
+#[tokio::test]
+async fn permanent_pin_error_in_child_fails_the_parent_step() -> Result<()> {
+    let fx = pinned_workspace_fixture(PinnedFixtureOpts::default()).await?;
+    let parent = cr_create_pinned_etl(&fx, "wrapper").await?;
+    let children = JobRepo::list_children(&fx.pool, parent).await?;
+    assert_eq!(children.len(), 1, "{children:?}");
+    let child = children[0].job_id;
+
+    JobRepo::mark_running_if_pending_server(&fx.pool, child).await?;
+    JobStepRepo::mark_completed(&fx.pool, child, "a", None).await?;
+    sqlx::query("UPDATE job SET revision = $1 WHERE job_id = $2")
+        .bind("0123456789abcdef0123456789abcdef01234567")
+        .bind(child)
+        .execute(&fx.pool)
+        .await?;
+    fx.state.settlement().advance(child).await?;
+
+    assert_eq!(
+        JobRepo::get(&fx.pool, child).await?.unwrap().status,
+        "failed"
+    );
+    let claimed: bool =
+        sqlx::query_scalar("SELECT metrics_recorded_at IS NOT NULL FROM job WHERE job_id = $1")
+            .bind(child)
+            .fetch_one(&fx.pool)
+            .await?;
+    assert!(claimed, "the terminal claim was taken");
+    assert_eq!(cr_step(&fx.pool, parent, "call").await.status, "failed");
+    assert_eq!(
+        JobRepo::get(&fx.pool, parent).await?.unwrap().status,
+        "failed"
+    );
+    Ok(())
+}
+
+/// `etl` main plus a task whose `type: task` step is itself `ref`'d: the step
+/// carries an ACTION pin (and inherits it as its task pin).
+fn cr_etl_main_with_pinned_call() -> String {
+    format!(
+        "{ETL_MAIN}  pinned-call:\n    flow:\n      first:\n        action: hello\n      call:\n        \
+         action: call-local\n        ref: release/2.3\n        depends_on: [first]\n"
+    )
+}
+
+/// Dispatch loads a step's stamped pins (spec § 7.3). A pin that cannot load
+/// fails the step with the `[pin]` text kept (F37) — and a `PinLoadFailed`
+/// only ever as the fixed sentence, never the loader chain (T6 review #9).
+#[tokio::test]
+async fn dispatch_fails_a_task_step_whose_pin_cannot_load() -> Result<()> {
+    let fx = pinned_workspace_fixture(PinnedFixtureOpts {
+        etl_main: Some(cr_etl_main_with_pinned_call()),
+        ..Default::default()
+    })
+    .await?;
+    let broken = fx
+        .etl
+        .commit("broken", "main", &[("workflow.yaml", CR_BROKEN)]);
+    let gone = "0123456789abcdef0123456789abcdef01234567";
+
+    // The action owner's pin (`action_revision`) is gone.
+    let job_a = cr_create_etl(&fx, "pinned-call").await?;
+    sqlx::query(
+        "UPDATE job_step SET action_revision = $1 WHERE job_id = $2 AND step_name = 'call'",
+    )
+    .bind(gone)
+    .bind(job_a)
+    .execute(&fx.pool)
+    .await?;
+    // The task pin (`task_revision`) does not load.
+    let job_t = cr_create_etl(&fx, "manifest").await?;
+    sqlx::query("UPDATE job_step SET task_revision = $1 WHERE job_id = $2 AND step_name = 'call'")
+        .bind(&broken)
+        .bind(job_t)
+        .execute(&fx.pool)
+        .await?;
+
+    for (job_id, expected) in [
+        (
+            job_a,
+            format!(
+                "[pin] etl@release/2.3 (0123456) cannot be loaded: commit {gone} not found in \
+                 workspace 'etl' (owner of action 'call-local')"
+            ),
+        ),
+        (
+            job_t,
+            format!(
+                "[pin] etl@release/2.3 ({}) cannot be loaded: its configuration does not load",
+                &broken[..7]
+            ),
+        ),
+    ] {
+        JobStepRepo::mark_completed(&fx.pool, job_id, "first", None).await?;
+        fx.state.settlement().advance(job_id).await?;
+        let call = cr_step(&fx.pool, job_id, "call").await;
+        assert_eq!(call.status, "failed");
+        let err = call.error_message.unwrap_or_default();
+        assert!(err.contains(&expected), "{expected}\n---\n{err}");
+        assert!(!err.contains("s3cr3t"), "{err}");
+        assert!(JobRepo::list_children(&fx.pool, job_id).await?.is_empty());
+    }
+    Ok(())
+}
+
+/// T9 review: a pin needs both halves. A child asked to carry a `ref` with no
+/// commit is refused before any row is written.
+#[tokio::test]
+async fn child_with_ref_but_no_revision_is_refused() -> Result<()> {
+    let fx = pinned_workspace_fixture(PinnedFixtureOpts::default()).await?;
+    let pinned = fx
+        .mgr()
+        .pins()
+        .ensure("etl", &fx.commits.etl_release)
+        .await?;
+    let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM job")
+        .fetch_one(&fx.pool)
+        .await?;
+    let err = create_child_job_for_task_detailed(
+        fx.mgr(),
+        &fx.pool,
+        &pinned.config,
+        "etl",
+        "nightly",
+        json!({}),
+        "agent_tool",
+        None,
+        Uuid::new_v4(),
+        "think",
+        None,
+        JobDefaults::default(),
+        Some("release/2.3"),
+    )
+    .await
+    .unwrap_err();
+    assert!(format!("{err:#}").contains("without its commit"), "{err:#}");
+    let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM job")
+        .fetch_one(&fx.pool)
+        .await?;
+    assert_eq!(before, after);
     Ok(())
 }

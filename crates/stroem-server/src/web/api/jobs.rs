@@ -762,14 +762,7 @@ pub async fn restart_job(
 
     // Root approval steps suspended during creation, then terminal handling for
     // a restart whose set cascade-skipped and settled on the spot.
-    crate::settlement::dispatch::fire_initial_suspended_hooks(
-        &state,
-        &workspace,
-        &source.workspace,
-        &source.task_name,
-        created.job_id,
-    )
-    .await;
+    crate::settlement::dispatch::fire_initial_suspended_hooks(&state, created.job_id).await;
     let new_job_id = created.job_id;
     state.settlement().job_created(created).await;
 

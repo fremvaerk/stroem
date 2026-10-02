@@ -581,11 +581,39 @@ impl WorkspaceManager {
             return err.into();
         }
         let withheld = pins::PinLoadWithheld::new(ws, pin);
-        let set = crate::workspace_set::WorkspaceSet::load(self, ws, None).await;
-        let values = crate::workspace_set::collect_redaction_values(&set);
-        let detail = crate::workspace_set::redact_secrets_in_str(&err.to_string(), &values);
+        let detail = self.scrub_live(ws, &err.to_string()).await;
         tracing::error!("{withheld}: {detail}");
         withheld.into()
+    }
+
+    /// [`config_for`](Self::config_for) for a path whose error a user may see
+    /// (job log, `job_step.error_message`, an HTTP body): a `PinLoadFailed`
+    /// becomes its fixed sentence through
+    /// [`pin_error_for_user`](Self::pin_error_for_user); every other error is
+    /// unchanged, so a `PinError` still downcasts.
+    #[tracing::instrument(skip_all, fields(workspace = %ws))]
+    pub async fn config_for_user(
+        &self,
+        ws: &str,
+        pin: Option<&PinRef>,
+    ) -> Result<Option<ConfigHandle>> {
+        match (self.config_for(ws, pin).await, pin) {
+            (Err(e), Some(pin)) => match e.downcast::<PinError>() {
+                Ok(pe) => Err(self.pin_error_for_user(ws, pin, pe).await),
+                Err(e) => Err(e),
+            },
+            (result, _) => result,
+        }
+    }
+
+    /// `text` with every LIVE redaction value of `ws` and the other loaded
+    /// workspaces masked (`redact_secrets_in_str`). For pin error text, which
+    /// has no pinned redaction set to use: the pin is what failed to load.
+    #[tracing::instrument(skip_all, fields(workspace = %ws))]
+    pub async fn scrub_live(&self, ws: &str, text: &str) -> String {
+        let set = crate::workspace_set::WorkspaceSet::load(self, ws, None).await;
+        let values = crate::workspace_set::collect_redaction_values(&set);
+        crate::workspace_set::redact_secrets_in_str(text, &values)
     }
 
     /// Every workspace name the server was CONFIGURED with, whether or not it

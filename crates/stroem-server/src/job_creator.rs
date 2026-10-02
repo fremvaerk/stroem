@@ -166,8 +166,10 @@ pub async fn create_restart_job(
 /// reporting `terminal_at_creation` so the caller can finalize (or reject) a
 /// child that settled synchronously.
 ///
-/// Used by `handle_task_steps` to create sub-jobs that propagate back to the
-/// parent step on completion.
+/// Used by `agent_task_tool` to create tool children that propagate back to
+/// the parent step on completion. `git_ref` set ⇒ the child is pinned like
+/// its parent (git-refs spec § 7.3): `workspace_config` is the parent's pinned
+/// config and `revision` its commit.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_child_job_for_task_detailed(
     workspaces: &WorkspaceManager,
@@ -182,6 +184,7 @@ pub async fn create_child_job_for_task_detailed(
     parent_step_name: &str,
     revision: Option<&str>,
     defaults: JobDefaults,
+    git_ref: Option<&str>,
 ) -> Result<CreatedJob> {
     create_job_for_task_inner(
         workspaces,
@@ -198,7 +201,7 @@ pub async fn create_child_job_for_task_detailed(
         CreationMode::Normal, // child paths never carry re-run/restart lineage
         None,
         defaults,
-        None,
+        git_ref,
     )
     .await
 }
@@ -297,6 +300,17 @@ pub(crate) fn create_job_for_task_inner<'a>(
     git_ref: Option<&'a str>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<CreatedJob>> + Send + 'a>> {
     Box::pin(async move {
+        // A pin needs both halves (spec § 6): never persist `git_ref` without
+        // its commit. Before any lookup, so nothing is written.
+        if let (Some(r), None) = (git_ref, revision) {
+            bail!(
+                "job of task '{}' in workspace '{}' would carry ref '{}' without its commit",
+                task_name,
+                workspace_name,
+                r
+            );
+        }
+
         // Look up task
         let task = workspace_config.tasks.get(task_name).with_context(|| {
             format!(

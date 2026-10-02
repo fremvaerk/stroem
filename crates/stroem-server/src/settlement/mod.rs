@@ -132,23 +132,43 @@ impl Settlement {
     /// Resolve the workspace config and task for a job row, with the
     /// hook / event-source minimal-task fallback. `None` when either is
     /// missing (already logged).
+    ///
+    /// The config is the job's OWN (git-refs spec § 7.3): a pinned job reads
+    /// its commit for life, an unpinned one today's live config. A pin that
+    /// cannot be loaded is `None` too; see [`Self::pin_unavailable`].
     async fn resolve(&self, job: &JobRow) -> Result<Option<(Arc<WorkspaceConfig>, TaskDef)>> {
-        let Some(workspace) = self.workspaces.get_config(&job.workspace).await else {
-            // Two wordings, both inherited: a terminal job still drains,
-            // claims and propagates without the flow (only hooks, retry and
-            // the archive are lost), so it gets the old terminal path's
-            // milder message; a non-terminal job cannot execute at all and
-            // gets the old `orchestrate_after_step` wording.
-            if is_terminal(&job.status) {
-                tracing::warn!(
-                    "Workspace '{}' not found for terminal job {} — skipping hooks and S3 upload",
-                    job.workspace,
-                    job.job_id
-                );
-            } else {
-                tracing::error!("Workspace '{}' not found", job.workspace);
+        let pin = crate::workspace::pins::PinRef::of_job(job);
+        let workspace = match self
+            .workspaces
+            .config_for_user(&job.workspace, pin.as_ref())
+            .await
+        {
+            Ok(Some(handle)) => handle.arc(),
+            Ok(None) => {
+                // Two wordings, both inherited: a terminal job still drains,
+                // claims and propagates without the flow (only hooks, retry and
+                // the archive are lost), so it gets the old terminal path's
+                // milder message; a non-terminal job cannot execute at all and
+                // gets the old `orchestrate_after_step` wording.
+                if is_terminal(&job.status) {
+                    tracing::warn!(
+                        "Workspace '{}' not found for terminal job {} — skipping hooks and S3 upload",
+                        job.workspace,
+                        job.job_id
+                    );
+                } else {
+                    tracing::error!("Workspace '{}' not found", job.workspace);
+                }
+                return Ok(None);
             }
-            return Ok(None);
+            // `config_for` fails only for a pin; anything else propagates.
+            Err(e) => match pin {
+                Some(pin) => {
+                    self.pin_unavailable(job, &pin, e).await?;
+                    return Ok(None);
+                }
+                None => return Err(e),
+            },
         };
         let task = match workspace.tasks.get(&job.task_name) {
             Some(t) => t.clone(),
@@ -167,6 +187,62 @@ impl Settlement {
             }
         };
         Ok(Some((workspace, task)))
+    }
+
+    /// `job`'s pin cannot be loaded on this replica (git-refs spec § 7.3, F4).
+    /// `err` comes from `config_for_user`, so a `PinLoadFailed` is already the
+    /// withheld sentence (its scrubbed chain went to `tracing::error!` only).
+    ///
+    /// - **Transient** (`PinUnavailable`: a cold store during a git outage):
+    ///   logged, nothing else. `recovery::readvance_stalled_pinned_jobs`
+    ///   re-enters the job once the pin loads.
+    /// - **Permanent** (`NotGit`, `CommitNotFound`, a withheld
+    ///   `PinLoadFailed`): a non-terminal job is settled `failed` with one
+    ///   `[pin] … cannot be loaded` line, and its not-yet-started steps are
+    ///   cancelled so nothing of a failed job still starts. It is no longer
+    ///   `running`, so the re-advance phase can never loop on it.
+    ///
+    /// A terminal job is only logged: it still drains, claims and propagates
+    /// without the flow, like a job whose workspace is gone.
+    async fn pin_unavailable(
+        &self,
+        job: &JobRow,
+        pin: &crate::workspace::pins::PinRef,
+        err: anyhow::Error,
+    ) -> Result<()> {
+        use crate::workspace::pins::{cannot_be_loaded, pin_label, PinError, PinLoadWithheld};
+        let permanent = match err.downcast_ref::<PinError>() {
+            Some(p) => !p.is_transient(),
+            None => err.downcast_ref::<PinLoadWithheld>().is_some(),
+        };
+        let line = if permanent {
+            cannot_be_loaded(&job.workspace, pin, &err)
+        } else {
+            format!(
+                "[pin] {} not available yet: {:#}",
+                pin_label(&job.workspace, pin),
+                err
+            )
+        };
+        let line = self.workspaces.scrub_live(&job.workspace, &line).await;
+
+        if is_terminal(&job.status) {
+            tracing::warn!(job_id = %job.job_id, "{line} — skipping hooks and S3 upload");
+            return Ok(());
+        }
+        if !permanent {
+            tracing::warn!(job_id = %job.job_id, "{line}");
+            self.server_log(job.job_id, &line).await;
+            return Ok(());
+        }
+        if JobRepo::settle(&self.pool, job.job_id, JobStatus::Failed, None).await? {
+            tracing::error!(job_id = %job.job_id, "{line}");
+            self.server_log(job.job_id, &line).await;
+            JobStepRepo::cancel_pending_steps(&self.pool, job.job_id).await?;
+        } else {
+            tracing::warn!(job_id = %job.job_id, "{line} (job already terminal)");
+        }
+        Ok(())
     }
 
     /// Move `job_id` as far as its rows allow. Spec §6.3. Idempotent: every
@@ -204,11 +280,12 @@ impl Settlement {
         };
         let resolved = self.resolve(&job).await?;
 
-        // Step 3 — once, not a loop (spec §6.3).
-        if !is_terminal(&job.status) {
-            let Some((workspace, task)) = resolved.as_ref() else {
-                return Ok(());
-            };
+        // Step 3 — once, not a loop (spec §6.3). Without a flow there is
+        // nothing to execute, but step 4 still runs: `resolve` itself settles
+        // a job whose pin can never load (git-refs F4), and that job must
+        // still drain, claim and propagate to its parent. Step 4 re-reads the
+        // row, so an unresolved job that is still live returns there.
+        if let (false, Some((workspace, task))) = (is_terminal(&job.status), resolved.as_ref()) {
             // One sample per entry (spec §3.4): every render in this advance —
             // the cascade, task-step input, approval messages — sees the same
             // snapshot. Nested advances sample independently.

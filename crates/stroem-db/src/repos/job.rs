@@ -1068,6 +1068,33 @@ impl JobRepo {
         Ok(rows)
     }
 
+    /// Running pinned jobs with no live step (git-refs spec § 7.3, R7). A job
+    /// lands here when an `advance` could not load its pin (`PinUnavailable`
+    /// on a cold replica during a git outage) after the step that triggered it
+    /// went terminal — nothing is left to re-enter it. A `type: task` step
+    /// waiting on a child is `running` and an approval is `suspended`, so
+    /// neither is listed; `claimed` counts as live like in `has_live_steps`.
+    pub async fn get_stalled_pinned_jobs(pool: &PgPool) -> Result<Vec<Uuid>> {
+        let ids = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            SELECT j.job_id
+            FROM job j
+            WHERE j.status = 'running'
+              AND j.git_ref IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM job_step s
+                  WHERE s.job_id = j.job_id
+                    AND s.status IN ('ready', 'claimed', 'running', 'suspended')
+              )
+            ORDER BY j.created_at, j.job_id
+            "#,
+        )
+        .fetch_all(pool)
+        .await
+        .context("Failed to list stalled pinned jobs")?;
+        Ok(ids)
+    }
+
     /// Return up to `batch_size` terminal jobs that FINISHED more than the given
     /// number of days ago (`completed_at`, falling back to `created_at` for a
     /// terminal row without one).
