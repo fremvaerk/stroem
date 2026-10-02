@@ -573,6 +573,70 @@ async fn fail_or_retry_running_and_claim_leave_a_finished_row_alone() -> Result<
     Ok(())
 }
 
+// ─── Recovery Phase 4.5: stalled pinned jobs (spec § 7.3) ─────────────
+
+/// A job (pinned unless `git_ref` is `None`) in `job_status`, with one step
+/// per `(name, status)`.
+async fn stalled_candidate(
+    pool: &PgPool,
+    git_ref: Option<&str>,
+    job_status: &str,
+    steps: &[(&str, &str)],
+) -> Uuid {
+    let id = match git_ref {
+        Some(r) => create_pinned_job(pool, "etl", "nightly", r, None).await,
+        None => create_job(pool, "etl", "nightly").await,
+    };
+    sqlx::query("UPDATE job SET status = $2 WHERE job_id = $1")
+        .bind(id)
+        .bind(job_status)
+        .execute(pool)
+        .await
+        .expect("set job status");
+    let rows: Vec<NewJobStep> = steps
+        .iter()
+        .map(|(name, status)| script_step(id, name, status))
+        .collect();
+    JobStepRepo::create_steps(pool, &rows)
+        .await
+        .expect("create steps");
+    id
+}
+
+/// Final review I1: a pinned job whose only claimed step failed before any
+/// worker called `/start` is still `pending`; it is listed like a `running`
+/// one. A `pending` job with no terminal step is a job whose creation-time
+/// init has not promoted anything yet, and must never be advanced
+/// concurrently with that init.
+#[tokio::test]
+async fn stalled_pinned_jobs_include_pending_jobs_with_a_terminal_step() -> Result<()> {
+    let pool = setup_db().await;
+    let r = Some("release/2.3");
+    let running =
+        stalled_candidate(&pool, r, "running", &[("a", "completed"), ("b", "pending")]).await;
+    let pending_failed =
+        stalled_candidate(&pool, r, "pending", &[("a", "failed"), ("b", "pending")]).await;
+    let pending_skipped =
+        stalled_candidate(&pool, r, "pending", &[("a", "skipped"), ("b", "pending")]).await;
+    // Not listed: nothing terminal yet (creation init still owns it) ...
+    stalled_candidate(&pool, r, "pending", &[("a", "pending"), ("b", "pending")]).await;
+    // ... a live step (claimed, ready, running, suspended) ...
+    for live in ["ready", "claimed", "running", "suspended"] {
+        stalled_candidate(&pool, r, "pending", &[("a", "failed"), ("b", live)]).await;
+        stalled_candidate(&pool, r, "running", &[("a", "completed"), ("b", live)]).await;
+    }
+    // ... an unpinned job, and a terminal one.
+    stalled_candidate(&pool, None, "pending", &[("a", "failed"), ("b", "pending")]).await;
+    stalled_candidate(&pool, r, "failed", &[("a", "failed"), ("b", "pending")]).await;
+
+    let mut got = JobRepo::get_stalled_pinned_jobs(&pool).await?;
+    got.sort();
+    let mut want = vec![running, pending_failed, pending_skipped];
+    want.sort();
+    assert_eq!(got, want);
+    Ok(())
+}
+
 // ─── Task 4: ACL scope ────────────────────────────────────────────────
 
 fn pairs(v: &[(&str, &str)]) -> Vec<(String, String)> {

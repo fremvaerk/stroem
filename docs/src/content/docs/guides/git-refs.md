@@ -224,7 +224,10 @@ hooks, scheduling a retry) needs the commit's definitions. If they cannot be
 loaded at that moment, the job waits, with
 `[pin] … not available yet: …` in its log. The recovery sweep re-advances
 such a job on every pass (every `recovery.sweep_interval_secs`, 60 seconds
-by default), so it continues once the git server is reachable again.
+by default), so it continues once the git server is reachable again. That
+includes a job that never started because its step failed at claim (after
+30 releases) or its files could not be downloaded: once the definitions
+load, the sweep skips the steps that depended on it and settles the job.
 
 If the commit can never load again (force-pushed away, or the YAML at it is
 broken), the job is **failed** with `[pin] … cannot be loaded: …`, and its

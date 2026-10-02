@@ -11,6 +11,10 @@ side, each from its own definitions and files. Line numbers cite
 
 ## Revision history
 
+**Revision 10 (2026-10-02, final review).** Fixes from the whole-branch review:
+- I1: the re-advance phase also lists a `pending` pinned job that has a
+  terminal step and no live one (§ 7.3).
+
 **Revision 9 (2026-10-02, execution pre-flight).** Two rulings from the
 pre-flight conflict scan:
 - A permanent pin error during `advance` fails the job, so the re-advance
@@ -696,11 +700,24 @@ A recovery phase fixes this. `readvance_stalled_pinned_jobs` runs on every
 leader sweep and selects
 
 ```sql
-SELECT id FROM job
-WHERE status = 'running' AND git_ref IS NOT NULL
-  AND NOT EXISTS (SELECT 1 FROM job_step
-                  WHERE job_id = job.id AND status IN ('ready','running','suspended'))
+SELECT job_id FROM job j
+WHERE status IN ('pending','running') AND git_ref IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM job_step s
+                  WHERE s.job_id = j.job_id
+                    AND s.status IN ('ready','claimed','running','suspended'))
+  AND (status = 'running'
+       OR EXISTS (SELECT 1 FROM job_step s
+                  WHERE s.job_id = j.job_id
+                    AND s.status IN ('completed','failed','skipped','cancelled')))
 ```
+
+A job stays `pending` until a worker calls `/start`, so a step that fails at
+claim (the release cap, a permanent pin or render error) or whose tarball
+download is exhausted leaves it `pending`; the `advance` after that failure
+may run on the very replica that cannot load the pin. A `pending` job is
+listed only once it has a terminal step: one with none is a job whose
+creation-time init has not promoted its first steps yet, and is never
+advanced concurrently with that init.
 
 It calls `Settlement::advance` for each job, with one heartbeat per job
 (CLAUDE.md § Health Check). `advance` is idempotent, so a job that is

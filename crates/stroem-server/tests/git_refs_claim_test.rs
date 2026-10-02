@@ -225,6 +225,50 @@ async fn pin_release_cap_fails_the_step() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Final review I1: the cap must END a pinned job whose remote is dead. The
+/// step fails at claim, before any worker called `/start`, so the job is
+/// still `pending`; the `advance` after the failure runs on the replica that
+/// cannot load the job's pin and leaves it as it is. Recovery Phase 4.5
+/// re-advances it once the pin loads: its dependents are skipped and the job
+/// fails.
+#[tokio::test]
+async fn pin_release_cap_on_a_pinned_job_is_settled_by_recovery() -> anyhow::Result<()> {
+    let fx = pinned_workspace_fixture(PinnedFixtureOpts::default()).await?;
+    let job_id = fx.create_pinned_etl_job("nightly").await?;
+    sqlx::query("UPDATE job_step SET pin_releases = 30 WHERE job_id = $1 AND step_name = 'a'")
+        .bind(job_id)
+        .execute(&fx.pool)
+        .await?;
+
+    let replica = fx.second_replica().await?;
+    fx.etl.break_remote();
+    let worker = register_worker(&replica.router, &["script"]).await;
+    let (status, body) = claim_status(&replica.router, &worker).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    let a = JobStepRepo::get_step(&fx.pool, job_id, "a").await?.unwrap();
+    assert_eq!(a.status, "failed");
+    let b = JobStepRepo::get_step(&fx.pool, job_id, "b").await?.unwrap();
+    assert_eq!(b.status, "pending");
+    assert_eq!(
+        JobRepo::get(&fx.pool, job_id).await?.unwrap().status,
+        "pending",
+        "precondition: the job never started and its advance could not load the pin"
+    );
+    let log = job_log_text(&fx.pool, &replica.state, job_id).await;
+    assert!(log.contains("not available yet"), "{log}");
+
+    fx.etl.restore_remote();
+    stroem_server::recovery::sweep_once(&replica.state).await?;
+    let b = JobStepRepo::get_step(&fx.pool, job_id, "b").await?.unwrap();
+    assert_eq!(b.status, "skipped", "{b:?}");
+    assert_eq!(
+        JobRepo::get(&fx.pool, job_id).await?.unwrap().status,
+        "failed"
+    );
+    assert!(JobRepo::get_stalled_pinned_jobs(&fx.pool).await?.is_empty());
+    Ok(())
+}
+
 #[tokio::test]
 async fn pin_release_after_cancel_settles_step_and_siblings() -> anyhow::Result<()> {
     let fx = claim_fixture().await?;

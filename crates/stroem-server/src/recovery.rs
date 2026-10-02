@@ -289,7 +289,7 @@ async fn sweep(state: &AppState) -> Result<()> {
         }
     }
 
-    // Phase 4.5 (git refs, R7): re-advance running pinned jobs with no live step.
+    // Phase 4.5 (git refs, R7): re-advance pinned jobs with no live step.
     readvance_stalled_pinned_jobs(state).await?;
 
     // Phase 5: Data retention (rate-limited — runs at most once per retention_interval_secs)
@@ -309,11 +309,12 @@ async fn sweep(state: &AppState) -> Result<()> {
     Ok(())
 }
 
-/// Phase 4.5 (git-refs spec § 7.3, R7): `advance` every running pinned job
-/// with no live step. An `advance` that could not load the job's pin on its
-/// replica (cold store + git outage) returns without effect, and the
-/// completion that triggered it is gone — nothing else would re-enter the
-/// job. Idempotent: `advance` on a job with nothing to do changes nothing. A
+/// Phase 4.5 (git-refs spec § 7.3, R7): `advance` every non-terminal pinned
+/// job with no live step (a `pending` one only once it has a terminal step:
+/// a step that failed at claim leaves a job that never started `pending`).
+/// An `advance` that could not load the job's pin on its replica (cold
+/// store + git outage) returns without effect, and the event that triggered
+/// it is gone — nothing else would re-enter the job. Idempotent: `advance` on a job with nothing to do changes nothing. A
 /// PERMANENT pin error settles the job `failed` inside `advance`, so it is
 /// never listed twice. One beat per job (CLAUDE.md § Health Check, "Beat =
 /// progress"); a unit is bounded by the pin-load budget.

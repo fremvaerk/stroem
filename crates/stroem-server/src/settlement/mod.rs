@@ -200,8 +200,8 @@ impl Settlement {
     ///   `PinLoadFailed`): a non-terminal job is settled `failed` and its
     ///   not-yet-started steps are cancelled (so nothing of a failed job still
     ///   starts), in one transaction, then one `[pin] … cannot be loaded`
-    ///   line is logged. It is no longer `running`, so the re-advance phase
-    ///   can never loop on it; if the write fails it is still `running`, and
+    ///   line is logged. It is terminal then, so the re-advance phase can
+    ///   never loop on it; if the write fails it is still non-terminal, and
     ///   that phase retries it.
     ///
     /// A terminal job is only logged: it still drains, claims and propagates
