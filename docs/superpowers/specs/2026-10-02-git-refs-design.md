@@ -14,6 +14,8 @@ side, each from its own definitions and files. Line numbers cite
 **Revision 10 (2026-10-02, final review).** Fixes from the whole-branch review:
 - I1: the re-advance phase also lists a `pending` pinned job that has a
   terminal step and no live one (§ 7.3).
+- I2: a `sops`/`vals` failure of a commit is answered from memory for 30 s and
+  becomes the permanent `PinLoadFailed` after an hour (§ 5.3, § 8).
 
 **Revision 9 (2026-10-02, execution pre-flight).** Two rulings from the
 pre-flight conflict scan:
@@ -415,8 +417,19 @@ refs can still be pinned.
    on the remote).
 3. Checkout to the immutable tree dir (if absent).
 4. Load the config (if not cached). A load error from the YAML itself is
-   permanent (`PinLoadFailed`); a budget expiry or a `sops`/`vals` failure is
-   transient (`PinUnavailable`).
+   permanent (`PinLoadFailed`); a budget expiry is transient
+   (`PinUnavailable`). A `sops`/`vals` failure (an undecryptable SOPS file,
+   a failing `vals` reference) is transient too, but bounded, per
+   `(ws, commit)` and per replica, in memory: for
+   `PIN_SECRET_FAILURE_RETRY_SECS` (30) after one, `ensure` answers the same
+   error without loading again (no `sops`/`vals` subprocess per request);
+   once the failure has persisted `PIN_SECRET_FAILURE_PERMANENT_AFTER_SECS`
+   (3600) since this replica first saw it, it is reported as the permanent
+   `PinLoadFailed`, with a message that names the cause. A successful load
+   of the commit clears the record. An old commit routinely becomes
+   undecryptable for good (key rotation re-encrypts only new commits; a KMS
+   key or a `vals` path is removed); without the bound, every read path would
+   answer 503 and settlement would wait on it forever.
 5. Collect `secret_values` for redaction (§ 9).
 
 `ensure_tree(ws, commit) -> Result<PathBuf>` runs steps 1–3 only (no config
@@ -1200,8 +1213,8 @@ ordinary job of its task and is authorised by that task's folder.
 | Unknown workspace, folder owner, library item + `ref`, invalid ref syntax | 400 | MISSED | — (never created) |
 | `RefNotFound`, `CommitNotFound` | 400 | MISSED | permanent → `fail_claimed_step` |
 | Name missing at that commit ("has no action/task … at ref") | 400 | MISSED | permanent |
-| `PinLoadFailed` (YAML at that commit does not load) | 400 | MISSED | permanent |
-| `PinUnavailable` (ls-remote/fetch failure with no cached listing, budget, sops/vals) | 500 | MISSED | transient → `release_claim` (§ 7.2) |
+| `PinLoadFailed` (YAML at that commit does not load; sops/vals failing for an hour, § 5.3) | 400 | MISSED | permanent |
+| `PinUnavailable` (ls-remote/fetch failure with no cached listing, budget, sops/vals for under an hour) | 500 | MISSED | transient → `release_claim` (§ 7.2) |
 | Ref'd agent action (§ 7.1) | 400 | MISSED | — (never created) |
 
 For a `type: task` step, a pin error at dispatch fails the step through

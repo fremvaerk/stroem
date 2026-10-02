@@ -38,6 +38,18 @@ pub const DEFAULT_KEEP_RECENT_PER_WORKSPACE: usize = 5;
 /// never starve them (spec § 5.3).
 pub const MAX_CONCURRENT_PIN_LOADS: usize = 4;
 
+/// How long a SECRET-class failure of one commit (an undecryptable SOPS
+/// file, a failing `vals` reference) is answered from memory before its
+/// load is tried again: no `sops`/`vals` subprocess runs per request.
+pub const PIN_SECRET_FAILURE_RETRY_SECS: u64 = 30;
+
+/// How long a secret-class failure of one commit stays TRANSIENT (first
+/// seen on this replica → now). After that it is the permanent
+/// `PinLoadFailed`: an old commit routinely becomes undecryptable for good
+/// (key rotation re-encrypts only new commits; a KMS key or a `vals` path is
+/// removed), and a 503 / a waiting job must not last forever.
+pub const PIN_SECRET_FAILURE_PERMANENT_AFTER_SECS: u64 = 3600;
+
 /// A checked-out commit. Immutable once published (tmp dir + rename);
 /// deleted only by `PinStore::evict`, once no caller holds it.
 #[derive(Debug)]
@@ -74,9 +86,20 @@ impl std::fmt::Debug for Pinned {
 /// `(workspace, commit)`.
 type Key = (String, String);
 
+/// A secret-class load failure of one `(workspace, commit)`, in memory on
+/// this replica. Cleared by a successful load of that commit.
+struct SecretFailure {
+    first_seen: Instant,
+    last_failed: Instant,
+    /// What the last attempt answered: `PinUnavailable`, or `PinLoadFailed`
+    /// once the failure outlasted `PIN_SECRET_FAILURE_PERMANENT_AFTER_SECS`.
+    error: PinError,
+}
+
 /// One cache entry. `OnceCell` is the single-flight: concurrent callers
 /// await one initialisation; a failed one leaves the cell empty, so the
-/// next caller retries (errors are never cached).
+/// next caller retries (errors are never cached here; a secret-class
+/// failure is remembered for a short while in `PinStore::secret_failures`).
 struct Slot<T> {
     cell: Arc<OnceCell<Arc<T>>>,
     last_used: Instant,
@@ -262,13 +285,16 @@ pub enum PinError {
         workspace: String,
         commit: String,
     },
-    /// The config at that commit does not load. Permanent.
+    /// The config at that commit does not load, or its secrets (SOPS,
+    /// `vals`) have failed to load for `PIN_SECRET_FAILURE_PERMANENT_AFTER_SECS`.
+    /// Permanent.
     PinLoadFailed {
         workspace: String,
         commit: String,
         message: String,
     },
-    /// Network, auth, timeout, sops/vals. Transient.
+    /// Network, auth, timeout, or a sops/vals failure younger than
+    /// `PIN_SECRET_FAILURE_PERMANENT_AFTER_SECS`. Transient.
     PinUnavailable {
         workspace: String,
         message: String,
@@ -442,9 +468,14 @@ pub struct PinStore {
     permits: Arc<Semaphore>,
     /// Config loads started (test support).
     loads: AtomicUsize,
+    /// Secret-class load failures by `(workspace, commit)` (spec § 5.3).
+    secret_failures: Mutex<HashMap<Key, SecretFailure>>,
     /// Test hook: pretend the remote refuses want-by-SHA.
     #[cfg(test)]
     skip_fetch_by_sha: AtomicBool,
+    /// Test hook: added to `Instant::now()` by [`PinStore::now`].
+    #[cfg(test)]
+    clock_offset: Mutex<Duration>,
     /// Test hook: holds the blocking pin work at its start while closed.
     /// Compiled in (integration tests link this crate without `cfg(test)`);
     /// never closed outside [`PinStore::hold_loads_for_test`].
@@ -559,8 +590,11 @@ impl PinStore {
             configs: Mutex::new(HashMap::new()),
             permits: Arc::new(Semaphore::new(MAX_CONCURRENT_PIN_LOADS)),
             loads: AtomicUsize::new(0),
+            secret_failures: Mutex::new(HashMap::new()),
             #[cfg(test)]
             skip_fetch_by_sha: AtomicBool::new(false),
+            #[cfg(test)]
+            clock_offset: Mutex::new(Duration::ZERO),
             gate: Arc::default(),
         })
     }
@@ -581,8 +615,11 @@ impl PinStore {
             configs: Mutex::new(HashMap::new()),
             permits: Arc::new(Semaphore::new(MAX_CONCURRENT_PIN_LOADS)),
             loads: AtomicUsize::new(0),
+            secret_failures: Mutex::new(HashMap::new()),
             #[cfg(test)]
             skip_fetch_by_sha: AtomicBool::new(false),
+            #[cfg(test)]
+            clock_offset: Mutex::new(Duration::ZERO),
             gate: Arc::default(),
         }
     }
@@ -629,6 +666,89 @@ impl PinStore {
     #[cfg(not(test))]
     fn fetch_by_sha_enabled(&self) -> bool {
         true
+    }
+
+    /// The store's clock (secret-failure bookkeeping). Tests move it forward
+    /// with `advance_clock`.
+    #[cfg(not(test))]
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+
+    #[cfg(test)]
+    fn now(&self) -> Instant {
+        Instant::now() + *self.clock_offset.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The remembered answer for `(ws, commit)` while its last secret-class
+    /// failure is less than `PIN_SECRET_FAILURE_RETRY_SECS` old: callers get
+    /// it without a load (no `sops`/`vals` subprocess per request).
+    fn recent_secret_failure(&self, ws: &str, commit: &str) -> Option<PinError> {
+        let failures = self
+            .secret_failures
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let failure = failures.get(&(ws.to_string(), commit.to_string()))?;
+        (self.now().saturating_duration_since(failure.last_failed)
+            < Duration::from_secs(PIN_SECRET_FAILURE_RETRY_SECS))
+        .then(|| failure.error.clone())
+    }
+
+    /// Record a secret-class load failure of `(ws, commit)` and return what
+    /// the caller sees: `PinUnavailable` (transient) until the failure has
+    /// persisted for `PIN_SECRET_FAILURE_PERMANENT_AFTER_SECS` since this
+    /// replica first saw it, `PinLoadFailed` (permanent) from then on.
+    /// `message` may quote config text: a `PinLoadFailed` reaches users only
+    /// as `PinLoadWithheld`, and its message only the scrubbed server log.
+    fn record_secret_failure(&self, ws: &str, commit: &str, message: String) -> PinError {
+        let now = self.now();
+        let mut failures = self
+            .secret_failures
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let failure = failures
+            .entry((ws.to_string(), commit.to_string()))
+            .or_insert_with(|| SecretFailure {
+                first_seen: now,
+                last_failed: now,
+                error: unavailable(ws, ""),
+            });
+        failure.last_failed = now;
+        let failing_for = now.saturating_duration_since(failure.first_seen);
+        let error = if failing_for >= Duration::from_secs(PIN_SECRET_FAILURE_PERMANENT_AFTER_SECS) {
+            if failure.error.is_transient() {
+                tracing::warn!(
+                    "Pinned workspace '{ws}' at {commit}: its secrets have failed to load for \
+                     {}s on this server; reporting the commit as permanently unloadable",
+                    failing_for.as_secs()
+                );
+            }
+            PinError::PinLoadFailed {
+                workspace: ws.to_string(),
+                commit: commit.to_string(),
+                message: format!(
+                    "its secrets have failed to load for {}s on this server (an undecryptable \
+                     SOPS file or a failing vals reference); treated as permanent: {message}",
+                    failing_for.as_secs()
+                ),
+            }
+        } else {
+            unavailable(ws, message)
+        };
+        failure.error = error.clone();
+        error
+    }
+
+    fn clear_secret_failure(&self, ws: &str, commit: &str) {
+        self.secret_failures
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&(ws.to_string(), commit.to_string()));
+    }
+
+    #[cfg(test)]
+    fn advance_clock(&self, by: Duration) {
+        *self.clock_offset.lock().unwrap_or_else(|e| e.into_inner()) += by;
     }
 
     #[cfg(test)]
@@ -885,6 +1005,9 @@ impl PinStore {
     #[tracing::instrument(skip_all, fields(workspace = %ws, commit = %commit))]
     pub async fn ensure(&self, ws: &str, commit: &str) -> Result<Arc<Pinned>, PinError> {
         let commit = normalize_commit(ws, commit)?;
+        if let Some(remembered) = self.recent_secret_failure(ws, &commit) {
+            return Err(remembered);
+        }
         // ONE deadline for the whole call — fetch, checkout, config — and it
         // runs while the call waits behind another caller's load, too.
         let budget = LoadBudget::from_now(self.settings.load_timeout);
@@ -930,7 +1053,14 @@ impl PinStore {
         })
         .await
         .map_err(|e| unavailable(ws, e))?;
-        let mut config = classify_load(ws, commit, loaded)?;
+        let mut config = match classify_load(ws, commit, loaded) {
+            Ok(config) => config,
+            Err(LoadFailure::Secret(message)) => {
+                return Err(self.record_secret_failure(ws, commit, message))
+            }
+            Err(LoadFailure::Other(e)) => return Err(e),
+        };
+        self.clear_secret_failure(ws, commit);
         merge_libraries_into_workspace(&mut config, &self.libraries);
         let secret_values = local_secret_values(ws, &config);
         Ok(Arc::new(Pinned {
@@ -1355,24 +1485,37 @@ fn checkout_commit(
     }
 }
 
+/// How a config load failed (spec § 5.3).
+enum LoadFailure {
+    /// An undecryptable SOPS file or a failing `vals` reference: transient
+    /// at first, bounded by `PinStore::record_secret_failure`.
+    Secret(String),
+    Other(PinError),
+}
+
 /// Map a folder-loader result to the pin taxonomy (spec § 5.3) by the
 /// loader's own markers, never by message text:
-/// - `DeadlineExceeded`, or a failure of the `vals` filter, is transient;
+/// - `DeadlineExceeded` is transient;
+/// - a failure of the `vals` filter is a SECRET-class failure;
 /// - any other load error is permanent;
 /// - a SOPS file the loader could not decrypt is a WARNING, and the load
 ///   succeeds without it. Caching that config would freeze a possibly
-///   transient decryption failure into an immutable pin, so it is
-///   transient too. Any other warning (a YAML parse error) keeps live-load
-///   semantics: the config loads without that file.
+///   transient decryption failure into an immutable pin, so it is a
+///   secret-class failure too. Any other warning (a YAML parse error) keeps
+///   live-load semantics: the config loads without that file.
+///
+/// A secret-class failure is transient for
+/// `PIN_SECRET_FAILURE_PERMANENT_AFTER_SECS`, then permanent
+/// (`PinStore::record_secret_failure`).
 fn classify_load(
     ws: &str,
     commit: &str,
     loaded: anyhow::Result<(WorkspaceConfig, Vec<String>)>,
-) -> Result<WorkspaceConfig, PinError> {
+) -> Result<WorkspaceConfig, LoadFailure> {
     match loaded {
         Ok((config, warnings)) => {
             if let Some(w) = warnings.iter().find(|w| is_sops_failure_warning(w)) {
-                return Err(unavailable(ws, w));
+                return Err(LoadFailure::Secret(w.clone()));
             }
             if !warnings.is_empty() {
                 tracing::warn!(
@@ -1382,12 +1525,13 @@ fn classify_load(
             }
             Ok(config)
         }
-        Err(e) if is_deadline_exceeded(&e) || is_vals_failure(&e) => Err(unavailable(ws, e)),
-        Err(e) => Err(PinError::PinLoadFailed {
+        Err(e) if is_deadline_exceeded(&e) => Err(LoadFailure::Other(unavailable(ws, e))),
+        Err(e) if is_vals_failure(&e) => Err(LoadFailure::Secret(format!("{e:#}"))),
+        Err(e) => Err(LoadFailure::Other(PinError::PinLoadFailed {
             workspace: ws.to_string(),
             commit: commit.to_string(),
             message: format!("{e:#}"),
-        }),
+        })),
     }
 }
 
@@ -2180,30 +2324,52 @@ mod tests {
         assert_eq!(store.load_count(), 1);
     }
 
-    #[tokio::test]
-    async fn ensure_failed_sops_file_is_transient_and_not_cached() {
-        let (_r, url, c1) = bare_remote(&[
+    /// A commit whose SOPS file no key decrypts (`sops` is missing, or the
+    /// data is not real ciphertext): a secret-class failure either way.
+    fn undecryptable_sops_remote() -> (TempDir, String, String) {
+        bare_remote(&[
             ("wf.yaml", &workflow("v1")),
             (
                 "creds.sops.yaml",
                 "secrets:\n  k: ENC[AES256_GCM,data:abc]\nsops:\n  version: 3\n",
             ),
-        ]);
+        ])
+    }
+
+    fn secret_failure_count(store: &PinStore) -> usize {
+        store
+            .secret_failures
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
+    }
+
+    const RETRY: Duration = Duration::from_secs(PIN_SECRET_FAILURE_RETRY_SECS);
+    const PERMANENT_AFTER: Duration = Duration::from_secs(PIN_SECRET_FAILURE_PERMANENT_AFTER_SECS);
+
+    /// Final review I2: a secret-class failure is transient and never caches
+    /// a config, but within `PIN_SECRET_FAILURE_RETRY_SECS` it is answered
+    /// from memory — no second load, so no `sops` subprocess per request.
+    #[tokio::test]
+    async fn ensure_failed_sops_file_is_transient_and_answered_from_memory_for_a_while() {
+        let (_r, url, c1) = undecryptable_sops_remote();
         let (_d, store) = store(&url, HOUR);
         let err = store.ensure("w", &c1).await.unwrap_err();
         assert!(err.is_transient(), "{err:?}");
-        let _ = store.ensure("w", &c1).await;
-        assert_eq!(
-            store.load_count(),
-            2,
-            "a transient failure is retried, not cached"
-        );
+        assert_eq!(store.ensure("w", &c1).await.unwrap_err(), err);
+        assert_eq!(store.load_count(), 1, "answered from the negative cache");
+
+        store.advance_clock(RETRY);
+        let retried = store.ensure("w", &c1).await.unwrap_err();
+        assert!(retried.is_transient(), "{retried:?}");
+        assert_eq!(store.load_count(), 2, "loaded again once the window ends");
+        assert!(store.cached_commits("w").is_empty(), "no config is cached");
     }
 
     /// Fails whether or not `vals` is installed: the CLI is missing, or the
     /// file it is asked to read is.
     #[tokio::test]
-    async fn ensure_failed_vals_reference_is_transient_and_not_cached() {
+    async fn ensure_failed_vals_reference_is_transient_and_answered_from_memory_for_a_while() {
         let yaml = format!(
             "{}secrets:\n  token: \"{{{{ 'ref+file:///definitely/missing/stroem-pin-test' | vals }}}}\"\n",
             workflow("v1")
@@ -2212,8 +2378,77 @@ mod tests {
         let (_d, store) = store(&url, HOUR);
         let err = store.ensure("w", &c1).await.unwrap_err();
         assert!(err.is_transient(), "{err:?}");
-        let _ = store.ensure("w", &c1).await;
+        assert_eq!(store.ensure("w", &c1).await.unwrap_err(), err);
+        assert_eq!(store.load_count(), 1);
+        store.advance_clock(RETRY);
+        assert!(store.ensure("w", &c1).await.unwrap_err().is_transient());
         assert_eq!(store.load_count(), 2);
+    }
+
+    /// Final review I2: a secret-class failure that has persisted for
+    /// `PIN_SECRET_FAILURE_PERMANENT_AFTER_SECS` (first seen → now) is the
+    /// permanent `PinLoadFailed` from then on, answered from memory like the
+    /// transient one, with a message that names the cause.
+    #[tokio::test]
+    async fn a_secret_failure_that_outlasts_its_window_becomes_permanent() {
+        let (_r, url, c1) = undecryptable_sops_remote();
+        let (_d, store) = store(&url, HOUR);
+        assert!(store.ensure("w", &c1).await.unwrap_err().is_transient());
+
+        // Just short of the window: loaded again, still transient.
+        store.advance_clock(PERMANENT_AFTER - Duration::from_secs(1));
+        assert!(store.ensure("w", &c1).await.unwrap_err().is_transient());
+        assert_eq!(store.load_count(), 2);
+
+        // Past it, but within the retry window of the last attempt: still
+        // the remembered transient answer, no load.
+        store.advance_clock(Duration::from_secs(1));
+        assert!(store.ensure("w", &c1).await.unwrap_err().is_transient());
+        assert_eq!(store.load_count(), 2);
+
+        // The next attempt is permanent.
+        store.advance_clock(RETRY);
+        let err = store.ensure("w", &c1).await.unwrap_err();
+        assert!(
+            matches!(&err, PinError::PinLoadFailed { message, .. }
+                if message.contains("treated as permanent") && message.contains("sops")),
+            "{err:?}"
+        );
+        assert!(!err.is_transient());
+        assert_eq!(store.load_count(), 3);
+        assert_eq!(store.ensure("w", &c1).await.unwrap_err(), err);
+        assert_eq!(
+            store.load_count(),
+            3,
+            "the permanent answer is remembered too"
+        );
+    }
+
+    /// Final review I2: a successful load of the commit clears its record,
+    /// so a later secret failure starts a fresh (transient) window.
+    #[tokio::test]
+    async fn a_successful_load_clears_the_secret_failure_record() {
+        let (_r, url, c1) = bare_remote(&[("wf.yaml", &workflow("v1"))]);
+        let (_d, store) = store(&url, HOUR);
+        // The commit's secrets failed (a KMS outage, say), long ago.
+        assert!(store
+            .record_secret_failure("w", &c1, "sops: kms unreachable".into())
+            .is_transient());
+        assert_eq!(secret_failure_count(&store), 1);
+        store.advance_clock(PERMANENT_AFTER + RETRY);
+
+        store.ensure("w", &c1).await.unwrap();
+        assert_eq!(
+            secret_failure_count(&store),
+            0,
+            "a success clears the record"
+        );
+        assert!(
+            store
+                .record_secret_failure("w", &c1, "sops: kms unreachable".into())
+                .is_transient(),
+            "a new failure starts a new window"
+        );
     }
 
     #[tokio::test]
@@ -2228,6 +2463,11 @@ mod tests {
         );
         let err = store.ensure("w", &c1).await.unwrap_err();
         assert!(err.is_transient(), "{err:?}");
+        assert_eq!(
+            secret_failure_count(&store),
+            0,
+            "a deadline is not a secret-class failure"
+        );
     }
 
     /// One deadline covers a whole `ensure`: the config phase runs under

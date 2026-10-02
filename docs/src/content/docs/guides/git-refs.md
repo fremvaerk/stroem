@@ -285,7 +285,7 @@ responses never fall back to a partial mask:
 | Situation | Job detail, webhook, MCP | Worker detail |
 |---|---|---|
 | A commit cannot be loaded right now (git server unreachable on this replica) | `503` "redaction set unavailable, retry" (webhook responses keep `job_id`; MCP returns an error) | that row's `error_message` is `••••••` |
-| A commit can never load (force-pushed away, broken YAML), or the job is connected to too many jobs to check | `200`, with every content string masked as `••••••`; ids, statuses and timestamps stay | that row's `error_message` is `••••••` |
+| A commit can never load (force-pushed away, broken YAML, secrets that have not loaded for an hour), or the job is connected to too many jobs to check | `200`, with every content string masked as `••••••`; ids, statuses and timestamps stay | that row's `error_message` is `••••••` |
 
 The price is that a cold commit anywhere in a job's tree can make an
 unrelated job's detail answer `503` during a git outage.
@@ -299,6 +299,26 @@ YAML does not load is reported only as
 `[pin] ws@ref (sha) cannot be loaded: its configuration does not load`,
 because the loader's message can quote secret values.
 
+### Secrets that no longer decrypt
+
+A commit's `sops` files and `vals` references are read when the server
+loads that commit. If they fail — the `sops` key or the KMS key is not
+available, a `vals` backend is down, a `vals` path no longer exists — the
+commit counts as **not available yet**, like a git outage: claims are
+released and retried, a job waits, the responses above answer `503`. The
+server remembers such a failure for 30 seconds, so `sops` and `vals` run at
+most twice a minute per commit, not on every request.
+
+Old commits often stay undecryptable for good: key rotation re-encrypts only
+new commits, and a retired KMS key or a deleted `vals` path does not come
+back. So once a commit's secrets have failed for **one hour** on a server
+(counted from the first failure that server saw, and reset by any
+successful load of that commit), the server treats the commit as one that
+can never load: claims fail the step, a waiting job fails, and the
+responses above answer `200` with everything masked. The server log names
+the cause (`its secrets have failed to load for …s …; treated as
+permanent`). Each replica counts on its own, and a restart starts over.
+
 ## Errors
 
 | Condition | Execute API, webhook | Scheduler trigger | When a step runs |
@@ -309,6 +329,7 @@ because the loader's message can quote secret values.
 | The YAML at that commit does not load | `400`, fixed message | MISSED | step fails, fixed message |
 | Commit no longer exists (force-pushed away) | `400` | MISSED | step fails; a pinned job fails |
 | Git server unreachable with nothing cached, load timeout, `sops`/`vals` failure | `500` | MISSED | claim released and retried, up to 30 times (see [Claim](#claim)) |
+| The commit's secrets (`sops`/`vals`) have failed to load for an hour on that server | `400`, fixed message | MISSED | step fails, fixed message; a pinned job fails |
 | `ref` on an agent action | `400` | MISSED | — |
 
 A `type: task` step whose pinned action or task cannot be loaded when it is

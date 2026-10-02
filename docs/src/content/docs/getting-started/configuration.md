@@ -193,7 +193,12 @@ The bare repositories are never garbage-collected. With the default
 directory they are lost on a container restart and refilled on demand; the
 first pinned run after a restart then fetches again. Fetching a commit, its
 checkout and its config load share `workspace_reload.load_timeout_secs`;
-listing branches and tags uses `workspace_reload.peek_timeout_secs`.
+listing branches and tags uses `workspace_reload.peek_timeout_secs`. A
+commit whose `sops`/`vals` secrets fail to load is retried at most every 30
+seconds, and treated as permanently unloadable once they have failed for an
+hour (see [Git Refs → Secrets that no longer
+decrypt](/guides/git-refs/#secrets-that-no-longer-decrypt)). Neither value is
+configurable.
 
 Environment overrides use the usual form, e.g.
 `STROEM__PIN_STORE__DIR=/var/lib/stroem/pins`.
