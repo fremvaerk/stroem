@@ -1306,9 +1306,11 @@ impl JobRepo {
     /// A job is still `pending` until a worker calls `/start`, so a step that
     /// failed at claim (the release cap, a permanent pin or render error) or
     /// whose tarball download was exhausted leaves it `pending`. Such a job
-    /// is listed only once it has a TERMINAL step: a `pending` job with none
-    /// is one whose creation-time init has not promoted its first steps yet,
-    /// and must never be advanced concurrently with that init.
+    /// is listed only once it has a TERMINAL step that is not carried over:
+    /// a `pending` job with none is one whose creation-time init has not
+    /// promoted its first steps yet, and must never be advanced concurrently
+    /// with that init. A restart's carried-over rows are terminal from
+    /// creation on, so they do not count.
     pub async fn get_stalled_pinned_jobs(pool: &PgPool) -> Result<Vec<Uuid>> {
         let ids = sqlx::query_scalar::<_, Uuid>(
             r#"
@@ -1327,6 +1329,7 @@ impl JobRepo {
                       SELECT 1 FROM job_step s
                       WHERE s.job_id = j.job_id
                         AND s.status IN ('completed', 'failed', 'skipped', 'cancelled')
+                        AND NOT s.carried_over
                   )
               )
             ORDER BY j.created_at, j.job_id

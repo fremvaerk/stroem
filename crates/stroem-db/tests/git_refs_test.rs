@@ -607,7 +607,8 @@ async fn stalled_candidate(
 /// worker called `/start` is still `pending`; it is listed like a `running`
 /// one. A `pending` job with no terminal step is a job whose creation-time
 /// init has not promoted anything yet, and must never be advanced
-/// concurrently with that init.
+/// concurrently with that init; a carried-over row (a restart's) does not
+/// count, it is terminal from creation on.
 #[tokio::test]
 async fn stalled_pinned_jobs_include_pending_jobs_with_a_terminal_step() -> Result<()> {
     let pool = setup_db().await;
@@ -625,9 +626,17 @@ async fn stalled_pinned_jobs_include_pending_jobs_with_a_terminal_step() -> Resu
         stalled_candidate(&pool, r, "pending", &[("a", "failed"), ("b", live)]).await;
         stalled_candidate(&pool, r, "running", &[("a", "completed"), ("b", live)]).await;
     }
-    // ... an unpinned job, and a terminal one.
+    // ... an unpinned job, and a terminal one ...
     stalled_candidate(&pool, None, "pending", &[("a", "failed"), ("b", "pending")]).await;
     stalled_candidate(&pool, r, "failed", &[("a", "failed"), ("b", "pending")]).await;
+    // ... and a just-created RESTART job: its carried-over rows are terminal
+    // from creation on, before its init has promoted anything.
+    let restart =
+        stalled_candidate(&pool, r, "pending", &[("a", "completed"), ("b", "pending")]).await;
+    sqlx::query("UPDATE job_step SET carried_over = TRUE WHERE job_id = $1 AND step_name = 'a'")
+        .bind(restart)
+        .execute(&pool)
+        .await?;
 
     let mut got = JobRepo::get_stalled_pinned_jobs(&pool).await?;
     got.sort();

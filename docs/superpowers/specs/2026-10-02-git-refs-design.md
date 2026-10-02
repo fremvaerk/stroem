@@ -727,16 +727,18 @@ WHERE status IN ('pending','running') AND git_ref IS NOT NULL
   AND (status = 'running'
        OR EXISTS (SELECT 1 FROM job_step s
                   WHERE s.job_id = j.job_id
-                    AND s.status IN ('completed','failed','skipped','cancelled')))
+                    AND s.status IN ('completed','failed','skipped','cancelled')
+                    AND NOT s.carried_over))
 ```
 
 A job stays `pending` until a worker calls `/start`, so a step that fails at
 claim (the release cap, a permanent pin or render error) or whose tarball
 download is exhausted leaves it `pending`; the `advance` after that failure
 may run on the very replica that cannot load the pin. A `pending` job is
-listed only once it has a terminal step: one with none is a job whose
-creation-time init has not promoted its first steps yet, and is never
-advanced concurrently with that init.
+listed only once it has a terminal step that is not carried over: one with
+none is a job whose creation-time init has not promoted its first steps yet,
+and is never advanced concurrently with that init (a restart's carried rows
+are terminal from creation on, so they do not count).
 
 It calls `Settlement::advance` for each job, with one heartbeat per job
 (CLAUDE.md § Health Check). `advance` is idempotent, so a job that is
