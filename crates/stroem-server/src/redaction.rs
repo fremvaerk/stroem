@@ -279,11 +279,30 @@ pub const CLOSURE_BOUNDS: ClosureBounds = ClosureBounds {
 ///   failing pin is not retried for every job.
 ///
 /// A one-job outlet uses a fresh memo.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct RedactionMemo {
     any_pinned: Option<bool>,
     closures: HashMap<uuid::Uuid, RedactionClosure>,
     pin_values: HashMap<(String, String), Result<Vec<String>, RedactionUnavailable>>,
+}
+
+// Never prints the pins' secret values: counts only (CLAUDE.md § Secrets in
+// logs, like `Pinned`).
+impl std::fmt::Debug for RedactionMemo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let loaded = self.pin_values.values().filter(|v| v.is_ok()).count();
+        f.debug_struct("RedactionMemo")
+            .field("any_pinned", &self.any_pinned)
+            .field("closures", &self.closures.len())
+            .field(
+                "pin_values",
+                &format_args!(
+                    "[REDACTED; {loaded} loaded, {} failed]",
+                    self.pin_values.len() - loaded
+                ),
+            )
+            .finish()
+    }
 }
 
 /// Every distinct pin of the job's **redaction closure** (spec § 7.4): the
@@ -407,7 +426,7 @@ pub async fn job_redaction_values_memo(
 }
 
 /// How an outlet treats a job's content once its pins are known.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum JobRedaction {
     /// Every referenced pin loaded: mask these values wherever they occur.
     Values(Vec<String>),
@@ -416,6 +435,18 @@ pub enum JobRedaction {
     /// good, so every content string is masked whole. Identifiers, statuses
     /// and timestamps stay readable.
     MaskAll,
+}
+
+// Never prints the values: a count only (CLAUDE.md § Secrets in logs).
+impl std::fmt::Debug for JobRedaction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            JobRedaction::Values(values) => {
+                write!(f, "Values([REDACTED; {}])", values.len())
+            }
+            JobRedaction::MaskAll => f.write_str("MaskAll"),
+        }
+    }
 }
 
 impl JobRedaction {
@@ -610,6 +641,30 @@ mod tests {
 
     const SHA_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const SHA_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    /// Final review M3 (CLAUDE.md § Secrets in logs): neither the per-request
+    /// memo nor a redaction set prints the secret values it holds.
+    #[test]
+    fn redaction_debug_never_prints_secret_values() {
+        const SECRET: &str = "m3-plaintext-secret-value";
+        let values = JobRedaction::Values(vec![SECRET.to_string()]);
+        let debug = format!("{values:?}");
+        assert!(!debug.contains(SECRET), "{debug}");
+        assert!(debug.contains("Values"), "{debug}");
+        assert!(
+            !format!("{:?}", JobRedaction::MaskAll).is_empty(),
+            "MaskAll still prints"
+        );
+
+        let mut memo = RedactionMemo::default();
+        memo.pin_values
+            .insert(("etl".into(), SHA_A.into()), Ok(vec![SECRET.to_string()]));
+        memo.any_pinned = Some(true);
+        let debug = format!("{memo:?}");
+        assert!(!debug.contains(SECRET), "{debug}");
+        let debug = format!("{memo:#?}");
+        assert!(!debug.contains(SECRET), "{debug}");
+    }
 
     // ── redact_value_tree (moved from web/api/jobs.rs) ─────────────────
 
