@@ -622,6 +622,7 @@ async fn fire_single_hook(
             crate::job_creator::CreationMode::Hook { source_job_id },
             None, // agents_config not available in hook context; orchestrator dispatches agents
             defaults,
+            None,
         )
         .await
         .context("Failed to create hook task job")?;
@@ -695,6 +696,8 @@ async fn fire_single_hook(
         Some(rendered_input),
         StepStatus::Ready,
         defaults,
+        None,
+        None,
         None,
         None,
     );

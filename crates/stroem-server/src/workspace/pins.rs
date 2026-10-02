@@ -316,6 +316,52 @@ impl std::fmt::Display for PinError {
 
 impl std::error::Error for PinError {}
 
+/// `{ws}@{ref} ({short sha})`: how a `[pin]` line names a pin.
+pub fn pin_label(ws: &str, pin: &PinRef) -> String {
+    format!("{ws}@{} ({})", pin.git_ref, short_sha(&pin.commit))
+}
+
+fn short_sha(commit: &str) -> &str {
+    commit.get(..7).unwrap_or(commit)
+}
+
+/// All a user ever sees of a [`PinError::PinLoadFailed`] (T6 review #9).
+/// Its message is the raw loader chain and can quote secret values, so it
+/// goes only to the server log, scrubbed
+/// (`WorkspaceManager::pin_error_for_user`). Permanent, like the error it
+/// replaces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PinLoadWithheld {
+    label: String,
+}
+
+impl PinLoadWithheld {
+    pub fn new(ws: &str, pin: &PinRef) -> Self {
+        Self {
+            label: pin_label(ws, pin),
+        }
+    }
+
+    /// For a failure whose ref is not known (only the commit).
+    pub fn for_commit(ws: &str, commit: &str) -> Self {
+        Self {
+            label: format!("{ws} ({})", short_sha(commit)),
+        }
+    }
+}
+
+impl std::fmt::Display for PinLoadWithheld {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "[pin] {} cannot be loaded: its configuration does not load",
+            self.label
+        )
+    }
+}
+
+impl std::error::Error for PinLoadWithheld {}
+
 fn unavailable(ws: &str, e: impl std::fmt::Display) -> PinError {
     PinError::PinUnavailable {
         workspace: ws.to_string(),

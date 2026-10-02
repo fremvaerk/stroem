@@ -31,7 +31,7 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
-use pins::{PinRef, PinStore, Pinned};
+use pins::{PinError, PinRef, PinStore, Pinned};
 
 use crate::config::{GitAuthConfig, LibraryDef, WorkspaceSourceDef};
 
@@ -90,6 +90,22 @@ impl WorkspaceSource for InMemorySource {
     fn path(&self) -> &Path {
         Path::new("/dev/null")
     }
+}
+
+/// A healthy entry over an in-memory source (tests): it serves `config` at
+/// `revision`, and every reload returns the same. Integration tests mix it
+/// with real sources through [`WorkspaceManager::from_entries`].
+#[doc(hidden)]
+pub fn in_memory_entry(
+    name: &str,
+    config: WorkspaceConfig,
+    revision: Option<String>,
+) -> WorkspaceEntry {
+    let source = Arc::new(InMemorySource {
+        config: config.clone(),
+        revision: revision.clone(),
+    });
+    WorkspaceEntry::new(name, source as Arc<dyn WorkspaceSource>, config, revision)
 }
 
 /// A workspace config: the live published one, or a pinned commit's.
@@ -352,60 +368,21 @@ impl WorkspaceManager {
     /// Create a WorkspaceManager from an in-memory WorkspaceConfig (for testing).
     /// The workspace is registered under the given name with a temp path.
     pub fn from_config(name: &str, config: WorkspaceConfig) -> Self {
-        let source = Arc::new(InMemorySource {
-            config: config.clone(),
-            revision: None,
-        });
-        let mut entries = HashMap::new();
-        entries.insert(
-            name.to_string(),
-            Arc::new(WorkspaceEntry::new(
-                name.to_string(),
-                source as Arc<dyn WorkspaceSource>,
-                config,
-                None,
-            )),
-        );
-        Self {
-            entries,
-            load_errors: HashMap::new(),
-            resolved_libraries: Arc::new(HashMap::new()),
-            triggers_disabled: HashSet::new(),
-            settings: ReloadSettings::default(),
-            load_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_WORKSPACE_LOADS)),
-            pins: Arc::new(PinStore::disabled()),
-        }
+        Self::from_configs(vec![(name.to_string(), config, None)])
     }
 
     /// Create a WorkspaceManager from several in-memory configs, each with an
     /// optional explicit revision (for testing multi-workspace behaviour such
     /// as cross-workspace action resolution).
     pub fn from_configs(configs: Vec<(String, WorkspaceConfig, Option<String>)>) -> Self {
-        let mut entries = HashMap::new();
-        for (name, config, revision) in configs {
-            let source = Arc::new(InMemorySource {
-                config: config.clone(),
-                revision: revision.clone(),
-            });
-            entries.insert(
-                name.clone(),
-                Arc::new(WorkspaceEntry::new(
-                    name,
-                    source as Arc<dyn WorkspaceSource>,
-                    config,
-                    revision,
-                )),
-            );
-        }
-        Self {
-            entries,
-            load_errors: HashMap::new(),
-            resolved_libraries: Arc::new(HashMap::new()),
-            triggers_disabled: HashSet::new(),
-            settings: ReloadSettings::default(),
-            load_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_WORKSPACE_LOADS)),
-            pins: Arc::new(PinStore::disabled()),
-        }
+        let entries = configs
+            .into_iter()
+            .map(|(name, config, revision)| {
+                let entry = in_memory_entry(&name, config, revision);
+                (name, entry)
+            })
+            .collect();
+        Self::from_entries(entries)
     }
 
     /// Test-only: register a source-construction failure for `name` with no
@@ -590,6 +567,25 @@ impl WorkspaceManager {
             self.configured_names(),
         );
         crate::workspace_set::collect_redaction_values(&set)
+    }
+
+    /// `err`, from loading `ws` at `pin`, in the form a user may see
+    /// (T6 review #9). A `PinLoadFailed` carries the raw loader chain, which
+    /// can quote secret values: it is logged in full — scrubbed with the live
+    /// redaction values — through `tracing::error!` only, and replaced by the
+    /// fixed [`PinLoadWithheld`](pins::PinLoadWithheld) sentence. Every other
+    /// variant carries no config text and passes through unchanged.
+    #[tracing::instrument(skip_all, fields(workspace = %ws, commit = %pin.commit))]
+    pub async fn pin_error_for_user(&self, ws: &str, pin: &PinRef, err: PinError) -> anyhow::Error {
+        if !matches!(err, PinError::PinLoadFailed { .. }) {
+            return err.into();
+        }
+        let withheld = pins::PinLoadWithheld::new(ws, pin);
+        let set = crate::workspace_set::WorkspaceSet::load(self, ws, None).await;
+        let values = crate::workspace_set::collect_redaction_values(&set);
+        let detail = crate::workspace_set::redact_secrets_in_str(&err.to_string(), &values);
+        tracing::error!("{withheld}: {detail}");
+        withheld.into()
     }
 
     /// Every workspace name the server was CONFIGURED with, whether or not it

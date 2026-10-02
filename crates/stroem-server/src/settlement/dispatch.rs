@@ -502,6 +502,7 @@ async fn handle_task_steps_pass(
             CreationMode::Normal, // child task jobs never inherit re-run/restart lineage
             None,                 // agents_config not available; orchestrator will dispatch
             defaults,
+            None,
         )
         .await
         {

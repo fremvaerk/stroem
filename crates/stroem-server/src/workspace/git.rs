@@ -39,7 +39,11 @@ impl GitSource {
         })
     }
 
-    #[cfg(test)]
+    /// Like [`Self::new`], with an explicit clone dir (tests: `new` clones
+    /// into a fixed per-name temp dir, which parallel tests and a second
+    /// replica would share). Not `#[cfg(test)]`: integration test binaries
+    /// link this crate without `cfg(test)`.
+    #[doc(hidden)]
     pub fn with_clone_dir(
         url: &str,
         git_ref: &str,
