@@ -1228,21 +1228,22 @@ pub async fn agent_suspend_step(
         )
         .await;
 
-    // Fire on_suspended hooks
+    // Fire on_suspended hooks from the job's OWN config (git-refs spec § 7.3):
+    // a pinned job's hooks come from its commit, like the hook job they create.
     let job = JobRepo::get(&state.pool, job_id).await.context("get job")?;
     if let Some(ref job) = job {
-        if let Some(workspace) = state.get_workspace(&job.workspace).await {
-            if let Some(task) = workspace.tasks.get(&job.task_name) {
-                crate::settlement::hooks::fire_suspended_hooks(
-                    &state.settlement(),
-                    &workspace,
-                    job,
-                    task,
-                    &step_name,
-                    &req.message,
-                )
-                .await;
-            }
+        if let Some((handle, task)) =
+            crate::settlement::dispatch::job_config_and_task(&state, job).await
+        {
+            crate::settlement::hooks::fire_suspended_hooks(
+                &state.settlement(),
+                handle.config(),
+                job,
+                &task,
+                &step_name,
+                &req.message,
+            )
+            .await;
         }
     }
 

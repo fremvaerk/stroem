@@ -628,6 +628,21 @@ impl JobRepo {
         status: JobStatus,
         output: Option<JsonValue>,
     ) -> Result<bool> {
+        Self::settle_tx(pool, job_id, status, output).await
+    }
+
+    /// Executor-generic variant of [`Self::settle`]. Use inside a transaction
+    /// that also writes the job's steps, job row first (the lock order of
+    /// `release_claim` and the creation compensation).
+    pub async fn settle_tx<'e, E>(
+        executor: E,
+        job_id: Uuid,
+        status: JobStatus,
+        output: Option<JsonValue>,
+    ) -> Result<bool>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
         let result = sqlx::query(
             r#"
             UPDATE job
@@ -638,7 +653,7 @@ impl JobRepo {
         .bind(job_id)
         .bind(status.as_ref())
         .bind(output)
-        .execute(pool)
+        .execute(executor)
         .await
         .context("Failed to settle job")?;
         Ok(result.rows_affected() > 0)

@@ -197,10 +197,12 @@ impl Settlement {
     ///   logged, nothing else. `recovery::readvance_stalled_pinned_jobs`
     ///   re-enters the job once the pin loads.
     /// - **Permanent** (`NotGit`, `CommitNotFound`, a withheld
-    ///   `PinLoadFailed`): a non-terminal job is settled `failed` with one
-    ///   `[pin] … cannot be loaded` line, and its not-yet-started steps are
-    ///   cancelled so nothing of a failed job still starts. It is no longer
-    ///   `running`, so the re-advance phase can never loop on it.
+    ///   `PinLoadFailed`): a non-terminal job is settled `failed` and its
+    ///   not-yet-started steps are cancelled (so nothing of a failed job still
+    ///   starts), in one transaction, then one `[pin] … cannot be loaded`
+    ///   line is logged. It is no longer `running`, so the re-advance phase
+    ///   can never loop on it; if the write fails it is still `running`, and
+    ///   that phase retries it.
     ///
     /// A terminal job is only logged: it still drains, claims and propagates
     /// without the flow, like a job whose workspace is gone.
@@ -235,10 +237,27 @@ impl Settlement {
             self.server_log(job.job_id, &line).await;
             return Ok(());
         }
-        if JobRepo::settle(&self.pool, job.job_id, JobStatus::Failed, None).await? {
+        // ONE transaction, job row before steps (the lock order of
+        // `release_claim` and the creation compensation). A failed write rolls
+        // both back: the job stays `running` with no live step, so
+        // `readvance_stalled_pinned_jobs` retries it. Committing the job
+        // `failed` alone and then failing on the steps would return before
+        // `advance` takes the terminal claim, leaving a `failed` job that
+        // nothing re-enters and a parent step that never settles.
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .context("begin pin-failure settlement")?;
+        let settled = JobRepo::settle_tx(&mut *tx, job.job_id, JobStatus::Failed, None).await?;
+        if settled {
+            JobStepRepo::cancel_pending_steps_tx(&mut *tx, job.job_id).await?;
+        }
+        tx.commit().await.context("commit pin-failure settlement")?;
+
+        if settled {
             tracing::error!(job_id = %job.job_id, "{line}");
             self.server_log(job.job_id, &line).await;
-            JobStepRepo::cancel_pending_steps(&self.pool, job.job_id).await?;
         } else {
             tracing::warn!(job_id = %job.job_id, "{line} (job already terminal)");
         }

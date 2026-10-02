@@ -12,7 +12,7 @@ use stroem_common::template::{
     merge_action_defaults, render_input_map, resolve_task_input_by_provenance_roles, RoleConfig,
     RoleScope,
 };
-use stroem_db::{JobRepo, JobStepRepo};
+use stroem_db::{JobRepo, JobRow, JobStepRepo};
 use uuid::Uuid;
 
 use crate::config::JobDefaults;
@@ -869,48 +869,10 @@ pub async fn fire_initial_suspended_hooks(state: &crate::state::AppState, job_id
         }
     };
 
-    // The job's OWN config (git-refs spec § 7.4): a pinned job reads its commit.
-    let pin = PinRef::of_job(&job);
-    let handle = match state
-        .workspaces
-        .config_for_user(&job.workspace, pin.as_ref())
-        .await
-    {
-        Ok(Some(h)) => h,
-        Ok(None) => {
-            tracing::warn!(
-                job_id = %job_id,
-                "fire_initial_suspended_hooks: workspace '{}' not available",
-                job.workspace
-            );
-            return;
-        }
-        Err(e) => {
-            // `config_for_user` already withheld a `PinLoadFailed` (its
-            // scrubbed chain went to `tracing::error!` only).
-            tracing::error!(
-                job_id = %job_id,
-                "fire_initial_suspended_hooks: workspace '{}' at ref '{}' not available: {:#}",
-                job.workspace,
-                job.git_ref.as_deref().unwrap_or(""),
-                e
-            );
-            return;
-        }
+    let Some((handle, task)) = job_config_and_task(state, &job).await else {
+        return;
     };
     let workspace_config = handle.config();
-
-    let task = match workspace_config.tasks.get(&job.task_name) {
-        Some(t) => t,
-        None => {
-            tracing::warn!(
-                job_id = %job_id,
-                task = %job.task_name,
-                "fire_initial_suspended_hooks: task not found in workspace"
-            );
-            return;
-        }
-    };
 
     for step in &steps {
         if step.status != stroem_common::models::job::StepStatus::Suspended.as_ref() {
@@ -935,12 +897,63 @@ pub async fn fire_initial_suspended_hooks(state: &crate::state::AppState, job_id
             &state.settlement(),
             workspace_config,
             &job,
-            task,
+            &task,
             &step.step_name,
             &rendered_message,
         )
         .await;
     }
+}
+
+/// The job's OWN config and task (git-refs spec § 7.3, § 7.4), for firing its
+/// `on_suspended` hooks outside `advance`: a pinned job's hook definitions
+/// come from its commit, the same commit `fire_single_hook` stamps on the hook
+/// job. `None` when either is unavailable, logged; a pin that cannot load is
+/// also written to the job log, since its hooks then do not fire.
+pub(crate) async fn job_config_and_task(
+    state: &crate::state::AppState,
+    job: &JobRow,
+) -> Option<(ConfigHandle, TaskDef)> {
+    let pin = PinRef::of_job(job);
+    let handle = match state
+        .workspaces
+        .config_for_user(&job.workspace, pin.as_ref())
+        .await
+    {
+        Ok(Some(h)) => h,
+        Ok(None) => {
+            tracing::warn!(
+                job_id = %job.job_id,
+                "workspace '{}' not available — on_suspended hooks not fired",
+                job.workspace
+            );
+            return None;
+        }
+        Err(e) => {
+            // `config_for_user` already withheld a `PinLoadFailed` (its
+            // scrubbed chain went to `tracing::error!` only).
+            let detail = match &pin {
+                Some(pin) => cannot_be_loaded(&job.workspace, pin, &e),
+                None => format!("{e:#}"),
+            };
+            let line = format!(
+                "[hooks] on_suspended hooks not fired: {}",
+                state.workspaces.scrub_live(&job.workspace, &detail).await
+            );
+            tracing::error!(job_id = %job.job_id, "{line}");
+            state.append_server_log(job.job_id, &line).await;
+            return None;
+        }
+    };
+    let Some(task) = handle.config().tasks.get(&job.task_name).cloned() else {
+        tracing::warn!(
+            job_id = %job.job_id,
+            task = %job.task_name,
+            "task not found in workspace — on_suspended hooks not fired"
+        );
+        return None;
+    };
+    Some((handle, task))
 }
 
 /// Run the orchestrator after a server-dispatched step (approval, task) is

@@ -1025,3 +1025,127 @@ async fn child_with_ref_but_no_revision_is_refused() -> Result<()> {
     assert_eq!(before, after);
     Ok(())
 }
+
+// ─── Task 11 fix round 1 ───────────────────────────────────────────────────
+
+/// `etl` release/2.3 plus an interactive agent task with an `on_suspended`
+/// hook. Live main has neither the task nor the hook action `notify`.
+fn cr_etl_release_with_agent_ask() -> String {
+    ETL_RELEASE.replace(
+        "tasks:\n  nightly:\n",
+        "tasks:\n  agent-ask:\n    on_suspended:\n      - action: notify\n    flow:\n      think:\n        \
+         action: ask\n  nightly:\n",
+    )
+}
+
+/// Spec § 7.3: when an agent step of a pinned job suspends (`ask_user`), the
+/// `on_suspended` hooks come from the job's commit — the same commit the hook
+/// job is stamped with. The live config has no such task, so it would fire
+/// nothing at all.
+#[tokio::test]
+async fn agent_suspend_fires_on_suspended_hooks_from_the_pinned_config() -> Result<()> {
+    let fx = pinned_workspace_fixture(PinnedFixtureOpts {
+        etl_release: Some(cr_etl_release_with_agent_ask()),
+        ..Default::default()
+    })
+    .await?;
+    let job_id = cr_create_pinned_etl(&fx, "agent-ask").await?;
+    JobStepRepo::mark_running_server(&fx.pool, job_id, "think").await?;
+
+    let (status, body) = worker_req(
+        &fx.router,
+        "POST",
+        &format!("/worker/jobs/{job_id}/steps/think/suspend"),
+        Some(json!({"agent_state": {}, "message": "which one?"})),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    assert_eq!(cr_step(&fx.pool, job_id, "think").await.status, "suspended");
+
+    let hooks = cr_jobs_where(
+        &fx.pool,
+        "SELECT job_id FROM job WHERE source_job_id = $1 AND source_type = 'hook'",
+        job_id,
+    )
+    .await;
+    assert_eq!(hooks.len(), 1, "{hooks:?}");
+    assert_eq!(hooks[0].git_ref.as_deref(), Some("release/2.3"));
+    assert_eq!(
+        hooks[0].revision.as_deref(),
+        Some(fx.commits.etl_release.as_str())
+    );
+    let hook_step = cr_step(&fx.pool, hooks[0].job_id, "hook").await;
+    assert_eq!(
+        hook_step.action_spec.unwrap()["script"],
+        json!("echo notify"),
+        "the hook action is the pinned commit's"
+    );
+    Ok(())
+}
+
+/// Fix round 1 (F4 follow-up): settling a job whose pin can never load writes
+/// the job row and its step cancellations in ONE transaction. When the step
+/// write fails, nothing is written: the job stays `running` with no live step,
+/// and the stalled-job phase finishes it later — it is never stranded
+/// `failed` without its terminal claim.
+#[tokio::test]
+async fn permanent_pin_failure_that_cannot_be_written_is_retried_by_recovery() -> Result<()> {
+    let fx = pinned_workspace_fixture(PinnedFixtureOpts::default()).await?;
+    let job_id = cr_create_pinned_etl(&fx, "nightly").await?;
+    JobRepo::mark_running_if_pending_server(&fx.pool, job_id).await?;
+    JobStepRepo::mark_completed(&fx.pool, job_id, "a", None).await?;
+    sqlx::query("UPDATE job SET revision = $1 WHERE job_id = $2")
+        .bind("0123456789abcdef0123456789abcdef01234567")
+        .bind(job_id)
+        .execute(&fx.pool)
+        .await?;
+
+    // Test-only fault: every step write to `cancelled` fails.
+    sqlx::raw_sql(
+        r#"
+        CREATE FUNCTION test_reject_cancel() RETURNS trigger AS $$
+        BEGIN
+          RAISE EXCEPTION 'injected step-write failure';
+        END $$ LANGUAGE plpgsql;
+        CREATE TRIGGER test_reject_cancel_trg BEFORE UPDATE ON job_step
+        FOR EACH ROW WHEN (NEW.status = 'cancelled') EXECUTE FUNCTION test_reject_cancel();
+        "#,
+    )
+    .execute(&fx.pool)
+    .await?;
+
+    let err = fx.state.settlement().advance(job_id).await.unwrap_err();
+    assert!(format!("{err:#}").contains("injected"), "{err:#}");
+    assert_eq!(
+        JobRepo::get(&fx.pool, job_id).await?.unwrap().status,
+        "running",
+        "the failed write rolls the job back instead of stranding it `failed`"
+    );
+    assert_eq!(cr_step(&fx.pool, job_id, "b").await.status, "pending");
+    assert_eq!(
+        JobRepo::get_stalled_pinned_jobs(&fx.pool).await?,
+        vec![job_id]
+    );
+
+    sqlx::raw_sql(
+        "DROP TRIGGER test_reject_cancel_trg ON job_step; DROP FUNCTION test_reject_cancel();",
+    )
+    .execute(&fx.pool)
+    .await?;
+    stroem_server::recovery::sweep_once(&fx.state).await?;
+
+    assert_eq!(
+        JobRepo::get(&fx.pool, job_id).await?.unwrap().status,
+        "failed"
+    );
+    assert_eq!(cr_step(&fx.pool, job_id, "b").await.status, "cancelled");
+    let claimed: bool =
+        sqlx::query_scalar("SELECT metrics_recorded_at IS NOT NULL FROM job WHERE job_id = $1")
+            .bind(job_id)
+            .fetch_one(&fx.pool)
+            .await?;
+    assert!(claimed, "the terminal claim was taken");
+    let log = job_log_text(&fx.pool, &fx.state, job_id).await;
+    assert_eq!(log.matches("[pin]").count(), 1, "{log}");
+    Ok(())
+}
