@@ -223,63 +223,6 @@ async fn rp_worker_bytes(
     (status, bytes)
 }
 
-/// One MCP `tools/call` (initialize first; the session id, if any, is reused).
-async fn rp_mcp_call(router: &Router, token: Option<&str>, tool: &str, args: Value) -> Value {
-    let build = |body: Value, sid: Option<&str>| {
-        let mut b = Request::builder()
-            .method("POST")
-            .uri("/mcp")
-            .header("Host", "localhost")
-            .header("Content-Type", "application/json")
-            .header("Accept", "application/json, text/event-stream");
-        if let Some(t) = token {
-            b = b.header("Authorization", format!("Bearer {t}"));
-        }
-        if let Some(s) = sid {
-            b = b.header("Mcp-Session-Id", s);
-        }
-        b.body(Body::from(body.to_string())).unwrap()
-    };
-    let init = router
-        .clone()
-        .oneshot(build(
-            json!({"jsonrpc": "2.0", "method": "initialize", "id": 0, "params": {
-                "protocolVersion": "2025-03-26", "capabilities": {},
-                "clientInfo": {"name": "t", "version": "1"}}}),
-            None,
-        ))
-        .await
-        .unwrap();
-    let sid = init
-        .headers()
-        .get("Mcp-Session-Id")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
-    let resp = router
-        .clone()
-        .oneshot(build(
-            json!({"jsonrpc": "2.0", "method": "tools/call", "id": 1,
-                   "params": {"name": tool, "arguments": args}}),
-            sid.as_deref(),
-        ))
-        .await
-        .unwrap();
-    json_body(resp).await
-}
-
-fn rp_mcp_json(resp: &Value) -> Value {
-    serde_json::from_str(
-        resp["result"]["content"][0]["text"]
-            .as_str()
-            .expect("tool text"),
-    )
-    .unwrap()
-}
-
-fn rp_mcp_is_error(resp: &Value) -> bool {
-    resp.get("error").is_some() || resp["result"]["isError"].as_bool().unwrap_or(false)
-}
-
 // ── Task 16: per-job redaction ─────────────────────────────────────────
 
 /// The exact fail-closed message of job detail (503 body) and MCP status.
@@ -466,15 +409,15 @@ async fn mcp_get_job_status_masks_ref_only_secret_and_fails_closed() -> Result<(
         let fx = pinned_workspace_fixture(o).await?;
 
         let ok = rp_seed_pinned_23(&fx, fx.commits.etl_release.clone()).await;
-        let resp = rp_mcp_call(
+        let resp = mcp_call(
             &fx.router,
             None,
             "get_job_status",
             json!({"job_id": ok.to_string()}),
         )
         .await;
-        assert!(!rp_mcp_is_error(&resp), "{resp}");
-        let status = rp_mcp_json(&resp);
+        assert!(!mcp_is_error(&resp), "{resp}");
+        let status = mcp_tool_json(&resp);
         assert!(
             !status.to_string().contains(SECRET_23),
             "secret leaked: {status}"
@@ -489,7 +432,7 @@ async fn mcp_get_job_status_masks_ref_only_secret_and_fails_closed() -> Result<(
 
         let broken = rp_seed_pinned_23(&fx, fx.commits.etl_release.clone()).await;
         let replica = rp_cold_replica_during_outage(&fx).await?;
-        let resp = rp_mcp_call(
+        let resp = mcp_call(
             &replica.router,
             None,
             "get_job_status",
@@ -499,7 +442,7 @@ async fn mcp_get_job_status_masks_ref_only_secret_and_fails_closed() -> Result<(
         rp_assert_pin_transient(&replica.state, &fx.commits.etl_release).await;
         fx.etl.restore_remote();
 
-        assert!(rp_mcp_is_error(&resp), "must fail closed: {resp}");
+        assert!(mcp_is_error(&resp), "must fail closed: {resp}");
         assert_eq!(
             resp["error"]["message"],
             json!(RP_REDACTION_UNAVAILABLE),
@@ -684,7 +627,7 @@ async fn mcp_get_job_status_masks_everything_when_a_pin_is_permanently_unloadabl
         let fx = pinned_workspace_fixture(o).await?;
         let job_id = rp_seed_pinned_23(&fx, MISSING_COMMIT.to_string()).await;
 
-        let resp = rp_mcp_call(
+        let resp = mcp_call(
             &fx.router,
             None,
             "get_job_status",
@@ -693,12 +636,12 @@ async fn mcp_get_job_status_masks_everything_when_a_pin_is_permanently_unloadabl
         .await;
         rp_assert_pin_permanent(&fx.state, MISSING_COMMIT).await;
 
-        assert!(!rp_mcp_is_error(&resp), "{resp}");
+        assert!(!mcp_is_error(&resp), "{resp}");
         assert!(
             !resp.to_string().contains(SECRET_23),
             "secret leaked: {resp}"
         );
-        let status = rp_mcp_json(&resp);
+        let status = mcp_tool_json(&resp);
         assert_eq!(rp_step(&status, "run")["error_message"], json!(MASK));
         rp_assert_identifiers_intact(&status, job_id);
         Ok(())
@@ -1644,7 +1587,7 @@ async fn pinned_job_in_denied_folder_is_denied_over_mcp_and_list_paginates_after
         let viewer = fx.api_key(VIEWER, false).await;
         let t = Some(viewer.as_str());
 
-        let call = |tool: &'static str, args: Value| rp_mcp_call(&fx.router, t, tool, args);
+        let call = |tool: &'static str, args: Value| mcp_call(&fx.router, t, tool, args);
         let deny_message = |resp: &Value| resp["error"]["message"].clone();
 
         for id in jobs.denied() {
@@ -1678,7 +1621,7 @@ async fn pinned_job_in_denied_folder_is_denied_over_mcp_and_list_paginates_after
             let job = json!({"job_id": id.to_string()});
             for tool in ["get_job_status", "get_job_logs", "list_artifacts"] {
                 let resp = call(tool, job.clone()).await;
-                assert!(!rp_mcp_is_error(&resp), "{tool} {id}: {resp}");
+                assert!(!mcp_is_error(&resp), "{tool} {id}: {resp}");
             }
             // Past the job ACL: the artifact itself is what is missing.
             let resp = call(
@@ -1700,8 +1643,8 @@ async fn pinned_job_in_denied_folder_is_denied_over_mcp_and_list_paginates_after
         }
 
         let resp = call("list_jobs", json!({})).await;
-        assert!(!rp_mcp_is_error(&resp), "{resp}");
-        let list = rp_mcp_json(&resp);
+        assert!(!mcp_is_error(&resp), "{resp}");
+        let list = mcp_tool_json(&resp);
         assert_eq!(list["count"], json!(3), "{list}");
         let listed: Vec<Value> = list["jobs"]
             .as_array()
@@ -1717,7 +1660,7 @@ async fn pinned_job_in_denied_folder_is_denied_over_mcp_and_list_paginates_after
         }
 
         // The denied jobs are the most recent: filtering after LIMIT returns 0.
-        let list = rp_mcp_json(&call("list_jobs", json!({"limit": 1})).await);
+        let list = mcp_tool_json(&call("list_jobs", json!({"limit": 1})).await);
         assert_eq!(list["count"], json!(1), "{list}");
         assert_eq!(
             list["jobs"][0]["job_id"],
@@ -1725,7 +1668,7 @@ async fn pinned_job_in_denied_folder_is_denied_over_mcp_and_list_paginates_after
             "{list}"
         );
 
-        let list = rp_mcp_json(
+        let list = mcp_tool_json(
             &call(
                 "list_jobs",
                 json!({"workspace": "etl", "task_name": RP_RELEASE_ONLY_TASK}),
@@ -1741,8 +1684,8 @@ async fn pinned_job_in_denied_folder_is_denied_over_mcp_and_list_paginates_after
 
         // An admin API key lists all five.
         let admin = fx.api_key(ADMIN, true).await;
-        let resp = rp_mcp_call(&fx.router, Some(admin.as_str()), "list_jobs", json!({})).await;
-        assert_eq!(rp_mcp_json(&resp)["count"], json!(5), "{resp}");
+        let resp = mcp_call(&fx.router, Some(admin.as_str()), "list_jobs", json!({})).await;
+        assert_eq!(mcp_tool_json(&resp)["count"], json!(5), "{resp}");
         Ok(())
     })
     .await

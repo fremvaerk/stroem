@@ -819,10 +819,13 @@ field (`web/api/jobs.rs:348-355`); approval messages are rendered with the
 job's secrets (`settlement/dispatch.rs:583-589`, `:684-717`). Today's
 redactor visits only `input` / `output` / `raw_input` (`web/api/jobs.rs:532-559`)
 and would miss that copy. After this change it walks every string in the
-serialised step entries and in the job object.
+serialised step entries and in the job object. The walk skips identifier
+keys (`redaction::JOB_IDENTIFIER_KEYS`, `STEP_IDENTIFIER_KEYS`), so a short
+secret value cannot mangle a link. It skips the `child_jobs[]` summaries
+whole, which is safe only while they hold identifiers (§ 7.8).
 
 These outlets were found by grep and are checked again by the audit task in
-§ 7.9.
+§ 7.9. The audit at `324f0b1` found no outlet missing from this list.
 
 Step `error_message` can carry a failing script's stderr
 (`stroem-worker/src/poller.rs:745`, persisted at `web/worker_api/jobs.rs:939`).
@@ -956,8 +959,10 @@ conflating two refs of one task that declare different folders.
   unpinned one. No pin load is needed. `check_job_acl` changes signature to
   take the `JobRow` (it takes `(workspace, task_name)` strings today) and
   calls the helper. Every **job-scoped** read path goes through it. The
-  inventory at `b367b6c` is exhaustive, from a grep for `make_task_path`,
-  `.folder` and `check_job_acl` under `web/` and `mcp/`:
+  inventory at `b367b6c` came from a grep for `make_task_path`, `.folder`
+  and `check_job_acl` under `web/` and `mcp/`. The § 7.9 audit re-checked it
+  at `324f0b1` against every route and MCP tool, and added the sync webhook
+  response and the `child_jobs[]` row:
 
   | Path | Today | After |
   |---|---|---|
@@ -968,8 +973,9 @@ conflating two refs of one task that declare different folders.
   | Worker detail, recent steps (`web/api/workers.rs:98-148`) | inline live-folder derivation per step (`:106`) | per step row: the step query joins `job.ref` and `job.task_folder`, and each row uses `job_task_path` |
   | MCP per-job checks: status, logs, cancel, `list_artifacts`, `get_artifact` (`mcp/tools.rs:291`, `:816-824`, `:864-872`) | live folder | `job_task_path(&job)` |
   | Task duration stats (`GET /api/workspaces/{ws}/tasks/{name}/stats`, `web/api/tasks.rs:363-427`; queries `stroem-db/src/repos/job.rs:1234-1244`, `:1267-1278`, `job_step.rs:1279-1302`) | live folder for the task; the queries select every job of that name | **pinned jobs are excluded** (`AND ref IS NULL` in all three queries). Stats describe the live task, and a release's runs, with their different flows, are not its runs. That also removes any need for the pinned-folder predicate there |
-  | Webhook job status (`GET /hooks/{name}/jobs/{job_id}`, `web/hooks.rs:305-467`) | **webhook authentication** (`:323-348`), not task ACL | unchanged: an explicit exception, since the caller holds the webhook's secret. Its output is redacted (§ 7.4) |
+  | Webhook job status (`GET /hooks/{name}/jobs/{job_id}`, `web/hooks.rs:305-467`) and the sync webhook response (`/hooks/{name}` with `mode: sync`, `web/hooks.rs::sync_response`) | **webhook authentication** (`:323-348`), not task ACL | unchanged: an explicit exception, since the caller holds the webhook's secret. Its output is redacted (§ 7.4) |
   | REST + MCP lists and counts | live pairs | per-job predicate (below) |
+  | `child_jobs[]` summaries in job detail (`web/api/jobs.rs::get_job`), and the lineage ids `parent_job_id` / `source_job_id` / `retry_of_job_id` / `retry_job_id` | the parent's `check_job_acl` | unchanged: the parent's ACL, **no per-child filter**. A summary holds identifiers only: child id, workspace, task name, status, `created_at`, `ref`, `revision`. All of it already follows from the parent. The parent's own flow names the child's task, and its step stamps `task_workspace` / `task_ref` / `task_revision`. The child's result settles into that step: `output` on success, `Child job {id} failed` as `error_message` (`Settlement::propagate`). Filtering would hide nothing. The child's own input, steps, logs and artifacts stay behind `check_job_acl(&child)`. Redaction skips `child_jobs` whole (`STEP_IDENTIFIER_KEYS`), so a content field must never be added to it. Test: `read_path_audit_test.rs` |
 
   Task-scoped paths are unchanged: task list and detail, execute, triggers,
   workspaces, manual state upload. They concern live tasks.
@@ -1014,6 +1020,26 @@ lists being complete; the implementation plan carries a dedicated task:
 
 The audit's output updates § 7.8 / § 7.4 in this spec, and the
 implementation review checks it.
+
+**Audit run at `324f0b1`.** Every route registered in `web/mod.rs`,
+`web/api/mod.rs`, `web/hooks.rs`, `web/worker_api/mod.rs` and `oauth/mod.rs`
+was enumerated, along with all ten MCP tools, and each was classified. No
+state list endpoint exists. The audit found two entries missing from § 7.8:
+the sync webhook response and the `child_jobs[]` summaries. It found no
+missing § 7.4 outlet. Every job-scoped path already had its test from the
+task that changed it. The only new test is for `child_jobs[]`.
+
+| Class | Routes and tools | Outlet (§ 7.4) | Tested by |
+|---|---|---|---|
+| Job-scoped (`check_job_acl(&job)` / `job_task_path`) | `GET /api/jobs/{id}`; `POST /api/jobs/{id}/cancel`, `/restart`, `/steps/{step}/approve`; `GET /api/jobs/{id}/logs`, `/steps/{step}/logs`, `/artifacts`, `/artifacts/{name}`; the WebSocket `/api/jobs/{id}/logs/stream`; the re-run source of `POST …/execute`; MCP `get_job_status`, `get_job_logs`, `cancel_job`, `list_artifacts`, `get_artifact` | job detail and MCP `get_job_status`. Logs are not redacted (§ 16) | `git_refs_read_paths_test.rs`: deny in `pinned_job_in_denied_folder_is_denied_on_every_rest_path`, `…_on_the_websocket` and `…_over_mcp_and_list_paginates_after_acl`; mask in `job_detail_masks_ref_only_secret_in_every_field` and `mcp_get_job_status_masks_ref_only_secret_and_fails_closed`. Re-run source: `pinned_rerun_restart_test.rs::pinned_rerun_authorises_against_the_source_task_folder` |
+| Job-scoped per row | `GET /api/workers/{id}` (recent steps) | yes, per row | `pinned_job_in_denied_folder_is_denied_on_every_rest_path`, `worker_detail_masks_error_and_fails_closed_per_row` |
+| List / count predicate | `GET /api/jobs`, `GET /api/stats`, MCP `list_jobs` | no (metadata only) | the same deny tests |
+| The parent's ACL | `child_jobs[]` and the lineage ids in job detail | identifiers, skipped | `read_path_audit_test.rs::child_job_summary_in_job_detail_is_identifiers_only_and_the_child_stays_job_scoped` |
+| Task-scoped (live), pinned jobs excluded | `GET /api/workspaces/{ws}/tasks/{name}/stats` | no | stroem-db `git_refs_test.rs::duration_stats_exclude_pinned_jobs` |
+| Task-scoped (live) | workspaces and refresh, task list and detail, triggers, execute (not a re-run), manual state upload; MCP `list_workspaces`, `list_tasks`, `get_task`, `execute_task` | no | unchanged |
+| Explicit exception: webhook auth | the sync response of `/hooks/{name}`, `GET /hooks/{name}/jobs/{job_id}` | yes, every branch | `sync_webhook_masks_ref_only_secret`, `sync_webhook_fails_closed_with_job_id`, `webhook_status_poll_masks_ref_only_secret_in_every_branch`, `webhook_status_poll_fails_closed_with_job_id` |
+| Worker token, not user-facing | `/worker/*` | no | state partitions: the Task 19 `state_*` / `global_state_*` tests |
+| No job data | `/livez`, `/healthz`, `/healthz/detail`, `/metrics`, `/api/config`, `/api/auth/*` (incl. `api-keys`, `oidc`), `/api/users*`, `/api/groups`, `GET /api/workers`, `/api/oauth/*`, `/oauth/*`, `/.well-known/*` | no | none needed |
 
 ## 8. Errors and classification
 

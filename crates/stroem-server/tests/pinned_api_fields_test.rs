@@ -6,11 +6,8 @@ use common::pinned::*;
 use std::time::Duration;
 
 use anyhow::Result;
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use axum::Router;
+use axum::http::StatusCode;
 use serde_json::{json, Value as JsonValue};
-use tower::ServiceExt;
 
 /// Every test runs under this bound (testcontainers + git).
 const AF_TIMEOUT: Duration = Duration::from_secs(240);
@@ -19,52 +16,6 @@ async fn af_bounded(body: impl std::future::Future<Output = Result<()>>) -> Resu
     tokio::time::timeout(AF_TIMEOUT, body)
         .await
         .map_err(|_| anyhow::anyhow!("test timed out after {AF_TIMEOUT:?}"))?
-}
-
-async fn af_mcp_call(router: &Router, tool: &str, args: JsonValue) -> JsonValue {
-    let build = |body: JsonValue, sid: Option<&str>| {
-        let mut b = Request::builder()
-            .method("POST")
-            .uri("/mcp")
-            .header("Host", "localhost")
-            .header("Content-Type", "application/json")
-            .header("Accept", "application/json, text/event-stream");
-        if let Some(s) = sid {
-            b = b.header("Mcp-Session-Id", s);
-        }
-        b.body(Body::from(body.to_string())).unwrap()
-    };
-    let init = router
-        .clone()
-        .oneshot(build(
-            json!({"jsonrpc": "2.0", "method": "initialize", "id": 0, "params": {
-                "protocolVersion": "2025-03-26", "capabilities": {},
-                "clientInfo": {"name": "t", "version": "1"}}}),
-            None,
-        ))
-        .await
-        .unwrap();
-    let sid = init
-        .headers()
-        .get("Mcp-Session-Id")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
-    let resp = router
-        .clone()
-        .oneshot(build(
-            json!({"jsonrpc": "2.0", "method": "tools/call", "id": 1,
-                   "params": {"name": tool, "arguments": args}}),
-            sid.as_deref(),
-        ))
-        .await
-        .unwrap();
-    let v = json_body(resp).await;
-    serde_json::from_str(
-        v["result"]["content"][0]["text"]
-            .as_str()
-            .expect("tool text"),
-    )
-    .unwrap()
 }
 
 /// `etl` main: `call` is a root `type: task` step, so its child exists at
@@ -172,16 +123,19 @@ async fn mcp_status_and_list_carry_ref() -> Result<()> {
         .await?;
         let job_id = fx.create_pinned_etl_job("nightly").await?;
 
-        let status = af_mcp_call(
-            &fx.router,
-            "get_job_status",
-            json!({"job_id": job_id.to_string()}),
-        )
-        .await;
+        let status = mcp_tool_json(
+            &mcp_call(
+                &fx.router,
+                None,
+                "get_job_status",
+                json!({"job_id": job_id.to_string()}),
+            )
+            .await,
+        );
         assert_eq!(status["ref"], "release/2.3", "{status}");
         assert_eq!(status["revision"], fx.commits.etl_release.as_str());
 
-        let list = af_mcp_call(&fx.router, "list_jobs", json!({})).await;
+        let list = mcp_tool_json(&mcp_call(&fx.router, None, "list_jobs", json!({})).await);
         let item = list["jobs"]
             .as_array()
             .or_else(|| list.as_array())

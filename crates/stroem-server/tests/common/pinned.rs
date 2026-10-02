@@ -914,6 +914,82 @@ pub async fn claim_once(router: &Router, worker_id: &str) -> Value {
     .1
 }
 
+/// Bound for one fixture-based test (testcontainers + git transports).
+pub const FIXTURE_TEST_TIMEOUT: Duration = Duration::from_secs(240);
+
+/// Run a test body under [`FIXTURE_TEST_TIMEOUT`], so a hung container or git
+/// transport fails that test instead of stalling the run.
+pub async fn bounded(body: impl std::future::Future<Output = Result<()>>) -> Result<()> {
+    tokio::time::timeout(FIXTURE_TEST_TIMEOUT, body)
+        .await
+        .map_err(|_| anyhow::anyhow!("test timed out after {FIXTURE_TEST_TIMEOUT:?}"))?
+}
+
+// ─── MCP helpers ───────────────────────────────────────────────────────────
+
+/// One MCP `tools/call` over Streamable HTTP: `initialize` first, then the
+/// call on the session it opened (if any). `token` goes out as a Bearer;
+/// `/mcp` takes an API key ([`PinnedFixture::api_key`]), not a login JWT.
+/// Returns the JSON-RPC response body, whatever its status.
+pub async fn mcp_call(router: &Router, token: Option<&str>, tool: &str, args: Value) -> Value {
+    let build = |body: Value, sid: Option<&str>| {
+        let mut b = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("Host", "localhost")
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream");
+        if let Some(t) = token {
+            b = b.header("Authorization", format!("Bearer {t}"));
+        }
+        if let Some(s) = sid {
+            b = b.header("Mcp-Session-Id", s);
+        }
+        b.body(Body::from(body.to_string())).unwrap()
+    };
+    let init = router
+        .clone()
+        .oneshot(build(
+            json!({"jsonrpc": "2.0", "method": "initialize", "id": 0, "params": {
+                "protocolVersion": "2025-03-26", "capabilities": {},
+                "clientInfo": {"name": "t", "version": "1"}}}),
+            None,
+        ))
+        .await
+        .unwrap();
+    let sid = init
+        .headers()
+        .get("Mcp-Session-Id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let resp = router
+        .clone()
+        .oneshot(build(
+            json!({"jsonrpc": "2.0", "method": "tools/call", "id": 1,
+                   "params": {"name": tool, "arguments": args}}),
+            sid.as_deref(),
+        ))
+        .await
+        .unwrap();
+    json_body(resp).await
+}
+
+/// The JSON document a successful [`mcp_call`] returned as its first text block.
+pub fn mcp_tool_json(resp: &Value) -> Value {
+    serde_json::from_str(
+        resp["result"]["content"][0]["text"]
+            .as_str()
+            .expect("tool text"),
+    )
+    .unwrap()
+}
+
+/// Whether an [`mcp_call`] failed: a JSON-RPC error, or a tool result flagged
+/// `isError`.
+pub fn mcp_is_error(resp: &Value) -> bool {
+    resp.get("error").is_some() || resp["result"]["isError"].as_bool().unwrap_or(false)
+}
+
 /// `POST /api/workspaces/{ws}/tasks/{task}/execute` with `{"input": input}`.
 pub async fn execute_task(
     router: &Router,
