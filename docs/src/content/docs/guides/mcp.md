@@ -313,6 +313,18 @@ Returns:
 
 This shows the tail of the log (last 256 KiB by default); pass `tail_bytes` for more history, up to `log_storage.read.tail_max_bytes`.
 
+`get_job_status` masks secret values (`••••••`) in what it returns — chiefly
+the steps' `error_message` — the same way as `GET /api/jobs/{id}`, including
+the secrets of any [pinned commit](/guides/git-refs/#secrets-and-redaction)
+the job is connected to. When those secrets cannot be loaded at the moment, the tool
+returns an error, `redaction set unavailable, retry`, instead of the job;
+call it again later. When a pinned commit can never be loaded again, the job
+is returned with every content string masked. A job that runs on a git ref
+carries its `ref`, in `get_job_status` and in `list_jobs`.
+
+`get_job_logs` returns log lines as the steps printed them; log lines are not
+masked.
+
 ## Use Cases
 
 ### AI-Assisted Deployments
@@ -335,8 +347,8 @@ Agents can explore available tasks, their input requirements, and past execution
 
 When ACL is configured on your Strøm server, MCP tools enforce the same permission rules as the REST API:
 
-- **List tools** (`list_workspaces`, `list_tasks`, `list_jobs`): Filter results to only show resources the user has access to. Tasks with `Deny` permission are hidden.
-- **Read tools** (`get_task`, `get_job_status`, `get_job_logs`): Require `View` or `Run` permission. `Deny` returns "not found".
+- **List tools** (`list_workspaces`, `list_tasks`, `list_jobs`): Filter results to only show resources the user has access to. Tasks with `Deny` permission are hidden. `list_jobs` filters before applying `limit`, so a page holds up to `limit` jobs you may see.
+- **Read tools** (`get_task`, `get_job_status`, `get_job_logs`, `list_artifacts`, `get_artifact`): Require `View` or `Run` permission. `Deny` returns "not found". A job that runs on a [git ref](/guides/git-refs/) is checked against the folder its own commit declares for its task.
 - **Mutation tools** (`execute_task`, `cancel_job`): Require `Run` permission. `View`-only users receive an error.
 
 The `list_tasks` response includes a `can_execute` field indicating whether the user can execute each task (`true` for `Run`, `false` for `View`).

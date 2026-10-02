@@ -201,9 +201,33 @@ These are set automatically by the worker and runner. If no previous state exist
 
 Snapshots are pruned automatically per task to keep a rolling window of recent snapshots:
 
-- Default: keep the last **5 snapshots** per task (configurable via `max_snapshots`)
+- Default: keep the last **5 snapshots** per task (configurable via `max_snapshots`) — per task **and** per ref, see [Pinned jobs](#pinned-jobs)
 - Older snapshots are deleted from both the database and archive
 - Snapshots survive job retention cleanup — the snapshot's `job_id` reference is cleared when the job is deleted, but the snapshot remains in the archive
+
+## Which state a step sees
+
+State belongs to the **job**: every step of a job reads and writes the state
+of the job's own workspace and task. That includes a step that runs a
+[cross-workspace action](/guides/cross-workspace-references/): it reads and
+writes the calling job's state, not the action owner's. The server takes
+these coordinates from the job, never from the worker's request.
+
+### Pinned jobs
+
+A job running on a [git ref](/guides/git-refs/) reads and writes state
+partitioned by the ref string: `release/2.3`'s snapshots are separate from
+`release/2.4`'s and from the default branch's. Bumping a ref (`v2.3.1` →
+`v2.3.2`) starts with empty state. The same holds for global state: a pinned
+job's `GLOBAL_STATE:` and `{{ global_state.* }}` use that workspace's
+partition for the ref.
+
+Workers older than the server do not tell the server which job a state
+download is for, so a pinned job claimed by such a worker gets the default
+(unpinned) partition mounted at `/state`. Its templates (`{{ state.* }}`)
+and its uploads still use the right partition, because the server renders
+templates and decides where uploads go. Upgrade workers together with the
+server.
 
 ## Use cases
 
@@ -353,6 +377,9 @@ POST /api/workspaces/{ws}/state                 # global workspace state (admin)
 ```
 
 Both accept a gzip tarball (max 50 MB) in the request body and state-JSON key/value pairs as query parameters.
+
+Manual uploads always write the default (unpinned) partition; there is no
+way yet to upload state for a [git ref](/guides/git-refs/)'s partition.
 
 ### Auth
 

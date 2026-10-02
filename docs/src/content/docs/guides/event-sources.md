@@ -440,6 +440,10 @@ triggers:
     enabled: false  # Process won't start
 ```
 
+An event-source trigger cannot carry a [`ref:`](/guides/git-refs/) yet:
+`stroem validate` reports it, and the server does not start such a consumer
+(it logs a warning on every reconcile).
+
 ## Secrets and templating
 
 Event variables and `input` defaults support Tera templating, with access to `secret.*`:

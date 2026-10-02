@@ -70,6 +70,7 @@ The validator checks:
 - DAG cycle detection
 - Trigger cron expression syntax
 - Hook action references
+- `ref:` values ([Git Refs](/guides/git-refs/)): the ref's syntax, and that it appears only where it is supported (flow-step actions, `type: task` actions, scheduler/webhook triggers). A reference with `ref:` is not resolved offline — it is skipped with a warning, like a library action
 - Warns when a merge step depends on a step with `when` or `for_each` that lacks `continue_when_skipped` — that dependency's skip would otherwise cascade-skip the merge (see [Conditionals](/guides/conditionals/))
 
 ### `tasks`

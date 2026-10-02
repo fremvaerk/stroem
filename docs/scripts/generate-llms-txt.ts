@@ -40,9 +40,16 @@ When generating Strøm workflow YAML, these constraints are enforced at parse ti
 - \`type: script\` + \`image\` is **rejected** — use \`type: docker\` or \`runner: docker\` instead.
 
 **Task actions:**
-- \`task\` field must reference an existing task in the same workspace.
-- Self-referencing tasks (direct or via hooks) are rejected.
+- \`task\` field must reference an existing task — in the same workspace, or another workspace's task as \`ws.task\`.
+- Self-referencing tasks (direct or via hooks) are rejected. With \`ref\`, the same task at another commit is allowed (bounded by the nesting depth).
 - Maximum nesting depth: 10 levels.
+
+**Git refs (\`ref:\`):**
+- Allowed only on a flow step (qualifies \`action\`), a \`type: task\` action (qualifies \`task\`), and scheduler / webhook triggers (qualifies \`task\`). Not on any other action type.
+- Value: a branch, a tag, \`refs/heads/<name>\`, \`refs/tags/<name>\`, or a full 40-hex commit SHA. Short SHAs, other \`refs/…\` namespaces and templated values (\`{{\`, \`{%\`) are rejected.
+- Rejected on hooks, event-source triggers, agent \`tools: [{task: …}]\` entries, and on a flow step whose ref'd action is \`type: agent\`.
+- Only git workspaces have refs; a library item (\`lib.item\`) cannot carry \`ref\`.
+- The referenced name is looked up at the ref (it need not exist on the default branch); \`stroem validate\` skips that check with a warning.
 
 **Flow steps:**
 - \`action\` must reference an existing action.
@@ -61,6 +68,7 @@ When generating Strøm workflow YAML, these constraints are enforced at parse ti
 - \`timeout_secs\` must be 1–300 (default: 30). Only meaningful in sync mode.
 - \`type: event_source\` — long-running queue consumer. Requires \`task\` (consumer task) and \`target_task\` (target for emitted jobs). Consumer's execution defined in referenced task. Emitted JSON on stdout creates jobs for target task. \`env:\` provides environment overrides. \`restart_policy\`: \`always\` (default), \`on_failure\`, \`never\`. \`backoff_secs\` for exponential backoff. \`max_in_flight\` for backpressure.
 - \`force_refresh: true\` (scheduler, webhook) — reload workspace from source before creating the job.
+- Scheduler / webhook \`task\` may name another workspace's task (\`ws.task\`), optionally with \`ref\`; the job is created in that workspace.
 
 **Hooks:**
 - \`on_success\` / \`on_error\` hook action references must exist.
@@ -68,7 +76,7 @@ When generating Strøm workflow YAML, these constraints are enforced at parse ti
 
 **Templates:**
 - Step names with hyphens (e.g., \`say-hello\`) become underscores in templates: \`{{ say_hello.output.* }}\`.
-- Template context: \`input.*\`, \`<step_name>.output.*\`, \`secret.*\`, \`state.*\` (task state), \`global_state.*\` (workspace state).
+- Template context: \`input.*\`, \`<step_name>.output.*\`, \`secret.*\`, \`state.*\` (task state), \`global_state.*\` (workspace state), \`job.revision\`, \`job.ref\` (empty unless the job runs on a git ref).
 
 **Pod manifest overrides:**
 - \`manifest\` field is only valid on \`type: pod\` and \`type: script\` + \`runner: pod\`.
@@ -120,6 +128,8 @@ const sections: Section[] = [
     desc: "LLM calls as workflow steps (19 providers, structured output, tools)", group: "Guides" },
   { file: "guides/task-state.md", title: "Task State Snapshots", slug: "task-state",
     desc: "Cross-run state persistence: STATE:, GLOBAL_STATE:, /state mount", group: "Guides" },
+  { file: "guides/git-refs.md", title: "Git Refs", slug: "git-refs",
+    desc: "ref: on actions, type: task and triggers — branch/tag/SHA, pinned jobs, per-ref state", group: "Guides" },
   { file: "guides/artifacts.md", title: "Artifacts", slug: "artifacts",
     desc: "Per-job files via /artifacts/: limits, MIME sniffing, UI/CLI/MCP download", group: "Guides" },
   { file: "guides/mcp.md", title: "MCP Integration", slug: "mcp",

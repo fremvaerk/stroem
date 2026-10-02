@@ -105,6 +105,7 @@ worker_token: "change-in-production"
 | `workspaces` | Yes | Map of workspace definitions (see [Multi-Workspace](/guides/multi-workspace/)) |
 | `workspaces.<name>.triggers` | No | `false` loads the workspace but never fires its triggers on this server (default: `true`; see [Disabling triggers per server](/guides/multi-workspace/#disabling-triggers-per-server)) |
 | `workspace_reload` | No | Tunes workspace refresh timing and backoff (see [`workspace_reload`](#workspace_reload) below) |
+| `pin_store` | No | Where and how many pinned commits this replica keeps for [git refs](/guides/git-refs/) (see [`pin_store`](#pin_store) below) |
 | `worker_token` | Yes | Shared secret for worker authentication |
 | `recovery` | No | Recovery sweeper settings (see [Recovery](/operations/recovery/)) |
 | `retention` | No | Data retention settings (see [Retention](/operations/retention/)) |
@@ -163,6 +164,38 @@ The three duration fields above are capped at 24 hours; a larger value is reject
 Environment overrides use the usual form, e.g. `STROEM__WORKSPACE_RELOAD__LOAD_TIMEOUT_SECS=600`.
 
 See [How workspaces are refreshed](/guides/multi-workspace/#how-workspaces-are-refreshed) for the policy these tune.
+
+### `pin_store`
+
+Pinned commits for [git refs](/guides/git-refs/). All fields are optional.
+
+```yaml
+pin_store:
+  dir: /var/lib/stroem/pins        # default: <temp>/stroem/pins
+  keep_recent_per_workspace: 5     # default 5
+  claim_load_budget_secs: 20       # default 20
+```
+
+| Field | Default | Meaning |
+|---|---|---|
+| `dir` | `<temp>/stroem/pins` | One bare repository per git workspace plus one checkout per pinned commit. Must be private to ONE server process: startup fails with `pin_store.dir … is in use by another process` if another process holds its lock. Must not be empty. |
+| `keep_recent_per_workspace` | `5` | Recently used pinned commits kept per workspace beyond those active jobs still need. At most `1000`. |
+| `claim_load_budget_secs` | `20` | How long a worker's claim waits for the pinned commits it needs to load. Past it, the step is released back to `ready` and the load continues in the background. Keep it clearly **below** the workers' `request_timeout_secs` (30 s by default). If a worker gives up first, the server releases that claim too, so the step is only delayed. Between `1` and `86400`. |
+
+The pin store is opened only when at least one git workspace is configured.
+It takes a lock on `{dir}/.lock`, so two server processes on one host need
+different directories — with the default directory, also two servers
+sharing one temporary directory. Startup removes checkouts left half-written
+by an interrupted run.
+
+The bare repositories are never garbage-collected. With the default
+directory they are lost on a container restart and refilled on demand; the
+first pinned run after a restart then fetches again. Fetching a commit, its
+checkout and its config load share `workspace_reload.load_timeout_secs`;
+listing branches and tags uses `workspace_reload.peek_timeout_secs`.
+
+Environment overrides use the usual form, e.g.
+`STROEM__PIN_STORE__DIR=/var/lib/stroem/pins`.
 
 ## Agent providers
 
@@ -250,6 +283,7 @@ tags:
 | `worker_name` | No | Display name (default: hostname) |
 | `max_concurrent` | No | Max concurrent step executions (default: 4) |
 | `poll_interval_secs` | No | Poll frequency in seconds (default: 2) |
+| `request_timeout_secs` | No | Timeout of each API request to the server, including step claims (default: 30; workspace downloads have their own longer timeout). Keep it above the server's [`pin_store.claim_load_budget_secs`](#pin_store) (default 20) |
 | `workspace_cache_dir` | No | Local cache for workspace tarballs |
 | `tags` | No | Tags for step routing (default: `["script"]`) |
 | `runner_image` | No | Default Docker image for `type: script` container steps |

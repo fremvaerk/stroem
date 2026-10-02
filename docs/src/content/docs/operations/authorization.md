@@ -51,6 +51,33 @@ acl:
    - If a rule matches workspace and task patterns, check if user/groups match
 4. If no rules matched → use `acl.default` (defaults to `deny`)
 
+## Jobs and task folders
+
+A job is authorised by the task path of the task it ran, `"{folder}/{task}"`:
+
+- An ordinary job uses the task's folder in the workspace's **current**
+  configuration.
+- A job that runs on a [git ref](/guides/git-refs/) uses the folder its **own
+  commit** declared for the task (the job's `task_folder`), never the current
+  one — even when a task of the same name exists on the default branch under
+  another folder. Two refs of one task that declare different folders are
+  authorised independently.
+
+This applies to job detail, logs (REST, WebSocket stream, MCP), artifacts,
+cancel, approve, restart and re-run, the recent steps on a worker's detail
+page, and to the job list, dashboard counts and MCP `list_jobs`, which are
+filtered before pagination.
+
+A single-step hook job has the task name `_hook:<action>` and no folder, so
+a rule matching `_hook:*` at the root grants access to the hook payloads of
+that workspace — including the step errors of the jobs that fired them. A
+`type: task` hook job is authorised by its task's folder.
+
+The child-job links in a parent's job detail (`child_jobs[]`: id, workspace,
+task name, status, ref, revision) are shown to anyone who can see the
+parent; the child's own detail, logs and artifacts need access to the
+child's task.
+
 ## Permission levels
 
 | Permission | See in list | Execute/cancel | View logs |
@@ -225,7 +252,8 @@ If using Helm secrets, remember that the ACL config is baked into the ConfigMap 
 
 ## Known limitations
 
-- **Webhooks** (`/hooks/{name}`) use their own secret-based authentication, not user ACL. They are not subject to ACL rules.
+- **Webhooks** (`/hooks/{name}`) use their own secret-based authentication, not user ACL. They are not subject to ACL rules. That includes the webhook job-status poll (`/hooks/{name}/jobs/{job_id}`), which returns the (masked) output of the jobs that webhook created.
+- **Re-run of a job on a git ref**: a caller who already holds a job's id can tell from the status code whether it exists and whether it runs on a ref (unknown → `400`, pinned and denied → `404`, unpinned and denied → `403`). No job data is returned.
 - **JWT token TTL**: After revoking admin status or changing groups, existing tokens remain valid for up to 15 minutes (the access token TTL). This is by design to avoid excessive database queries on each request.
 
 ## API reference
