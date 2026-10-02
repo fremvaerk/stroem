@@ -1,6 +1,6 @@
 # Git Refs on Action, Task and Trigger References — Design
 
-Status: revision 6 — Codex round 5 applied, pending re-review
+Status: revision 7 — Codex round 6 applied, pending re-review
 Ships in: next minor (migrations `049` + `050`)
 
 Lets a flow step's `action:`, a `type: task` action's `task:` and a
@@ -10,6 +10,17 @@ side, each from its own definitions and files. Line numbers cite
 `anatolii/Revisions` at `b367b6c`.
 
 ## Revision history
+
+**Revision 7 (2026-10-02, Codex round 6, same thread).** The inventories
+were incomplete. Added:
+- task stats, which now exclude pinned jobs;
+- webhook job-status polling, redacted in every branch, and the
+  webhook-auth exception stated;
+- whole-response redaction, which catches the copied `approval_message`;
+- MCP artifacts in the table.
+
+New § 7.9 makes the read-path inventory an implementation audit task, with
+one test per path, rather than a list the design depends on being complete.
 
 **Revision 6 (2026-10-02, Codex round 5, same thread).** I1–I5 CLOSED; log
 redaction confirmed pre-existing. Two findings, applied by inventory rather
@@ -746,10 +757,20 @@ step's `action_ref` and `task_ref`):
 - worker detail's recent steps (`web/api/workers.rs:134-148`), which today
   returns `error_message` raw. The page lists steps of many jobs, so it
   builds one redaction set per distinct job;
+- every branch of the webhook job-status poll (`web/hooks.rs:305-311`,
+  `:360-390`, `:457-467`), which today returns `job.output` raw;
 - `fail_claimed_step` and `fail_task_step`.
 
-These are all the API outlets of step `error_message` and job / step output
-(a grep for `error_message` under `web/api/` and `mcp/`).
+Redaction applies to the **whole response object**, not to named source
+fields. Job detail copies `output.approval_message` into a separate step
+field (`web/api/jobs.rs:348-355`); approval messages are rendered with the
+job's secrets (`settlement/dispatch.rs:583-589`, `:684-717`). Today's
+redactor visits only `input` / `output` / `raw_input` (`web/api/jobs.rs:532-559`)
+and would miss that copy. After this change it walks every string in the
+serialised step entries and in the job object.
+
+These outlets were found by grep and are checked again by the audit task in
+§ 7.9.
 
 Step `error_message` can carry a failing script's stderr
 (`stroem-worker/src/poller.rs:745`, persisted at `web/worker_api/jobs.rs:939`).
@@ -807,9 +828,10 @@ Errors map as in § 8 (400/500; MISSED is a scheduler term). The initial
 `on_suspended` hooks and approvals of the created job come from the job's
 own config (§ 7.4), not from the webhook's defining workspace.
 
-**Sync webhook output** (`web/hooks.rs:156`, `:177`) is redacted, in both the
-already-terminal branch and the completion-event branch, with the job's
-per-job redaction set (§ 7.4), failing closed. Today it returns `job.output`
+**Webhook output** is redacted with the job's per-job redaction set
+(§ 7.4), failing closed. That covers both sync-invocation branches
+(`web/hooks.rs:156`, `:177`) and every branch of the async job-status poll
+(`:305-467`). Today it returns `job.output`
 unredacted for every job. Refs would extend that to secrets that exist only
 at a ref, so the fix applies to all sync webhook responses.
 
@@ -887,7 +909,9 @@ conflating two refs of one task that declare different folders.
   | Artifacts list / download (`web/api/artifacts.rs:115`, `:153`) | `check_job_acl(ws, task)` | `check_job_acl(&job)` |
   | WebSocket log stream, backfill and live (`web/api/ws.rs:103-136`) | inline live-folder derivation (`:119`) | `job_task_path(&job)` |
   | Worker detail, recent steps (`web/api/workers.rs:98-148`) | inline live-folder derivation per step (`:106`) | per step row: the step query joins `job.ref` and `job.task_folder`, and each row uses `job_task_path` |
-  | MCP per-job checks: status, logs, cancel (`mcp/tools.rs:291`) | live folder | `job_task_path(&job)` |
+  | MCP per-job checks: status, logs, cancel, `list_artifacts`, `get_artifact` (`mcp/tools.rs:291`, `:816-824`, `:864-872`) | live folder | `job_task_path(&job)` |
+  | Task duration stats (`GET /api/workspaces/{ws}/tasks/{name}/stats`, `web/api/tasks.rs:363-427`; queries `stroem-db/src/repos/job.rs:1234-1244`, `:1267-1278`, `job_step.rs:1279-1302`) | live folder for the task; the queries select every job of that name | **pinned jobs are excluded** (`AND ref IS NULL` in all three queries). Stats describe the live task, and a release's runs, with their different flows, are not its runs. That also removes any need for the pinned-folder predicate there |
+  | Webhook job status (`GET /hooks/{name}/jobs/{job_id}`, `web/hooks.rs:305-467`) | **webhook authentication** (`:323-348`), not task ACL | unchanged: an explicit exception, since the caller holds the webhook's secret. Its output is redacted (§ 7.4) |
   | REST + MCP lists and counts | live pairs | per-job predicate (below) |
 
   Task-scoped paths are unchanged: task list and detail, execute, triggers,
@@ -914,6 +938,25 @@ conflating two refs of one task that declare different folders.
 - The execute-time ACL check (`Run` on the task) is unchanged for ordinary
   executes. A re-run or restart of a pinned source checks the source's
   `task_folder`.
+
+### 7.9 Read-path audit (implementation task)
+
+The § 7.8 table and the § 7.4 outlet list were built by grep. Codex rounds 5
+and 6 each found paths missing from them. So the design does not rely on the
+lists being complete; the implementation plan carries a dedicated task:
+
+1. Enumerate every route in `web/api/`, `web/hooks.rs`, `web/worker_api/`
+   (worker-facing paths: none returns data to a user) and every MCP tool
+   that returns job-scoped data: job or step rows, `error_message`, job or
+   step output, logs, artifacts, approval messages, hook payloads.
+2. Classify each one as job-scoped ACL (§ 7.8 helper), list/count
+   predicate, task-scoped, or an explicit exception (webhook status).
+   Classify it as redaction outlet or not (§ 7.4).
+3. Add one integration test per job-scoped path: a pinned job in a denied
+   folder is denied, and a ref-only secret is masked.
+
+The audit's output updates § 7.8 / § 7.4 in this spec, and the
+implementation review checks it.
 
 ## 8. Errors and classification
 
@@ -1098,6 +1141,11 @@ the GitSource tests).**
 - Worker detail redacts a ref-only secret in a step's `error_message`, and
   masks the field (row-level fail-closed) when that job's pin is
   unavailable.
+- Webhook job-status poll (every branch) masks a ref-only secret in
+  `output`.
+- Job detail masks a ref-only secret inside the copied `approval_message`.
+- Task stats exclude pinned jobs from the aggregates, the recent durations
+  and the per-step breakdown.
 - Webhook with `force_refresh`: a refresh that changes the `ref` runs the
   new ref; one that removes the webhook gives 404; one that rotates the
   secret authenticates against the new secret.
