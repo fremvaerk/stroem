@@ -321,7 +321,7 @@ pub fn pin_label(ws: &str, pin: &PinRef) -> String {
     format!("{ws}@{} ({})", pin.git_ref, short_sha(&pin.commit))
 }
 
-fn short_sha(commit: &str) -> &str {
+pub(crate) fn short_sha(commit: &str) -> &str {
     commit.get(..7).unwrap_or(commit)
 }
 

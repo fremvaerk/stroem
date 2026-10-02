@@ -442,6 +442,7 @@ async fn restart_from_middle_carries_upstream_and_reruns_downstream() -> Result<
         Some("tester"),
         None,
         JobDefaults::default(),
+        None,
     )
     .await?;
     // `terminal_at_creation` is private to the settlement module; the step
@@ -534,6 +535,7 @@ async fn restart_set_entirely_skipped_settles_failed_at_creation() -> Result<()>
         None,
         None,
         JobDefaults::default(),
+        None,
     )
     .await?;
     assert!(created.terminal_at_creation());
@@ -579,6 +581,7 @@ async fn restart_rejects_legacy_source_without_raw_input() -> Result<()> {
         None,
         None,
         JobDefaults::default(),
+        None,
     )
     .await
     .unwrap_err();
@@ -784,6 +787,7 @@ async fn carried_for_each_placeholder_exposes_aggregated_output_without_instance
         None,
         None,
         JobDefaults::default(),
+        None,
     )
     .await?;
 
@@ -898,6 +902,7 @@ async fn carried_task_step_keeps_output_and_creates_no_child() -> Result<()> {
         None,
         None,
         JobDefaults::default(),
+        None,
     )
     .await?;
 
@@ -954,6 +959,7 @@ async fn restart_from_task_step_creates_child_under_new_job() -> Result<()> {
         None,
         None,
         JobDefaults::default(),
+        None,
     )
     .await?;
 
@@ -1064,6 +1070,7 @@ async fn restart_from_approval_step_suspends_new_job() -> Result<()> {
         None,
         None,
         JobDefaults::default(),
+        None,
     )
     .await?;
 
@@ -1165,6 +1172,7 @@ async fn flow_change_new_upstream_step_forces_rerun_of_dependent() -> Result<()>
         None,
         None,
         JobDefaults::default(),
+        None,
     )
     .await?;
 
@@ -1272,6 +1280,7 @@ async fn input_replay_rotated_connection_yields_new_value() -> Result<()> {
         None,
         None,
         JobDefaults::default(),
+        None,
     )
     .await?;
 
@@ -1328,6 +1337,7 @@ async fn seed_failure_rolls_back_the_whole_restart_job() -> Result<()> {
         None,
         None,
         JobDefaults::default(),
+        None,
     )
     .await
     .unwrap_err();

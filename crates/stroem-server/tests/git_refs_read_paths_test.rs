@@ -1561,8 +1561,9 @@ async fn pinned_job_in_denied_folder_is_denied_on_every_rest_path() -> Result<()
         let (_, b) = api_req(&fx.router, "GET", "/api/stats", a, None).await;
         assert_eq!(b["completed"], json!(5), "{b}");
 
-        // Re-run source: RUNNER may Run the live `nightly`, but not read a
-        // source job whose own folder is denied.
+        // Re-run source: RUNNER may Run the live `nightly`, but a pinned
+        // source is authorised FIRST by its own folder (§ 7.3, § 7.8); a
+        // denied one answers like a denied task.
         sqlx::query("UPDATE job SET raw_input = '{}'::jsonb WHERE job_id = ANY($1)")
             .bind(vec![jobs.pin23, jobs.pin24])
             .execute(&fx.pool)
@@ -1578,12 +1579,8 @@ async fn pinned_job_in_denied_folder_is_denied_on_every_rest_path() -> Result<()
             Some(rerun(jobs.pin23)),
         )
         .await;
-        assert_eq!(s, StatusCode::FORBIDDEN, "{b}");
-        assert_eq!(
-            b["error"],
-            json!("Not authorized to read source job"),
-            "{b}"
-        );
+        assert_eq!(s, StatusCode::NOT_FOUND, "{b}");
+        assert_eq!(b["error"], json!("Task not found"), "{b}");
         let (s, b) = api_req(
             &fx.router,
             "POST",

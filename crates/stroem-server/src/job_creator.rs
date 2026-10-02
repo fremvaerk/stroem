@@ -113,6 +113,10 @@ pub async fn create_job_for_task_detailed(
 /// Reports `terminal_at_creation` like every other creation entry point — the
 /// caller must run `Settlement::job_created` when it is true (a
 /// restart whose whole restart set cascades to skipped settles immediately).
+///
+/// `git_ref` is the source's ref when it is a pinned job (spec § 7.3): the
+/// caller re-resolved it, `workspace_config` is that commit's config and
+/// `revision` its SHA; the new job is stamped with the same ref.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_restart_job(
     workspaces: &WorkspaceManager,
@@ -125,6 +129,7 @@ pub async fn create_restart_job(
     source_id: Option<&str>,
     revision: Option<&str>,
     defaults: JobDefaults,
+    git_ref: Option<&str>,
 ) -> Result<CreatedJob> {
     debug_assert!(
         plan.restart_steps.iter().any(|s| s == from_step),
@@ -157,7 +162,7 @@ pub async fn create_restart_job(
         },
         None,
         defaults,
-        None,
+        git_ref,
     )
     .await
 }
@@ -915,7 +920,7 @@ fn parse_ref(git_ref: &str, what: &str) -> Result<()> {
 /// that commit. A `PinLoadFailed` is replaced by its fixed sentence
 /// ([`WorkspaceManager::pin_error_for_user`]); every other `PinError`
 /// propagates as is, for `classify_execute_error` to downcast.
-async fn pin_at_ref(
+pub(crate) async fn pin_at_ref(
     workspaces: &WorkspaceManager,
     owner: &str,
     git_ref: &str,

@@ -7,6 +7,7 @@ pub mod middleware;
 #[cfg(feature = "mcp")]
 pub mod oauth_consent;
 pub mod oidc;
+mod pinned_source;
 pub mod state_upload;
 pub mod tasks;
 pub mod triggers;

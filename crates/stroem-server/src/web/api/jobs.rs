@@ -599,7 +599,15 @@ pub(crate) fn is_top_level_job(job: &stroem_db::JobRow) -> bool {
 ///
 /// Checks run in the spec's order: 401 (auth configured, no user) → 404 (job
 /// missing or ACL `Deny`) → 403 (ACL `View`) → 409 (source not terminal) → 400
-/// (legacy source, workspace/task gone, bad `from_step`).
+/// (not top-level, legacy source, workspace/task gone, bad `from_step`).
+///
+/// A pinned source (git-refs spec § 7.3) is authorised by its own
+/// `task_folder` (§ 7.8) and re-resolves its ref BEFORE the task lookup, so
+/// the plan uses the flow at the commit the restart will run. That adds: 400
+/// when the ref no longer resolves (`RefNotFound`) or its config does not
+/// load (`PinLoadFailed`, withheld), 400 when the task does not exist at the
+/// re-resolved commit, and 500 when the git remote is unavailable
+/// (`PinUnavailable`).
 #[tracing::instrument(skip(state, auth_user, req))]
 pub async fn restart_job(
     State(state): State<Arc<AppState>>,
@@ -656,18 +664,29 @@ pub async fn restart_job(
         ));
     }
 
-    let workspace = state
-        .get_workspace(&source.workspace)
-        .await
-        .ok_or_else(|| {
-            AppError::BadRequest(format!("Workspace '{}' is not loaded", source.workspace))
-        })?;
-    let task = workspace.tasks.get(&source.task_name).ok_or_else(|| {
-        AppError::BadRequest(format!(
-            "Task '{}' no longer exists in workspace '{}'",
-            source.task_name, source.workspace
-        ))
-    })?;
+    // Spec § 7.3: a pinned source re-resolves its ref BEFORE the task lookup —
+    // the task may exist only at the ref, and the plan must be computed
+    // against the flow of the commit the restart will run.
+    let source_pin = super::pinned_source::resolve_source_pin(&state, &source).await?;
+    let live_workspace;
+    let (workspace, task) = match &source_pin {
+        Some(sp) => (sp.handle.config(), sp.task(&source.task_name)?),
+        None => {
+            live_workspace = state
+                .get_workspace(&source.workspace)
+                .await
+                .ok_or_else(|| {
+                    AppError::BadRequest(format!("Workspace '{}' is not loaded", source.workspace))
+                })?;
+            let task = live_workspace.tasks.get(&source.task_name).ok_or_else(|| {
+                AppError::BadRequest(format!(
+                    "Task '{}' no longer exists in workspace '{}'",
+                    source.task_name, source.workspace
+                ))
+            })?;
+            (live_workspace.as_ref(), task)
+        }
+    };
 
     let source_steps = JobStepRepo::get_steps_for_job(&state.pool, job_id)
         .await
@@ -694,11 +713,14 @@ pub async fn restart_job(
         .into_response());
     }
 
-    let revision = state.workspaces.get_revision(&source.workspace);
+    let revision = match &source_pin {
+        Some(sp) => Some(sp.pin.commit.clone()),
+        None => state.workspaces.get_revision(&source.workspace),
+    };
     let created = crate::job_creator::create_restart_job(
         &state.workspaces,
         &state.pool,
-        &workspace,
+        workspace,
         &source.workspace,
         &source,
         &plan,
@@ -706,6 +728,7 @@ pub async fn restart_job(
         source_id.as_deref(),
         revision.as_deref(),
         crate::config::JobDefaults::from(state.config.as_ref()),
+        source_pin.as_ref().map(|sp| sp.pin.git_ref.as_str()),
     )
     .await
     .map_err(super::classify_execute_error)?;
