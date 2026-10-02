@@ -389,7 +389,11 @@ pub async fn get_job(
             let mut in_deg: HashMap<&str, usize> = task
                 .flow
                 .iter()
-                .map(|(name, fs)| (name.as_str(), fs.depends_on.len()))
+                .map(|(name, fs)| {
+                    let mut names = Vec::new();
+                    stroem_common::depends_on::collect_names(&fs.depends_on, &mut names);
+                    (name.as_str(), names.len())
+                })
                 .collect();
 
             let mut queue: Vec<&str> = in_deg
@@ -404,7 +408,9 @@ pub async fn get_job(
                 queue.remove(0);
                 topo_order.push(node);
                 for (name, fs) in &task.flow {
-                    if fs.depends_on.iter().any(|d| d == node) {
+                    let mut dep_names = Vec::new();
+                    stroem_common::depends_on::collect_names(&fs.depends_on, &mut dep_names);
+                    if dep_names.iter().any(|d| *d == node) {
                         if let Some(deg) = in_deg.get_mut(name.as_str()) {
                             *deg -= 1;
                             if *deg == 0 {
@@ -1383,6 +1389,7 @@ mod tests {
 
     #[test]
     fn test_depends_on_enriched_from_flow() {
+        use stroem_common::depends_on::DependsOnEntry;
         use stroem_common::models::workflow::FlowStep;
 
         // Build a task flow with dependencies
@@ -1396,7 +1403,7 @@ mod tests {
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: false,
-                continue_when_skipped: false,
+                legacy_continue_when_skipped: None,
                 timeout: None,
                 when: None,
                 for_each: None,
@@ -1411,10 +1418,10 @@ mod tests {
                 action: "shell/bash".to_string(),
                 name: None,
                 description: None,
-                depends_on: vec!["build".to_string()],
+                depends_on: vec![DependsOnEntry::Name("build".to_string())],
                 input: HashMap::new(),
                 continue_on_failure: false,
-                continue_when_skipped: false,
+                legacy_continue_when_skipped: None,
                 timeout: None,
                 when: None,
                 for_each: None,
@@ -1429,10 +1436,13 @@ mod tests {
                 action: "shell/bash".to_string(),
                 name: None,
                 description: None,
-                depends_on: vec!["build".to_string(), "test".to_string()],
+                depends_on: vec![
+                    DependsOnEntry::Name("build".to_string()),
+                    DependsOnEntry::Name("test".to_string()),
+                ],
                 input: HashMap::new(),
                 continue_on_failure: false,
-                continue_when_skipped: false,
+                legacy_continue_when_skipped: None,
                 timeout: None,
                 when: None,
                 for_each: None,

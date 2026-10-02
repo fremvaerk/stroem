@@ -445,11 +445,16 @@ impl StromMcpHandler {
         let mut flow: Vec<FlowStepSummary> = task
             .flow
             .iter()
-            .map(|(name, step)| FlowStepSummary {
-                name: name.clone(),
-                action: step.action.clone(),
-                depends_on: step.depends_on.clone(),
-                when: step.when.clone(),
+            .map(|(name, step)| {
+                let mut depends_on = Vec::new();
+                stroem_common::depends_on::collect_names(&step.depends_on, &mut depends_on);
+                let depends_on = depends_on.into_iter().map(str::to_string).collect();
+                FlowStepSummary {
+                    name: name.clone(),
+                    action: step.action.clone(),
+                    depends_on,
+                    when: step.when.clone(),
+                }
             })
             .collect();
         flow.sort_by(|a, b| a.name.cmp(&b.name));

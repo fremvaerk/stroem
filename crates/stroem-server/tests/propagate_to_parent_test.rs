@@ -8,6 +8,7 @@ use anyhow::Result;
 use serde_json::json;
 use sqlx::PgPool;
 use std::collections::HashMap;
+use stroem_common::depends_on::DependsOnEntry;
 use stroem_common::models::workflow::{ActionDef, FlowStep, TaskDef, WorkspaceConfig};
 use stroem_db::{create_pool, run_migrations, JobRepo, JobStepRepo, NewJobStep, WorkerRepo};
 use stroem_server::config::{
@@ -167,7 +168,7 @@ fn make_workspace_config() -> WorkspaceConfig {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
-            continue_when_skipped: false,
+            legacy_continue_when_skipped: None,
             timeout: None,
             when: None,
             for_each: None,
@@ -187,7 +188,7 @@ fn make_workspace_config() -> WorkspaceConfig {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
-            continue_when_skipped: false,
+            legacy_continue_when_skipped: None,
             timeout: None,
             when: None,
             for_each: None,
@@ -653,7 +654,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
-            continue_when_skipped: false,
+            legacy_continue_when_skipped: None,
             timeout: None,
             when: None,
             for_each: None,
@@ -691,7 +692,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
-            continue_when_skipped: false,
+            legacy_continue_when_skipped: None,
             timeout: None,
             when: None,
             for_each: None,
@@ -729,7 +730,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
-            continue_when_skipped: false,
+            legacy_continue_when_skipped: None,
             timeout: None,
             when: None,
             for_each: None,
@@ -1026,7 +1027,7 @@ async fn parent_with_mixed_steps() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
-            continue_when_skipped: false,
+            legacy_continue_when_skipped: None,
             timeout: None,
             when: None,
             for_each: None,
@@ -1041,10 +1042,10 @@ async fn parent_with_mixed_steps() -> Result<()> {
             action: "run-child-action".to_string(),
             name: None,
             description: None,
-            depends_on: vec!["shell-step".to_string()],
+            depends_on: vec![DependsOnEntry::Name("shell-step".to_string())],
             input: HashMap::new(),
             continue_on_failure: false,
-            continue_when_skipped: false,
+            legacy_continue_when_skipped: None,
             timeout: None,
             when: None,
             for_each: None,
@@ -1064,7 +1065,7 @@ async fn parent_with_mixed_steps() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
-            continue_when_skipped: false,
+            legacy_continue_when_skipped: None,
             timeout: None,
             when: None,
             for_each: None,

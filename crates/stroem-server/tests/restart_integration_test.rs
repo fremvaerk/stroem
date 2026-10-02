@@ -13,6 +13,7 @@ use http_body_util::BodyExt;
 use serde_json::{json, Value as JsonValue};
 use sqlx::PgPool;
 use std::collections::HashMap;
+use stroem_common::depends_on::DependsOnEntry;
 use stroem_common::models::workflow::{
     ActionDef, ConnectionDef, ConnectionPropertyDef, ConnectionTypeDef, FlowStep, HookDef,
     InputFieldDef, TaskDef, WorkspaceConfig,
@@ -86,10 +87,13 @@ fn flow_step(action: &str, depends_on: &[&str], input: HashMap<String, JsonValue
         action: action.to_string(),
         name: None,
         description: None,
-        depends_on: depends_on.iter().map(|s| s.to_string()).collect(),
+        depends_on: depends_on
+            .iter()
+            .map(|s| DependsOnEntry::Name(s.to_string()))
+            .collect(),
         input,
         continue_on_failure: false,
-        continue_when_skipped: false,
+        legacy_continue_when_skipped: None,
         timeout: None,
         when: None,
         for_each: None,
