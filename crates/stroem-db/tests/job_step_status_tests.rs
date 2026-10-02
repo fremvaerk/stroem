@@ -1165,3 +1165,54 @@ async fn test_fail_or_retry_reject_after_approve_is_not_applied() -> Result<()> 
     assert!(after.retry_at.is_none(), "no retry was scheduled");
     Ok(())
 }
+
+// ─── fail_placeholder_tx tests (Task 6: loop output on a failed rollup) ──
+
+/// `fail_placeholder_tx` persists the caller-supplied output column, not
+/// just status/error_message — cascade.rs's R6 now builds the loop's output
+/// array even on a failed (untolerated) rollup, and that array must survive
+/// the write (spec §4/§12).
+#[tokio::test]
+async fn test_fail_placeholder_tx_persists_the_output_column() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let job_id = make_job(&pool, "fail-placeholder").await?;
+    let mut placeholder = make_step(job_id, "p", "running");
+    placeholder.for_each_expr = Some("[1,2]".to_string());
+    JobStepRepo::create_steps(&pool, &[placeholder]).await?;
+
+    let output = serde_json::json!([{"n": 1}, null]);
+    let mut tx = pool.begin().await?;
+    let n =
+        JobStepRepo::fail_placeholder_tx(&mut *tx, job_id, "p", "boom", &output).await?;
+    assert_eq!(n, 1);
+    tx.commit().await?;
+
+    let row = JobStepRepo::get_step(&pool, job_id, "p").await?.unwrap();
+    assert_eq!(row.status, "failed");
+    assert_eq!(row.error_message.as_deref(), Some("boom"));
+    assert_eq!(row.output, Some(output));
+
+    Ok(())
+}
+
+/// `fail_placeholder_tx` only matches a `running` placeholder, same guard as
+/// `complete_placeholder_tx`/`start_placeholder_tx` — a non-running row is
+/// left untouched and the caller's cascade guard-miss retry kicks in.
+#[tokio::test]
+async fn test_fail_placeholder_tx_is_a_noop_outside_running_status() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let job_id = make_job(&pool, "fail-placeholder-noop").await?;
+    JobStepRepo::create_steps(&pool, &[make_step(job_id, "p", "pending")]).await?;
+
+    let output = serde_json::json!([null]);
+    let n = JobStepRepo::fail_placeholder_tx(&pool, job_id, "p", "boom", &output).await?;
+    assert_eq!(n, 0);
+
+    let row = JobStepRepo::get_step(&pool, job_id, "p").await?.unwrap();
+    assert_eq!(row.status, "pending");
+    assert!(row.output.is_none());
+
+    Ok(())
+}

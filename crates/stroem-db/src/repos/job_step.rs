@@ -460,23 +460,28 @@ impl JobStepRepo {
         Ok(r.rows_affected())
     }
 
-    /// Cascade primitive: running placeholder → failed.
+    /// Cascade primitive: running placeholder → failed. `output` is the
+    /// loop's per-iteration array built by R6 even on a failed rollup (spec
+    /// §4/§12) — unlike an ordinary step failure, a failed `for_each`
+    /// placeholder still carries an output, not just an error.
     pub async fn fail_placeholder_tx<'e, E>(
         executor: E,
         job_id: Uuid,
         name: &str,
         error: &str,
+        output: &JsonValue,
     ) -> Result<u64>
     where
         E: sqlx::Executor<'e, Database = sqlx::Postgres>,
     {
         let r = sqlx::query(
-            "UPDATE job_step SET status = 'failed', error_message = $3, completed_at = NOW() \
+            "UPDATE job_step SET status = 'failed', error_message = $3, output = $4, completed_at = NOW() \
              WHERE job_id = $1 AND step_name = $2 AND status = 'running'",
         )
         .bind(job_id)
         .bind(name)
         .bind(error)
+        .bind(output)
         .execute(executor)
         .await
         .context("fail_placeholder_tx")?;

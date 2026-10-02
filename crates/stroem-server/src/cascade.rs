@@ -804,11 +804,8 @@ pub async fn apply(
                         JobStepRepo::complete_placeholder_tx(&mut **tx, job_id, placeholder, out)
                             .await?
                     }
-                    RollupOutcome::Failed(err, _out) => {
-                        // TEMP (Task 6 checkpoint split, reverted 2 edits from
-                        // now): job_step.rs's fail_placeholder_tx doesn't take
-                        // output yet at this commit point.
-                        JobStepRepo::fail_placeholder_tx(&mut **tx, job_id, placeholder, err)
+                    RollupOutcome::Failed(err, out) => {
+                        JobStepRepo::fail_placeholder_tx(&mut **tx, job_id, placeholder, err, out)
                             .await?
                     }
                 };

@@ -168,7 +168,10 @@ async fn apply_sets_timestamps_and_statuses() -> Result<()> {
             },
             Change::Rollup {
                 placeholder: "f".into(),
-                outcome: RollupOutcome::Failed("for_each loop failed: instances [0] failed".into()),
+                outcome: RollupOutcome::Failed(
+                    "for_each loop failed: instances [0] failed".into(),
+                    json!([null]),
+                ),
             },
         ],
     };
@@ -214,7 +217,11 @@ async fn apply_sets_timestamps_and_statuses() -> Result<()> {
         "a failed rollup records the error"
     );
     assert!(by("f").completed_at.is_some());
-    assert_eq!(by("f").output, None, "a failed rollup leaves output alone");
+    assert_eq!(
+        by("f").output,
+        Some(json!([null])),
+        "a failed rollup now persists its output array too (spec §4/§12), not just the error"
+    );
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
     assert_eq!(
         job.status, "running",
@@ -394,10 +401,13 @@ fn flow_step(depends_on: Vec<&str>) -> FlowStep {
         action: "noop".to_string(),
         name: None,
         description: None,
-        depends_on: depends_on.into_iter().map(str::to_string).collect(),
+        depends_on: depends_on
+            .into_iter()
+            .map(|d| stroem_common::depends_on::DependsOnEntry::Name(d.to_string()))
+            .collect(),
         input: HashMap::new(),
         continue_on_failure: false,
-        continue_when_skipped: false,
+        legacy_continue_when_skipped: None,
         timeout: None,
         when: None,
         for_each: None,
