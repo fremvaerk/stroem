@@ -776,7 +776,7 @@ const CF: &str = "ffffffffffffffffffffffffffffffffffffffff";
 const BOUNDS: ClosureBounds = ClosureBounds {
     task_depth: 10,
     hook_hops: 3,
-    restart_hops: 32,
+    source_hops: 32,
     retry_hops: 33,
     max_jobs: 20_000,
 };
@@ -873,8 +873,8 @@ async fn closure(
 
 /// The closure is the whole tree (root + all descendants) of every job in the
 /// source lineage: the job, its parents up to the root, and the hook,
-/// restart and task-retry sources it was made from. Nothing else: no hook or
-/// restart OF a job, no re-run lineage, no unrelated job. Every bound fails
+/// restart, re-run and task-retry sources it was made from. Nothing else: no
+/// hook, restart or re-run OF a job, no unrelated job. Every bound fails
 /// closed: an edge it refuses, or too many jobs, answers `Truncated`, and the
 /// exact bound itself still passes.
 #[tokio::test]
@@ -990,13 +990,33 @@ async fn redaction_closure_pins_cover_the_whole_tree_of_the_source_lineage_and_f
             },
         )
         .await;
-        // A re-run of S0 (input replay, not a copy) and an unrelated job.
+        // A re-run of S0 (it can replay S0's raw input, and a retry's raw
+        // input is a resolved one: final review M2), a re-run of that re-run,
+        // a re-run of the restart R, and an unrelated job.
         let rerun = seed_closure_job(
             &pool,
             Lineage {
                 source_type: "rerun",
                 source_job_id: Some(s0),
                 pin: Some(("etl", "release/8", C8)),
+                ..Default::default()
+            },
+        )
+        .await;
+        let rerun2 = seed_closure_job(
+            &pool,
+            Lineage {
+                source_type: "rerun",
+                source_job_id: Some(rerun),
+                ..Default::default()
+            },
+        )
+        .await;
+        let rerun_of_restart = seed_closure_job(
+            &pool,
+            Lineage {
+                source_type: "rerun",
+                source_job_id: Some(r),
                 ..Default::default()
             },
         )
@@ -1070,10 +1090,19 @@ async fn redaction_closure_pins_cover_the_whole_tree_of_the_source_lineage_and_f
         let restart_tree = with(&[("etl", "release/2.5", C5)]);
         assert_eq!(closure(&pool, r, BOUNDS).await, Some(restart_tree.clone()));
         assert_eq!(closure(&pool, r2, BOUNDS).await, Some(restart_tree.clone()));
-        // A re-run is not a copy: only its own pin.
+        // A re-run (and a re-run of a re-run) covers its source's tree.
+        let rerun_tree = with(&[("etl", "release/8", C8)]);
         assert_eq!(
             closure(&pool, rerun, BOUNDS).await,
-            Some(triples(&[("etl", "release/8", C8)]))
+            Some(rerun_tree.clone())
+        );
+        assert_eq!(
+            closure(&pool, rerun2, BOUNDS).await,
+            Some(rerun_tree.clone())
+        );
+        assert_eq!(
+            closure(&pool, rerun_of_restart, BOUNDS).await,
+            Some(restart_tree.clone())
         );
 
         // Bounds fail closed. A hop cap: the exact cap passes (H1 → S0 is
@@ -1085,15 +1114,19 @@ async fn redaction_closure_pins_cover_the_whole_tree_of_the_source_lineage_and_f
         };
         assert_eq!(closure(&pool, h1, one_hook).await, Some(hook_tree.clone()));
         assert_eq!(closure(&pool, h2, one_hook).await, None);
-        let one_restart = ClosureBounds {
-            restart_hops: 1,
+        let one_source = ClosureBounds {
+            source_hops: 1,
             ..BOUNDS
         };
         assert_eq!(
-            closure(&pool, r, one_restart).await,
+            closure(&pool, r, one_source).await,
             Some(restart_tree.clone())
         );
-        assert_eq!(closure(&pool, r2, one_restart).await, None);
+        assert_eq!(closure(&pool, r2, one_source).await, None);
+        // Re-run and restart links share that one cap.
+        assert_eq!(closure(&pool, rerun, one_source).await, Some(rerun_tree));
+        assert_eq!(closure(&pool, rerun2, one_source).await, None);
+        assert_eq!(closure(&pool, rerun_of_restart, one_source).await, None);
         let no_retry = ClosureBounds {
             retry_hops: 0,
             ..BOUNDS

@@ -145,8 +145,9 @@ pub struct ClosureBounds {
     pub task_depth: i32,
     /// `source_type = 'hook'` links followed to the job that fired the hook.
     pub hook_hops: i32,
-    /// `source_type = 'restart'` links followed to the restarted job.
-    pub restart_hops: i32,
+    /// `source_type = 'restart'` and `source_type = 'rerun'` links followed
+    /// to the source job (`source_job_id`), counted together.
+    pub source_hops: i32,
     /// `retry_of_job_id` links followed to the job a task retry re-runs.
     pub retry_hops: i32,
     /// Jobs in the closure (each walk counted separately).
@@ -158,8 +159,8 @@ pub struct ClosureBounds {
 pub enum RedactionClosure {
     /// The whole closure was read: these are its distinct pins.
     Pins(Vec<ClosurePinRow>),
-    /// A bound refused an edge (a parent, a child, a hook, restart or retry
-    /// source), or the closure holds more than `max_jobs` jobs. Pins beyond
+    /// A bound refused an edge (a parent, a child, a hook, restart, re-run
+    /// or retry source), or the closure holds more than `max_jobs` jobs. Pins beyond
     /// the bound are unknown, so the caller must fail closed.
     Truncated,
 }
@@ -1085,15 +1086,18 @@ impl JobRepo {
     ///   `source_job_id`, or the UUID prefix of `source_id` on a hook row
     ///   written before migration 048 (the same fallback as the server's
     ///   hook-chain walk);
-    /// - from a `source_type = 'restart'` job, to its source (`source_job_id`);
+    /// - from a `source_type = 'restart'` or `'rerun'` job, to its source
+    ///   (`source_job_id`). A re-run replays its source's `raw_input`, and a
+    ///   task retry's `raw_input` is the failed job's RESOLVED input, so a
+    ///   re-run can carry another commit's secrets (final review M2);
     /// - from a task retry, to the job it re-runs (`retry_of_job_id`).
     ///
     /// The closure is the **whole tree** of every lineage job: its root and
     /// all the root's descendants. That covers values copied up (a child's
     /// output into its parent step), down (a parent's values into a child's
     /// input), across (a sibling's output into another child's input), into
-    /// a hook payload, into a restart's carried rows, and into a task retry's
-    /// replayed input.
+    /// a hook payload, into a restart's carried rows, into a re-run's replayed
+    /// input, and into a task retry's replayed input.
     ///
     /// Over the closure, a pin is one of three kinds:
     /// - a job's own (`workspace`, `git_ref`, `revision`);
@@ -1115,17 +1119,17 @@ impl JobRepo {
     ) -> Result<RedactionClosure> {
         let rows = sqlx::query_as::<_, (bool, Option<String>, Option<String>, Option<String>)>(
             r#"
-            WITH RECURSIVE up(job_id, depth, hook_hops, restart_hops, retry_hops, refused) AS (
+            WITH RECURSIVE up(job_id, depth, hook_hops, source_hops, retry_hops, refused) AS (
                 SELECT $1::uuid, 0, 0, 0, 0, false
                 UNION ALL
                 -- A refused edge is recorded (refused = true) and not walked.
-                SELECT e.job_id, e.depth, e.hook_hops, e.restart_hops, e.retry_hops, NOT e.ok
+                SELECT e.job_id, e.depth, e.hook_hops, e.source_hops, e.retry_hops, NOT e.ok
                   FROM up u
                   JOIN job j ON j.job_id = u.job_id
                  CROSS JOIN LATERAL (
                      VALUES
                          (j.parent_job_id, u.depth + 1,
-                          u.hook_hops, u.restart_hops, u.retry_hops,
+                          u.hook_hops, u.source_hops, u.retry_hops,
                           u.depth < $2),
                          (CASE j.source_type
                               WHEN 'hook' THEN COALESCE(
@@ -1135,19 +1139,20 @@ impl JobRepo {
                                        THEN split_part(j.source_id, '/', 1)::uuid
                                   END)
                               WHEN 'restart' THEN j.source_job_id
+                              WHEN 'rerun' THEN j.source_job_id
                           END,
                           0,
                           u.hook_hops + (j.source_type = 'hook')::int,
-                          u.restart_hops + (j.source_type = 'restart')::int,
+                          u.source_hops + (j.source_type IN ('restart', 'rerun'))::int,
                           u.retry_hops,
                           CASE j.source_type
                               WHEN 'hook' THEN u.hook_hops < $3
-                              ELSE u.restart_hops < $4
+                              ELSE u.source_hops < $4
                           END),
                          (j.retry_of_job_id, 0,
-                          u.hook_hops, u.restart_hops, u.retry_hops + 1,
+                          u.hook_hops, u.source_hops, u.retry_hops + 1,
                           u.retry_hops < $5)
-                 ) AS e(job_id, depth, hook_hops, restart_hops, retry_hops, ok)
+                 ) AS e(job_id, depth, hook_hops, source_hops, retry_hops, ok)
                  WHERE NOT u.refused AND e.job_id IS NOT NULL
             ),
             up_capped AS (SELECT job_id, refused FROM up LIMIT $6 + 1),
@@ -1204,7 +1209,7 @@ impl JobRepo {
         .bind(job_id)
         .bind(bounds.task_depth)
         .bind(bounds.hook_hops)
-        .bind(bounds.restart_hops)
+        .bind(bounds.source_hops)
         .bind(bounds.retry_hops)
         .bind(bounds.max_jobs)
         .fetch_all(pool)

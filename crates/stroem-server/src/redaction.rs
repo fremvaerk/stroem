@@ -4,12 +4,14 @@
 //! `error_message` masks with the live workspaces' values PLUS the secret
 //! values of every pin referenced by the job's **redaction closure**: the
 //! whole job tree of every job in its source lineage (the job, and the hook,
-//! restart and task-retry sources it was made from), see [`closure_pins`].
-//! Content is copied between those jobs:
+//! restart, re-run and task-retry sources it was made from), see
+//! [`closure_pins`]. Content is copied between those jobs:
 //! - a child's output settles into its parent step;
 //! - a parent's or sibling's values render into a child's input;
 //! - a hook payload quotes its source's step errors;
 //! - a restart carries its source's step output;
+//! - a re-run replays its source's `raw_input` (a task retry's is the failed
+//!   job's resolved input);
 //! - a task retry replays its source's input.
 //!
 //! So a job's own pins alone would let a copied value through. A pinned
@@ -235,16 +237,16 @@ pub fn merge_pins(
     out
 }
 
-/// Restart links the redaction closure follows before it gives up (fail
-/// closed). Nothing else caps a chain of restarts: each one is a user action
-/// on a top-level job.
-pub const MAX_RESTART_LINEAGE_HOPS: i32 = 32;
+/// Restart and re-run links (`source_job_id`), counted together, that the
+/// redaction closure follows before it gives up (fail closed). Nothing else
+/// caps a chain of them: each one is a user action on a top-level job.
+pub const MAX_SOURCE_LINEAGE_HOPS: i32 = 32;
 
 /// Task-retry links the redaction closure follows before it gives up (fail
 /// closed). A retry points at the root original (`retry_of_job_id`), so a
-/// chain needs more than one retry hop only when restarts and retries
-/// interleave, and the restart cap bounds that.
-pub const MAX_RETRY_LINEAGE_HOPS: i32 = MAX_RESTART_LINEAGE_HOPS + 1;
+/// chain needs more than one retry hop only when restarts or re-runs and
+/// retries interleave, and the source-lineage cap bounds that.
+pub const MAX_RETRY_LINEAGE_HOPS: i32 = MAX_SOURCE_LINEAGE_HOPS + 1;
 
 /// Jobs a redaction closure may hold before it gives up (fail closed). It also
 /// bounds the walk's work on every outlet call.
@@ -253,18 +255,18 @@ pub const MAX_REDACTION_CLOSURE_JOBS: i64 = 20_000;
 /// The bounds of every redaction closure:
 /// - the server's task-nesting cap (`job_creator::MAX_TASK_DEPTH`);
 /// - the hook-chain cap (`settlement::hooks::MAX_HOOK_CHAIN_DEPTH`);
-/// - [`MAX_RESTART_LINEAGE_HOPS`], [`MAX_RETRY_LINEAGE_HOPS`] and
+/// - [`MAX_SOURCE_LINEAGE_HOPS`], [`MAX_RETRY_LINEAGE_HOPS`] and
 ///   [`MAX_REDACTION_CLOSURE_JOBS`].
 ///
 /// Hitting any of them makes the closure TRUNCATED, and the outlet masks
 /// everything ([`JobRedaction::MaskAll`]); nothing is cut silently. That is
-/// reachable: restart chains are otherwise unbounded, agent task-tool
+/// reachable: restart and re-run chains are otherwise unbounded, agent task-tool
 /// children skip the `MAX_TASK_DEPTH` check, and the hook-chain walk fails
 /// open.
 pub const CLOSURE_BOUNDS: ClosureBounds = ClosureBounds {
     task_depth: crate::job_creator::MAX_TASK_DEPTH as i32,
     hook_hops: crate::settlement::hooks::MAX_HOOK_CHAIN_DEPTH as i32,
-    restart_hops: MAX_RESTART_LINEAGE_HOPS,
+    source_hops: MAX_SOURCE_LINEAGE_HOPS,
     retry_hops: MAX_RETRY_LINEAGE_HOPS,
     max_jobs: MAX_REDACTION_CLOSURE_JOBS,
 };
@@ -289,8 +291,8 @@ pub struct RedactionMemo {
 /// plus the pins of every job whose content can be copied into it. That is
 /// the whole job tree (root and all descendants) of every job in the job's
 /// source lineage: the job itself and, following parents up and hook,
-/// restart and task-retry sources back, every job it was made from. Bounded
-/// by [`CLOSURE_BOUNDS`], fail closed.
+/// restart, re-run and task-retry sources back, every job it was made from.
+/// Bounded by [`CLOSURE_BOUNDS`], fail closed.
 ///
 /// **Short-circuit.** When no row anywhere references a pin, every closure's
 /// pin set is empty, so the job's own (empty) pins are the answer and the
@@ -865,8 +867,8 @@ mod tests {
             CLOSURE_BOUNDS.hook_hops,
             crate::settlement::hooks::MAX_HOOK_CHAIN_DEPTH as i32
         );
-        assert_eq!(CLOSURE_BOUNDS.restart_hops, MAX_RESTART_LINEAGE_HOPS);
-        assert_eq!(CLOSURE_BOUNDS.retry_hops, MAX_RESTART_LINEAGE_HOPS + 1);
+        assert_eq!(CLOSURE_BOUNDS.source_hops, MAX_SOURCE_LINEAGE_HOPS);
+        assert_eq!(CLOSURE_BOUNDS.retry_hops, MAX_SOURCE_LINEAGE_HOPS + 1);
         assert_eq!(CLOSURE_BOUNDS.max_jobs, 20_000);
     }
 

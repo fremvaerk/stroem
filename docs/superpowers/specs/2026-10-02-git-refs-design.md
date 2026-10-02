@@ -18,6 +18,8 @@ side, each from its own definitions and files. Line numbers cite
   becomes the permanent `PinLoadFailed` after an hour (§ 5.3, § 8).
 - I3: pinned Re-run / Restart also require `Run` on the task's folder at the
   re-resolved commit (§ 7.3).
+- M2: the redaction closure follows re-run sources too, under one cap with
+  restarts, `MAX_SOURCE_LINEAGE_HOPS` (was `MAX_RESTART_LINEAGE_HOPS`) (§ 7.4).
 
 **Revision 9 (2026-10-02, execution pre-flight).** Two rulings from the
 pre-flight conflict scan:
@@ -879,7 +881,13 @@ whole, which is safe only while they hold identifiers (§ 7.8).
   stamped with the pins of the commit the restart runs at;
 - **into a task retry:** a retry job replays the failed job's `input`
   (`settlement/retry.rs::create_retry_job`), so a retried hook job carries
-  its source's payload.
+  its source's payload;
+- **into a re-run:** a re-run replays its source's `raw_input` (the `••••••`
+  sentinels of `secret: true` and connection fields). A task retry's
+  `raw_input` is the failed job's RESOLVED input — secret-rendered defaults
+  and resolved connection properties included — so a re-run of a retry, or
+  of a re-run of one, carries values of the retried commit into a job pinned
+  at the re-resolved one.
 
 So the set of the job's own pins alone misses a value copied in from
 another job. Rule: a job's redaction set is the live values plus
@@ -890,24 +898,24 @@ job in the **whole tree of every job in its source lineage**:
   - from a `source_type = 'hook'` job, the job that fired it
     (`source_job_id`, or the UUID prefix of `source_id` on a pre-048 hook
     row);
-  - from a `source_type = 'restart'` job, the restarted job
-    (`source_job_id`);
+  - from a `source_type = 'restart'` or `'rerun'` job, its source
+    (`source_job_id`) — always, not only when the source is a retry: a
+    re-run of a re-run copies the same values;
   - from a task retry, the job it re-runs (`retry_of_job_id`, always the
     root original).
 
-  The walk goes up `parent_job_id` too, so a child of a hook, restart or
-  retry job reaches that job's source. A re-run is not a copy (it replays
-  the user's raw input) and is not followed.
+  The walk goes up `parent_job_id` too, so a child of a hook, restart,
+  re-run or retry job reaches that job's source.
 - **Whole tree:** for each lineage job, its root (walking `parent_job_id`
   up) and every descendant of that root.
 
 **Bounds fail closed.** The walk is bounded:
 - `MAX_TASK_DEPTH` levels up and down;
 - `MAX_HOOK_CHAIN_DEPTH` hook links;
-- `redaction::MAX_RESTART_LINEAGE_HOPS` (32) restart links. Restart chains
-  have no cap of their own;
+- `redaction::MAX_SOURCE_LINEAGE_HOPS` (32) restart and re-run links,
+  counted together. Restart and re-run chains have no cap of their own;
 - `redaction::MAX_RETRY_LINEAGE_HOPS` (33) retry links. One per retry
-  generation, more only when restarts and retries interleave;
+  generation, more only when restarts or re-runs and retries interleave;
 - `redaction::MAX_REDACTION_CLOSURE_JOBS` (20 000) jobs per walk.
 
 A bound never cuts silently. A refused edge makes the closure
@@ -916,7 +924,7 @@ cap. So does a walk with more jobs than the node cap. A truncated closure
 answers `MaskAll`: retrying would hit the same bound.
 
 Every bound is reachable:
-- restart chains are otherwise unbounded;
+- restart and re-run chains are otherwise unbounded;
 - agent task-tool children skip the `MAX_TASK_DEPTH` check;
 - `hook_chain_depth` fails open.
 
@@ -1201,7 +1209,7 @@ ordinary job of its task and is authorised by that task's folder.
 | Job-scoped per row | `GET /api/workers/{id}` (recent steps) | yes, per row | `pinned_job_in_denied_folder_is_denied_on_every_rest_path`, `worker_detail_masks_error_and_fails_closed_per_row` |
 | List / count predicate | `GET /api/jobs`, `GET /api/stats`, MCP `list_jobs` | no (metadata only) | the same deny tests |
 | The parent's ACL | `child_jobs[]` and the lineage ids in job detail | identifiers, skipped | `read_path_audit_test.rs::child_job_summary_in_job_detail_is_identifiers_only_and_the_child_stays_job_scoped` |
-| Content copied between jobs (redaction closure, § 7.4) | a child's output in its parent's step (up); a pinned parent's values in a live child's input (down); a hook payload in the hook job's input; a restart's carried rows; a task retry's replayed input | yes: the receiving job's set covers the whole tree of every job in its source lineage; a truncated closure masks everything; no pin anywhere → the live set alone | `read_path_audit_test.rs`: `parent_job_detail_masks_a_secret_of_its_childs_step_pin`, `child_job_detail_masks_a_secret_its_pinned_parent_rendered_into_its_input`, `hook_job_detail_masks_a_secret_of_its_sources_step_pin`, `retried_hook_job_detail_masks_a_secret_of_its_hook_source`, `job_detail_masks_everything_when_its_redaction_closure_is_truncated`; `pinned_rerun_restart_test.rs::restart_masks_a_carried_secret_of_the_source_commit`; stroem-db `git_refs_test.rs`: `redaction_closure_pins_cover_the_whole_tree_of_the_source_lineage_and_fail_closed_at_a_bound`, `any_pinned_rows_sees_a_pinned_job_or_a_pinned_step` |
+| Content copied between jobs (redaction closure, § 7.4) | a child's output in its parent's step (up); a pinned parent's values in a live child's input (down); a hook payload in the hook job's input; a restart's carried rows; a task retry's replayed input; a re-run's replayed `raw_input` | yes: the receiving job's set covers the whole tree of every job in its source lineage; a truncated closure masks everything; no pin anywhere → the live set alone | `read_path_audit_test.rs`: `parent_job_detail_masks_a_secret_of_its_childs_step_pin`, `child_job_detail_masks_a_secret_its_pinned_parent_rendered_into_its_input`, `hook_job_detail_masks_a_secret_of_its_sources_step_pin`, `retried_hook_job_detail_masks_a_secret_of_its_hook_source`, `job_detail_masks_everything_when_its_redaction_closure_is_truncated`; `pinned_rerun_restart_test.rs::restart_masks_a_carried_secret_of_the_source_commit`, `rerun_of_a_retry_masks_a_secret_of_the_retried_commit`; stroem-db `git_refs_test.rs`: `redaction_closure_pins_cover_the_whole_tree_of_the_source_lineage_and_fail_closed_at_a_bound`, `any_pinned_rows_sees_a_pinned_job_or_a_pinned_step` |
 | Job-scoped, hook job (pre-existing) | single-step hook jobs on every job-scoped path: task path `_hook:{action}`, root folder | as any job | the job-scoped deny tests (the rule is the same `check_job_acl`) |
 | Task-scoped (live), pinned jobs excluded | `GET /api/workspaces/{ws}/tasks/{name}/stats` | no | stroem-db `git_refs_test.rs::duration_stats_exclude_pinned_jobs` |
 | Task-scoped (live) | workspaces and refresh, task list and detail, triggers, execute (not a re-run), manual state upload; MCP `list_workspaces`, `list_tasks`, `get_task`, `execute_task` | no | unchanged |

@@ -641,3 +641,122 @@ async fn restart_masks_a_carried_secret_of_the_source_commit() -> Result<()> {
     })
     .await
 }
+
+/// The value `TOKEN` has at release/2.3's first commit; the branch then
+/// rotates it.
+const RR_RETRY_SECRET: &str = "rr-retry-secret-at-the-old-commit";
+
+/// `only-on-release` with a task retry and a `secret: true` input whose
+/// default renders the commit's secret into the job's resolved input.
+fn rr_retry_release(token: &str) -> String {
+    format!(
+        r#"
+secrets:
+  TOKEN: "{token}"
+actions:
+  a:
+    type: script
+    script: "echo a"
+tasks:
+  only-on-release:
+    folder: rel
+    retry:
+      max_attempts: 2
+      delay: 1s
+    input:
+      token:
+        type: string
+        secret: true
+        default: "{{{{ secret.TOKEN }}}}"
+    flow:
+      a:
+        action: a
+"#
+    )
+}
+
+/// Final review M2: a task retry stores the failed job's RESOLVED input as
+/// its `raw_input`, so it holds the old commit's secret; a re-run of that
+/// retry replays it (the `••••••` sentinel) into a job pinned at the
+/// branch's new commit, which rotated the secret. Only the re-run's source
+/// lineage (re-run → retry, pinned at the old commit) can mask it.
+#[tokio::test(flavor = "multi_thread")]
+async fn rerun_of_a_retry_masks_a_secret_of_the_retried_commit() -> Result<()> {
+    rr_bounded(async {
+        let fx = pinned_workspace_fixture(PinnedFixtureOpts {
+            etl_main: Some(RR_ETL_MAIN.to_string()),
+            etl_release: Some(rr_retry_release(RR_RETRY_SECRET)),
+            ..Default::default()
+        })
+        .await?;
+        let source = fire_etl_trigger(&fx, "nightly").await?;
+        let w = register_worker(&fx.router, &["script"]).await;
+        claim_and_complete(
+            &fx,
+            &w,
+            source,
+            "a",
+            json!({"exit_code": 1, "error": "a broke"}),
+        )
+        .await;
+        let retry: Uuid = sqlx::query_scalar("SELECT job_id FROM job WHERE retry_of_job_id = $1")
+            .bind(source)
+            .fetch_one(&fx.pool)
+            .await?;
+        let row = JobRepo::get(&fx.pool, retry).await?.unwrap();
+        assert_eq!(
+            row.revision.as_deref(),
+            Some(fx.commits.etl_release.as_str())
+        );
+        assert!(
+            row.raw_input
+                .as_ref()
+                .map(|v| v.to_string())
+                .unwrap_or_default()
+                .contains(RR_RETRY_SECRET),
+            "precondition: the retry's raw_input is the resolved input: {:?}",
+            row.raw_input
+        );
+
+        let c2 = fx.etl.commit(
+            "release/2.3",
+            "release/2.3",
+            &[(RR_YAML_PATH, &rr_retry_release("rr-rotated-token"))],
+        );
+        let (st, body) = api_req(
+            &fx.router,
+            "POST",
+            "/api/workspaces/etl/tasks/only-on-release/execute",
+            None,
+            Some(
+                json!({"input": {"token": "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}"},
+                        "source_job_id": retry}),
+            ),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "re-run of the retry: {body}");
+        let rerun: Uuid = body["job_id"].as_str().unwrap().parse()?;
+        let job = JobRepo::get(&fx.pool, rerun).await?.unwrap();
+        assert_eq!(job.revision.as_deref(), Some(c2.as_str()));
+        assert_eq!(
+            job.input.as_ref().map(|v| v["token"].clone()),
+            Some(json!(RR_RETRY_SECRET)),
+            "precondition: the re-run replays the retried commit's secret"
+        );
+
+        let (st, detail) =
+            api_req(&fx.router, "GET", &format!("/api/jobs/{rerun}"), None, None).await;
+        assert_eq!(st, StatusCode::OK, "{detail}");
+        assert!(
+            !detail.to_string().contains(RR_RETRY_SECRET),
+            "replayed secret leaked: {detail}"
+        );
+        assert_eq!(
+            detail["input"]["token"],
+            json!("\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}"),
+            "{detail}"
+        );
+        Ok(())
+    })
+    .await
+}

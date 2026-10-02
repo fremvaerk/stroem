@@ -267,8 +267,10 @@ values of every pinned commit the job is connected to:
 - the commits of every job in the same job tree (parent, children,
   siblings), because values are copied between them;
 - the commits of the jobs it was made from — the job that fired a hook, the
-  job a restart was restarted from, the job a task retry retries — and of
-  their job trees.
+  job a restart was restarted from, the job a re-run re-ran (a re-run of a
+  task retry replays that retry's resolved input), the job a task retry
+  retries — and of their job trees. Chains of restarts and re-runs are
+  followed up to 32 links; a longer chain masks everything.
 
 These responses are job detail (`GET /api/jobs/{id}`), the recent steps on
 worker detail, the sync webhook response and the webhook job-status poll,

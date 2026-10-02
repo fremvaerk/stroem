@@ -85,6 +85,12 @@ name is a `400`). If the task no longer exists at the re-resolved commit, or
 the ref itself is gone, both answer `400`; if the git server is unreachable,
 `500` — the restart **preview** contacts the git server too.
 
+The new job's input and output are masked with the secrets of every pinned
+commit its source job was connected to, as well as its own: a re-run
+replays the source's input, and a task retry's input is the failed job's
+fully resolved input, so a re-run of a retry can carry a secret of the
+older commit.
+
 The UI hides Re-run and Restart for a pinned job whose task does not exist on
 the default branch, because the task page reads the default branch. Use the
 API for those: `POST /api/workspaces/{ws}/tasks/{task}/execute` with
