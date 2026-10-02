@@ -481,7 +481,7 @@ The migration also rebuilds two state indexes and adds one partial index on
 |---|---|---|
 | `job.ref TEXT` | The job was created in owner@ref (ref'd `type: task` child, inherited child, ref'd trigger incl. its skipped rows, hook/retry/re-run/restart of a pinned job) | Ref string as written. `job.revision` holds the commit. `ref IS NOT NULL` ⇔ **pinned job** |
 | `job.task_folder TEXT` | Every pinned job, from the task's `folder` in the pinned config (NULL = no folder) | The pinned job's ACL folder (§ 7.8) |
-| `job_step.action_ref TEXT` | The step's action was resolved through a `ref:` | `action_workspace` (now also set when the owner is the job's own workspace) and `action_revision` (the commit) describe the pin |
+| `job_step.action_ref TEXT` | The step's action was resolved through a `ref:`, or is a self-qualified name (`etl.hello`) inherited inside a pinned `etl@R` job (§ 4.3), which stamps the job's own pin | `action_workspace` (now also set when the owner is the job's own workspace) and `action_revision` (the commit) describe the pin |
 | `job_step.task_workspace TEXT`, `task_ref TEXT`, `task_revision TEXT` | A `type: task` step whose task resolves to a pin: an explicit `ref:`, or an inherited pin (§ 7.1) | The task owner `T` and its pin, stamped at parent creation. Dispatch reads only these columns and never infers a pin from the parent job |
 | `job_step.pin_releases INT NOT NULL DEFAULT 0` | A claim was released because its pin was unavailable (§ 7.2) | Bounds the release-to-ready loop |
 | `task_state.ref TEXT`, `workspace_state.ref TEXT` | Snapshot written by a pinned job | Part of the key. `NULL` = unpinned (today's rows) |
