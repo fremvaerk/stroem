@@ -259,18 +259,8 @@ fn synthetic_row(inst: &NewJobStep) -> JobStepRow {
 
 // ── dependency gate (spec 2026-09-26 §2, §5) ─────────────────────────
 
-fn gate_for(snap: &Snapshot, task: &TaskDef, fs: &FlowStep) -> Gate {
-    gate(&fs.depends_on, &task.flow, |d| snap.outcome(d))
-}
-
-/// Every dependency is skipped. P1 keeps 0.16's R1 domain: it applies an
-/// `unreachable` skip only in this case; P2 applies the rest (spec §5).
-fn all_deps_skipped(snap: &Snapshot, fs: &FlowStep) -> bool {
-    !fs.depends_on.is_empty()
-        && fs
-            .depends_on
-            .iter()
-            .all(|d| snap.status(d) == Some(SKIPPED))
+fn gate_for(snap: &Snapshot, fs: &FlowStep) -> Gate {
+    gate(&fs.depends_on, |d| snap.outcome(d))
 }
 
 fn is_placeholder(r: &JobStepRow) -> bool {
@@ -380,71 +370,69 @@ fn phase_rollup(snap: &Snapshot, task: &TaskDef) -> Vec<Change> {
     out
 }
 
-/// P1: R1 cascade-skip, then R2 promote (with `when`).
-fn phase_promote(snap: &Snapshot, task: &TaskDef, ctx: Option<&Value>) -> Vec<Change> {
-    let mut out = Vec::new();
-    for r in snap
-        .rows
-        .iter()
-        .filter(|r| r.status == PENDING && !is_placeholder(r))
-    {
-        let Some(fs) = task.flow.get(&r.step_name) else {
-            continue;
-        };
-        match gate_for(snap, task, fs) {
-            Gate::Wait => continue,
-            Gate::Skip(SkipReason::Unreachable) if !all_deps_skipped(snap, fs) => continue,
-            Gate::Skip(reason) => {
-                out.push(Change::Skip {
-                    step: r.step_name.clone(),
-                    reason,
-                });
+/// P1 (merged): cascade-skip + promote with `when`, relayed internally
+/// until stable. Spec §5: replaces the old P1-then-P2 split, which only
+/// ever gave one hop of same-pass relay and gave it asymmetrically
+/// (skip-rooted chains got it, failed-rooted chains didn't). Returns every
+/// change made across all its inner iterations, and leaves `snap` updated
+/// to the final, stable state.
+fn phase_promote(
+    snap: &mut Snapshot,
+    task: &TaskDef,
+    mut build_ctx: impl FnMut(&Snapshot) -> Option<Value>,
+) -> Vec<Change> {
+    let mut all_changes = Vec::new();
+    loop {
+        let ctx = build_ctx(snap);
+        let mut batch = Vec::new();
+        for r in snap
+            .rows
+            .iter()
+            .filter(|r| r.status == PENDING && !is_placeholder(r))
+        {
+            let Some(fs) = task.flow.get(&r.step_name) else {
                 continue;
+            };
+            match gate_for(snap, fs) {
+                Gate::Wait => continue,
+                Gate::Omitted => {
+                    batch.push(Change::Skip {
+                        step: r.step_name.clone(),
+                        reason: SkipReason::Unreachable,
+                    });
+                }
+                Gate::Open => match (&r.when_condition, ctx.as_ref()) {
+                    (None, _) => batch.push(Change::Promote {
+                        step: r.step_name.clone(),
+                    }),
+                    (Some(_), None) => {} // no template context: stays pending (today's behaviour)
+                    (Some(w), Some(c)) => match stroem_common::template::evaluate_condition(w, c) {
+                        Ok(true) => batch.push(Change::Promote {
+                            step: r.step_name.clone(),
+                        }),
+                        Ok(false) => batch.push(Change::Skip {
+                            step: r.step_name.clone(),
+                            reason: SkipReason::Condition,
+                        }),
+                        Err(e) => batch.push(Change::Fail {
+                            step: r.step_name.clone(),
+                            error: format!("when condition error: {:#}", e),
+                        }),
+                    },
+                },
             }
-            Gate::Open => {}
         }
-        match (&r.when_condition, ctx) {
-            (None, _) => out.push(Change::Promote {
-                step: r.step_name.clone(),
-            }),
-            (Some(_), None) => {} // no template context: stays pending (today's behaviour)
-            (Some(w), Some(ctx)) => match stroem_common::template::evaluate_condition(w, ctx) {
-                Ok(true) => out.push(Change::Promote {
-                    step: r.step_name.clone(),
-                }),
-                Ok(false) => out.push(Change::Skip {
-                    step: r.step_name.clone(),
-                    reason: SkipReason::Condition,
-                }),
-                Err(e) => out.push(Change::Fail {
-                    step: r.step_name.clone(),
-                    error: format!("when condition error: {:#}", e),
-                }),
-            },
+        if batch.is_empty() {
+            return all_changes;
         }
+        apply_all(snap, &batch);
+        all_changes.extend(batch);
+        // Loop: the next iteration's build_ctx(snap) call sees everything
+        // just applied, and may now be able to decide rows this iteration
+        // couldn't. Terminates because `batch.is_empty()` requires strictly
+        // fewer pending rows each productive iteration, and the pending set
+        // is finite.
     }
-    out
-}
-
-/// P2: R3 skip unreachable.
-fn phase_skip_unreachable(snap: &Snapshot, task: &TaskDef) -> Vec<Change> {
-    let mut out = Vec::new();
-    for r in snap
-        .rows
-        .iter()
-        .filter(|r| r.status == PENDING && !is_placeholder(r))
-    {
-        let Some(fs) = task.flow.get(&r.step_name) else {
-            continue;
-        };
-        if gate_for(snap, task, fs) == Gate::Skip(SkipReason::Unreachable) {
-            out.push(Change::Skip {
-                step: r.step_name.clone(),
-                reason: SkipReason::Unreachable,
-            });
-        }
-    }
-    out
 }
 
 /// P3: R0 adopt (Task 6) + R4 retire/expand placeholders. Needs a context.
@@ -473,12 +461,12 @@ fn phase_placeholders(
             });
             continue;
         }
-        match gate_for(snap, task, fs) {
+        match gate_for(snap, fs) {
             Gate::Wait => continue,
-            Gate::Skip(reason) => {
+            Gate::Omitted => {
                 out.push(Change::Skip {
                     step: r.step_name.clone(),
-                    reason,
+                    reason: SkipReason::Unreachable,
                 });
                 continue;
             }
@@ -639,14 +627,17 @@ pub fn run(
         apply_all(&mut snap, &p0);
         pass.extend(p0);
 
-        let ctx_a = workspace_config.map(|ws| condition_context(job, &snap.rows, ws, snapshots));
-        let p1 = phase_promote(&snap, task, ctx_a.as_ref().map(|c| c.as_value()));
-        apply_all(&mut snap, &p1);
+        let build_ctx = |s: &Snapshot| {
+            workspace_config.map(|ws| {
+                condition_context(job, &s.rows, ws, snapshots)
+                    .as_value()
+                    .clone()
+            })
+        };
+        let p1 = phase_promote(&mut snap, task, build_ctx);
         pass.extend(p1);
-
-        let p2 = phase_skip_unreachable(&snap, task);
-        apply_all(&mut snap, &p2);
-        pass.extend(p2);
+        // (phase_promote already applied its own changes to `snap` internally —
+        // no separate apply_all(&mut snap, &p1) call here, unlike the other phases.)
 
         let ctx_b = workspace_config.map(|ws| condition_context(job, &snap.rows, ws, snapshots));
         let p3 = phase_placeholders(
@@ -904,6 +895,7 @@ mod tests {
     use chrono::Utc;
     use serde_json::{json, Value};
     use std::collections::HashMap;
+    use stroem_common::depends_on::Outcome;
     use stroem_common::models::workflow::{FlowStep, TaskDef, WorkspaceConfig};
     use stroem_db::{JobRow, JobStepRow};
     use uuid::Uuid;
@@ -1179,12 +1171,15 @@ mod tests {
     }
 
     #[test]
-    fn failed_or_cancelled_dep_with_its_own_cof_promotes_dependent() {
+    fn dependent_accepting_failed_or_cancelled_promotes() {
+        // Retired-behavior replacement: a dependency's own `continue_on_failure`
+        // no longer bypasses the gate for its dependents (spec 2026-10-01 §2.3)
+        // — only the dependent's own `accept` set does.
         let t = task(vec![
-            ("a", fs_cof(&[])),
-            ("b", fs(&["a"])),
-            ("x", fs_cof(&[])),
-            ("y", fs(&["x"])),
+            ("a", fs(&[])),
+            ("b", fs_with_accept(&[("a", &[Outcome::Failed])])),
+            ("x", fs(&[])),
+            ("y", fs_with_accept(&[("x", &[Outcome::Cancelled])])),
         ]);
         let rows = vec![
             row("a", "failed"),
@@ -1397,8 +1392,10 @@ mod tests {
             ("c", fs(&["a", "b"])),
             ("d", fs_cof(&["a"])),
         ]);
-        // a failed, b still running: c has a failed dep → R3 skips it; d's own
-        // cof no longer tolerates a's failure (only a's own flag can).
+        // a failed, b still running: the uniform barrier (spec §2.3) makes c
+        // wait for b too, rather than deciding immediately off a's failure
+        // alone; d's own `fs_cof` no longer tolerates a's failure (only d's
+        // own `accept` can).
         let rows = vec![
             row("a", "failed"),
             row("b", "running"),
@@ -1414,15 +1411,17 @@ mod tests {
         )
         .unwrap();
         let s = final_statuses(&plan, &rows);
-        assert_eq!(s["c"], "skipped");
+        assert_eq!(s["c"], "pending");
         assert_eq!(s["d"], "skipped");
 
-        // a's own cof passes d; b still running keeps c waiting.
+        // d's own `accept: [failed]` (replacing the retired cof-bypass) passes
+        // it past a's failure; b still running keeps c waiting regardless of
+        // a's own (now gate-irrelevant) continue_on_failure.
         let t2 = task(vec![
             ("a", fs_cof(&[])),
             ("b", fs(&[])),
             ("c", fs(&["a", "b"])),
-            ("d", fs_cof(&["a"])),
+            ("d", fs_with_accept(&[("a", &[Outcome::Failed])])),
         ]);
         let rows2 = vec![
             row("a", "failed"),
@@ -1537,8 +1536,13 @@ mod tests {
             ("p_expr_err", fs(&[])),
             ("p_empty", fs(&[])),
             ("p_too_many", fs(&[])),
-            ("dep_failed_cof", fs_cof(&[])),
-            ("p_cof", fs_cof(&["dep_failed_cof"])),
+            ("dep_failed_cof", fs(&[])),
+            // Retired-behavior replacement: the dependency's own cof no
+            // longer bypasses the gate; the placeholder's own `accept` does.
+            (
+                "p_cof",
+                fs_with_accept(&[("dep_failed_cof", &[Outcome::Failed])]),
+            ),
             ("p_absent_from_flow_is_ignored_via_missing_entry", fs(&[])),
         ]);
         let big = format!("[{}]", vec!["1"; 10_001].join(","));
@@ -2420,7 +2424,8 @@ mod tests {
         assert_eq!(statuses["d"], "pending", "d waits for b");
 
         // Once b settles completed, c's choice-skip no longer converges
-        // automatically: d needs c's own continue_when_skipped to pass.
+        // automatically: d needs its own `accept` entry for c's skip to pass
+        // (replacing the retired continue_when_skipped).
         let rows2 = vec![
             row("a", "completed"),
             row("b", "completed"),
@@ -2435,15 +2440,21 @@ mod tests {
             &crate::render_context::Snapshots::default(),
         )
         .unwrap();
-        assert_eq!(skips(&plan2), [s("d", "cascade")]);
+        assert_eq!(skips(&plan2), [s("d", "unreachable")]);
 
-        // With continue_when_skipped on both branches, c's skip is tolerated
-        // and d promotes.
+        // With d's own depends_on accepting both b's Completed and c's
+        // Skipped outcome, d promotes.
         let t2 = task(vec![
             ("a", fs(&[])),
-            ("b", fs_cws(&["a"])),
-            ("c", fs_cws(&["a"])),
-            ("d", fs(&["b", "c"])),
+            ("b", fs(&["a"])),
+            ("c", fs(&["a"])),
+            (
+                "d",
+                fs_with_accept(&[
+                    ("b", &[Outcome::Completed]),
+                    ("c", &[Outcome::Completed, Outcome::Skipped]),
+                ]),
+            ),
         ]);
         let plan3 = run(
             &t2,
@@ -2582,11 +2593,19 @@ mod tests {
         assert_eq!(items[1]["x"], 2);
     }
 
-    // ── continue_when_skipped + skip reasons (spec 2026-09-09) ──
+    // ── accept-set tolerance + skip reasons (spec 2026-10-01 §2, replacing
+    // the retired continue_when_skipped/continue_on_failure gate interplay
+    // from spec 2026-09-09) ──
 
     #[test]
-    fn cws_all_deps_skipped_by_condition_promotes() {
-        let t = task(vec![("a", fs_cws(&[])), ("b", fs(&["a"]))]);
+    fn dependent_accepting_skipped_promotes_past_a_condition_skip() {
+        let t = task(vec![
+            ("a", fs(&[])),
+            (
+                "b",
+                fs_with_accept(&[("a", &[Outcome::Completed, Outcome::Skipped])]),
+            ),
+        ]);
         let rows = vec![row_skipped("a", "condition"), row("b", "pending")];
         let plan = run(
             &t,
@@ -2600,8 +2619,14 @@ mod tests {
     }
 
     #[test]
-    fn cws_all_deps_skipped_by_empty_loop_promotes() {
-        let t = task(vec![("a", fs_cws(&[])), ("b", fs(&["a"]))]);
+    fn dependent_accepting_skipped_promotes_past_an_empty_loop_skip() {
+        let t = task(vec![
+            ("a", fs(&[])),
+            (
+                "b",
+                fs_with_accept(&[("a", &[Outcome::Completed, Outcome::Skipped])]),
+            ),
+        ]);
         let rows = vec![row_skipped("a", "empty"), row("b", "pending")];
         let plan = run(
             &t,
@@ -2615,10 +2640,16 @@ mod tests {
     }
 
     #[test]
-    fn cws_with_falsy_own_when_skips_as_condition() {
-        // Even though `a`'s continue_when_skipped bypasses b's cascade-skip
-        // rule, b's own `when` is still evaluated on its own terms.
-        let t = task(vec![("a", fs_cws(&[])), ("b", fs(&["a"]))]);
+    fn accepting_skipped_still_evaluates_its_own_falsy_when_as_condition() {
+        // Even though b's `accept` passes a's choice-skip through the gate,
+        // b's own `when` is still evaluated on its own terms.
+        let t = task(vec![
+            ("a", fs(&[])),
+            (
+                "b",
+                fs_with_accept(&[("a", &[Outcome::Completed, Outcome::Skipped])]),
+            ),
+        ]);
         let rows = vec![
             row_skipped("a", "condition"),
             row_when("b", "pending", "false"),
@@ -2635,9 +2666,10 @@ mod tests {
     }
 
     #[test]
-    fn cof_alone_no_longer_bypasses_all_deps_skipped() {
+    fn cof_alone_no_longer_bypasses_a_choice_skip() {
         // continue_on_failure on the skipped dependency does not pass a
-        // choice skip — cof is failure-only, cws is the skip-side flag.
+        // choice skip — cof no longer affects the gate at all; only the
+        // dependent's own `accept` set does (spec 2026-10-01 §2.3).
         let t = task(vec![("a", fs_cof(&[])), ("b", fs(&["a"]))]);
         let rows = vec![row_skipped("a", "condition"), row("b", "pending")];
         let plan = run(
@@ -2648,14 +2680,14 @@ mod tests {
             &crate::render_context::Snapshots::default(),
         )
         .unwrap();
-        assert_eq!(skips(&plan), [s("b", "cascade")]);
+        assert_eq!(skips(&plan), [s("b", "unreachable")]);
     }
 
     #[test]
-    fn cws_on_dependent_only_no_longer_bypasses() {
-        // The flag now lives on the skipped dependency, not the dependent —
-        // setting it on b (the step that would benefit) has no effect.
-        let t = task(vec![("a", fs(&[])), ("b", fs_cws(&["a"]))]);
+    fn accept_on_dependent_only_is_what_bypasses_now() {
+        // The old flag lived on the skipped dependency; `accept` lives on
+        // the dependent that would benefit, by design (spec §2.2).
+        let t = task(vec![("a", fs(&[])), ("b", fs(&["a"]))]);
         let rows = vec![row_skipped("a", "condition"), row("b", "pending")];
         let plan = run(
             &t,
@@ -2665,17 +2697,24 @@ mod tests {
             &crate::render_context::Snapshots::default(),
         )
         .unwrap();
-        assert_eq!(skips(&plan), [s("b", "cascade")]);
+        assert_eq!(skips(&plan), [s("b", "unreachable")]);
     }
 
     #[test]
-    fn cws_requires_every_skipped_dependency() {
-        // c depends on a (cws) and b (no cws); both skipped by condition.
-        // Every skipped dependency must carry the flag for c to bypass.
+    fn accept_requires_every_dependency_to_be_individually_satisfied() {
+        // c depends on a (tolerated skip) and b (not tolerated); both skipped
+        // by condition. Every edge must be satisfied on its own terms for c
+        // to be open — tolerating one does not blanket-tolerate the group.
         let t = task(vec![
-            ("a", fs_cws(&[])),
+            ("a", fs(&[])),
             ("b", fs(&[])),
-            ("c", fs(&["a", "b"])),
+            (
+                "c",
+                fs_with_accept(&[
+                    ("a", &[Outcome::Completed, Outcome::Skipped]),
+                    ("b", &[Outcome::Completed]),
+                ]),
+            ),
         ]);
         let rows = vec![
             row_skipped("a", "condition"),
@@ -2690,7 +2729,7 @@ mod tests {
             &crate::render_context::Snapshots::default(),
         )
         .unwrap();
-        assert_eq!(skips(&plan), [s("c", "cascade")]);
+        assert_eq!(skips(&plan), [s("c", "unreachable")]);
     }
 
     #[test]
@@ -2735,8 +2774,11 @@ mod tests {
     }
 
     #[test]
-    fn cof_on_an_unreachable_dep_passes_its_dependent() {
-        let t = task(vec![("a", fs_cof(&[])), ("b", fs(&["a"]))]);
+    fn accepting_omitted_passes_its_dependent() {
+        let t = task(vec![
+            ("a", fs(&[])),
+            ("b", fs_with_accept(&[("a", &[Outcome::Omitted])])),
+        ]);
         let rows = vec![row_skipped("a", "unreachable"), row("b", "pending")];
         let plan = run(
             &t,
@@ -2750,12 +2792,19 @@ mod tests {
     }
 
     #[test]
-    fn cws_and_cof_combine_on_a_single_step() {
-        // x (cof) failed → y passes the gate and reaches its own `when`
-        // (false → condition skip); y (cws) → z passes y's skip.
-        let mut y = fs_cws(&["x"]);
+    fn accept_sets_combine_across_a_two_hop_chain() {
+        // x failed → y accepts x's Failed outcome and reaches its own `when`
+        // (false → condition skip); z accepts y's Skipped outcome.
+        let mut y = fs_with_accept(&[("x", &[Outcome::Failed])]);
         y.when = Some("false".to_string());
-        let t = task(vec![("x", fs_cof(&[])), ("y", y), ("z", fs(&["y"]))]);
+        let t = task(vec![
+            ("x", fs(&[])),
+            ("y", y),
+            (
+                "z",
+                fs_with_accept(&[("y", &[Outcome::Completed, Outcome::Skipped])]),
+            ),
+        ]);
         let rows = vec![
             row("x", "failed"),
             row_when("y", "pending", "false"),
@@ -2788,16 +2837,11 @@ mod tests {
 
     #[test]
     fn unreachable_propagates_through_a_chain_in_one_run() {
-        // a failed → b (cws, no cof of its own) → c: b unreachable (R3),
-        // c unreachable (R1) — b's own continue_when_skipped does not help
-        // here (b was never skipped by choice), and b has no
-        // continue_on_failure of its own, so b's BlockFail verdict passes
-        // straight through to c.
-        let t = task(vec![
-            ("a", fs(&[])),
-            ("b", fs_cws(&["a"])),
-            ("c", fs(&["b"])),
-        ]);
+        // a failed → b (plain, default accept) → c: b unreachable (omitted),
+        // c unreachable too — b's own gate has no accept for a's failure, and
+        // c's own gate has no accept for b's resulting omission, so the
+        // block passes straight through to c.
+        let t = task(vec![("a", fs(&[])), ("b", fs(&["a"])), ("c", fs(&["b"]))]);
         let rows = vec![row("a", "failed"), row("b", "pending"), row("c", "pending")];
         let plan = run(
             &t,
@@ -2809,17 +2853,17 @@ mod tests {
         .unwrap();
         assert_eq!(skips(&plan), [s("b", "unreachable"), s("c", "unreachable")]);
 
-        // b's own cof does not rescue b from a's failure (only a's own flag
-        // could) — b is still skipped unreachable — but b's own cof does let
-        // its resulting skip pass through to c, which promotes.
-        let t_cof = task(vec![
+        // b's own continue_on_failure does not rescue b from a's failure
+        // (only b's own `accept` could) — b is still skipped unreachable —
+        // but c's own `accept` for b's Omitted outcome lets c promote.
+        let t_accept = task(vec![
             ("a", fs(&[])),
-            ("b", fs_cof(&["a"])),
-            ("c", fs(&["b"])),
+            ("b", fs(&["a"])),
+            ("c", fs_with_accept(&[("b", &[Outcome::Omitted])])),
         ]);
         let rows = vec![row("a", "failed"), row("b", "pending"), row("c", "pending")];
         let plan = run(
-            &t_cof,
+            &t_accept,
             &job(None),
             &rows,
             Some(&ws()),
@@ -2835,13 +2879,17 @@ mod tests {
     }
 
     #[test]
-    fn condition_skip_becomes_cascade_downstream_and_cws_runs() {
-        // x completed → a (when false) → b (cws) → c: a condition, b cascade, c promoted.
+    fn condition_skip_propagates_and_is_accepted_two_hops_downstream_in_one_run() {
+        // x completed → a (when false, own-choice skip) → b (plain, default
+        // accept: blocked by a's skip, itself becomes omitted/unreachable) →
+        // c (accepts b's Omitted outcome): a condition, b unreachable, c
+        // promoted — all three decided within the merged relay's single
+        // outer pass, replacing the old cws-on-the-skipped-step mechanism.
         let t = task(vec![
             ("x", fs(&[])),
             ("a", fs(&["x"])),
-            ("b", fs_cws(&["a"])),
-            ("c", fs(&["b"])),
+            ("b", fs(&["a"])),
+            ("c", fs_with_accept(&[("b", &[Outcome::Omitted])])),
         ]);
         let rows = vec![
             row("x", "completed"),
@@ -2857,7 +2905,7 @@ mod tests {
             &crate::render_context::Snapshots::default(),
         )
         .unwrap();
-        assert_eq!(skips(&plan), [s("a", "condition"), s("b", "cascade")]);
+        assert_eq!(skips(&plan), [s("a", "condition"), s("b", "unreachable")]);
         assert!(
             names(&plan).contains(&"promote:c".to_string()),
             "{:?}",
@@ -2866,9 +2914,13 @@ mod tests {
     }
 
     #[test]
-    fn three_pass_chain_reasons_match_statuses() {
-        // Spec §4.1 pass-boundary invariant: each link is decided one pass later
-        // than its predecessor and the reason travels with the status.
+    fn three_hop_chain_reasons_match_statuses() {
+        // Spec §5: the merged relay resolves this whole 3-hop chain within a
+        // single outer pass's inner relay (not 3 outer passes, as the old
+        // P1-then-P2 one-hop-per-pass split needed) — but the externally
+        // observed `run()` output is the same set of decisions either way,
+        // and the reason always travels with the status: every omitted link
+        // is `unreachable` now (spec §2.1: `cascade` is retired).
         let t = task(vec![
             ("x", fs(&[])),
             ("a", fs(&["x"])),
@@ -2891,15 +2943,19 @@ mod tests {
         .unwrap();
         assert_eq!(
             skips(&plan),
-            [s("a", "condition"), s("b", "cascade"), s("c", "cascade")]
+            [
+                s("a", "condition"),
+                s("b", "unreachable"),
+                s("c", "unreachable")
+            ]
         );
         let mut snap = Snapshot::new(rows.clone());
         for c in &plan.changes {
             snap.apply(c);
         }
         assert_eq!(snap.skip_reason("a"), Some("condition"));
-        assert_eq!(snap.skip_reason("b"), Some("cascade"));
-        assert_eq!(snap.skip_reason("c"), Some("cascade"));
+        assert_eq!(snap.skip_reason("b"), Some("unreachable"));
+        assert_eq!(snap.skip_reason("c"), Some("unreachable"));
     }
 
     fn run_default(t: &TaskDef, rows: &[JobStepRow]) -> Plan {
@@ -2943,9 +2999,9 @@ mod tests {
     }
 
     #[test]
-    fn mixed_completed_and_condition_skipped_dep_is_cascade_skipped() {
+    fn mixed_completed_and_condition_skipped_dep_is_unreachable() {
         // A branch switched off by its own `when` is a choice, not a failure
-        // — but without its own continue_when_skipped it still blocks c.
+        // — but without the dependent's own `accept` for it, it still blocks c.
         let t = task(vec![("a", fs(&[])), ("b", fs(&[])), ("c", fs(&["a", "b"]))]);
         let rows = vec![
             row("a", "completed"),
@@ -2953,15 +3009,21 @@ mod tests {
             row("c", "pending"),
         ];
         let plan = run_default(&t, &rows);
-        assert_eq!(skips(&plan), [s("c", "cascade")]);
+        assert_eq!(skips(&plan), [s("c", "unreachable")]);
     }
 
     #[test]
-    fn mixed_completed_and_cws_condition_skipped_dep_promotes() {
+    fn mixed_completed_and_accepted_condition_skipped_dep_promotes() {
         let t = task(vec![
             ("a", fs(&[])),
-            ("b", fs_cws(&[])),
-            ("c", fs(&["a", "b"])),
+            ("b", fs(&[])),
+            (
+                "c",
+                fs_with_accept(&[
+                    ("a", &[Outcome::Completed]),
+                    ("b", &[Outcome::Completed, Outcome::Skipped]),
+                ]),
+            ),
         ]);
         let rows = vec![
             row("a", "completed"),
@@ -2973,11 +3035,14 @@ mod tests {
     }
 
     #[test]
-    fn unreachable_dep_with_its_own_cof_passes_among_completed_ones() {
+    fn dependent_accepting_omitted_promotes_among_completed_ones() {
         let t = task(vec![
             ("a", fs(&[])),
-            ("b", fs_cof(&[])),
-            ("c", fs(&["a", "b"])),
+            ("b", fs(&[])),
+            (
+                "c",
+                fs_with_accept(&[("a", &[Outcome::Completed]), ("b", &[Outcome::Omitted])]),
+            ),
         ]);
         let rows = vec![
             row("a", "completed"),
@@ -3070,31 +3135,34 @@ mod tests {
     }
 
     #[test]
-    fn reason_on_r4_placeholder_condition_empty_unreachable_and_cascade() {
+    fn reason_on_r4_placeholder_condition_empty_unreachable_and_accepted() {
         let t = task(vec![
             ("root", fs(&[])),
             ("dead", fs(&[])),
             ("gone", fs(&[])),
-            ("gone_cws", fs_cws(&[])),
+            ("gone_accepted", fs(&[])),
             ("p_when", fs(&["root"])),
             ("p_empty", fs(&["root"])),
             ("p_unreach", fs(&["dead"])),
-            ("p_cascade", fs(&["gone"])),
-            ("p_cws", fs(&["gone_cws"])),
+            ("p_omitted", fs(&["gone"])),
+            (
+                "p_accepted",
+                fs_with_accept(&[("gone_accepted", &[Outcome::Completed, Outcome::Skipped])]),
+            ),
         ]);
         let rows = vec![
             row("root", "completed"),
             row("dead", "failed"),
             row_skipped("gone", "condition"),
-            row_skipped("gone_cws", "condition"),
+            row_skipped("gone_accepted", "condition"),
             JobStepRow {
                 when_condition: Some("false".to_string()),
                 ..placeholder("p_when", "pending", "[1]")
             },
             placeholder("p_empty", "pending", "[]"),
             placeholder("p_unreach", "pending", "[1]"),
-            placeholder("p_cascade", "pending", "[1]"),
-            placeholder("p_cws", "pending", "[1]"),
+            placeholder("p_omitted", "pending", "[1]"),
+            placeholder("p_accepted", "pending", "[1]"),
         ];
         let plan = run(
             &t,
@@ -3108,20 +3176,24 @@ mod tests {
         assert!(sk.contains(&s("p_when", "condition")), "{sk:?}");
         assert!(sk.contains(&s("p_empty", "empty")), "{sk:?}");
         assert!(sk.contains(&s("p_unreach", "unreachable")), "{sk:?}");
-        assert!(sk.contains(&s("p_cascade", "cascade")), "{sk:?}");
+        assert!(sk.contains(&s("p_omitted", "unreachable")), "{sk:?}");
         assert!(
-            names(&plan).contains(&"expand:p_cws:1".to_string()),
-            "cws placeholder expands after a condition skip: {:?}",
+            names(&plan).contains(&"expand:p_accepted:1".to_string()),
+            "a placeholder whose own accept tolerates the condition skip expands: {:?}",
             names(&plan)
         );
     }
 
     #[test]
-    fn failure_dominates_while_a_sibling_runs() {
+    fn uniform_barrier_waits_for_a_running_sibling_even_with_a_failed_dep() {
+        // Spec §2.3: today's fail-fast BlockFail dominance is retired — even
+        // a tree already conclusively unsatisfiable by one child (a failed)
+        // waits for every other referenced step (b, still running) before c
+        // is decided at all.
         let t = task(vec![("a", fs(&[])), ("b", fs(&[])), ("c", fs(&["a", "b"]))]);
         let rows = vec![row("a", "failed"), row("b", "running"), row("c", "pending")];
         let plan = run_default(&t, &rows);
-        assert_eq!(skips(&plan), [s("c", "unreachable")]);
+        assert!(plan.changes.is_empty(), "{plan:?}");
     }
 
     #[test]
@@ -3142,21 +3214,24 @@ mod tests {
     }
 
     #[test]
-    fn failed_placeholder_with_its_own_cof_lets_dependents_promote() {
-        let t = task(vec![("p", fs_cof(&[])), ("d", fs(&["p"]))]);
+    fn dependent_accepting_a_failed_placeholder_promotes() {
+        let t = task(vec![
+            ("p", fs_cof(&[])),
+            ("d", fs_with_accept(&[("p", &[Outcome::Failed])])),
+        ]);
         let rows = vec![placeholder("p", "failed", "[1]"), row("d", "pending")];
         assert_eq!(names(&run_default(&t, &rows)), ["promote:d"]);
     }
 
     #[test]
-    fn placeholder_with_completed_and_condition_skipped_deps_is_cascade_skipped() {
+    fn placeholder_with_completed_and_condition_skipped_deps_is_unreachable() {
         let t = task(vec![("a", fs(&[])), ("b", fs(&[])), ("m", fs(&["a", "b"]))]);
         let rows = vec![
             row("a", "completed"),
             row_skipped("b", "condition"),
             placeholder("m", "pending", "[1,2]"),
         ];
-        assert_eq!(skips(&run_default(&t, &rows)), [s("m", "cascade")]);
+        assert_eq!(skips(&run_default(&t, &rows)), [s("m", "unreachable")]);
     }
 
     // ── pass timing (spec §5, Codex rounds 1-3) ──────────────────────
@@ -3192,8 +3267,13 @@ mod tests {
     }
 
     #[test]
-    fn timing_failed_root_keeps_legacy_pass() {
-        // x failed → a (P2) → b still pending at P3 → p condition-skipped.
+    fn timing_failed_root_now_resolves_same_pass_as_unreachable_root() {
+        // x failed -> a -> b -> p (placeholder). Under the old P1/P2 split, a
+        // failed (not skipped) root needed pass 2 to reach b, stranding p's
+        // already-committed condition-skip from pass 1. The merged relay
+        // decides a, then b, inside pass 1's single merged phase, before p (in
+        // P3) ever runs — so p now expands, matching the unreachable-root case
+        // exactly. Spec §5.
         let t = timing_task(fs(&["a"]));
         let rows = vec![
             row("x", "failed"),
@@ -3201,7 +3281,8 @@ mod tests {
             row("b", "pending"),
             observer(),
         ];
-        assert!(skips(&run_default(&t, &rows)).contains(&s("p", "condition")));
+        let n = names(&run_default(&t, &rows));
+        assert!(n.contains(&"expand:p:1".to_string()), "{n:?}");
     }
 
     #[test]
@@ -3233,7 +3314,10 @@ mod tests {
     }
 
     #[test]
-    fn timing_accepted_change_flagged_placeholder_retires_immediately() {
+    fn timing_flagged_placeholder_now_waits_for_a_pending_sibling() {
+        // l depends on [x (already unreachable), y (still running)]. Today's
+        // fail-fast BlockFail dominance retires l immediately, ignoring y. The
+        // uniform barrier (spec §2.3) waits for y before deciding anything.
         let t = task(vec![
             ("x", fs(&[])),
             ("y", fs(&[])),
@@ -3244,6 +3328,62 @@ mod tests {
             row("y", "running"),
             placeholder("l", "pending", "[1]"),
         ];
-        assert_eq!(skips(&run_default(&t, &rows)), [s("l", "unreachable")]);
+        let plan = run_default(&t, &rows);
+        assert!(
+            skips(&plan).is_empty(),
+            "l must not retire yet — y is still running: {plan:?}"
+        );
+    }
+
+    fn fs_with_accept(deps: &[(&str, &[stroem_common::depends_on::Outcome])]) -> FlowStep {
+        FlowStep {
+            depends_on: deps
+                .iter()
+                .map(|(name, accept)| {
+                    stroem_common::depends_on::DependsOnEntry::Step(
+                        stroem_common::depends_on::StepEntry {
+                            step: name.to_string(),
+                            accept: stroem_common::depends_on::AcceptSet::Outcomes(accept.to_vec()),
+                        },
+                    )
+                })
+                .collect(),
+            ..fs(&[])
+        }
+    }
+
+    #[test]
+    fn inner_relay_rebuilds_context_for_each_batch_not_once_for_the_whole_pass() {
+        // a(when: false); b accepts a's Skipped outcome AND tests in its own
+        // `when` whether `a` is defined. If the relay reused one stale context
+        // across inner iterations, b (decided in a later inner iteration than
+        // a) would incorrectly see `a` as still absent. Spec §5's
+        // context/batch contract.
+        //
+        // Note: `phase_promote` evaluates a step's own `when` from the ROW's
+        // `when_condition` (set here via `row_when`), never from the
+        // `FlowStep.when` in `task.flow` — this harness (unlike real job
+        // creation) does not sync the two, so the rows carry the conditions,
+        // not the `FlowStep`s built below.
+        let t = task(vec![
+            ("a", fs(&[])),
+            (
+                "b",
+                fs_with_accept(&[("a", &[Outcome::Completed, Outcome::Skipped])]),
+            ),
+        ]);
+        let rows = vec![
+            row_when("a", "pending", "false"),
+            row_when(
+                "b",
+                "pending",
+                "{% if a is defined %}true{% else %}false{% endif %}",
+            ),
+        ];
+        let plan = run_default(&t, &rows);
+        assert!(
+            names(&plan).contains(&"promote:b".to_string()),
+            "b must see a's Skipped outcome and run, not condition-skip on a stale read: {plan:?}"
+        );
     }
 }
