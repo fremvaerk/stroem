@@ -20,7 +20,7 @@ use stroem_common::git_ref::{parse_git_ref, short_sha_hint, GitRefSpec};
 use stroem_common::models::workflow::WorkspaceConfig;
 use stroem_common::template::is_vals_failure;
 use stroem_common::workspace_loader::is_sops_failure_warning;
-use tokio::sync::{OnceCell, Semaphore, SemaphorePermit};
+use tokio::sync::{OnceCell, OwnedSemaphorePermit, Semaphore};
 
 use super::availability::ReloadSettings;
 use super::git::{checkout_builder, git_error, GitSource};
@@ -377,13 +377,45 @@ pub struct PinStore {
     listings: Mutex<HashMap<String, Listing>>,
     trees: Mutex<HashMap<Key, Slot<PinnedTree>>>,
     configs: Mutex<HashMap<Key, Slot<Pinned>>>,
-    /// `MAX_CONCURRENT_PIN_LOADS` — never the watchers' semaphore.
-    permits: Semaphore,
+    /// `MAX_CONCURRENT_PIN_LOADS` — never the watchers' semaphore. A permit
+    /// moves into the blocking work it admits, so it bounds real work even
+    /// after the caller that started it is dropped.
+    permits: Arc<Semaphore>,
     /// Config loads started (test support).
     loads: AtomicUsize,
     /// Test hook: pretend the remote refuses want-by-SHA.
     #[cfg(test)]
     skip_fetch_by_sha: AtomicBool,
+    /// Test hook: holds the blocking pin work at its start while closed.
+    #[cfg(test)]
+    gate: Arc<TestGate>,
+}
+
+/// Test hook: blocking pin work (fetch + checkout, config load) waits at
+/// its start while the gate is closed.
+#[cfg(test)]
+#[derive(Default)]
+struct TestGate {
+    closed: Mutex<bool>,
+    changed: std::sync::Condvar,
+    /// Blocking pin work units that reached the gate.
+    entered: AtomicUsize,
+}
+
+#[cfg(test)]
+impl TestGate {
+    fn pass(&self) {
+        self.entered.fetch_add(1, Ordering::SeqCst);
+        let mut closed = self.closed.lock().unwrap_or_else(|e| e.into_inner());
+        while *closed {
+            closed = self.changed.wait(closed).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+
+    fn set_closed(&self, closed: bool) {
+        *self.closed.lock().unwrap_or_else(|e| e.into_inner()) = closed;
+        self.changed.notify_all();
+    }
 }
 
 impl std::fmt::Debug for PinStore {
@@ -447,10 +479,12 @@ impl PinStore {
             listings: Mutex::new(HashMap::new()),
             trees: Mutex::new(HashMap::new()),
             configs: Mutex::new(HashMap::new()),
-            permits: Semaphore::new(MAX_CONCURRENT_PIN_LOADS),
+            permits: Arc::new(Semaphore::new(MAX_CONCURRENT_PIN_LOADS)),
             loads: AtomicUsize::new(0),
             #[cfg(test)]
             skip_fetch_by_sha: AtomicBool::new(false),
+            #[cfg(test)]
+            gate: Arc::default(),
         })
     }
 
@@ -468,10 +502,12 @@ impl PinStore {
             listings: Mutex::new(HashMap::new()),
             trees: Mutex::new(HashMap::new()),
             configs: Mutex::new(HashMap::new()),
-            permits: Semaphore::new(MAX_CONCURRENT_PIN_LOADS),
+            permits: Arc::new(Semaphore::new(MAX_CONCURRENT_PIN_LOADS)),
             loads: AtomicUsize::new(0),
             #[cfg(test)]
             skip_fetch_by_sha: AtomicBool::new(false),
+            #[cfg(test)]
+            gate: Arc::default(),
         }
     }
 
@@ -695,12 +731,20 @@ impl PinStore {
     }
 
     /// A permit for one pin load, waiting at most until `budget`'s deadline.
-    async fn permit(&self, ws: &str, budget: &LoadBudget) -> Result<SemaphorePermit<'_>, PinError> {
+    /// Owned: the caller moves it into its `spawn_blocking` closure, so it is
+    /// released when the blocking work returns, not when the caller is
+    /// dropped (the live path's rule).
+    async fn permit(
+        &self,
+        ws: &str,
+        budget: &LoadBudget,
+    ) -> Result<OwnedSemaphorePermit, PinError> {
+        let acquire = Arc::clone(&self.permits).acquire_owned();
         let acquired = match budget.deadline() {
-            Some(deadline) => tokio::time::timeout_at(deadline.into(), self.permits.acquire())
+            Some(deadline) => tokio::time::timeout_at(deadline.into(), acquire)
                 .await
                 .map_err(|_elapsed| unavailable(ws, "pin load queue saturated"))?,
-            None => self.permits.acquire().await,
+            None => acquire.await,
         };
         acquired.map_err(|_closed| unavailable(ws, "pin load permits closed"))
     }
@@ -726,13 +770,21 @@ impl PinStore {
         let cell = slot_cell(&self.trees, ws, &commit);
         let tree = cell
             .get_or_try_init(|| async move {
-                let _permit = self.permit(ws, &budget).await?;
+                // Handed the cell after a failed attempt, a waiter may
+                // already be past the deadline it started with.
+                budget.check().map_err(|e| unavailable(ws, e))?;
+                let permit = self.permit(ws, &budget).await?;
                 let repo_dir = self.repo_dir(ws);
                 let trees_dir = self.trees_dir(ws);
                 let lock = self.repo_lock(ws);
                 let by_sha = self.fetch_by_sha_enabled();
                 let ws_owned = ws.to_string();
+                #[cfg(test)]
+                let gate = Arc::clone(&self.gate);
                 let dir = tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    #[cfg(test)]
+                    gate.pass();
                     let peeled = {
                         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
                         ensure_commit_local(&ws_owned, &repo_dir, &src, &commit, by_sha, &budget)?
@@ -752,12 +804,17 @@ impl PinStore {
     #[tracing::instrument(skip_all, fields(workspace = %ws, commit = %commit))]
     pub async fn ensure(&self, ws: &str, commit: &str) -> Result<Arc<Pinned>, PinError> {
         let commit = normalize_commit(ws, commit)?;
+        // ONE deadline for the whole call — fetch, checkout, config — and it
+        // runs while the call waits behind another caller's load, too.
+        let budget = LoadBudget::from_now(self.settings.load_timeout);
         let cell = slot_cell(&self.configs, ws, &commit);
         let pinned = cell
-            .get_or_try_init(|| async {
-                // ONE deadline for the whole load: fetch, checkout, config.
-                let budget = LoadBudget::from_now(self.settings.load_timeout);
-                let result = self.load_pinned(ws, &commit, budget).await;
+            .get_or_try_init(|| async move {
+                let result = match budget.check() {
+                    // Handed the cell after a failed attempt, past its deadline.
+                    Err(e) => Err(unavailable(ws, e)),
+                    Ok(()) => self.load_pinned(ws, &commit, budget).await,
+                };
                 metrics::counter!(
                     crate::metrics::STROEM_PIN_LOADS_TOTAL,
                     "workspace" => ws.to_owned(),
@@ -779,11 +836,18 @@ impl PinStore {
         // Tree first, permit second: the tree phase takes its own permit,
         // and nesting them could deadlock the semaphore.
         let tree = self.tree(ws, commit, budget).await?;
-        let _permit = self.permit(ws, &budget).await?;
+        let permit = self.permit(ws, &budget).await?;
         self.loads.fetch_add(1, Ordering::Relaxed);
-        let dir = tree.dir.clone();
+        // The permit and a lease on the checkout move into the blocking
+        // load: both outlive a caller dropped mid-load.
+        let lease = Arc::clone(&tree);
+        #[cfg(test)]
+        let gate = Arc::clone(&self.gate);
         let loaded = tokio::task::spawn_blocking(move || {
-            super::folder::load_folder_workspace_with(&dir, &budget)
+            let _permit = permit;
+            #[cfg(test)]
+            gate.pass();
+            super::folder::load_folder_workspace_with(&lease.dir, &budget)
         })
         .await
         .map_err(|e| unavailable(ws, e))?;
@@ -2129,5 +2193,115 @@ mod tests {
         let store = PinStore::disabled();
         assert_send(&store.ensure("w", "x"));
         assert_send(&store.ensure_tree("w", "x"));
+    }
+
+    /// Opens the gate when dropped, so a failing assertion never leaves a
+    /// blocking thread parked (the runtime would wait on it forever).
+    struct GateGuard<'a>(&'a TestGate);
+
+    impl Drop for GateGuard<'_> {
+        fn drop(&mut self) {
+            self.0.set_closed(false);
+        }
+    }
+
+    fn close_gate(store: &PinStore) -> GateGuard<'_> {
+        store.gate.entered.store(0, Ordering::SeqCst);
+        store.gate.set_closed(true);
+        GateGuard(&store.gate)
+    }
+
+    /// Poll `fut` until its blocking work is parked at the gate, then drop
+    /// it: a client disconnect or a caller-side timeout mid-load.
+    async fn abandon_when_gated<F: std::future::Future>(store: &PinStore, fut: F) {
+        let mut fut = Box::pin(fut);
+        let gated = async {
+            while store.gate.entered.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::select! {
+                _ = &mut fut => panic!("the load finished while gated"),
+                () = gated => {}
+            }
+        })
+        .await
+        .expect("the blocking work reaches the gate");
+    }
+
+    async fn all_permits_return(store: &PinStore) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while store.permits.available_permits() < MAX_CONCURRENT_PIN_LOADS {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the permit returns once the blocking work finishes");
+    }
+
+    /// The deadline starts when a caller asks, not when the cell is handed
+    /// to it: a waiter queued behind a load that fails after its deadline
+    /// fails fast instead of starting a fresh full-budget load.
+    #[tokio::test]
+    async fn a_waiter_whose_deadline_passed_in_the_queue_fails_fast() {
+        let (_r, url, c1) = bare_remote(&[("wf.yaml", &workflow("v1"))]);
+        let (_d, store) = store_with_settings(
+            &url,
+            ReloadSettings {
+                load_timeout: Duration::from_millis(300),
+                ..ReloadSettings::default()
+            },
+        );
+        let gate = close_gate(&store);
+        let release = async move {
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            drop(gate);
+        };
+        let (first, waiter, ()) =
+            tokio::join!(store.ensure("w", &c1), store.ensure("w", &c1), release);
+        assert!(
+            matches!(first, Err(PinError::PinUnavailable { .. })),
+            "{first:?}"
+        );
+        assert!(
+            matches!(waiter, Err(PinError::PinUnavailable { .. })),
+            "the waiter's deadline passed while it was queued: {waiter:?}"
+        );
+        assert_eq!(store.load_count(), 0, "no load starts past the deadline");
+    }
+
+    /// `MAX_CONCURRENT_PIN_LOADS` bounds real work: a dropped caller's
+    /// fetch + checkout keeps its permit until the blocking work returns.
+    #[tokio::test]
+    async fn a_dropped_caller_keeps_the_permit_until_its_checkout_returns() {
+        let (_r, url, c1) = bare_remote(&[("wf.yaml", &workflow("v1"))]);
+        let (_d, store) = store(&url, HOUR);
+        let gate = close_gate(&store);
+        abandon_when_gated(&store, store.ensure_tree("w", &c1)).await;
+        assert_eq!(
+            store.permits.available_permits(),
+            MAX_CONCURRENT_PIN_LOADS - 1,
+            "the detached checkout still holds its permit"
+        );
+        drop(gate);
+        all_permits_return(&store).await;
+    }
+
+    #[tokio::test]
+    async fn a_dropped_caller_keeps_the_permit_until_its_config_load_returns() {
+        let (_r, url, c1) = bare_remote(&[("wf.yaml", &workflow("v1"))]);
+        let (_d, store) = store(&url, HOUR);
+        // Warm checkout: only the config load reaches the gate.
+        let _tree = store.ensure_tree("w", &c1).await.unwrap();
+        let gate = close_gate(&store);
+        abandon_when_gated(&store, store.ensure("w", &c1)).await;
+        assert_eq!(
+            store.permits.available_permits(),
+            MAX_CONCURRENT_PIN_LOADS - 1,
+            "the detached config load still holds its permit"
+        );
+        drop(gate);
+        all_permits_return(&store).await;
     }
 }
