@@ -1,6 +1,6 @@
 # Git Refs on Action, Task and Trigger References — Design
 
-Status: revision 2 — Codex round 1 applied, pending re-review
+Status: revision 3 — Codex round 2 applied, pending re-review
 Ships in: next minor (migration `049`)
 
 Lets a flow step's `action:`, a `type: task` action's `task:` and a
@@ -10,6 +10,31 @@ side, each from its own definitions and files. Line numbers cite
 `anatolii/Revisions` at `b367b6c`.
 
 ## Revision history
+
+**Revision 3 (2026-10-02, Codex round 2, same thread).** 12 findings; 11
+applied, 1 cut from scope.
+
+Applied:
+- G1: `release_claim` locks the step, decides `Released` / `Cancelled` /
+  `CapReached` / `NotApplied`, and cancels siblings itself when the job is
+  terminal. The cap failure is guarded by the claim identity (G12).
+- G2: state coordinates come from the job, not the worker's path. This
+  fixes today's cross-workspace keying.
+- G3: a git revision is served from cache or pin before the live health
+  gate.
+- G4, G5: the deferrals were refuted, because refs reach ref-only secrets.
+  Owner-side claim render errors are now withheld (§ 7.2), and sync webhook
+  output is redacted, failing closed (§ 7.5).
+- G6: re-run and restart re-resolve a pinned source before task checks.
+- G7: ACL folder rule and `job.task_folder` (§ 7.8).
+- G8: a hook calling a ref'd `type: task` action is rejected.
+- G9: skipped rows carry the resolved target.
+- G10: a webhook is re-matched and re-authenticated after `force_refresh`.
+
+Cut:
+- G11: manual state upload stays unpartitioned in v1.
+
+Still deferred as pre-existing: the sibling-claim-after-cancel race (§ 16).
 
 **Revision 2 (2026-10-02, Codex round 1, thread `01a0fb54`).** 12 findings;
 10 applied, 2 recorded as pre-existing and not worsened (§ 16):
@@ -244,6 +269,12 @@ also get the `git_ref` field, used only to fail:
   bail, `settlement/hooks.rs::fire_single_hook`); an event source with `ref`
   is not started and logs once per reconcile; an agent task-tool call naming
   a `ref`'d entry is rejected with 400.
+- A hook whose `action` is a `type: task` action carrying `ref` is rejected
+  the same way. Validation reports it, and at runtime `fire_single_hook`
+  does not fire it and logs to the source job. Both hook creation branches
+  read `ActionDef.task` directly and create the hook job without task
+  resolution (`settlement/hooks.rs:594`, `:610`), so the `ref` would
+  otherwise be dropped.
 
 ## 5. PinStore
 
@@ -347,21 +378,29 @@ NotGit, PinLoadFailed, PinUnavailable}`) so callers classify by
 
 ### 5.4 Tarballs
 
-`download_workspace` (`web/worker_api/workspace.rs:44`), on a cache miss for
-a requested revision that is not the current one **of a git workspace**,
-calls `PinStore::ensure_tree(ws, revision)` and builds the tarball from that
-checkout dir (plus the library overlay, as `build_tarball` does), caching it
-under the unchanged key `(ws, revision)`. It 404s only when the commit does
-not exist in the repo. Folder workspaces have no history and keep today's
-404.
+`download_workspace` (`web/worker_api/workspace.rs:44`) gets a new first
+branch. A request with `?revision=` for a **configured git workspace** is
+answered from the tarball cache. On a miss it calls
+`PinStore::ensure_tree(ws, revision)` and builds the tarball from that
+checkout dir, plus the library overlay as `build_tarball` does, caching it
+under the unchanged key `(ws, revision)`.
 
-This is the one change to the default path: an **ordinary** job whose
-revision fell out of the tarball cache is now served instead of 404'd. Its
-tarball comes from a clean checkout and has no `.git` directory (today's live
-tarballs include `.git` because `build_tarball` archives the working clone,
-`workspace.rs:221-247`). The health gate stays: an errored workspace still
-404s before the cache lookup (`workspace.rs:54-58`) — tracked as a follow-up
-(§ 16), since the pin path itself would not need it.
+This branch runs **before** the live health gate (`get_path` → `None` for
+an errored entry, `workspace.rs:53-58`, `workspace/mod.rs:426`). A pin does
+not depend on the owner's live load (§ 5.1), so a pinned step whose claim
+succeeded must also get its files while `main` fails to load. It 404s only
+when the commit does not exist in the repo.
+
+The only exception to "pin first": when the requested revision **is** the
+live one and the live entry is healthy, today's live-dir path is used
+unchanged, so the default path keeps its bytes. Folder workspaces have no
+history and keep today's code path entirely, including the health gate.
+
+This changes the default path in one way: an **ordinary** job whose revision
+fell out of the tarball cache, or whose workspace is now erroring, is served
+instead of 404'd. That tarball comes from a clean checkout and has no `.git`
+directory (today's live tarballs include `.git` because `build_tarball`
+archives the working clone, `workspace.rs:221-247`).
 
 ## 6. Data model — migration `049_git_refs.sql`
 
@@ -369,7 +408,8 @@ All additive and nullable.
 
 | Column | Set when | Meaning |
 |---|---|---|
-| `job.ref TEXT` | The job was created in owner@ref (ref'd `type: task` child, inherited child, ref'd trigger, hook/retry of a pinned job) | Ref string as written. `job.revision` holds the commit. `ref IS NOT NULL` ⇔ **pinned job** |
+| `job.ref TEXT` | The job was created in owner@ref (ref'd `type: task` child, inherited child, ref'd trigger incl. its skipped rows, hook/retry/re-run/restart of a pinned job) | Ref string as written. `job.revision` holds the commit. `ref IS NOT NULL` ⇔ **pinned job** |
+| `job.task_folder TEXT` | Every pinned job, from the task's `folder` in the pinned config (NULL = no folder) | ACL path of a task that does not exist in the live config (§ 7.8) |
 | `job_step.action_ref TEXT` | The step's action was resolved through a `ref:` | `action_workspace` (now also set when the owner is the job's own workspace) and `action_revision` (the commit) describe the pin |
 | `job_step.task_workspace TEXT`, `task_ref TEXT`, `task_revision TEXT` | A `type: task` step whose task resolves to a pin: an explicit `ref:`, or an inherited pin (§ 7.1) | The task owner `T` and its pin, stamped at parent creation. Dispatch reads only these columns and never infers a pin from the parent job |
 | `job_step.pin_releases INT NOT NULL DEFAULT 0` | A claim was released because its pin was unavailable (§ 7.2) | Bounds the release-to-ready loop |
@@ -382,7 +422,9 @@ columns on purpose.
 State lookups use `ref IS NOT DISTINCT FROM $n`. `idx_task_state_lookup`
 (migration 028) and `idx_workspace_state_lookup` (029) are dropped and
 recreated with `ref` inserted after the leading key columns. No existing row
-is rewritten (D6).
+is rewritten (D6). A partial index `idx_job_pinned_tasks ON job (workspace,
+task_name, task_folder) WHERE ref IS NOT NULL` serves the ACL scope query
+(§ 7.8).
 
 ## 7. Flows
 
@@ -442,21 +484,36 @@ the job:
      `stroem-db/src/repos/job_step.rs:949`, which cancels only
      `pending`/`ready`/`suspended` rows and leaves `running` ones for the
      worker to drain).
-  2. Guarded update `WHERE status = 'running' AND worker_id = $w AND
-     started_at = $s`. If the job is still `pending`/`running`: set
-     `ready`, clear `worker_id` and `started_at`, `ready_at = now`,
-     `retry_at = now + 10 s`, `pin_releases += 1`. If the job is already
-     terminal (cancelled meanwhile): set `cancelled` with `completed_at`.
-  3. Zero rows updated → the step moved on (recovery, completion); the claim
-     returns "no work" and does nothing else.
+  2. `SELECT … FROM job_step WHERE … AND status = 'running' AND worker_id =
+     $w AND started_at = $s FOR UPDATE`. No row → `NotApplied`: the step
+     moved on (recovery, completion). The claim returns "no work" and does
+     nothing else.
+  3. Decide, still holding both locks:
+     - **Job terminal** (cancelled meanwhile) → `Cancelled`. Set this step
+       `cancelled` with `completed_at`, **and** run `cancel_pending_steps`
+       for the job in the same transaction. Cancellation is two separate
+       calls (`settlement/mod.rs:684`, `:694`), and without this the step's
+       settlement could win terminal handling while siblings are still
+       `ready`.
+     - **`pin_releases + 1 > MAX_PIN_RELEASES`** (30, ≈ 5 minutes at 10 s) →
+       `CapReached`. Nothing is written; the step stays `running` under
+       this claim.
+     - **Otherwise** → `Released`. Set `ready`, clear `worker_id` and
+       `started_at`, `ready_at = now`, `retry_at = now + 10 s`,
+       `pin_releases += 1`.
 
-  The released step is not a failure: `retry_attempt` and `retry_history`
-  are untouched. `claim_ready_step` already honours `retry_at`, and resetting
+  The handler acts on the outcome:
+  - `Released`: claim returns "no work".
+  - `Cancelled`: `Settlement::step_settled`, so the drain gate and terminal
+    handling run with no live sibling left.
+  - `CapReached`: `fail_claimed_step` with `expected_claim = (w, s)`, so the
+    failure applies only while the row is still this claim.
+  - `NotApplied`: nothing.
+
+  A released step is not a failure: `retry_attempt` and `retry_history` are
+  untouched. `claim_ready_step` already honours `retry_at`. Resetting
   `ready_at` keeps the unmatched-step sweep (which measures from `ready_at`,
-  `job_step.rs:1109`) from counting the time the step spent claimed. When the
-  step was settled `cancelled`, the claim handler calls
-  `Settlement::step_settled`, so the drain gate sees the job's last live step
-  go terminal and terminal handling runs.
+  `job_step.rs:1109`) from counting the time the step spent claimed.
 - Recovery phases that fail a **running** step they selected earlier (stale
   worker, step timeout; `recovery.rs:69`, `:120`) pass the claim identity
   they observed to a new optional `fail_or_retry` guard, `expected_claim:
@@ -467,15 +524,41 @@ the job:
   other `fail_or_retry` callers are unchanged.
 - The job log gets `[pin] {ws}@{ref} ({short sha}) not available yet on this
   server, retrying: {scrubbed error}` (`_server` step).
-- The claim response is "no work".
-- Backstops: the job timeout, when one is set; and a cap — `release_claim`
-  increments `job_step.pin_releases`, and once it reaches
-  `MAX_PIN_RELEASES` (30, ≈ 5 minutes at 10 s) the step fails through
-  `fail_claimed_step` instead. Without the cap, a job with no timeout would
-  loop forever on a permanently unreachable remote.
+- Backstops: the job timeout, when one is set; and the `CapReached` outcome
+  above. Without the cap, a job with no timeout would loop forever on a
+  permanently unreachable remote.
 
 Permanent pin errors (`RefNotFound`, `CommitNotFound`, `PinLoadFailed`) go
 through `fail_claimed_step` (`jobs.rs:364`) as any claim-time failure does.
+`fail_claimed_step` always passes the claim identity it holds as
+`expected_claim`.
+
+**Owner-side render errors are withheld at claim.** This is today's dispatch
+policy (`settlement/dispatch.rs:121`, CLAUDE.md § Secrets in logs) extended to
+claim. It applies to every claim whose step's action owner differs from
+`job.workspace`, pinned or live.
+
+An error raised while rendering the **owner's** templates is classified by
+origin, not by message, using a typed marker like `job_creator::OwnerSideRender`
+on the `anyhow` chain. That covers:
+- the owner's action input defaults and its connection resolution
+  (`prepare_step_action_input`);
+- the action body (`script` / `cmd` / `env` / `args` / `image` /
+  `manifest`) rendered with the owner's secrets.
+
+Such an error is persisted, logged to the job and returned to the worker as a
+fixed, value-free sentence: "rendering action '{name}' of workspace
+'{owner}' failed; details withheld". The full scrubbed chain goes only to the
+server log (`tracing::error!`).
+
+The caller's own step `input:` (rendered in the caller's context) and
+structural errors (action missing, pin errors) stay visible after scrubbing,
+as today. Own-workspace refs cross no boundary and are unaffected.
+
+This closes, for refs and for today's cross-workspace actions alike, the gap
+where a filter chain wraps an owner secret in an encoding the scrubber cannot
+match (`workspace_set.rs:163`). Refs make that gap reach secrets that exist
+only on an unreviewed branch.
 
 ### 7.3 Settlement
 
@@ -490,11 +573,34 @@ one commit.
 | `type: task` child without `task_*` | Unpinned; resolved live, as today (a same-workspace child still inherits the parent's `revision` for files, unchanged) |
 | Hook job of a pinned job (`fire_single_hook`) | Source job's `ref` + `revision`; the hook definition comes from the pinned config |
 | Task-level retry (`create_retry_job`, `settlement/retry.rs:108`) | Failed job's `ref` + `revision` |
-| Re-run / Restart of a pinned top-level job | **Re-resolves** `job.ref` (today they take the current revision; for a ref that is its current commit) |
+| Re-run / Restart of a pinned top-level job | **Re-resolves** `job.ref` (today they take the current revision; for a ref that is its current commit) — see below |
 | Agent task-tool child of a pinned job (`agent_task_tool`, `jobs.rs:1073`) | Parent's `ref` + `revision`; the tool's task is looked up in the pinned config |
 
 `dispatch::handle_task_steps_pass` picks the task's config from `task_*` if
 set, else live (today). It never infers a pin from the parent job.
+
+**Re-run and restart of a pinned source.** Both reject non-top-level sources
+(`is_top_level_job`, `web/api/jobs.rs:629`), so this concerns pinned jobs
+created by a ref'd trigger. Today both look the task up in the **live**
+config first: re-run through the execute route's task check
+(`web/api/tasks.rs:450`, `:479`), restart through its plan
+(`web/api/jobs.rs:700`, `:713`). A task that exists only at the ref would
+404.
+
+When the source has `job.ref`, both instead:
+1. Re-resolve the ref (`PinStore::resolve`) and `ensure` the new pin, before
+   any task check.
+2. Look the task up in that pinned config. Restart computes its
+   `RestartPlan` (`restart::compute_restart_set`) against the pinned flow
+   and seeds carried rows in the existing creation transaction
+   (`job_creator.rs:521`).
+3. Create the new job with `job.ref` (same string), the new commit and
+   `job.task_folder` from the new pin.
+
+Carried outputs come from the source commit and the restart set runs the new
+one. That is today's documented "revision drift" for restart, now made
+explicit by the commit. The execute route accepts the pinned path only via
+`source_job_id`; it is not a per-run ref override (§ 16).
 
 ### 7.4 `config_for`
 
@@ -523,13 +629,15 @@ with one local override (`:78`). It gains an overlay map
 step's owner pin (if any). Lookups for those workspaces hit the pinned
 config. Every other workspace stays live.
 
-**Per-job redaction set.** Job detail (`web/api/jobs.rs:491-494`),
-`fail_claimed_step` and `fail_task_step` redact with the live set's values
-plus `secret_values` of **every** pin the job references: `job.ref`, and
-each step's `action_ref` and `task_ref`. If a referenced pin cannot be
-ensured (`PinUnavailable` on a cold replica), job detail **fails closed**
-with 503 "redaction set unavailable, retry". It never answers with a
-redaction set that is missing a pin.
+**Per-job redaction set.** Job detail (`web/api/jobs.rs:491-494`), the sync
+webhook response (§ 7.5), `fail_claimed_step` and `fail_task_step` redact
+with the live set's values plus `secret_values` of **every** pin the job
+references: `job.ref`, and each step's `action_ref` and `task_ref`.
+
+If a referenced pin cannot be ensured (`PinUnavailable` on a cold replica),
+job detail and the sync webhook **fail closed** with 503 "redaction set
+unavailable, retry" (the webhook body still carries `job_id`). They never
+answer with a redaction set that is missing a pin.
 
 Other entry points: `handle_task_steps_pass` / `resolve_task_ref` (via
 `task_*`), the state endpoints (§ 7.6) and `download_workspace` (§ 5.4).
@@ -547,54 +655,104 @@ Scheduler (`scheduler.rs::fire_trigger`, `:346`) and webhook
 4. **Only then** the concurrency policy, keyed — as today — on
    `source_id = "{defining_ws}/{trigger}"` (`count_active_by_source`,
    `get_active_job_ids_by_source`).
-5. Create a top-level job in `T` with `job.ref` / `job.revision` (or `T`'s
-   current revision when there is no `ref`). A `skip`-policy skipped row is
-   recorded in `T` too.
+5. Create a top-level job in `T` with `job.ref`, `job.revision` and
+   `job.task_folder` (or `T`'s current revision when there is no `ref`). A
+   `skip`-policy skipped row (`scheduler.rs:414`, `JobRepo` at
+   `stroem-db/src/repos/job.rs:308`) is written for the same resolved target
+   `{T, task, ref, commit, task_folder}`, never for the defining workspace.
+   Both creation paths receive that resolved target as one value.
 
 Any failure in steps 1–3 logs `Trigger '…' MISSED: …` with no side effects —
 no `cancel_previous`, no skipped row — the rule already used for an
 unavailable workspace. `triggers: false` follows the **defining** workspace.
 
-Webhooks differ in step 3. `hooks::find_webhook_trigger` captures the
-trigger's task, defaults, secret and mode **before** `force_refresh`, and the
-handler creates the job from those captured values with no revalidation
-(`web/hooks.rs:48`, `:67`). That gap exists today and is not closed here
-(§ 16). For a webhook, steps 1–2 resolve the target from the captured
-definition after any `force_refresh`, and errors map as in § 8 (400/500;
-MISSED is a scheduler term). The initial `on_suspended` hooks and approvals
-of the created job come from the job's own config (§ 7.4), not from the
-webhook's defining workspace.
+**Webhooks.** Today `hooks::find_webhook_trigger` captures the trigger's
+task, defaults, secret and mode **before** `force_refresh`, and the handler
+creates the job from those captured values with no revalidation
+(`web/hooks.rs:48`, `:67`). With refs, that would let a refresh that changed
+or removed a webhook's `ref` still run the old release. New order:
+
+1. Match the webhook by name.
+2. If its definition has `force_refresh`, reload.
+3. **Match it again** in the refreshed config. If it is gone, answer 404.
+4. Authenticate against the **fresh** definition's secret.
+5. Resolve the target (steps 1–2 above) from the fresh definition.
+
+Errors map as in § 8 (400/500; MISSED is a scheduler term). The initial
+`on_suspended` hooks and approvals of the created job come from the job's
+own config (§ 7.4), not from the webhook's defining workspace.
+
+**Sync webhook output** (`web/hooks.rs:156`, `:177`) is redacted, in both the
+already-terminal branch and the completion-event branch, with the job's
+per-job redaction set (§ 7.4), failing closed. Today it returns `job.output`
+unredacted for every job. Refs would extend that to secrets that exist only
+at a ref, so the fix applies to all sync webhook responses.
 
 ### 7.6 State
 
 - Render context: `render_context::latest_snapshots` (`render_context.rs:50`)
   takes the job's ref and reads `TaskStateRepo::get_latest(ws, task, ref)` /
   the workspace-state equivalent.
-- **The partition is derived server-side from the job, never supplied by
-  the client.**
+- **The state coordinates `(workspace, task, ref)` are the job's own, and the
+  server derives them from the job, never from the client.** Today the worker
+  sends `ClaimResponse.workspace` (the step's action **owner**) with the
+  job's task name (`stroem-worker/src/poller.rs:367`, `:427`, `:620`). A
+  cross-workspace step therefore reads `(owner, caller task)`, and its upload
+  fails the server's workspace check (`web/worker_api/state.rs:400`).
   - Uploads (`POST /worker/state/{ws}/{task}/{job_id}` and the global-state
-    equivalent) already load the job to validate workspace and task
-    (`web/worker_api/state.rs:389`, `:400`). They now take `ref` from
-    `job.ref`.
+    equivalent) already load the job (`state.rs:389`). They now write to
+    `(job.workspace, job.task_name, job.ref)` and no longer require the path
+    `{ws}` / `{task}` to match: the path coordinates are ignored once the
+    job is known.
   - Downloads (`GET /worker/state/{ws}/{task}`, `GET
-    /worker/global-state/{ws}`) gain an optional `?job_id=`, sent by the
-    worker from the claim (`poller.rs:371`, `:430`). The server loads the
-    job, checks workspace and task as the upload does, and reads `job.ref`'s
-    partition. Without `job_id` (an old worker), the `NULL` partition is
-    read, which is today's behaviour.
-- `POST /api/workspaces/{ws}/tasks/{task}/state` and `…/state` (manual
-  upload) accept `?ref=`; the state list endpoints return `ref` per snapshot
-  and accept a `?ref=` filter.
+    /worker/global-state/{ws}`) gain an optional `?job_id=`, which the worker
+    sends from the claim. With it, the server reads the job's coordinates the
+    same way. Without it (an old worker), the path coordinates and the
+    `NULL` partition are used, which is today's behaviour.
+  - This also fixes today's cross-workspace state keying, as a consequence of
+    deriving everything from the job.
+- Manual uploads (`POST /api/workspaces/{ws}/tasks/{task}/state`, `…/state`)
+  are **not** ref-aware in v1. They write and merge the `NULL` partition
+  exactly as today (`web/api/state_upload.rs:339`, `:365`, `:581`). State is
+  unused today, so partitioned manual upload is a follow-up (§ 16). The state
+  list endpoints return `ref` per snapshot.
 - Retention (`max_snapshots`) prunes per `(workspace, task, ref)`.
-- Pre-existing, unchanged: the worker keys state on `ClaimResponse.workspace`
-  (the step's owner) and the job's task name, so a cross-workspace step reads
-  `(owner, caller task)`. Recorded in TODO.md, not fixed here.
 
 ### 7.7 Template and hook metadata
 
 `render_context::job_context` (`render_context.rs:216`) adds `ref`
 (`{{ job.ref }}`, `""` for unpinned jobs) next to `revision`; hooks get
 `hook.ref`. `{{ job.revision }}` of a pinned job is its commit.
+
+### 7.8 ACL
+
+ACL keeps keying on the workspace name (§ 4.5). Only the **folder** half of
+the task path `{folder}/{task}` needs a rule for pinned jobs. Today it comes
+from the live config, both for one job (`check_job_acl`,
+`web/api/jobs.rs:1091`, `:1108`; MCP `mcp/tools.rs:291`) and for lists
+(`resolve_acl_scope` builds allowed `(workspace, task)` pairs from live
+tasks, used by `list_with_acl` / `count_with_acl` /
+`get_status_counts_with_acl`). Without a rule, a release-only task's jobs
+would be invisible to non-admins and evaluated against no folder.
+
+**Rule.** A job's ACL path uses the live task's folder when the task name
+exists in the live config. It falls back to `job.task_folder` only when the
+name does not exist live, which can only be a pinned job.
+
+When the name exists live, this matches today's semantics for unpinned jobs:
+a task moved between folders on `main` re-scopes its past jobs too. A
+release-only task gets the folder its own commit declared.
+
+- `check_job_acl` and its MCP twin apply the rule. `task_folder` is read from
+  the job row, so no pin load is needed.
+- `resolve_acl_scope` evaluates its rules over the live tasks **plus**
+  `SELECT DISTINCT workspace, task_name, task_folder FROM job WHERE ref IS
+  NOT NULL` (served by `idx_job_pinned_tasks`, § 6), restricted to names
+  absent from the live config. Because a name gets a pair from exactly one
+  source, the two sources never conflate.
+- The execute-time ACL check (`Run` on the task) is unchanged for ordinary
+  executes. For a re-run or restart of a pinned source it applies the same
+  rule, with the source job's `task_folder` as the fallback.
 
 ## 8. Errors and classification
 
@@ -634,17 +792,12 @@ on some replica, so this needs a cold replica plus a git outage.
 - Secret values in a pinned config are rendered once, at pin load, and stay
   until the pin is evicted (same as the live config, which re-renders only on
   a new revision).
-- Not closed here, pre-existing and not made worse by refs (§ 16):
-  - **Claim-time owner render errors are scrubbed, not withheld.** A
-    cross-workspace action's claim-time render error goes through
-    `fail_claimed_step`, which scrubs known values
-    (`web/worker_api/jobs.rs:364`, `:665`, `:695`). Only `type: task`
-    dispatch withholds owner-side errors (`settlement/dispatch.rs:121`). An
-    own-workspace ref crosses no boundary. A cross-workspace ref is exactly
-    today's cross-workspace action, with the pin's values now added to the
-    scrub set.
-  - **The sync webhook response returns `job.output` unredacted**
-    (`web/hooks.rs:156`, `:177`), today for every secret alike.
+- **Claim-time owner render errors across a workspace boundary are now
+  withheld** (§ 7.2), extending the dispatch policy. Scrubbing alone cannot
+  match every encoding a filter chain produces, and refs make reachable
+  secrets that exist only at an unreviewed commit.
+- **Sync webhook output is redacted** with the per-job set, failing closed
+  (§ 7.5). Today it is returned unredacted for every job.
 
 ## 10. Retention, limits, configuration
 
@@ -717,6 +870,17 @@ from an allowed ref".
   release.** An old replica drops the unknown key and runs the default branch
   silently, and treats an own-workspace `action_workspace` as a live
   cross-workspace owner. Stated in the release notes and the guide.
+- Behaviour changes that apply without any `ref:` in YAML, for the release
+  notes:
+  - a cross-workspace step's task state now uses the job's own workspace
+    (§ 7.6);
+  - owner-side claim render errors of cross-workspace actions are withheld
+    (§ 7.2);
+  - sync webhook output is redacted (§ 7.5);
+  - a webhook is re-matched and re-authenticated after `force_refresh`
+    (§ 7.5);
+  - an old revision, or an erroring git workspace's pinned revision, is
+    served instead of 404 (§ 5.4).
 
 ## 14. Testing
 
@@ -749,10 +913,38 @@ the GitSource tests).**
   on a missing ref (scheduler, via `fire_trigger_once`, `scheduler.rs:329`).
 - Claim-time `PinUnavailable` → `release_claim` → step `ready` with
   `retry_at` and a fresh `ready_at`; release cap → failed.
-- `release_claim` racing cancellation, in both orders: cancel first → the
-  step is settled `cancelled` and terminal handling runs; release first →
-  `cancel_pending_steps` cancels the now-`ready` step. A cancelled job never
-  has a claimable step afterwards.
+- `release_claim` racing cancellation, in both orders. Cancel first: the
+  step is settled `cancelled`, its `ready` siblings are cancelled in the
+  same transaction, then terminal handling runs (a sibling left `ready` would
+  fail the test). Release first: `cancel_pending_steps` cancels the
+  now-`ready` step.
+- `release_claim` at the cap returns `CapReached` without writing, and the
+  following `fail_claimed_step` is `NotApplied` if the claim changed.
+- Withholding at claim: a foreign owner's action default with a failing
+  filter chain over a ref-only secret yields the fixed sentence in
+  `error_message`, the job log and the 422 body, and the scrubbed chain in
+  the server log. A caller-side `input:` error and an own-workspace ref error
+  stay visible (scrubbed).
+- Sync webhook (both branches) redacts a ref-only secret in `output`, and
+  answers 503 with `job_id` when the pin is unavailable.
+- Webhook with `force_refresh`: a refresh that changes the `ref` runs the
+  new ref; one that removes the webhook gives 404; one that rotates the
+  secret authenticates against the new secret.
+- A skipped scheduler fire for `T@ref` is recorded in `T` with `job.ref`,
+  the commit and `task_folder`.
+- Re-run and restart of a pinned trigger job whose task exists only at the
+  ref: the ref is re-resolved, and restart's plan uses the pinned flow.
+- ACL: a release-only task's jobs are listed for a user allowed by its
+  `task_folder`, and hidden for one who is not. A task that exists live uses
+  the live folder. `check_job_acl` and MCP agree.
+- A hook whose action is a ref'd `type: task` action is not fired and logs
+  to the source job.
+- Cross-workspace step state: upload and download (with `job_id`) use the
+  job's `(workspace, task, ref)`. A download without `job_id` keeps today's
+  path coordinates.
+- `download_workspace` serves a pinned revision of an erroring git workspace
+  (health gate bypassed for git revisions), and keeps the live path for the
+  healthy current revision.
 - A recovery failure carrying a stale `expected_claim` → `NotApplied` on a
   released step and on a step reclaimed by another worker.
 - Inheritance: a local `type: task` in a pinned job stamps `task_*`. A
@@ -804,23 +996,23 @@ outputs differ by ref and that `job.ref` is set on the child.
 - Per-run ref override (API/UI/MCP/CLI) — the feature-branch testing case.
 - Allow-list / trust gate (§ 12).
 - Warm-up on publish; background branch tracker (D8).
-- `ref` on hooks, event sources, agent task tools (§ 4.6).
-- Pinning definitions for **unpinned** jobs (today's live-config drift).
-- Libraries at a ref; bare-repo `git gc`; sharing pins across replicas.
-- Serving a cached or pinned tarball of an errored workspace (the
-  `download_workspace` health gate).
+- `ref` on hooks (including a hook calling a ref'd `type: task` action),
+  event sources, agent task tools (§ 4.6).
 - `ref` on agent actions: needs agent MCP definitions and task tools built
   from the action owner's (pinned) config. This is the same deferred work as
   cross-workspace agent actions.
+- Ref-partitioned manual state upload (§ 7.6).
+- Pinning definitions for **unpinned** jobs (today's live-config drift).
+- Libraries at a ref; bare-repo `git gc`; sharing pins across replicas.
 - Pre-existing, found during design; recorded in TODO.md and not made worse
   here:
   - the tarball-cache cleanup runs on the leader only (`recovery.rs:441`),
     while the cache is replica-local;
-  - cross-workspace steps key state on the owner workspace (§ 7.6);
-  - claim-time owner render errors of cross-workspace actions are scrubbed,
-    not withheld (§ 9);
-  - the sync webhook response is unredacted (§ 9);
-  - webhook triggers are not revalidated after `force_refresh` (§ 7.5);
   - `fail_or_retry` with an empty expected list accepts any status, so a
     recovery sweep can race a worker's completion. This design guards only
-    the new release path (§ 7.2).
+    the new release path and `fail_claimed_step` (§ 7.2);
+  - cancellation is two non-atomic calls (`JobRepo::cancel`, then
+    `cancel_pending_steps`), and the claim SQL does not check the job's
+    status (`job_step.rs:561`). A worker can claim a `ready` sibling between
+    the two calls. `release_claim` does not widen this: it cancels siblings
+    itself when it finds the job terminal.
