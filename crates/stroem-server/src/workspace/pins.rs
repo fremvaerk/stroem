@@ -519,6 +519,13 @@ impl PinStore {
         !self.sources.is_empty()
     }
 
+    /// Names of the workspaces that have a pin source, sorted.
+    pub fn source_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.sources.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
     fn source(&self, ws: &str) -> Result<PinSource, PinError> {
         self.sources
             .get(ws)
@@ -962,6 +969,52 @@ impl PinStore {
     }
 }
 
+impl PinRef {
+    /// A pinned job's pin: `job.git_ref` + `job.revision` (spec § 6).
+    pub fn of_job(job: &stroem_db::JobRow) -> Option<PinRef> {
+        Some(PinRef {
+            git_ref: job.git_ref.clone()?,
+            commit: job.revision.clone()?,
+        })
+    }
+
+    /// A step whose action was resolved through `ref:`. A live
+    /// cross-workspace step also stamps `action_revision` but has no
+    /// `action_ref`, so it is not pinned.
+    pub fn of_step_action(step: &stroem_db::JobStepRow) -> Option<PinRef> {
+        Some(PinRef {
+            git_ref: step.action_ref.clone()?,
+            commit: step.action_revision.clone()?,
+        })
+    }
+
+    /// A `type: task` step's task owner and pin (`task_*`, spec § 6).
+    pub fn of_step_task(step: &stroem_db::JobStepRow) -> Option<(String, PinRef)> {
+        Some((
+            step.task_workspace.clone()?,
+            PinRef {
+                git_ref: step.task_ref.clone()?,
+                commit: step.task_revision.clone()?,
+            },
+        ))
+    }
+}
+
+impl PinStoreConfig {
+    pub fn from_section(section: Option<&crate::config::PinStoreSection>) -> PinStoreConfig {
+        let default = PinStoreConfig::default();
+        let Some(s) = section else {
+            return default;
+        };
+        PinStoreConfig {
+            dir: s.dir.as_deref().map(PathBuf::from).unwrap_or(default.dir),
+            keep_recent_per_workspace: s
+                .keep_recent_per_workspace
+                .unwrap_or(default.keep_recent_per_workspace),
+        }
+    }
+}
+
 // ---- blocking git helpers (always run on `spawn_blocking`) ----
 
 /// Remove every entry of every `{root}/{ws}/trees/`. Called at `open`,
@@ -1273,6 +1326,70 @@ mod tests {
     use super::*;
     use crate::workspace::git_test_support::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn pin_refs_come_from_the_job_and_step_columns() {
+        let mut job = stroem_db::JobRow::test_default();
+        assert_eq!(PinRef::of_job(&job), None, "unpinned job");
+        job.git_ref = Some("release/2.3".into());
+        job.revision = Some("a".repeat(40));
+        assert_eq!(
+            PinRef::of_job(&job),
+            Some(PinRef {
+                git_ref: "release/2.3".into(),
+                commit: "a".repeat(40)
+            })
+        );
+
+        let mut step = stroem_db::JobStepRow::test_default(job.job_id, "s");
+        assert_eq!(PinRef::of_step_action(&step), None);
+        assert_eq!(PinRef::of_step_task(&step), None);
+        step.action_workspace = Some("w".into());
+        step.action_revision = Some("b".repeat(40));
+        assert_eq!(
+            PinRef::of_step_action(&step),
+            None,
+            "cross-workspace live step is not pinned"
+        );
+        step.action_ref = Some("v4.1.0".into());
+        assert_eq!(
+            PinRef::of_step_action(&step),
+            Some(PinRef {
+                git_ref: "v4.1.0".into(),
+                commit: "b".repeat(40)
+            })
+        );
+        step.task_workspace = Some("billing".into());
+        step.task_ref = Some("v4".into());
+        step.task_revision = Some("c".repeat(40));
+        assert_eq!(
+            PinRef::of_step_task(&step),
+            Some((
+                "billing".into(),
+                PinRef {
+                    git_ref: "v4".into(),
+                    commit: "c".repeat(40)
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn pin_store_config_from_section_applies_defaults() {
+        let d = PinStoreConfig::from_section(None);
+        assert_eq!(d.dir, PinStoreConfig::default_dir());
+        assert_eq!(
+            d.keep_recent_per_workspace,
+            DEFAULT_KEEP_RECENT_PER_WORKSPACE
+        );
+        let s = crate::config::PinStoreSection {
+            dir: Some("/var/lib/stroem/pins".into()),
+            keep_recent_per_workspace: Some(2),
+        };
+        let c = PinStoreConfig::from_section(Some(&s));
+        assert_eq!(c.dir, PathBuf::from("/var/lib/stroem/pins"));
+        assert_eq!(c.keep_recent_per_workspace, 2);
+    }
 
     const HOUR: Duration = Duration::from_secs(3600);
 

@@ -178,6 +178,7 @@ async fn setup() -> Result<(
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let workspace = stats_test_workspace();

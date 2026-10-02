@@ -538,6 +538,23 @@ impl Default for WorkspaceReloadConfig {
     }
 }
 
+/// Pin store (spec § 5.1, § 10). Every field optional.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PinStoreSection {
+    /// Where bare repos and per-commit checkouts live. Must be private to
+    /// ONE server process (it is locked). Default `<temp>/stroem/pins`.
+    #[serde(default)]
+    pub dir: Option<String>,
+    /// Recently used pins kept per workspace beyond what active jobs
+    /// hold. Default 5.
+    #[serde(default)]
+    pub keep_recent_per_workspace: Option<usize>,
+}
+
+/// Upper bound on `pin_store.keep_recent_per_workspace`.
+pub const MAX_PIN_KEEP_RECENT: usize = 1000;
+
 /// Data retention configuration for cleaning up old workers, jobs, and logs
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -639,6 +656,9 @@ pub struct ServerConfig {
     /// Workspace watcher reload tuning (spec § 4). Defaults apply when absent.
     #[serde(default)]
     pub workspace_reload: WorkspaceReloadConfig,
+    /// Pinned ref store (git refs on actions/tasks/triggers). Defaults apply when absent.
+    #[serde(default)]
+    pub pin_store: Option<PinStoreSection>,
 }
 
 /// Resolved timeout defaults passed into job creation.
@@ -792,6 +812,18 @@ impl ServerConfig {
             || r.git_read_timeout_ms > c_int_max
         {
             anyhow::bail!("workspace_reload git timeouts must be between 1 and {c_int_max} ms");
+        }
+        if let Some(p) = &self.pin_store {
+            if p.dir.as_deref().is_some_and(str::is_empty) {
+                anyhow::bail!("pin_store.dir must not be empty");
+            }
+            if let Some(n) = p.keep_recent_per_workspace {
+                if n > MAX_PIN_KEEP_RECENT {
+                    anyhow::bail!(
+                        "pin_store.keep_recent_per_workspace must be at most {MAX_PIN_KEEP_RECENT}, got {n}"
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -2747,6 +2779,7 @@ worker_token: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             default_step_timeout: None,
             default_job_timeout: None,
             workspace_reload: Default::default(),
+            pin_store: None,
         }
     }
 
@@ -2852,6 +2885,65 @@ worker_token: "0123456789abcdef0123456789abcdef"
         assert_eq!(r.max_backoff_secs, 900);
         assert_eq!(r.git_connect_timeout_ms, 10_000);
         assert_eq!(r.git_read_timeout_ms, 60_000);
+    }
+
+    #[test]
+    fn pin_store_section_parses_and_is_optional() {
+        let base = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://x"
+log_storage:
+  local_dir: /tmp/logs
+worker_token: "0123456789abcdef0123456789abcdef"
+"#;
+        let cfg: ServerConfig = serde_yaml::from_str(base).unwrap();
+        assert!(cfg.pin_store.is_none());
+        let with = format!(
+            "{base}pin_store:\n  dir: /var/lib/stroem/pins\n  keep_recent_per_workspace: 3\n"
+        );
+        let cfg: ServerConfig = serde_yaml::from_str(&with).unwrap();
+        let p = cfg.pin_store.unwrap();
+        assert_eq!(p.dir.as_deref(), Some("/var/lib/stroem/pins"));
+        assert_eq!(p.keep_recent_per_workspace, Some(3));
+        let unknown = format!("{base}pin_store:\n  bogus: 1\n");
+        assert!(serde_yaml::from_str::<ServerConfig>(&unknown).is_err());
+    }
+
+    #[test]
+    fn pin_store_validation_rejects_empty_dir_and_huge_keep_recent() {
+        let base = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://x"
+log_storage:
+  local_dir: /tmp/logs
+worker_token: "0123456789abcdef0123456789abcdef"
+"#;
+        let mut cfg: ServerConfig = serde_yaml::from_str(base).unwrap();
+        cfg.pin_store = Some(PinStoreSection {
+            dir: Some(String::new()),
+            keep_recent_per_workspace: None,
+        });
+        assert!(cfg
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("pin_store.dir"));
+        cfg.pin_store = Some(PinStoreSection {
+            dir: None,
+            keep_recent_per_workspace: Some(MAX_PIN_KEEP_RECENT + 1),
+        });
+        assert!(cfg
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("keep_recent_per_workspace"));
+        cfg.pin_store = Some(PinStoreSection {
+            dir: None,
+            keep_recent_per_workspace: Some(0),
+        });
+        cfg.validate().unwrap();
     }
 
     #[test]

@@ -730,6 +730,40 @@ impl JobRepo {
         Ok(rows)
     }
 
+    /// `(workspace, commit)` pins the server must keep loaded (spec § 10):
+    /// 1. every non-terminal PINNED job's own commit;
+    /// 2. the action pin (`action_ref`) and the task pin (`task_ref`) of
+    ///    every step in a non-terminal job;
+    /// 3. failed pinned top-level jobs still owed a task-level retry
+    ///    (the same one-hour window as `tarball_keep_revisions`).
+    pub async fn pin_keep_set(pool: &PgPool) -> Result<Vec<(String, String)>> {
+        let rows = sqlx::query_as::<_, (String, String)>(
+            "SELECT workspace, revision FROM job \
+              WHERE status IN ('pending', 'running') \
+                AND git_ref IS NOT NULL AND revision IS NOT NULL \
+             UNION \
+             SELECT s.action_workspace, s.action_revision FROM job_step s \
+               JOIN job j ON j.job_id = s.job_id \
+              WHERE j.status IN ('pending', 'running') AND s.action_ref IS NOT NULL \
+                AND s.action_workspace IS NOT NULL AND s.action_revision IS NOT NULL \
+             UNION \
+             SELECT s.task_workspace, s.task_revision FROM job_step s \
+               JOIN job j ON j.job_id = s.job_id \
+              WHERE j.status IN ('pending', 'running') AND s.task_ref IS NOT NULL \
+                AND s.task_workspace IS NOT NULL AND s.task_revision IS NOT NULL \
+             UNION \
+             SELECT workspace, revision FROM job \
+              WHERE status = 'failed' AND git_ref IS NOT NULL AND revision IS NOT NULL \
+                AND parent_job_id IS NULL AND retry_job_id IS NULL \
+                AND max_retries IS NOT NULL AND retry_attempt < max_retries \
+                AND completed_at > NOW() - INTERVAL '1 hour'",
+        )
+        .fetch_all(pool)
+        .await
+        .context("query pin keep set")?;
+        Ok(rows)
+    }
+
     /// Count jobs with optional workspace/status/source_type/search filters (mirrors `list()`)
     pub async fn count(
         pool: &PgPool,

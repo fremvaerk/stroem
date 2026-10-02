@@ -1312,6 +1312,7 @@ async fn setup() -> Result<(
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let workspace = test_workspace();
@@ -1529,6 +1530,7 @@ async fn setup_two_workspaces() -> Result<(
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let mgr = WorkspaceManager::from_configs(vec![
@@ -1886,6 +1888,7 @@ async fn setup_shared_connections() -> Result<(
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
     let mgr = WorkspaceManager::from_configs(vec![
         ("caller".to_string(), caller, None),
@@ -2495,6 +2498,7 @@ async fn setup_with_task_needing_missing_connection() -> Result<(
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let workspace = test_workspace_with_missing_connection();
@@ -2905,6 +2909,7 @@ async fn setup_with_library_dotted_action() -> Result<(
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let mgr = WorkspaceManager::from_config("default", workspace);
@@ -3774,6 +3779,7 @@ async fn setup_cross_task_workspaces(
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     if opts.auth {
@@ -6374,6 +6380,7 @@ async fn test_task_detail_connections() -> Result<()> {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     // Build a workspace with connections
@@ -8631,6 +8638,7 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let mgr = WorkspaceManager::from_config("default", workspace);
@@ -8911,6 +8919,7 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let mgr = WorkspaceManager::from_config("default", workspace);
@@ -9157,6 +9166,7 @@ async fn setup_with_auth() -> Result<(
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     // Seed initial user
@@ -11534,6 +11544,7 @@ async fn setup_multi_workspace_with(
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let ws_default = test_workspace();
@@ -11829,6 +11840,7 @@ async fn setup_with_auth_and_acl() -> Result<(
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     // Seed three users.
@@ -12467,6 +12479,7 @@ async fn test_workspace_tarball_download() -> Result<()> {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let mgr = WorkspaceManager::new(
@@ -12644,6 +12657,7 @@ async fn test_tarball_mismatched_etag_returns_200() -> Result<()> {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let mgr = WorkspaceManager::new(
@@ -12739,6 +12753,7 @@ async fn test_tarball_bare_etag_matches() -> Result<()> {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let mgr = WorkspaceManager::new(
@@ -12850,6 +12865,7 @@ async fn test_tarball_stale_etag_after_workspace_change() -> Result<()> {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let mgr = WorkspaceManager::new(
@@ -12996,6 +13012,7 @@ async fn test_tarball_etag_header_format() -> Result<()> {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let mgr = WorkspaceManager::new(
@@ -13916,6 +13933,7 @@ async fn test_config_returns_oidc_providers_with_auth() -> Result<()> {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let workspace = test_workspace();
@@ -14010,6 +14028,7 @@ async fn test_config_returns_has_internal_auth_true() -> Result<()> {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let workspace = test_workspace();
@@ -14088,6 +14107,7 @@ async fn test_config_returns_has_internal_auth_false_oidc_only() -> Result<()> {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let workspace = test_workspace();
@@ -14288,6 +14308,7 @@ fn hook_test_state(pool: PgPool, workspace: &WorkspaceConfig) -> AppState {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
     let mgr = WorkspaceManager::from_config("default", workspace.clone());
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
@@ -14333,6 +14354,7 @@ fn hook_test_state_with_default_step_timeout(
         default_step_timeout,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
     let mgr = WorkspaceManager::from_config("default", workspace.clone());
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
@@ -16549,6 +16571,7 @@ async fn setup_recovery() -> Result<(
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let workspace = test_workspace();
@@ -17059,6 +17082,7 @@ async fn test_recovery_propagates_to_parent() -> Result<()> {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let workspace = task_action_test_workspace();
@@ -18839,6 +18863,7 @@ async fn test_connection_input_passthrough_at_claim() -> Result<()> {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let mut workspace = WorkspaceConfig::default();
@@ -19212,6 +19237,7 @@ async fn setup_sync_webhook() -> Result<(
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let mgr = WorkspaceManager::from_config("default", workspace);
@@ -19778,6 +19804,7 @@ async fn test_scheduler_fires_cron_trigger() -> Result<()> {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
     let sched_log_storage = LogStorage::new(&sched_config.log_storage.local_dir);
     let sched_state = AppState::new(
@@ -19870,6 +19897,7 @@ async fn test_scheduler_disabled_trigger_does_not_fire() -> Result<()> {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
     let sched_log_storage = LogStorage::new(&sched_config.log_storage.local_dir);
     let sched_state = AppState::new(
@@ -19944,6 +19972,7 @@ async fn test_scheduler_passes_trigger_input_to_job() -> Result<()> {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
     let sched_log_storage = LogStorage::new(&sched_config.log_storage.local_dir);
     let sched_state = AppState::new(
@@ -20024,6 +20053,7 @@ async fn test_scheduler_clean_shutdown() -> Result<()> {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
     let sched_log_storage = LogStorage::new(&sched_config.log_storage.local_dir);
     let sched_state = AppState::new(
@@ -20438,6 +20468,7 @@ async fn test_multi_workspace_tarball_download() -> Result<()> {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let mgr =
@@ -20689,6 +20720,7 @@ async fn setup_recovery_with_unmatched_timeout(
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let workspace = test_workspace();
@@ -22071,6 +22103,7 @@ async fn test_scheduler_triggered_job_stores_revision() -> Result<()> {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
     let sched_log_storage = LogStorage::new(&sched_config.log_storage.local_dir);
     let sched_state = AppState::new(
@@ -22280,6 +22313,7 @@ fn revision_test_state(pool: PgPool, workspace: WorkspaceConfig) -> AppState {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let src: Arc<dyn stroem_server::workspace::WorkspaceSource> =
@@ -22945,6 +22979,7 @@ async fn setup_with_workspace(
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let mgr = WorkspaceManager::from_config("default", workspace);
@@ -23007,6 +23042,7 @@ async fn setup_state_with_workspace(
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let mgr = WorkspaceManager::from_config("default", workspace);
@@ -23962,6 +23998,7 @@ async fn setup_event_source() -> Result<(
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let workspace = event_source_workspace();
@@ -24481,6 +24518,7 @@ async fn test_emit_endpoint_disabled_trigger() -> Result<()> {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let workspace = disabled_event_source_workspace();
@@ -24619,6 +24657,7 @@ async fn setup_event_source_with_workspace(
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let mgr = WorkspaceManager::from_config("default", workspace);
@@ -30779,6 +30818,7 @@ async fn setup_with_state_storage() -> Result<(
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let workspace = test_workspace();
@@ -31983,6 +32023,7 @@ async fn setup_with_log_archive() -> Result<(
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let workspace = test_workspace();

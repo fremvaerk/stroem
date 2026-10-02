@@ -246,6 +246,7 @@ async fn build_test_app(workspace_name: &str, workspace: WorkspaceConfig) -> Res
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let mgr = WorkspaceManager::from_config(workspace_name, workspace);

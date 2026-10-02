@@ -38,6 +38,11 @@ async fn run_loop(state: AppState, cancel: CancellationToken) {
             }
         }
 
+        // Every replica, NOT leader-gated: the pin store is replica-local
+        // (spec § 10). One bounded query plus in-memory work per tick.
+        pin_eviction_once(&state).await;
+        state.background_tasks.recovery_beat.beat();
+
         // HA gate: only the leader sweeps. Sweep phases are NOT idempotent:
         // failure transitions are atomic, but a duplicate failure report for the
         // same step consumes another retry (fail_step with expected = [] does not
@@ -480,6 +485,29 @@ async fn tarball_cache_cleanup(state: &AppState) {
     });
 }
 
+/// Evict pins no active job holds (`JobRepo::pin_keep_set`), keeping the
+/// recently used ones and any a caller still holds (`PinStore::evict`).
+/// A folder-only server has no pin sources and skips the query.
+#[tracing::instrument(skip_all)]
+pub async fn pin_eviction_once(state: &AppState) {
+    let pins = state.workspaces.pins_arc();
+    if !pins.has_sources() {
+        return;
+    }
+    let keep: std::collections::HashSet<(String, String)> =
+        match JobRepo::pin_keep_set(&state.pool).await {
+            Ok(rows) => rows.into_iter().collect(),
+            Err(e) => {
+                tracing::warn!("Pin eviction: failed to query pins to keep: {:#}", e);
+                return;
+            }
+        };
+    // `evict` removes directories: never on a runtime thread.
+    if let Err(e) = tokio::task::spawn_blocking(move || pins.evict(&keep)).await {
+        tracing::warn!("Pin eviction task panicked: {:#}", e);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -534,6 +562,7 @@ mod tests {
             default_step_timeout: None,
             default_job_timeout: None,
             workspace_reload: Default::default(),
+            pin_store: None,
         };
 
         let ws_config = WorkspaceConfig::new();
@@ -617,6 +646,7 @@ mod tests {
             default_step_timeout: None,
             default_job_timeout: None,
             workspace_reload: Default::default(),
+            pin_store: None,
         };
 
         let ws_config = WorkspaceConfig::new();

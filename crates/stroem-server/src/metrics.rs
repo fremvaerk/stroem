@@ -147,6 +147,18 @@ pub async fn gather_gauges(state: &AppState) {
                 .set(age.as_secs_f64());
         }
     }
+    // Zero for a pin-source workspace with nothing cached, so the series does
+    // not go stale-absent after an eviction.
+    let cached: std::collections::HashMap<String, usize> = state
+        .workspaces
+        .pins()
+        .cached_counts()
+        .into_iter()
+        .collect();
+    for workspace in state.workspaces.pins().source_names() {
+        let count = cached.get(&workspace).copied().unwrap_or(0);
+        gauge!(STROEM_PINS_CACHED, "workspace" => workspace).set(count as f64);
+    }
     gauge!(STROEM_WORKSPACE_LOAD_PERMITS_AVAILABLE)
         .set(state.workspaces.load_permits_available() as f64);
 

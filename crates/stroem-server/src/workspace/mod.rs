@@ -31,6 +31,8 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
+use pins::{PinRef, PinStore, Pinned};
+
 use crate::config::{GitAuthConfig, LibraryDef, WorkspaceSourceDef};
 
 /// Upper bound on concurrent loads: startup loads, and every watcher load (a
@@ -90,6 +92,54 @@ impl WorkspaceSource for InMemorySource {
     }
 }
 
+/// A workspace config: the live published one, or a pinned commit's.
+#[derive(Clone)]
+pub enum ConfigHandle {
+    Live(Arc<WorkspaceConfig>),
+    Pinned(Arc<Pinned>),
+}
+
+impl std::fmt::Debug for ConfigHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Live(_) => f.write_str("ConfigHandle::Live"),
+            Self::Pinned(p) => write!(f, "ConfigHandle::Pinned({p:?})"),
+        }
+    }
+}
+
+impl ConfigHandle {
+    pub fn config(&self) -> &WorkspaceConfig {
+        match self {
+            Self::Live(c) => c,
+            Self::Pinned(p) => &p.config,
+        }
+    }
+
+    pub fn arc(&self) -> Arc<WorkspaceConfig> {
+        match self {
+            Self::Live(c) => Arc::clone(c),
+            Self::Pinned(p) => Arc::clone(&p.config),
+        }
+    }
+
+    /// The pin's OWN-workspace secret values (`Pinned::secret_values`);
+    /// empty for the live config. NOT sufficient for redaction on its
+    /// own: it misses `secret: true` properties of connections typed in
+    /// another workspace. Every redaction outlet uses
+    /// `WorkspaceManager::pin_redaction_values` instead (spec § 9).
+    pub fn pinned_own_secret_values(&self) -> &[String] {
+        match self {
+            Self::Live(_) => &[],
+            Self::Pinned(p) => &p.secret_values,
+        }
+    }
+
+    pub fn is_pinned(&self) -> bool {
+        matches!(self, Self::Pinned(_))
+    }
+}
+
 /// Manages multiple workspaces
 #[derive(Debug)]
 pub struct WorkspaceManager {
@@ -105,6 +155,9 @@ pub struct WorkspaceManager {
     settings: ReloadSettings,
     /// Shared across startup loads and every watcher load (spec § 4.5).
     load_permits: Arc<Semaphore>,
+    /// Pinned refs (spec § 5). `PinStore::disabled()` until `main`
+    /// installs the real store with `with_pin_store`.
+    pins: Arc<PinStore>,
 }
 
 impl WorkspaceManager {
@@ -270,6 +323,7 @@ impl WorkspaceManager {
             triggers_disabled,
             settings,
             load_permits,
+            pins: Arc::new(PinStore::disabled()),
         }
     }
 
@@ -291,6 +345,7 @@ impl WorkspaceManager {
             triggers_disabled: HashSet::new(),
             settings: ReloadSettings::default(),
             load_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_WORKSPACE_LOADS)),
+            pins: Arc::new(PinStore::disabled()),
         }
     }
 
@@ -318,6 +373,7 @@ impl WorkspaceManager {
             triggers_disabled: HashSet::new(),
             settings: ReloadSettings::default(),
             load_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_WORKSPACE_LOADS)),
+            pins: Arc::new(PinStore::disabled()),
         }
     }
 
@@ -348,6 +404,7 @@ impl WorkspaceManager {
             triggers_disabled: HashSet::new(),
             settings: ReloadSettings::default(),
             load_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_WORKSPACE_LOADS)),
+            pins: Arc::new(PinStore::disabled()),
         }
     }
 
@@ -467,6 +524,72 @@ impl WorkspaceManager {
     pub fn with_triggers_disabled(mut self, name: &str) -> Self {
         self.triggers_disabled.insert(name.to_string());
         self
+    }
+
+    /// Builder: install the pin store (main, after loading workspaces;
+    /// tests with a `file://` remote).
+    pub fn with_pin_store(mut self, store: PinStore) -> Self {
+        self.pins = Arc::new(store);
+        self
+    }
+
+    pub fn pins(&self) -> &PinStore {
+        &self.pins
+    }
+
+    pub fn pins_arc(&self) -> Arc<PinStore> {
+        Arc::clone(&self.pins)
+    }
+
+    pub fn resolved_libraries(&self) -> Arc<HashMap<String, ResolvedLibrary>> {
+        Arc::clone(&self.resolved_libraries)
+    }
+
+    /// The config to read for a job or step. No pin → today's live
+    /// config (`Ok(None)` when it is unavailable). A pin →
+    /// `PinStore::ensure`. Its errors are `PinError`s wrapped in
+    /// `anyhow`; classify them with `downcast_ref::<PinError>()`.
+    #[tracing::instrument(skip(self, pin), fields(workspace = %ws))]
+    pub async fn config_for(&self, ws: &str, pin: Option<&PinRef>) -> Result<Option<ConfigHandle>> {
+        match pin {
+            None => Ok(self.get_config(ws).await.map(ConfigHandle::Live)),
+            Some(p) => {
+                let pinned = self
+                    .pins
+                    .ensure(ws, &p.commit)
+                    .await
+                    .map_err(anyhow::Error::new)?;
+                Ok(Some(ConfigHandle::Pinned(pinned)))
+            }
+        }
+    }
+
+    /// THE complete redaction set for one pin of `ws`, and the one every
+    /// outlet must use (canonical, spec § 9; reconcile R5). It holds:
+    /// - the pinned config's `secrets`;
+    /// - `secret: true` properties of its connections typed in ANY
+    ///   workspace (foreign types resolved against the LIVE configs of
+    ///   the other workspaces);
+    /// - every other live workspace's values.
+    ///
+    /// Never redact with `Pinned::secret_values` or
+    /// `ConfigHandle::pinned_own_secret_values()` alone. The per-job
+    /// redaction set and `ClaimFailure.pin_secrets` union this over
+    /// every pin the job touches.
+    pub async fn pin_redaction_values(&self, ws: &str, pinned: &Pinned) -> Vec<String> {
+        let others: Vec<(String, Arc<WorkspaceConfig>)> = self
+            .get_all_configs()
+            .await
+            .into_iter()
+            .filter(|(name, _)| name != ws)
+            .collect();
+        let set = crate::workspace_set::WorkspaceSet::from_parts(
+            ws,
+            Some(pinned.config.as_ref()),
+            others,
+            self.configured_names(),
+        );
+        crate::workspace_set::collect_redaction_values(&set)
     }
 
     /// Every workspace name the server was CONFIGURED with, whether or not it
@@ -744,8 +867,137 @@ pub struct WorkspaceInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workspace::git_test_support::{bare_remote, workflow};
+    use crate::workspace::pins::*;
     use std::fs;
     use tempfile::TempDir;
+
+    fn pin_manager(
+        name: &str,
+        live: WorkspaceConfig,
+        url: &str,
+    ) -> (tempfile::TempDir, WorkspaceManager) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = PinStore::open(
+            PinStoreConfig {
+                dir: dir.path().join("pins"),
+                keep_recent_per_workspace: 0,
+            },
+            HashMap::from([(
+                name.to_string(),
+                PinSource {
+                    url: url.to_string(),
+                    auth: None,
+                    poll_interval: Duration::from_secs(60),
+                },
+            )]),
+            Arc::new(HashMap::new()),
+            ReloadSettings::default(),
+        )
+        .unwrap();
+        (
+            dir,
+            WorkspaceManager::from_config(name, live).with_pin_store(store),
+        )
+    }
+
+    #[tokio::test]
+    async fn config_for_without_a_pin_is_the_live_config() {
+        let live = crate::workspace::test_support::config_with("live_action");
+        let mgr = WorkspaceManager::from_config("w", live);
+        let handle = mgr.config_for("w", None).await.unwrap().unwrap();
+        assert!(!handle.is_pinned());
+        assert!(handle.config().actions.contains_key("live_action"));
+        assert!(handle.pinned_own_secret_values().is_empty());
+        assert!(mgr.config_for("missing", None).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn config_for_with_a_pin_loads_that_commit() {
+        let (_r, url, c1) = bare_remote(&[("wf.yaml", &workflow("v1"))]);
+        let (_d, mgr) = pin_manager(
+            "w",
+            crate::workspace::test_support::config_with("live_action"),
+            &url,
+        );
+        let pin = PinRef {
+            git_ref: "main".into(),
+            commit: c1,
+        };
+        let handle = mgr.config_for("w", Some(&pin)).await.unwrap().unwrap();
+        assert!(handle.is_pinned());
+        assert!(handle.config().actions.contains_key("greet"));
+        assert!(!handle.config().actions.contains_key("live_action"));
+    }
+
+    #[tokio::test]
+    async fn config_for_with_a_pin_on_a_non_git_workspace_is_not_git() {
+        let mgr = WorkspaceManager::from_config("w", WorkspaceConfig::new());
+        let pin = PinRef {
+            git_ref: "main".into(),
+            commit: "a".repeat(40),
+        };
+        let err = mgr.config_for("w", Some(&pin)).await.unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<PinError>(),
+            Some(&PinError::NotGit {
+                workspace: "w".into()
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn pin_redaction_values_cover_foreign_typed_connections_of_the_pin() {
+        let pinned_yaml = format!(
+            "{}secrets:\n  k: pinned-secret-value\n\
+             connections:\n  svc:\n    type: other.api\n    token: pinned-token-value\n",
+            workflow("v1")
+        );
+        let (_r, url, c1) = bare_remote(&[("wf.yaml", &pinned_yaml)]);
+        let other: WorkspaceConfig = serde_yaml::from_str(
+            "secrets:\n  o: other-live-secret\n\
+             connection_types:\n  api:\n    token:\n      type: string\n      secret: true\n",
+        )
+        .unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = PinStore::open(
+            PinStoreConfig {
+                dir: dir.path().join("pins"),
+                keep_recent_per_workspace: 0,
+            },
+            HashMap::from([(
+                "w".to_string(),
+                PinSource {
+                    url,
+                    auth: None,
+                    poll_interval: Duration::from_secs(60),
+                },
+            )]),
+            Arc::new(HashMap::new()),
+            ReloadSettings::default(),
+        )
+        .unwrap();
+        let mgr = WorkspaceManager::from_configs(vec![
+            ("w".into(), WorkspaceConfig::new(), None),
+            ("other".into(), other, None),
+        ])
+        .with_pin_store(store);
+        let pinned = mgr.pins().ensure("w", &c1).await.unwrap();
+        assert!(
+            !pinned
+                .secret_values
+                .contains(&"pinned-token-value".to_string()),
+            "local-only set cannot see a foreign type"
+        );
+        let values = mgr.pin_redaction_values("w", &pinned).await;
+        for v in [
+            "pinned-secret-value",
+            "pinned-token-value",
+            "other-live-secret",
+        ] {
+            assert!(values.contains(&v.to_string()), "missing {v}: {values:?}");
+        }
+    }
 
     fn create_test_workspace_dir() -> TempDir {
         let temp = TempDir::new().unwrap();

@@ -234,6 +234,7 @@ impl TestEnv {
             default_step_timeout: None,
             default_job_timeout: None,
             workspace_reload: Default::default(),
+            pin_store: None,
         };
 
         // 4. Load workspaces using real FolderSource
