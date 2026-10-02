@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use stroem_common::models::workflow::WorkspaceConfig;
 use stroem_common::template::{
-    prepare_action_input, render_env_map, render_input_map, render_json_strings, render_string_opt,
+    prepare_action_input_roles, render_env_map, render_input_map, render_json_strings,
+    render_string_opt, RoleConfig, RoleScope,
 };
 use stroem_db::JobStepRow;
 
@@ -18,7 +19,9 @@ pub struct PrepareContext<'a> {
     /// (the action body's owner) instead of the caller `workspace`. `None` ⇒
     /// local step: resolve against `workspace` (byte-for-byte today's behaviour).
     pub action_workspace: Option<&'a WorkspaceConfig>,
-    /// Name of the owner workspace when `action_workspace` is set.
+    /// Name of the owner workspace when `action_workspace` is set. `Some`
+    /// with `action_workspace: None` means the owner is not loaded: input
+    /// preparation fails rather than resolving against the caller.
     pub action_workspace_name: Option<&'a str>,
     /// Snapshot of all workspace configs for cross-workspace connection resolution.
     pub lookup: &'a dyn stroem_common::template::WorkspaceLookup,
@@ -123,17 +126,32 @@ pub fn prepare_step_action_input(
     // (e.g. a connection input), but the job-level input has it resolved.
     merge_missing_action_fields(&mut input_val, ctx.job_input, action.input.keys());
 
-    let prepared = match ctx.action_workspace_name {
-        Some(owner_name) => stroem_common::template::prepare_action_input_cross(
-            &input_val,
-            &action.input,
-            ctx.lookup,
-            ctx.lookup.local_name(),
-            owner_name,
-        ),
-        None => prepare_action_input(&input_val, &action.input, ctx.lookup),
-    }
-    .context("Failed to prepare action input")?;
+    // Role-scoped (git-refs spec § 7.4): the caller is the job's own config,
+    // the action owner the step's owner config (pinned or live) — never two
+    // commits of one workspace collapsed under one name. An owner whose config
+    // is not loaded fails; it never falls back to the caller's config.
+    let action_owner = match (ctx.action_workspace_name, ctx.action_workspace) {
+        (Some(workspace), Some(config)) => Some(RoleConfig { workspace, config }),
+        (Some(owner_name), None) => {
+            return Err(anyhow::anyhow!(
+                "action owner: workspace '{}' is not available",
+                owner_name
+            )
+            .context("Failed to prepare action input"));
+        }
+        (None, _) => None,
+    };
+    let roles = RoleScope {
+        caller: RoleConfig {
+            workspace: ctx.lookup.local_name(),
+            config: ctx.workspace,
+        },
+        action_owner,
+        task_owner: None,
+        others: ctx.lookup,
+    };
+    let prepared = prepare_action_input_roles(&input_val, &action.input, &roles)
+        .context("Failed to prepare action input")?;
     Ok(Some(prepared))
 }
 
@@ -1437,6 +1455,78 @@ mod tests {
         let err =
             prepare_step_action_input(Some(json!({"conn": "prod"})), &prep_unshared).unwrap_err();
         assert!(format!("{err:#}").contains("is not shared"), "{err:#}");
+    }
+
+    /// F47: a step whose owner workspace is known by name but whose config is
+    /// not loaded fails with the resolver's own "not available" message. It
+    /// never resolves against the caller's config, even when the caller has an
+    /// action and a connection of the same names (a ref'd `action: query` in
+    /// its own workspace).
+    #[test]
+    fn test_prepare_step_action_input_unloaded_owner_never_falls_back_to_caller() {
+        use crate::workspace_set::WorkspaceSet;
+        use stroem_common::models::workflow::{ConnectionDef, ConnectionTypeDef};
+
+        let mut query = make_action("script");
+        query
+            .input
+            .insert("conn".to_string(), make_input_field("pg"));
+        let mut task = TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow: HashMap::new(),
+            timeout: None,
+            retry: None,
+            on_success: vec![],
+            on_error: vec![],
+            on_suspended: vec![],
+            on_cancel: vec![],
+        };
+        task.flow.insert(
+            "s".to_string(),
+            make_flow_step(
+                "query",
+                HashMap::from([("conn".to_string(), json!("prod"))]),
+            ),
+        );
+        let mut caller = WorkspaceConfig::default();
+        caller.tasks.insert("t".to_string(), task);
+        caller.actions.insert("query".to_string(), query);
+        caller.connection_types.insert(
+            "pg".to_string(),
+            ConnectionTypeDef {
+                properties: HashMap::new(),
+            },
+        );
+        caller.connections.insert(
+            "prod".to_string(),
+            ConnectionDef {
+                connection_type: Some("pg".to_string()),
+                shared: false,
+                values: HashMap::from([("host".to_string(), json!("db.caller.internal"))]),
+            },
+        );
+
+        let set = WorkspaceSet::from_parts("A", Some(&caller), vec![], vec!["B".to_string()]);
+        let step = make_step_row("s", None);
+        let prep = PrepareContext {
+            workspace: &caller,
+            task_name: "t",
+            step: &step,
+            job_input: None,
+            action_workspace: None,
+            action_workspace_name: Some("B"),
+            lookup: &set,
+        };
+
+        let err = prepare_step_action_input(Some(json!({"conn": "prod"})), &prep).unwrap_err();
+        assert_eq!(
+            format!("{err:#}"),
+            "Failed to prepare action input: action owner: workspace 'B' is not available"
+        );
     }
 
     #[test]

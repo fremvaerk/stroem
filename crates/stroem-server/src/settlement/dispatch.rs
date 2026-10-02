@@ -9,7 +9,8 @@ use std::collections::HashMap;
 use stroem_common::models::job::{JobStatus, StepStatus};
 use stroem_common::models::workflow::{InputFieldDef, TaskDef, WorkspaceConfig};
 use stroem_common::template::{
-    merge_action_defaults, render_input_map, resolve_task_input_by_provenance,
+    merge_action_defaults, render_input_map, resolve_task_input_by_provenance_roles, RoleConfig,
+    RoleScope,
 };
 use stroem_db::{JobRepo, JobStepRepo};
 use uuid::Uuid;
@@ -400,15 +401,29 @@ async fn handle_task_steps_pass(
         };
 
         // 5. Connection resolution against the TASK's schema, by provenance.
+        //    Role-scoped (spec § 7.4): A, O and T may be one workspace at
+        //    different commits; each bucket reads its own role's config.
         let ws_set = WorkspaceSet::load(workspaces, &resolved.workspace, Some(t_cfg)).await;
-        let rendered_input = match resolve_task_input_by_provenance(
+        let roles = RoleScope {
+            caller: RoleConfig {
+                workspace: workspace_name,
+                config: workspace_config,
+            },
+            action_owner: Some(RoleConfig {
+                workspace: base_ws,
+                config: base_cfg,
+            }),
+            task_owner: Some(RoleConfig {
+                workspace: &resolved.workspace,
+                config: t_cfg,
+            }),
+            others: &ws_set,
+        };
+        let rendered_input = match resolve_task_input_by_provenance_roles(
             &caller_bucket,
             &default_bucket,
             &resolved.task.input,
-            &ws_set,
-            workspace_name,
-            base_ws,
-            &resolved.workspace,
+            &roles,
         ) {
             Ok(v) => v,
             Err(e) => {

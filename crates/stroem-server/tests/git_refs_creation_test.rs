@@ -486,3 +486,45 @@ async fn cold_replica_with_remote_down_answers_500_without_a_job_row() -> Result
     fx.etl.restore_remote();
     Ok(())
 }
+
+// ─── Task 10: role-scoped pre-check ────────────────────────────────────────
+
+#[tokio::test]
+async fn ref_step_literal_precheck_runs_against_owner_commit() -> Result<()> {
+    let fx = pinned_workspace_fixture(PinnedFixtureOpts::default()).await?;
+    // `release-db` exists only at release/2.3 — main has no connections at all.
+    cr_create_etl(&fx, "uses-release-db").await?;
+
+    let err = cr_create_etl(&fx, "uses-release-bad-db").await.unwrap_err();
+    assert!(format!("{err:#}").contains("does not exist"), "{err:#}");
+    Ok(())
+}
+
+/// `etl` release/2.3 plus two tasks whose LOCAL `query` step names a
+/// connection literally: `release-db` exists only at this commit (live main
+/// has no connections), `nope-db` nowhere.
+fn cr_etl_release_with_db_tasks() -> String {
+    format!(
+        "{ETL_RELEASE}  pinned-db:\n    flow:\n      run:\n        action: query\n        input:\n          \
+         db: release-db\n  pinned-bad-db:\n    flow:\n      run:\n        action: query\n        \
+         input:\n          db: nope-db\n"
+    )
+}
+
+/// A pinned job's own literals are pre-checked against the job's commit, not
+/// skipped and not checked against live main.
+#[tokio::test]
+async fn pinned_job_literal_precheck_runs_against_job_commit() -> Result<()> {
+    let fx = pinned_workspace_fixture(PinnedFixtureOpts {
+        etl_release: Some(cr_etl_release_with_db_tasks()),
+        ..Default::default()
+    })
+    .await?;
+    cr_create_pinned_etl(&fx, "pinned-db").await?;
+
+    let err = cr_create_pinned_etl(&fx, "pinned-bad-db")
+        .await
+        .unwrap_err();
+    assert!(format!("{err:#}").contains("does not exist"), "{err:#}");
+    Ok(())
+}

@@ -8,8 +8,7 @@ use stroem_common::models::workflow::{
     ActionDef, BackoffStrategy, FlowStep, TaskDef, WorkspaceConfig,
 };
 use stroem_common::template::{
-    merge_defaults, parse_qualified_ref, resolve_connection_inputs,
-    resolve_connection_inputs_scoped, ResolveScope,
+    merge_defaults, parse_qualified_ref, resolve_connection_inputs, RoleConfig, RoleScope,
 };
 use stroem_common::validation::{compute_required_ability, compute_required_tags, derive_runner};
 use stroem_db::{JobPinCols, JobRepo, JobRow, JobStepRepo, NewJobStep};
@@ -489,36 +488,40 @@ pub(crate) fn create_job_for_task_inner<'a>(
                         task_name
                     );
                 }
-                // Pinned task schemas are pre-checked by the role-scoped lookup
-                // (Task 10); the name-keyed lookup here would check the caller's
-                // literals against the wrong commit.
-                if pin.is_none() && job_pin.is_none() {
-                    precheck_task_step_literals(
-                        step_name,
-                        flow_step,
-                        &resolved,
-                        workspaces,
-                        workspace_name,
-                        base_cfg,
-                    )
-                    .await?;
-                }
+                precheck_task_step_literals(
+                    step_name,
+                    flow_step,
+                    &resolved,
+                    workspaces,
+                    RoleConfig {
+                        workspace: workspace_name,
+                        config: workspace_config,
+                    },
+                    base_cfg,
+                )
+                .await?;
                 task_pin = pin.map(|p| TaskPinStamp {
                     workspace: resolved.workspace.clone(),
                     git_ref: p.git_ref,
                     commit: p.commit,
                 });
-            } else if action_pin.is_none() && job_pin.is_none() {
-                // Same reason as above: a ref'd action or a pinned caller is
-                // pre-checked by the role-scoped lookup (Task 10).
-                precheck_literal_connection_inputs(
-                    step_name,
-                    flow_step,
-                    &action,
-                    &ws_set,
-                    workspace_name,
-                    action_workspace.as_deref(),
-                )?;
+            } else {
+                // Role-scoped (spec § 7.4): the job's own config is the
+                // caller, the action's owner config (pinned or live) its owner
+                // — the same roles the claim path resolves with.
+                let roles = RoleScope {
+                    caller: RoleConfig {
+                        workspace: workspace_name,
+                        config: workspace_config,
+                    },
+                    action_owner: action_workspace.as_deref().map(|ws| RoleConfig {
+                        workspace: ws,
+                        config: owner_cfg.as_deref().unwrap_or(workspace_config),
+                    }),
+                    task_owner: None,
+                    others: &ws_set,
+                };
+                precheck_literal_connection_inputs(step_name, flow_step, &action, &roles)?;
             }
 
             let status = if flow_step.for_each.is_some() {
@@ -1173,15 +1176,14 @@ async fn resolve_step_action(
 }
 
 /// Resolve the flow step's connection-typed inputs that are plain string
-/// literals (no `{{`), using the same scope the claim path will use, so an
-/// author mistake surfaces as a job-creation error instead of a failed step.
+/// literals (no `{{`), with the same role scope the claim path will use
+/// (spec § 7.4), so an author mistake surfaces as a job-creation error instead
+/// of a failed step.
 pub(crate) fn precheck_literal_connection_inputs(
     step_name: &str,
     flow_step: &FlowStep,
     action: &ActionDef,
-    set: &WorkspaceSet,
-    caller_ws: &str,
-    owner_ws: Option<&str>,
+    roles: &RoleScope<'_>,
 ) -> Result<()> {
     if flow_step.when.is_some() {
         // A `when`-guarded step may never run at all (condition false, or the
@@ -1191,7 +1193,6 @@ pub(crate) fn precheck_literal_connection_inputs(
         // claim time, only if the step is actually reached.
         return Ok(());
     }
-    let owner_ws = owner_ws.unwrap_or(caller_ws);
     let mut literal_schema = HashMap::new();
     let mut literal_values = serde_json::Map::new();
     for (field, def) in &action.input {
@@ -1208,19 +1209,13 @@ pub(crate) fn precheck_literal_connection_inputs(
     if literal_schema.is_empty() {
         return Ok(());
     }
-    resolve_connection_inputs_scoped(
+    let owner = roles.action_owner.unwrap_or(roles.caller);
+    stroem_common::template::resolve_bucket_by_role(
         &serde_json::Value::Object(literal_values),
         &literal_schema,
-        &ResolveScope {
-            lookup: set,
-            schema_ws: owner_ws,
-            value_ws: caller_ws,
-            fallback_ws: if owner_ws == caller_ws {
-                None
-            } else {
-                Some(owner_ws)
-            },
-        },
+        roles.caller,
+        owner,
+        roles.others,
     )
     .with_context(|| format!("step '{}': failed to resolve connection inputs", step_name))
     .map(|_| ())
@@ -1228,17 +1223,19 @@ pub(crate) fn precheck_literal_connection_inputs(
 
 /// Creation-time pre-check for a `type: task` step (spec § 3.2 item 3): the
 /// caller's LITERAL values for the TASK's connection-typed inputs are checked
-/// with the same scope dispatch will use (caller first, task owner if shared),
-/// including the cross-workspace shape rule. `when`-guarded steps are not
-/// pre-checked (the step may never run). The error is wrapped so the
-/// classifier's "resolve connection" phrase answers 400; an unavailable owner
-/// inside the chain still answers 500.
+/// with the same role scope dispatch will use (spec § 7.4). `caller` is the
+/// job's own config (pinned or live); the task owner answers with `resolved`'s
+/// config at its pin. Caller first, then the task owner — gated by `shared`
+/// across a workspace boundary — including the cross-workspace shape rule.
+/// `when`-guarded steps are not pre-checked (the step may never run). The
+/// error is wrapped so the classifier's "resolve connection" phrase answers
+/// 400; an unavailable owner inside the chain still answers 500.
 pub(crate) async fn precheck_task_step_literals(
     step_name: &str,
     flow_step: &FlowStep,
     resolved: &ResolvedTask,
     workspaces: &WorkspaceManager,
-    caller_ws: &str,
+    caller: RoleConfig<'_>,
     base_cfg: &WorkspaceConfig,
 ) -> Result<()> {
     if flow_step.when.is_some() {
@@ -1262,14 +1259,20 @@ pub(crate) async fn precheck_task_step_literals(
     }
     let t_cfg = resolved.config(base_cfg);
     let set = WorkspaceSet::load(workspaces, &resolved.workspace, Some(t_cfg)).await;
-    stroem_common::template::resolve_task_input_by_provenance(
+    let roles = RoleScope {
+        caller,
+        action_owner: None,
+        task_owner: Some(RoleConfig {
+            workspace: &resolved.workspace,
+            config: t_cfg,
+        }),
+        others: &set,
+    };
+    stroem_common::template::resolve_task_input_by_provenance_roles(
         &serde_json::Value::Object(literals),
         &serde_json::json!({}),
         &resolved.task.input,
-        &set,
-        caller_ws,
-        caller_ws,
-        &resolved.workspace,
+        &roles,
     )
     .with_context(|| format!("step '{}': failed to resolve connection inputs", step_name))
     .map(|_| ())
@@ -1317,6 +1320,15 @@ mod tests {
             vec![("owner".to_string(), Arc::new(owner))],
             vec![],
         );
+        let roles = RoleScope {
+            caller: RoleConfig {
+                workspace: "caller",
+                config: &caller,
+            },
+            action_owner: None,
+            task_owner: None,
+            others: &set,
+        };
 
         let mut action: ActionDef = serde_yaml::from_str("type: script\nscript: echo").unwrap();
         action.input.insert(
@@ -1332,29 +1344,14 @@ mod tests {
         };
 
         // Literal, unshared → error mentioning "is not shared"
-        let err = precheck_literal_connection_inputs(
-            "s",
-            &step("owner.private"),
-            &action,
-            &set,
-            "caller",
-            None,
-        )
-        .unwrap_err();
+        let err = precheck_literal_connection_inputs("s", &step("owner.private"), &action, &roles)
+            .unwrap_err();
         assert!(format!("{err:#}").contains("is not shared"), "{err:#}");
         // Literal, shared → ok
-        precheck_literal_connection_inputs("s", &step("owner.open"), &action, &set, "caller", None)
-            .unwrap();
+        precheck_literal_connection_inputs("s", &step("owner.open"), &action, &roles).unwrap();
         // Templated → skipped (no error even though it would not resolve)
-        precheck_literal_connection_inputs(
-            "s",
-            &step("{{ input.pick }}"),
-            &action,
-            &set,
-            "caller",
-            None,
-        )
-        .unwrap();
+        precheck_literal_connection_inputs("s", &step("{{ input.pick }}"), &action, &roles)
+            .unwrap();
     }
 
     #[test]
@@ -1387,6 +1384,15 @@ mod tests {
             vec![("owner".to_string(), Arc::new(owner))],
             vec![],
         );
+        let roles = RoleScope {
+            caller: RoleConfig {
+                workspace: "caller",
+                config: &caller,
+            },
+            action_owner: None,
+            task_owner: None,
+            others: &set,
+        };
 
         let mut action: ActionDef = serde_yaml::from_str("type: script\nscript: echo").unwrap();
         action.input.insert(
@@ -1404,7 +1410,7 @@ mod tests {
             serde_yaml::from_str("action: a\ninput:\n  conn: \"owner.private\"").unwrap();
         step.when = Some("input.flag".to_string());
 
-        precheck_literal_connection_inputs("s", &step, &action, &set, "caller", None).unwrap();
+        precheck_literal_connection_inputs("s", &step, &action, &roles).unwrap();
     }
 
     fn cfg_with_task(task: &str) -> WorkspaceConfig {
@@ -1617,9 +1623,19 @@ mod tests {
         let mut step = deploy_step("  db: {}");
         step.when = Some("input.flag".to_string());
 
-        precheck_task_step_literals("s", &step, &resolved, &mgr, "A", &a_cfg)
-            .await
-            .unwrap();
+        precheck_task_step_literals(
+            "s",
+            &step,
+            &resolved,
+            &mgr,
+            RoleConfig {
+                workspace: "A",
+                config: &a_cfg,
+            },
+            &a_cfg,
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -1633,9 +1649,19 @@ mod tests {
         };
         let step = deploy_step("  db: \"pg-local\"");
 
-        precheck_task_step_literals("s", &step, &resolved, &mgr, "A", &a_cfg)
-            .await
-            .unwrap();
+        precheck_task_step_literals(
+            "s",
+            &step,
+            &resolved,
+            &mgr,
+            RoleConfig {
+                workspace: "A",
+                config: &a_cfg,
+            },
+            &a_cfg,
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -1649,14 +1675,34 @@ mod tests {
         };
 
         let shared_step = deploy_step("  db: \"pg-prod\"");
-        precheck_task_step_literals("s", &shared_step, &resolved, &mgr, "A", &a_cfg)
-            .await
-            .unwrap();
+        precheck_task_step_literals(
+            "s",
+            &shared_step,
+            &resolved,
+            &mgr,
+            RoleConfig {
+                workspace: "A",
+                config: &a_cfg,
+            },
+            &a_cfg,
+        )
+        .await
+        .unwrap();
 
         let unshared_step = deploy_step("  db: \"pg-private\"");
-        let err = precheck_task_step_literals("s", &unshared_step, &resolved, &mgr, "A", &a_cfg)
-            .await
-            .unwrap_err();
+        let err = precheck_task_step_literals(
+            "s",
+            &unshared_step,
+            &resolved,
+            &mgr,
+            RoleConfig {
+                workspace: "A",
+                config: &a_cfg,
+            },
+            &a_cfg,
+        )
+        .await
+        .unwrap_err();
         assert!(
             format!("{err:#}").contains("is not shared"),
             "chain was: {err:#}"
@@ -1677,9 +1723,19 @@ mod tests {
         };
 
         let object_step = deploy_step("  db: {}");
-        let err = precheck_task_step_literals("s", &object_step, &resolved, &mgr, "A", &a_cfg)
-            .await
-            .unwrap_err();
+        let err = precheck_task_step_literals(
+            "s",
+            &object_step,
+            &resolved,
+            &mgr,
+            RoleConfig {
+                workspace: "A",
+                config: &a_cfg,
+            },
+            &a_cfg,
+        )
+        .await
+        .unwrap_err();
         assert!(
             format!("{err:#}")
                 .contains("a connection passed across workspaces must be a connection name"),
@@ -1690,9 +1746,19 @@ mod tests {
             .contains("failed to resolve connection inputs"));
 
         let null_step = deploy_step("  db: null");
-        let err = precheck_task_step_literals("s", &null_step, &resolved, &mgr, "A", &a_cfg)
-            .await
-            .unwrap_err();
+        let err = precheck_task_step_literals(
+            "s",
+            &null_step,
+            &resolved,
+            &mgr,
+            RoleConfig {
+                workspace: "A",
+                config: &a_cfg,
+            },
+            &a_cfg,
+        )
+        .await
+        .unwrap_err();
         assert!(
             format!("{err:#}")
                 .contains("a connection passed across workspaces must be a connection name"),
@@ -1717,9 +1783,19 @@ mod tests {
         };
         let step = deploy_step("  db: {}");
 
-        precheck_task_step_literals("s", &step, &resolved, &mgr, "T", &t_cfg)
-            .await
-            .unwrap();
+        precheck_task_step_literals(
+            "s",
+            &step,
+            &resolved,
+            &mgr,
+            RoleConfig {
+                workspace: "T",
+                config: &t_cfg,
+            },
+            &t_cfg,
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -1733,9 +1809,19 @@ mod tests {
         };
         let step = deploy_step("  db: \"{{ prev.output.db }}\"");
 
-        precheck_task_step_literals("s", &step, &resolved, &mgr, "A", &a_cfg)
-            .await
-            .unwrap();
+        precheck_task_step_literals(
+            "s",
+            &step,
+            &resolved,
+            &mgr,
+            RoleConfig {
+                workspace: "A",
+                config: &a_cfg,
+            },
+            &a_cfg,
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -1751,8 +1837,81 @@ mod tests {
         // considered, regardless of the cross-workspace boundary rule.
         let step = deploy_step("  name: {}");
 
-        precheck_task_step_literals("s", &step, &resolved, &mgr, "A", &a_cfg)
+        precheck_task_step_literals(
+            "s",
+            &step,
+            &resolved,
+            &mgr,
+            RoleConfig {
+                workspace: "A",
+                config: &a_cfg,
+            },
+            &a_cfg,
+        )
+        .await
+        .unwrap();
+    }
+
+    /// Spec § 7.4: the caller and the task owner are ONE workspace at two
+    /// commits. A caller literal resolves in the caller's commit first, then
+    /// falls back UNGATED to the task owner's commit. The name-keyed set
+    /// answered both roles with the task owner's commit.
+    #[tokio::test]
+    async fn precheck_task_step_literals_same_workspace_two_commits_reads_both() {
+        use stroem_common::models::workflow::{ConnectionDef, ConnectionTypeDef};
+
+        let (mgr, _a_cfg, t_cfg) = precheck_task_manager();
+        // T at the job's own commit: only `pg-x`.
+        let mut t_at_x = WorkspaceConfig::default();
+        t_at_x.connection_types.insert(
+            "pg".to_string(),
+            ConnectionTypeDef {
+                properties: Default::default(),
+            },
+        );
+        t_at_x.connections.insert(
+            "pg-x".to_string(),
+            ConnectionDef {
+                connection_type: Some("pg".into()),
+                shared: false,
+                values: Default::default(),
+            },
+        );
+        // The task is read at another commit of T (`t_cfg`: `pg-prod`,
+        // unshared `pg-private`).
+        let resolved = ResolvedTask {
+            workspace: "T".to_string(),
+            task_name: "deploy".to_string(),
+            task: t_cfg.tasks.get("deploy").unwrap().clone(),
+            config: OwnerConfig::Foreign(Arc::new(t_cfg.clone())),
+        };
+        let caller = RoleConfig {
+            workspace: "T",
+            config: &t_at_x,
+        };
+
+        for ok in ["pg-x", "pg-private"] {
+            precheck_task_step_literals(
+                "s",
+                &deploy_step(&format!("  db: \"{ok}\"")),
+                &resolved,
+                &mgr,
+                caller,
+                &t_at_x,
+            )
             .await
-            .unwrap();
+            .unwrap_or_else(|e| panic!("{ok}: {e:#}"));
+        }
+        let err = precheck_task_step_literals(
+            "s",
+            &deploy_step("  db: \"nope\""),
+            &resolved,
+            &mgr,
+            caller,
+            &t_at_x,
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("does not exist"), "{err:#}");
     }
 }
