@@ -331,10 +331,14 @@ async fn release_claim_puts_the_step_back_to_ready() -> Result<()> {
     let job = create_job(&pool, "ws", "t").await;
     let claim = claim_one(&pool, job, "s").await;
 
-    let before = chrono::Utc::now();
+    // `retry_at` and `ready_at` come from the DB clock: read it, not the host's.
+    let db_before: chrono::DateTime<chrono::Utc> =
+        sqlx::query_scalar("SELECT NOW()").fetch_one(&pool).await?;
     let out = JobStepRepo::release_claim(&pool, job, "s", claim, chrono::Duration::seconds(10), 30)
         .await?;
     assert_eq!(out, ReleaseOutcome::Released);
+    let db_after: chrono::DateTime<chrono::Utc> =
+        sqlx::query_scalar("SELECT NOW()").fetch_one(&pool).await?;
 
     let row = step(&pool, job, "s").await;
     assert_eq!(row.status, "ready");
@@ -342,10 +346,28 @@ async fn release_claim_puts_the_step_back_to_ready() -> Result<()> {
     assert_eq!(row.started_at, None);
     assert_eq!(row.pin_releases, 1);
     assert_eq!(row.retry_attempt, 0, "a release is not a retry");
+    assert_eq!(
+        row.retry_history,
+        serde_json::json!([]),
+        "a release adds no retry history"
+    );
     let retry_at = row.retry_at.expect("retry_at set");
+    let ten = chrono::Duration::seconds(10);
     assert!(
-        retry_at >= before + chrono::Duration::seconds(9),
-        "{retry_at}"
+        retry_at >= db_before + ten && retry_at <= db_after + ten,
+        "retry_at {retry_at} not within DB now + 10 s [{db_before}, {db_after}]"
+    );
+    // The unmatched-step sweep measures from `ready_at`: reset at release, so
+    // the time the step spent claimed is not counted.
+    let ready_at: chrono::DateTime<chrono::Utc> =
+        sqlx::query_scalar("SELECT ready_at FROM job_step WHERE job_id = $1 AND step_name = 's'")
+            .bind(job)
+            .fetch_one(&pool)
+            .await?;
+    assert!(
+        ready_at >= claim.started_at && ready_at >= db_before && ready_at <= db_after,
+        "ready_at {ready_at}: claim at {}, release in [{db_before}, {db_after}]",
+        claim.started_at
     );
     // Not claimable before retry_at.
     let w = Uuid::new_v4();

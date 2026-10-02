@@ -11,8 +11,7 @@ use stroem_common::git_ref::GitRefError;
 use stroem_db::{JobRepo, JobRow, JobStepRepo, JobStepRow};
 use stroem_server::config::JobDefaults;
 use stroem_server::job_creator::{
-    create_child_job_for_task_detailed, create_job_for_task_detailed, create_job_for_task_pinned,
-    CreationMode,
+    create_child_job_for_task_detailed, create_job_for_task_detailed,
 };
 use stroem_server::refs::RefResolveError;
 use stroem_server::workspace::pins::{PinError, PinLoadWithheld};
@@ -41,28 +40,7 @@ async fn cr_create_etl(fx: &PinnedFixture, task: &str) -> Result<Uuid> {
 
 /// A top-level job of `task` pinned to etl@release/2.3 at fixture creation.
 async fn cr_create_pinned_etl(fx: &PinnedFixture, task: &str) -> Result<Uuid> {
-    let pinned = fx
-        .mgr()
-        .pins()
-        .ensure("etl", &fx.commits.etl_release)
-        .await?;
-    create_job_for_task_pinned(
-        fx.mgr(),
-        &fx.pool,
-        &pinned.config,
-        "etl",
-        task,
-        json!({}),
-        "trigger",
-        None,
-        &fx.commits.etl_release,
-        "release/2.3",
-        CreationMode::Normal,
-        None,
-        JobDefaults::default(),
-    )
-    .await
-    .map(|c| c.job_id)
+    fx.create_pinned_etl_job(task).await
 }
 
 async fn cr_step(pool: &sqlx::PgPool, job_id: Uuid, name: &str) -> JobStepRow {

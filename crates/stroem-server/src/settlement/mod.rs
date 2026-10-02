@@ -25,7 +25,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
 use stroem_common::models::job::{JobStatus, SourceType, StepStatus};
 use stroem_common::models::workflow::{TaskDef, WorkspaceConfig};
-use stroem_db::{FailOutcome, JobRepo, JobRow, JobStepRepo};
+use stroem_db::{ClaimIdentity, FailOutcome, JobRepo, JobRow, JobStepRepo};
 use uuid::Uuid;
 
 /// The settlement module's dependencies: eight of `AppState`'s fields.
@@ -578,12 +578,18 @@ impl Settlement {
     /// `JobStepRepo::fail_or_retry`), append the matching server-log line, and
     /// advance the job when the outcome is `Failed`. `RetryScheduled` and
     /// `NotApplied` do not advance — the step is `ready` again.
+    ///
+    /// `expected_claim`, when set, applies the failure only while the row is
+    /// still that claim (spec § 7.2): recovery passes the claim it selected,
+    /// `fail_claimed_step` the claim it holds. A claim released (or released
+    /// and reclaimed) since then is `NotApplied`.
     pub async fn step_failed(
         &self,
         job_id: Uuid,
         step_name: &str,
         error: &str,
         expected: &[StepStatus],
+        expected_claim: Option<ClaimIdentity>,
     ) -> Result<FailOutcome> {
         let outcome = JobStepRepo::fail_or_retry(
             &self.pool,
@@ -592,7 +598,7 @@ impl Settlement {
             error,
             expected,
             retry::compute_retry_delay,
-            None, // expected_claim: threaded by the claim/recovery task
+            expected_claim,
         )
         .await
         .with_context(|| format!("fail_or_retry for step '{}' of job {}", step_name, job_id))?;

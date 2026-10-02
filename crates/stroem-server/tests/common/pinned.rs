@@ -31,8 +31,10 @@ use stroem_db::{create_pool, run_migrations, ApiKeyRepo, JobRepo, UserGroupRepo,
 use stroem_server::auth::{generate_api_key, hash_password};
 use stroem_server::blob_storage::{BlobArchive, LocalBlobArchive};
 use stroem_server::config::{
-    AclConfig, AuthConfig, DbConfig, LogStorageConfig, McpConfig, RetentionConfig, ServerConfig,
+    AclConfig, AuthConfig, DbConfig, JobDefaults, LogStorageConfig, McpConfig, RetentionConfig,
+    ServerConfig,
 };
+use stroem_server::job_creator::{create_job_for_task_pinned, CreationMode};
 use stroem_server::log_read::StepFilter;
 use stroem_server::log_storage::{JobLogMeta, LogStorage};
 use stroem_server::state::AppState;
@@ -734,6 +736,34 @@ impl PinnedFixture {
             state: Arc::new(state),
             router,
         })
+    }
+
+    /// A top-level job of `etl`'s `task`, pinned to `release/2.3` at its
+    /// fixture commit (`Commits::etl_release`), created through the pinned
+    /// creation path on this (primary) replica — which warms ITS PinStore only.
+    pub async fn create_pinned_etl_job(&self, task: &str) -> Result<Uuid> {
+        let pinned = self
+            .mgr()
+            .pins()
+            .ensure("etl", &self.commits.etl_release)
+            .await?;
+        create_job_for_task_pinned(
+            self.mgr(),
+            &self.pool,
+            &pinned.config,
+            "etl",
+            task,
+            json!({}),
+            "trigger",
+            None,
+            &self.commits.etl_release,
+            "release/2.3",
+            CreationMode::Normal,
+            None,
+            JobDefaults::default(),
+        )
+        .await
+        .map(|c| c.job_id)
     }
 
     /// Access JWT for a seeded user (`opts.users`).

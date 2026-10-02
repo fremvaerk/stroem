@@ -1176,3 +1176,94 @@ async fn test_fail_or_retry_reject_after_approve_is_not_applied() -> Result<()> 
     assert!(after.retry_at.is_none(), "no retry was scheduled");
     Ok(())
 }
+
+/// Spec § 7.2: recovery fails a running step only while it is still the
+/// claim it selected, so the selection must carry `started_at` next to
+/// `worker_id`.
+#[tokio::test]
+async fn test_stale_step_info_carries_claim_started_at() -> Result<()> {
+    let (pool, _c) = setup_db().await?;
+    let job_id = make_job(&pool, "t").await?;
+    JobStepRepo::create_steps(&pool, &[make_step(job_id, "s", "running")]).await?;
+    let worker_id = Uuid::new_v4();
+    WorkerRepo::register(
+        &pool,
+        worker_id,
+        "worker-stale-info",
+        &["script".to_string()],
+        &[],
+        false,
+        None,
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE job_step SET worker_id = $2, started_at = NOW() - INTERVAL '1 hour', \
+         timeout_secs = 1 WHERE job_id = $1 AND step_name = 's'",
+    )
+    .bind(job_id)
+    .bind(worker_id)
+    .execute(&pool)
+    .await?;
+    let row = JobStepRepo::get_step(&pool, job_id, "s").await?.unwrap();
+    assert!(row.started_at.is_some());
+
+    let by_worker = JobStepRepo::get_running_steps_for_workers(&pool, &[worker_id]).await?;
+    assert_eq!(by_worker.len(), 1);
+    assert_eq!(by_worker[0].started_at, row.started_at);
+    // F27: the claim identity recovery passes to `fail_or_retry`.
+    assert_eq!(
+        by_worker[0].claim(),
+        Some(stroem_db::ClaimIdentity {
+            worker_id,
+            started_at: row.started_at.unwrap(),
+        })
+    );
+
+    let timed_out = JobStepRepo::get_timed_out_steps(&pool).await?;
+    let mine = timed_out.iter().find(|s| s.job_id == job_id).unwrap();
+    assert_eq!(mine.started_at, row.started_at);
+    assert_eq!(mine.claim(), by_worker[0].claim());
+    Ok(())
+}
+
+/// The selections for rows that are not running carry no claim: phase 2.5
+/// (suspended) and phase 4 (ready) never pass an `expected_claim`.
+#[tokio::test]
+async fn test_stale_step_info_without_a_claim_for_suspended_and_ready_rows() -> Result<()> {
+    let (pool, _c) = setup_db().await?;
+    let job_id = make_job(&pool, "t").await?;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            make_step(job_id, "susp", "suspended"),
+            make_step(job_id, "rdy", "ready"),
+        ],
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE job_step SET suspended_at = NOW() - INTERVAL '1 hour', timeout_secs = 1 \
+         WHERE job_id = $1 AND step_name = 'susp'",
+    )
+    .bind(job_id)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE job_step SET ready_at = NOW() - INTERVAL '1 hour' \
+         WHERE job_id = $1 AND step_name = 'rdy'",
+    )
+    .bind(job_id)
+    .execute(&pool)
+    .await?;
+
+    let suspended = JobStepRepo::get_timed_out_suspended_steps(&pool).await?;
+    let susp = suspended.iter().find(|s| s.job_id == job_id).unwrap();
+    assert_eq!((susp.worker_id, susp.started_at), (None, None));
+    assert_eq!(susp.claim(), None);
+
+    // No worker is registered, so the ready step is unmatched.
+    let unmatched = JobStepRepo::get_unmatched_ready_steps(&pool, 1.0).await?;
+    let rdy = unmatched.iter().find(|s| s.job_id == job_id).unwrap();
+    assert_eq!(rdy.step_name, "rdy");
+    assert_eq!(rdy.claim(), None);
+    Ok(())
+}

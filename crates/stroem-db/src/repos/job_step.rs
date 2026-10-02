@@ -209,6 +209,22 @@ pub struct StaleStepInfo {
     pub job_id: Uuid,
     pub step_name: String,
     pub worker_id: Option<Uuid>,
+    /// The claim's start time. With `worker_id` it identifies the claim a
+    /// recovery phase selected (`ClaimIdentity`, spec § 7.2). `None` for
+    /// rows that are not running (suspended, ready).
+    pub started_at: Option<DateTime<Utc>>,
+}
+
+impl StaleStepInfo {
+    /// The claim this selection observed, for `fail_or_retry`'s
+    /// `expected_claim`: a failure decided on it applies only while the row
+    /// is still that claim (spec § 7.2). `None` for a row with no claim.
+    pub fn claim(&self) -> Option<ClaimIdentity> {
+        Some(ClaimIdentity {
+            worker_id: self.worker_id?,
+            started_at: self.started_at?,
+        })
+    }
 }
 
 /// Step with joined job metadata, for worker detail views.
@@ -906,7 +922,8 @@ impl JobStepRepo {
     ///    `pin_releases + 1 > max_releases` -> `CapReached` (nothing written);
     ///    else `Released` (`ready`, worker/started_at cleared, `ready_at = now`
     ///    so the unmatched-step sweep does not count the claimed time,
-    ///    `retry_at = now + retry_after`, `pin_releases + 1`).
+    ///    `retry_at = now + retry_after`, `pin_releases + 1`; `now` is the DB
+    ///    clock for both).
     ///
     /// A release is not a failure: `retry_attempt` and `retry_history` are
     /// untouched.
@@ -967,12 +984,16 @@ impl JobStepRepo {
             sqlx::query(
                 "UPDATE job_step \
                  SET status = 'ready', worker_id = NULL, started_at = NULL, \
-                     ready_at = NOW(), retry_at = $3, pin_releases = pin_releases + 1 \
+                     ready_at = NOW(), \
+                     retry_at = NOW() + make_interval(secs => $3::double precision), \
+                     pin_releases = pin_releases + 1 \
                  WHERE job_id = $1 AND step_name = $2",
             )
             .bind(job_id)
             .bind(step_name)
-            .bind(Utc::now() + retry_after)
+            // The DB clock, like `ready_at` and the claim SQL's `retry_at`
+            // check: a host clock skewed against Postgres would shift it.
+            .bind(retry_after.num_milliseconds() as f64 / 1000.0)
             .execute(&mut *tx)
             .await
             .context("release claimed step")?;
@@ -1241,7 +1262,7 @@ impl JobStepRepo {
         }
         let rows = sqlx::query_as::<_, StaleStepInfo>(
             r#"
-            SELECT job_id, step_name, worker_id
+            SELECT job_id, step_name, worker_id, started_at
             FROM job_step
             WHERE status = 'running'
               AND worker_id = ANY($1)
@@ -1257,7 +1278,7 @@ impl JobStepRepo {
     /// Return running steps whose `timeout_secs` deadline has elapsed.
     pub async fn get_timed_out_steps(pool: &PgPool) -> Result<Vec<StaleStepInfo>> {
         let rows = sqlx::query_as::<_, StaleStepInfo>(
-            "SELECT job_id, step_name, worker_id FROM job_step \
+            "SELECT job_id, step_name, worker_id, started_at FROM job_step \
              WHERE status = 'running' AND timeout_secs IS NOT NULL \
                AND started_at + make_interval(secs => timeout_secs::double precision) < NOW()",
         )
@@ -1281,7 +1302,8 @@ impl JobStepRepo {
     ) -> Result<Vec<StaleStepInfo>> {
         let rows = sqlx::query_as::<_, StaleStepInfo>(
             r#"
-            SELECT js.job_id, js.step_name, NULL::uuid AS worker_id
+            SELECT js.job_id, js.step_name, NULL::uuid AS worker_id,
+                   NULL::timestamptz AS started_at
             FROM job_step js
             WHERE js.status = 'ready'
               -- Must match the claim SQL's exclusion set exactly. Missing
@@ -1386,7 +1408,8 @@ impl JobStepRepo {
     /// since `suspended_at`.
     pub async fn get_timed_out_suspended_steps(pool: &PgPool) -> Result<Vec<StaleStepInfo>> {
         let rows = sqlx::query_as::<_, StaleStepInfo>(
-            "SELECT job_id, step_name, NULL::uuid AS worker_id FROM job_step \
+            "SELECT job_id, step_name, NULL::uuid AS worker_id, \
+                    NULL::timestamptz AS started_at FROM job_step \
              WHERE status = 'suspended' AND timeout_secs IS NOT NULL \
                AND suspended_at + make_interval(secs => timeout_secs::double precision) < NOW()",
         )
