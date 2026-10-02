@@ -583,7 +583,15 @@ impl StromMcpHandler {
             })
             .collect();
 
-        let result = serde_json::json!({
+        // Same per-job set as job detail (spec § 7.4); fail closed.
+        let secrets = crate::redaction::job_redaction_values(&self.state, &job, &steps)
+            .await
+            .map_err(|e| {
+                tracing::warn!(job_id = %job.job_id, "MCP get_job_status fails closed: {e}");
+                internal_err("redaction set unavailable, retry")
+            })?;
+
+        let mut result = serde_json::json!({
             "job_id": job.job_id,
             "workspace": job.workspace,
             "task_name": job.task_name,
@@ -595,6 +603,7 @@ impl StromMcpHandler {
             "completed_at": job.completed_at.map(|dt| dt.to_rfc3339()),
             "steps": steps_json,
         });
+        crate::redaction::redact_job_response(&mut result, &secrets);
 
         Ok(json_result(&result))
     }

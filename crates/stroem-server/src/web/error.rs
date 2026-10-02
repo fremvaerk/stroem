@@ -17,6 +17,10 @@ pub enum AppError {
     NotFound(String),
     /// 409 Conflict
     Conflict(String),
+    /// 503 Service Unavailable — a dependency needed to answer safely is
+    /// temporarily unavailable (e.g. a pinned config whose secrets must be
+    /// masked); the client should retry.
+    ServiceUnavailable(String),
     /// 429 Too Many Requests — sets a `Retry-After` header.
     TooManyRequests {
         message: String,
@@ -63,6 +67,7 @@ impl IntoResponse for AppError {
             Self::Forbidden(msg) => (StatusCode::FORBIDDEN, msg),
             Self::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
             Self::Conflict(msg) => (StatusCode::CONFLICT, msg),
+            Self::ServiceUnavailable(msg) => (StatusCode::SERVICE_UNAVAILABLE, msg),
             Self::PayloadTooLarge(msg) => (StatusCode::PAYLOAD_TOO_LARGE, msg),
             Self::Internal(err) => {
                 tracing::error!("Internal error: {:#}", err);
@@ -191,6 +196,16 @@ mod tests {
         let body = to_bytes(response.into_body(), 1024).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["error"], "Internal server error");
+    }
+
+    #[tokio::test]
+    async fn service_unavailable_maps_to_503() {
+        let resp =
+            AppError::ServiceUnavailable("redaction set unavailable, retry".into()).into_response();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(resp.into_body(), 1024).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "redaction set unavailable, retry");
     }
 
     #[tokio::test]

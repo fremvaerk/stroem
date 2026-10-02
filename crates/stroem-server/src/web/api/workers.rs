@@ -11,8 +11,9 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::json;
+use std::collections::HashMap;
 use std::sync::Arc;
-use stroem_db::{JobStepRepo, WorkerRepo};
+use stroem_db::{JobRepo, JobStepRepo, WorkerRepo};
 
 #[derive(Debug, Deserialize)]
 pub struct ListWorkersQuery {
@@ -131,9 +132,39 @@ pub async fn get_worker(
 
     let total = steps.len() as i64;
 
+    // Per-job redaction of `error_message` (spec § 7.4): one set per distinct
+    // job that has an error to show. A job whose set cannot be built (pin not
+    // loadable, row gone) has its rows' error masked whole — fail closed per
+    // row, not per page.
+    let mut sets: HashMap<uuid::Uuid, Option<Vec<String>>> = HashMap::new();
+    for s in &steps {
+        if s.error_message.is_none() || sets.contains_key(&s.job_id) {
+            continue;
+        }
+        let set = match (
+            JobRepo::get(&state.pool, s.job_id).await,
+            JobStepRepo::get_steps_for_job(&state.pool, s.job_id).await,
+        ) {
+            (Ok(Some(job)), Ok(job_steps)) => {
+                crate::redaction::job_redaction_values(&state, &job, &job_steps)
+                    .await
+                    .ok()
+            }
+            _ => None,
+        };
+        sets.insert(s.job_id, set);
+    }
+
     let steps_json: Vec<serde_json::Value> = steps
         .iter()
         .map(|s| {
+            let error_message = s
+                .error_message
+                .as_deref()
+                .map(|m| match sets.get(&s.job_id) {
+                    Some(Some(secrets)) => crate::redaction::redact_str(m, secrets),
+                    _ => crate::workspace_set::REDACTED.to_string(),
+                });
             json!({
                 "job_id": s.job_id,
                 "workspace": s.workspace,
@@ -144,7 +175,7 @@ pub async fn get_worker(
                 "status": s.status,
                 "started_at": s.started_at,
                 "completed_at": s.completed_at,
-                "error_message": s.error_message,
+                "error_message": error_message,
             })
         })
         .collect();

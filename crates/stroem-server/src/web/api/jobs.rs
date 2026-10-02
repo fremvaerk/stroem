@@ -389,8 +389,30 @@ pub async fn get_job(
         })
         .collect();
 
-    // Look up workspace once — used for topo-sort and secret redaction
-    let workspace = state.get_workspace(&job.workspace).await;
+    // Live set + every referenced pin's secrets (spec § 7.4). Computed while
+    // `job` and `steps` are still whole; never answer with a partial set.
+    // Before `config_for` below: a pin that cannot load fails here once,
+    // and one that loads is cached for `config_for`.
+    let secret_values = crate::redaction::job_redaction_values(&state, &job, &steps)
+        .await
+        .map_err(|e| {
+            tracing::warn!(job_id = %job.job_id, "job detail fails closed: {e}");
+            AppError::ServiceUnavailable("redaction set unavailable, retry".into())
+        })?;
+
+    // The job's own config (spec § 7.4): a pinned job sorts by the flow of its
+    // commit. `None` (pin not loadable, workspace unavailable) leaves the
+    // steps unsorted.
+    let workspace = state
+        .workspaces
+        .config_for(
+            &job.workspace,
+            crate::workspace::pins::PinRef::of_job(&job).as_ref(),
+        )
+        .await
+        .ok()
+        .flatten()
+        .map(|h| h.arc());
 
     // Sort steps by topological order (dependency-first) using the task flow
     if let Some(ref ws) = workspace {
@@ -470,7 +492,7 @@ pub async fn get_job(
         }
     }
 
-    let mut response = JobDetailResponse {
+    let response = JobDetailResponse {
         job_id: job.job_id,
         workspace: job.workspace,
         task_name: job.task_name,
@@ -497,74 +519,12 @@ pub async fn get_job(
         max_retries: job.max_retries,
     };
 
-    // Redact secrets from EVERY loaded workspace plus values of connection
-    // properties marked `secret: true` — a cross-workspace connection's values
-    // are persisted in this job's input and provenance is not recoverable.
-    let ws_set = crate::workspace_set::WorkspaceSet::load(
-        &state.workspaces,
-        &response.workspace,
-        workspace.as_deref(),
-    )
-    .await;
-    let secret_values = crate::workspace_set::collect_redaction_values(&ws_set);
-    redact_response(&mut response, &secret_values);
-
-    Ok(Json(response))
-}
-
-use crate::workspace_set::{redact_secrets_in_str, REDACTED};
-
-/// Replace secret values and `ref+` references in a JSON tree with REDACTED.
-fn redact_json(value: &mut serde_json::Value, secret_values: &[String]) {
-    match value {
-        serde_json::Value::String(s) => {
-            if s.starts_with("ref+") {
-                *s = REDACTED.to_string();
-                return;
-            }
-            *s = redact_secrets_in_str(s, secret_values);
-        }
-        serde_json::Value::Object(map) => {
-            for v in map.values_mut() {
-                redact_json(v, secret_values);
-            }
-        }
-        serde_json::Value::Array(arr) => {
-            for v in arr.iter_mut() {
-                redact_json(v, secret_values);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Redact secrets from a JobDetailResponse (job input/output + step input/output).
-fn redact_response(response: &mut JobDetailResponse, secret_values: &[String]) {
-    if let Some(ref mut input) = response.input {
-        redact_json(input, secret_values);
-    }
-    if let Some(ref mut raw_input) = response.raw_input {
-        redact_json(raw_input, secret_values);
-    }
-    if let Some(ref mut output) = response.output {
-        redact_json(output, secret_values);
-    }
-    for step in &mut response.steps {
-        if let Some(input) = step.get_mut("input") {
-            redact_json(input, secret_values);
-        }
-        if let Some(output) = step.get_mut("output") {
-            redact_json(output, secret_values);
-        }
-        if let Some(error_message) = step.get_mut("error_message") {
-            redact_json(error_message, secret_values);
-        }
-        // Every previous attempt's error, including claim-time render errors
-        // that quote a secret value.
-        if let Some(retry_history) = step.get_mut("retry_history") {
-            redact_json(retry_history, secret_values);
-        }
-    }
+    // Whole-response redaction (spec § 7.4): every content string of the job
+    // and of each step entry, including fields copied out of step output
+    // such as `approval_message`.
+    let mut value = serde_json::to_value(&response).context("serialise job detail")?;
+    crate::redaction::redact_job_response(&mut value, &secret_values);
+    Ok(Json(value))
 }
 
 /// POST /api/jobs/:id/cancel - Cancel a running or pending job
@@ -1167,86 +1127,14 @@ async fn resolve_acl_scope(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workspace_set::REDACTED;
     use serde_json::json;
 
-    #[test]
-    fn test_redact_json_exact_match() {
-        let secrets = vec!["s3cr3t-value".to_string()];
-        let mut value = json!("s3cr3t-value");
-        redact_json(&mut value, &secrets);
-        assert_eq!(value, json!(REDACTED));
-    }
-
-    #[test]
-    fn test_redact_json_substring_match() {
-        let secrets = vec!["tok_abc123".to_string()];
-        let mut value = json!("Bearer tok_abc123");
-        redact_json(&mut value, &secrets);
-        assert_eq!(value, json!(format!("Bearer {REDACTED}")));
-    }
-
-    #[test]
-    fn test_redact_json_nested() {
-        let secrets = vec!["s3cr3t".to_string()];
-        let mut value = json!({
-            "url": "https://hooks.slack.com/s3cr3t/path",
-            "nested": {
-                "key": "s3cr3t"
-            },
-            "list": ["safe", "s3cr3t", "also-safe"]
-        });
-        redact_json(&mut value, &secrets);
-        assert_eq!(
-            value["url"],
-            json!(format!("https://hooks.slack.com/{REDACTED}/path"))
-        );
-        assert_eq!(value["nested"]["key"], json!(REDACTED));
-        assert_eq!(value["list"][0], json!("safe"));
-        assert_eq!(value["list"][1], json!(REDACTED));
-        assert_eq!(value["list"][2], json!("also-safe"));
-    }
-
-    #[test]
-    fn test_redact_json_no_match() {
-        let secrets = vec!["s3cr3t".to_string()];
-        let mut value = json!({"safe": "no-secrets-here", "number": 42});
-        let original = value.clone();
-        redact_json(&mut value, &secrets);
-        assert_eq!(value, original);
-    }
-
-    #[test]
-    fn test_redact_json_vals_reference() {
-        let secrets = vec![];
-        let mut value = json!({
-            "password": "ref+awsssm:///prod/db/password",
-            "vault": "ref+vault://secret/data/key",
-            "safe": "not-a-ref"
-        });
-        redact_json(&mut value, &secrets);
-        assert_eq!(value["password"], json!(REDACTED));
-        assert_eq!(value["vault"], json!(REDACTED));
-        assert_eq!(value["safe"], json!("not-a-ref"));
-    }
-
-    #[test]
-    fn test_redact_json_multiple_secrets_in_one_string() {
-        let secrets = vec!["user123".to_string(), "pass456".to_string()];
-        let mut value = json!("postgres://user123:pass456@db.host/mydb");
-        redact_json(&mut value, &secrets);
-        assert_eq!(
-            value,
-            json!(format!("postgres://{REDACTED}:{REDACTED}@db.host/mydb"))
-        );
-    }
-
-    #[test]
-    fn test_redact_json_ref_plus_no_secret_values() {
-        // ref+ patterns must be redacted even when secret_values is empty
-        let secrets: Vec<String> = vec![];
-        let mut value = json!({"key": "ref+gcpsecrets://project/secret"});
-        redact_json(&mut value, &secrets);
-        assert_eq!(value["key"], json!(REDACTED));
+    /// Serialise + redact the way `get_job` does.
+    fn redacted(response: &JobDetailResponse, secrets: &[String]) -> serde_json::Value {
+        let mut v = serde_json::to_value(response).unwrap();
+        crate::redaction::redact_job_response(&mut v, secrets);
+        v
     }
 
     fn job_detail_fixture() -> JobDetailResponse {
@@ -1281,7 +1169,7 @@ mod tests {
     #[test]
     fn test_redact_response() {
         let secrets = vec!["my-secret-token".to_string()];
-        let mut response = JobDetailResponse {
+        let response = JobDetailResponse {
             job_id: Uuid::nil(),
             workspace: "default".to_string(),
             task_name: "test".to_string(),
@@ -1312,36 +1200,38 @@ mod tests {
             retry_attempt: 0,
             max_retries: None,
         };
-        redact_response(&mut response, &secrets);
-        assert_eq!(response.input.unwrap()["token"], json!(REDACTED));
-        assert_eq!(response.output.unwrap()["result"], json!("ok"));
+        let v = redacted(&response, &secrets);
+        assert_eq!(v["input"]["token"], json!(REDACTED));
+        assert_eq!(v["output"]["result"], json!("ok"));
         assert_eq!(
-            response.steps[0]["input"]["webhook"],
+            v["steps"][0]["input"]["webhook"],
             json!(format!("https://hooks.example.com/{REDACTED}"))
         );
         assert_eq!(
-            response.steps[0]["error_message"],
+            v["steps"][0]["error_message"],
             json!(format!("failed to connect: {REDACTED} rejected"))
         );
     }
 
     /// Security regression (2026-09-11): `retry_history` carries the error from
     /// every previous attempt, including claim-time render errors that quote a
-    /// secret value. `redact_response` masked `error_message` but not
-    /// `retry_history`, so `GET /api/jobs/{id}` returned it unredacted.
+    /// secret value. The old per-field redaction masked `error_message` but
+    /// not `retry_history`, so `GET /api/jobs/{id}` returned it unredacted.
     #[test]
     fn test_redact_response_redacts_retry_history() {
         let secrets = vec!["my-secret-token".to_string()];
-        let mut response = job_detail_fixture();
-        response.steps = vec![json!({
-            "step_name": "deploy",
-            "retry_history": [
-                {"attempt": 1, "error": "boom: my-secret-token rejected"},
-                {"attempt": 2, "error": "still my-secret-token"}
-            ]
-        })];
-        redact_response(&mut response, &secrets);
-        let history = &response.steps[0]["retry_history"];
+        let response = JobDetailResponse {
+            steps: vec![json!({
+                "step_name": "deploy",
+                "retry_history": [
+                    {"attempt": 1, "error": "boom: my-secret-token rejected"},
+                    {"attempt": 2, "error": "still my-secret-token"}
+                ]
+            })],
+            ..job_detail_fixture()
+        };
+        let v = redacted(&response, &secrets);
+        let history = &v["steps"][0]["retry_history"];
         assert_eq!(
             history[0]["error"],
             json!(format!("boom: {REDACTED} rejected"))
@@ -1352,7 +1242,7 @@ mod tests {
     #[test]
     fn test_redact_response_redacts_raw_input() {
         let secrets = vec!["my-secret-token".to_string()];
-        let mut response = JobDetailResponse {
+        let response = JobDetailResponse {
             job_id: Uuid::nil(),
             workspace: "default".to_string(),
             task_name: "t".to_string(),
@@ -1378,8 +1268,8 @@ mod tests {
             retry_attempt: 0,
             max_retries: None,
         };
-        redact_response(&mut response, &secrets);
-        let raw = response.raw_input.unwrap();
+        let v = redacted(&response, &secrets);
+        let raw = &v["raw_input"];
         assert_eq!(raw["token"], json!(REDACTED));
         assert_eq!(raw["name"], json!("alice")); // non-secret untouched
     }
