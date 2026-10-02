@@ -694,3 +694,250 @@ async fn pinned_task_triples_lists_distinct_pinned_tasks() -> Result<()> {
     );
     Ok(())
 }
+
+// ─── Task 22 fix: the redaction closure (spec § 7.4) ──────────────────
+
+const C1: &str = "1111111111111111111111111111111111111111";
+const C2: &str = "2222222222222222222222222222222222222222";
+const C3: &str = "3333333333333333333333333333333333333333";
+const C4: &str = "4444444444444444444444444444444444444444";
+const C7: &str = "7777777777777777777777777777777777777777";
+const C8: &str = "8888888888888888888888888888888888888888";
+const C9: &str = "9999999999999999999999999999999999999999";
+
+/// The server's bounds (`job_creator::MAX_TASK_DEPTH`,
+/// `settlement::hooks::MAX_HOOK_CHAIN_DEPTH`).
+const TASK_DEPTH: i32 = 10;
+const HOOK_HOPS: i32 = 3;
+
+/// Lineage of one seeded job.
+#[derive(Default)]
+struct Lineage<'a> {
+    source_type: &'a str,
+    source_job_id: Option<Uuid>,
+    source_id: Option<String>,
+    parent_job_id: Option<Uuid>,
+    /// The job's own pin: (workspace, ref, commit).
+    pin: Option<(&'a str, &'a str, &'a str)>,
+}
+
+async fn seed_closure_job(pool: &PgPool, l: Lineage<'_>) -> Uuid {
+    let job_id = Uuid::new_v4();
+    let (workspace, git_ref, revision) = match l.pin {
+        Some((ws, r, c)) => (ws, Some(r), Some(c)),
+        None => ("etl", None, None),
+    };
+    let source_type = if l.source_type.is_empty() {
+        "api"
+    } else {
+        l.source_type
+    };
+    sqlx::query(
+        "INSERT INTO job (job_id, workspace, task_name, status, source_type, source_job_id, \
+                          source_id, parent_job_id, git_ref, revision) \
+         VALUES ($1, $2, 't', 'completed', $3, $4, $5, $6, $7, $8)",
+    )
+    .bind(job_id)
+    .bind(workspace)
+    .bind(source_type)
+    .bind(l.source_job_id)
+    .bind(l.source_id)
+    .bind(l.parent_job_id)
+    .bind(git_ref)
+    .bind(revision)
+    .execute(pool)
+    .await
+    .expect("seed closure job");
+    job_id
+}
+
+/// A step with an action pin `(action_workspace, ref, commit)` and/or a task
+/// pin `(task_workspace, ref, commit)`.
+async fn seed_closure_step(
+    pool: &PgPool,
+    job_id: Uuid,
+    name: &str,
+    action: Option<(Option<&str>, &str, &str)>,
+    task: Option<(&str, &str, &str)>,
+) {
+    sqlx::query(
+        "INSERT INTO job_step (job_id, step_name, action_name, action_type, status, \
+                               action_workspace, action_ref, action_revision, \
+                               task_workspace, task_ref, task_revision) \
+         VALUES ($1, $2, $2, 'script', 'completed', $3, $4, $5, $6, $7, $8)",
+    )
+    .bind(job_id)
+    .bind(name)
+    .bind(action.and_then(|a| a.0))
+    .bind(action.map(|a| a.1))
+    .bind(action.map(|a| a.2))
+    .bind(task.map(|t| t.0))
+    .bind(task.map(|t| t.1))
+    .bind(task.map(|t| t.2))
+    .execute(pool)
+    .await
+    .expect("seed closure step");
+}
+
+async fn closure(pool: &PgPool, job: Uuid, depth: i32, hops: i32) -> Vec<(String, String, String)> {
+    JobRepo::redaction_closure_pins(pool, job, depth, hops)
+        .await
+        .expect("closure pins")
+        .into_iter()
+        .map(|r| (r.workspace, r.git_ref, r.revision))
+        .collect()
+}
+
+/// The closure follows descendants and hook-source links (with each source's
+/// descendants), and nothing else: no ancestors, no sibling hooks, no
+/// re-run lineage, no unrelated job. Both bounds cut where they say.
+#[tokio::test]
+async fn redaction_closure_pins_follow_descendants_and_the_hook_source_chain() -> Result<()> {
+    tokio::time::timeout(std::time::Duration::from_secs(240), async {
+        let pool = setup_db().await;
+        // S0 (unpinned) runs a step at etl@release/2.3; its child K is
+        // pinned at billing@v4.1.0; K's child G runs a docs@main action.
+        let s0 = seed_closure_job(&pool, Lineage::default()).await;
+        seed_closure_step(&pool, s0, "s", Some((None, "release/2.3", C1)), None).await;
+        let k = seed_closure_job(
+            &pool,
+            Lineage {
+                source_type: "task",
+                parent_job_id: Some(s0),
+                pin: Some(("billing", "v4.1.0", C2)),
+                ..Default::default()
+            },
+        )
+        .await;
+        let g = seed_closure_job(
+            &pool,
+            Lineage {
+                source_type: "task",
+                parent_job_id: Some(k),
+                ..Default::default()
+            },
+        )
+        .await;
+        seed_closure_step(&pool, g, "g", Some((Some("docs"), "main", C3)), None).await;
+
+        // H1: an unpinned hook of S0, whose `type: task` child HK runs at
+        // etl@release/2.4; H2 is a hook of H1; HX a sibling hook of S0.
+        let h1 = seed_closure_job(
+            &pool,
+            Lineage {
+                source_type: "hook",
+                source_job_id: Some(s0),
+                source_id: Some(s0.to_string()),
+                ..Default::default()
+            },
+        )
+        .await;
+        let hk = seed_closure_job(
+            &pool,
+            Lineage {
+                source_type: "task",
+                parent_job_id: Some(h1),
+                ..Default::default()
+            },
+        )
+        .await;
+        seed_closure_step(&pool, hk, "h", Some((None, "release/2.4", C4)), None).await;
+        let h2 = seed_closure_job(
+            &pool,
+            Lineage {
+                source_type: "hook",
+                source_job_id: Some(h1),
+                source_id: Some(h1.to_string()),
+                ..Default::default()
+            },
+        )
+        .await;
+        let hx = seed_closure_job(
+            &pool,
+            Lineage {
+                source_type: "hook",
+                source_job_id: Some(s0),
+                pin: Some(("etl", "release/7", C7)),
+                ..Default::default()
+            },
+        )
+        .await;
+        // A hook row written before migration 048: no source_job_id.
+        let hpre = seed_closure_job(
+            &pool,
+            Lineage {
+                source_type: "hook",
+                source_id: Some(format!("{s0}/notify")),
+                ..Default::default()
+            },
+        )
+        .await;
+        // A re-run of S0 (lineage, not a hook) and an unrelated job.
+        let rerun = seed_closure_job(
+            &pool,
+            Lineage {
+                source_type: "rerun",
+                source_job_id: Some(s0),
+                pin: Some(("etl", "release/8", C8)),
+                ..Default::default()
+            },
+        )
+        .await;
+        let unrelated = seed_closure_job(&pool, Lineage::default()).await;
+        seed_closure_step(&pool, unrelated, "u", None, Some(("etl", "release/9", C9))).await;
+
+        let s0_tree = triples(&[
+            ("billing", "v4.1.0", C2),
+            ("docs", "main", C3),
+            ("etl", "release/2.3", C1),
+        ]);
+        let with_hk = triples(&[
+            ("billing", "v4.1.0", C2),
+            ("docs", "main", C3),
+            ("etl", "release/2.3", C1),
+            ("etl", "release/2.4", C4),
+        ]);
+
+        // A job: itself and its descendants, never its parent.
+        assert_eq!(closure(&pool, s0, TASK_DEPTH, HOOK_HOPS).await, s0_tree);
+        assert_eq!(
+            closure(&pool, k, TASK_DEPTH, HOOK_HOPS).await,
+            triples(&[("billing", "v4.1.0", C2), ("docs", "main", C3)])
+        );
+        // A hook job: its own descendants, its source and the source's tree;
+        // never a sibling hook of the same source (C7).
+        assert_eq!(closure(&pool, h1, TASK_DEPTH, HOOK_HOPS).await, with_hk);
+        assert_eq!(closure(&pool, h2, TASK_DEPTH, HOOK_HOPS).await, with_hk);
+        // A pre-048 hook row reaches its source through `source_id`.
+        assert_eq!(closure(&pool, hpre, TASK_DEPTH, HOOK_HOPS).await, s0_tree);
+        // A re-run is not a hook: only its own pin.
+        assert_eq!(
+            closure(&pool, rerun, TASK_DEPTH, HOOK_HOPS).await,
+            triples(&[("etl", "release/8", C8)])
+        );
+        // A sibling hook's own pin plus its source's tree, not H1's child.
+        assert_eq!(
+            closure(&pool, hx, TASK_DEPTH, HOOK_HOPS).await,
+            triples(&[
+                ("billing", "v4.1.0", C2),
+                ("docs", "main", C3),
+                ("etl", "release/2.3", C1),
+                ("etl", "release/7", C7),
+            ])
+        );
+
+        // Bounds: one hook hop from H2 reaches H1 (and HK) but not S0; one
+        // task level from S0 reaches K but not G.
+        assert_eq!(
+            closure(&pool, h2, TASK_DEPTH, 1).await,
+            triples(&[("etl", "release/2.4", C4)])
+        );
+        assert_eq!(
+            closure(&pool, s0, 1, HOOK_HOPS).await,
+            triples(&[("billing", "v4.1.0", C2), ("etl", "release/2.3", C1)])
+        );
+        Ok::<(), anyhow::Error>(())
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("test timed out"))?
+}

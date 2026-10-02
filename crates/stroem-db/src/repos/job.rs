@@ -136,6 +136,16 @@ pub struct RecentDurationRow {
     pub completed_at: DateTime<Utc>,
 }
 
+/// One pin referenced inside a job's redaction closure
+/// ([`JobRepo::redaction_closure_pins`]): the owner workspace, the ref as
+/// written and the commit it resolved to.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct ClosurePinRow {
+    pub workspace: String,
+    pub git_ref: String,
+    pub revision: String,
+}
+
 /// Pin columns of a job created in owner@ref (spec 2026-10-02 § 6). The commit
 /// itself goes in the `revision` parameter.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1034,6 +1044,89 @@ impl JobRepo {
         .await
         .context("Failed to get settled descendants with running parent step")?;
         Ok(rows)
+    }
+
+    /// Every distinct pin referenced by `job_id`'s **redaction closure**
+    /// (spec 2026-10-02 git refs § 7.4): the jobs whose content can be copied
+    /// into this job's rows.
+    /// - The job itself.
+    /// - Its hook-source chain: while a job is `source_type = 'hook'`, the job
+    ///   that fired it. That is `source_job_id`, or the UUID prefix of
+    ///   `source_id` on a hook row written before migration 048 (the same
+    ///   fallback as the server's hook-chain walk). At most `max_hook_hops`
+    ///   links.
+    /// - Every descendant (`parent_job_id`) of each of those, at most
+    ///   `max_task_depth` levels below it.
+    ///
+    /// Over that job set, a pin is a job's own (`workspace`, `git_ref`,
+    /// `revision`), a step's action pin (`action_workspace`, defaulting to
+    /// the job's workspace, `action_ref`, `action_revision`) or a step's task
+    /// pin (`task_workspace`, `task_ref`, `task_revision`). Rows are distinct
+    /// and sorted.
+    pub async fn redaction_closure_pins(
+        pool: &PgPool,
+        job_id: Uuid,
+        max_task_depth: i32,
+        max_hook_hops: i32,
+    ) -> Result<Vec<ClosurePinRow>> {
+        sqlx::query_as::<_, ClosurePinRow>(
+            r#"
+            WITH RECURSIVE chain(job_id, hops) AS (
+                SELECT $1::uuid, 0
+                UNION ALL
+                SELECT nxt.job_id, c.hops + 1
+                  FROM chain c
+                  JOIN job j ON j.job_id = c.job_id
+                 CROSS JOIN LATERAL (
+                     SELECT COALESCE(
+                         j.source_job_id,
+                         CASE WHEN split_part(j.source_id, '/', 1)
+                                   ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                              THEN split_part(j.source_id, '/', 1)::uuid
+                         END
+                     ) AS job_id
+                 ) nxt
+                 WHERE j.source_type = 'hook'
+                   AND nxt.job_id IS NOT NULL
+                   AND c.hops < $3
+            ),
+            tree(job_id, depth) AS (
+                SELECT job_id, 0 FROM chain
+                UNION ALL
+                SELECT child.job_id, t.depth + 1
+                  FROM tree t
+                  JOIN job child ON child.parent_job_id = t.job_id
+                 WHERE t.depth < $2
+            ),
+            closure AS (SELECT DISTINCT job_id FROM tree)
+            SELECT DISTINCT workspace, git_ref, revision FROM (
+                SELECT j.workspace, j.git_ref, j.revision
+                  FROM job j
+                  JOIN closure cl ON cl.job_id = j.job_id
+                 WHERE j.git_ref IS NOT NULL AND j.revision IS NOT NULL
+                UNION ALL
+                SELECT COALESCE(s.action_workspace, j.workspace), s.action_ref, s.action_revision
+                  FROM job_step s
+                  JOIN closure cl ON cl.job_id = s.job_id
+                  JOIN job j ON j.job_id = s.job_id
+                 WHERE s.action_ref IS NOT NULL AND s.action_revision IS NOT NULL
+                UNION ALL
+                SELECT s.task_workspace, s.task_ref, s.task_revision
+                  FROM job_step s
+                  JOIN closure cl ON cl.job_id = s.job_id
+                 WHERE s.task_workspace IS NOT NULL
+                   AND s.task_ref IS NOT NULL
+                   AND s.task_revision IS NOT NULL
+            ) pins
+            ORDER BY workspace, revision, git_ref
+            "#,
+        )
+        .bind(job_id)
+        .bind(max_task_depth)
+        .bind(max_hook_hops)
+        .fetch_all(pool)
+        .await
+        .context("Failed to read the job's redaction closure pins")
     }
 
     /// Get job counts grouped by status (used for dashboard stats)

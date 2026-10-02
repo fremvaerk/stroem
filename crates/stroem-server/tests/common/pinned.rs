@@ -990,6 +990,29 @@ pub fn mcp_is_error(resp: &Value) -> bool {
     resp.get("error").is_some() || resp["result"]["isError"].as_bool().unwrap_or(false)
 }
 
+/// Claim the next ready step with `worker` (it must be `job`'s `step`) and
+/// complete it with `result` (a worker `complete` body: `output`,
+/// `exit_code`, `error`).
+pub async fn claim_and_complete(
+    fx: &PinnedFixture,
+    worker: &str,
+    job: Uuid,
+    step: &str,
+    result: Value,
+) {
+    let claimed = claim_once(&fx.router, worker).await;
+    assert_eq!(claimed["job_id"], json!(job.to_string()), "{claimed}");
+    assert_eq!(claimed["step_name"], json!(step), "{claimed}");
+    let (st, resp) = worker_req(
+        &fx.router,
+        "POST",
+        &format!("/worker/jobs/{job}/steps/{step}/complete"),
+        Some(result),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "complete {step}: {resp}");
+}
+
 /// `POST /api/workspaces/{ws}/tasks/{task}/execute` with `{"input": input}`.
 pub async fn execute_task(
     router: &Router,

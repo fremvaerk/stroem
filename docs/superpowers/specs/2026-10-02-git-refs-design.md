@@ -800,8 +800,8 @@ When no role is pinned, every handle is today's live config and behaviour is
 unchanged.
 
 **Per-job redaction set.** These all redact with the live set's values plus
-`secret_values` of **every** pin the job references (`job.ref`, and each
-step's `action_ref` and `task_ref`):
+`secret_values` of **every** pin of the job's **redaction closure** (below):
+`job.ref`, and each step's `action_ref` and `task_ref`, of every job in it:
 - job detail (`web/api/jobs.rs:491-494`);
 - the sync webhook response (§ 7.5);
 - MCP `get_job_status` (`mcp/tools.rs:577`), which today returns job output
@@ -824,8 +824,36 @@ keys (`redaction::JOB_IDENTIFIER_KEYS`, `STEP_IDENTIFIER_KEYS`), so a short
 secret value cannot mangle a link. It skips the `child_jobs[]` summaries
 whole, which is safe only while they hold identifiers (§ 7.8).
 
+**Redaction closure** (Task 22 review). Content is copied between jobs:
+- a hook payload quotes its source's step errors (`hook.error_message`,
+  `hook.failed_steps[]`, `settlement/hooks.rs::build_hook_context`), and the
+  rendered hook input becomes the hook job's input. The hook job's only pin
+  is its source's `job.ref`; its own step has none;
+- a child's output settles into its parent's `type: task` step
+  (`Settlement::propagate`). The parent references the child's own pin
+  (`task_ref`), but not the pins of the child's steps.
+
+So the set of the job's own pins alone misses a value copied in from
+another job. Rule: a job's redaction set is the live values plus
+`pin_redaction_values` of every pin referenced by:
+- the job itself;
+- every **descendant** (`parent_job_id`, at most `MAX_TASK_DEPTH` levels);
+- its **hook-source chain**: while a job is `source_type = 'hook'`, the job
+  that fired it (`source_job_id`, or the UUID prefix of `source_id` on a
+  pre-048 hook row), at most `MAX_HOOK_CHAIN_DEPTH` links;
+- each source's descendants.
+
+One recursive query reads the distinct pins
+(`JobRepo::redaction_closure_pins`), merged with the job's own pins from the
+rows the outlet shows (`redaction::closure_pins`). Neither copy path is
+special-cased. Fail-closed is unchanged, over the whole closure: a transient
+pin failure anywhere in it answers 503, and a permanent one masks
+everything. A closure that cannot be read (a DB error) answers 503.
+
 These outlets were found by grep and are checked again by the audit task in
-§ 7.9. The audit at `324f0b1` found no outlet missing from this list.
+§ 7.9. The audit at `324f0b1` found no outlet route missing from this list.
+Its review then found the two copy paths above, which the job's own pins
+missed. The redaction closure covers them.
 
 Step `error_message` can carry a failing script's stderr
 (`stroem-worker/src/poller.rs:745`, persisted at `web/worker_api/jobs.rs:939`).
@@ -1026,8 +1054,22 @@ implementation review checks it.
 was enumerated, along with all ten MCP tools, and each was classified. No
 state list endpoint exists. The audit found two entries missing from § 7.8:
 the sync webhook response and the `child_jobs[]` summaries. It found no
-missing § 7.4 outlet. Every job-scoped path already had its test from the
-task that changed it. The only new test is for `child_jobs[]`.
+missing § 7.4 outlet route. Every job-scoped path already had its test from
+the task that changed it.
+
+The audit's review found one hole. A value can be copied INTO a job from
+another job, and the job's own pins did not cover it. A hook payload quotes
+its source's step errors, and a child's output settles into its parent
+step. The § 7.4 redaction closure fixes it. New tests cover `child_jobs[]`
+and both copy paths.
+
+Hook jobs: a single-step hook job is named `_hook:{action}`. That name
+matches no task, and a pinned hook job stamps no `task_folder`, so it is
+authorised as task `_hook:{action}` at the root folder. This is
+pre-existing. A rule that grants the root `_hook:*` grants View on every
+hook payload of that workspace, and so on the source errors it quotes, even
+when the source job's own folder is denied. A `type: task` hook job is an
+ordinary job of its task and is authorised by that task's folder.
 
 | Class | Routes and tools | Outlet (§ 7.4) | Tested by |
 |---|---|---|---|
@@ -1035,6 +1077,8 @@ task that changed it. The only new test is for `child_jobs[]`.
 | Job-scoped per row | `GET /api/workers/{id}` (recent steps) | yes, per row | `pinned_job_in_denied_folder_is_denied_on_every_rest_path`, `worker_detail_masks_error_and_fails_closed_per_row` |
 | List / count predicate | `GET /api/jobs`, `GET /api/stats`, MCP `list_jobs` | no (metadata only) | the same deny tests |
 | The parent's ACL | `child_jobs[]` and the lineage ids in job detail | identifiers, skipped | `read_path_audit_test.rs::child_job_summary_in_job_detail_is_identifiers_only_and_the_child_stays_job_scoped` |
+| Content copied between jobs (redaction closure, § 7.4) | a hook payload in the hook job's input (`hook.error_message`, `hook.failed_steps[]`); a child's output settled into its parent's `type: task` step | yes: the receiving job's set covers the pins of its hook sources and descendants | `read_path_audit_test.rs`: `hook_job_detail_masks_a_secret_of_its_sources_step_pin`, `parent_job_detail_masks_a_secret_of_its_childs_step_pin`; stroem-db `git_refs_test.rs::redaction_closure_pins_follow_descendants_and_the_hook_source_chain` |
+| Job-scoped, hook job (pre-existing) | single-step hook jobs on every job-scoped path: task path `_hook:{action}`, root folder | as any job | the job-scoped deny tests (the rule is the same `check_job_acl`) |
 | Task-scoped (live), pinned jobs excluded | `GET /api/workspaces/{ws}/tasks/{name}/stats` | no | stroem-db `git_refs_test.rs::duration_stats_exclude_pinned_jobs` |
 | Task-scoped (live) | workspaces and refresh, task list and detail, triggers, execute (not a re-run), manual state upload; MCP `list_workspaces`, `list_tasks`, `get_task`, `execute_task` | no | unchanged |
 | Explicit exception: webhook auth | the sync response of `/hooks/{name}`, `GET /hooks/{name}/jobs/{job_id}` | yes, every branch | `sync_webhook_masks_ref_only_secret`, `sync_webhook_fails_closed_with_job_id`, `webhook_status_poll_masks_ref_only_secret_in_every_branch`, `webhook_status_poll_fails_closed_with_job_id` |

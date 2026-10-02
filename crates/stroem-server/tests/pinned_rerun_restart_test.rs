@@ -105,20 +105,6 @@ async fn rr_fire(fx: &PinnedFixture, trigger: &str) -> Result<Uuid> {
     Ok(id)
 }
 
-async fn rr_step(fx: &PinnedFixture, worker: &str, job: Uuid, step: &str, result: JsonValue) {
-    let claimed = claim_once(&fx.router, worker).await;
-    assert_eq!(claimed["job_id"], json!(job.to_string()), "{claimed}");
-    assert_eq!(claimed["step_name"], json!(step), "{claimed}");
-    let (st, resp) = worker_req(
-        &fx.router,
-        "POST",
-        &format!("/worker/jobs/{job}/steps/{step}/complete"),
-        Some(result),
-    )
-    .await;
-    assert_eq!(st, StatusCode::OK, "complete {step}: {resp}");
-}
-
 /// Source job: pinned to `release/2.3` at its first commit, `a` completed, `b` failed.
 async fn rr_failed_pinned_source(fx: &PinnedFixture) -> Result<Uuid> {
     let source = rr_fire(fx, "nightly").await?;
@@ -129,8 +115,8 @@ async fn rr_failed_pinned_source(fx: &PinnedFixture) -> Result<Uuid> {
         Some(fx.commits.etl_release.as_str())
     );
     let w = register_worker(&fx.router, &["script"]).await;
-    rr_step(fx, &w, source, "a", json!({"output": {"ok": true}})).await;
-    rr_step(
+    claim_and_complete(fx, &w, source, "a", json!({"output": {"ok": true}})).await;
+    claim_and_complete(
         fx,
         &w,
         source,

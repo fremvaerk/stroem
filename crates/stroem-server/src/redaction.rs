@@ -2,10 +2,15 @@
 //!
 //! Every API outlet that returns a job's input/output, step output or
 //! `error_message` masks with the live workspaces' values PLUS the secret
-//! values of every pin the job references. A pinned commit's sops values (or
-//! how its vals references render) can differ from the live config, so the
-//! live set alone would let an older or ref-only secret through. A pin that
-//! cannot be loaded makes the set incomplete; an incomplete set is never
+//! values of every pin referenced by the job's **redaction closure**: the job,
+//! its descendants, and its hook-source chain with each source's descendants
+//! ([`closure_pins`]). Content is copied between those jobs (a child's output
+//! settles into its parent step, a hook payload quotes its source's step
+//! errors), so a job's own pins alone would let a copied value through. A
+//! pinned commit's sops values (or how its vals references render) can differ
+//! from the live config, so the live set alone would let an older or
+//! ref-only secret through. A pin that cannot be loaded, or a closure that
+//! cannot be read, makes the set incomplete; an incomplete set is never
 //! used. A TRANSIENT failure fails closed ([`RedactionUnavailable`] → 503 /
 //! an MCP error, retry later); a PERMANENT one can never be retried away, so
 //! the outlet answers with every content string masked
@@ -14,7 +19,7 @@
 use std::collections::BTreeSet;
 
 use serde_json::Value;
-use stroem_db::{JobRow, JobStepRow};
+use stroem_db::{ClosurePinRow, JobRepo, JobRow, JobStepRow};
 
 use crate::state::AppState;
 use crate::workspace::pins::{PinError, PinLoadWithheld, PinRef};
@@ -22,12 +27,15 @@ use crate::workspace_set::{
     collect_redaction_values, redact_secrets_in_str, WorkspaceSet, REDACTED,
 };
 
-/// A pin the job references could not be loaded, so its secret values are
-/// unknown. Callers must not answer with a partial redaction set.
+/// A pin in the job's redaction closure could not be loaded, or the closure
+/// itself could not be read, so some secret values are unknown. Callers must
+/// not answer with a partial redaction set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RedactionUnavailable {
     pub workspace: String,
-    pub commit: String,
+    /// The pin that failed. `None`: the closure could not be read (a DB
+    /// error), so which pins it holds is unknown.
+    pub commit: Option<String>,
     /// [`PinError::is_transient`] of the failure: `true` = a retry may
     /// succeed (answer 503); `false` = it never will (mask everything).
     pub transient: bool,
@@ -37,25 +45,41 @@ impl RedactionUnavailable {
     pub fn from_pin_error(ws: &str, pin: &PinRef, e: &PinError) -> Self {
         RedactionUnavailable {
             workspace: ws.to_string(),
-            commit: pin.commit.clone(),
+            commit: Some(pin.commit.clone()),
             transient: e.is_transient(),
+        }
+    }
+
+    /// The closure of a job in `ws` could not be read. Transient: a retry
+    /// may read it.
+    pub fn closure_unreadable(ws: &str) -> Self {
+        RedactionUnavailable {
+            workspace: ws.to_string(),
+            commit: None,
+            transient: true,
         }
     }
 }
 
 impl std::fmt::Display for RedactionUnavailable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "redaction set unavailable: pin {}@{} could not be loaded ({})",
-            self.workspace,
-            self.commit,
-            if self.transient {
-                "transient"
-            } else {
-                "permanent"
-            }
-        )
+        let kind = if self.transient {
+            "transient"
+        } else {
+            "permanent"
+        };
+        match &self.commit {
+            Some(commit) => write!(
+                f,
+                "redaction set unavailable: pin {}@{commit} could not be loaded ({kind})",
+                self.workspace
+            ),
+            None => write!(
+                f,
+                "redaction set unavailable: the redaction closure of a job in {} could not be read ({kind})",
+                self.workspace
+            ),
+        }
     }
 }
 
@@ -151,9 +175,58 @@ pub fn referenced_pins(job: &JobRow, steps: &[JobStepRow]) -> Vec<(String, PinRe
     out
 }
 
-/// The live redaction set plus the secret values of every pin the job
-/// references (spec § 7.4). `Err` = some pin could not be loaded; the first
-/// failing pin decides the error's kind. Outlets normally go through
+/// [`referenced_pins`] of the job (`own`, in order), then each closure row
+/// whose `(workspace, commit)` is not listed yet. Pure.
+pub fn merge_pins(
+    own: Vec<(String, PinRef)>,
+    closure: Vec<ClosurePinRow>,
+) -> Vec<(String, PinRef)> {
+    let mut seen: BTreeSet<(String, String)> = own
+        .iter()
+        .map(|(ws, pin)| (ws.clone(), pin.commit.clone()))
+        .collect();
+    let mut out = own;
+    for row in closure {
+        if seen.insert((row.workspace.clone(), row.revision.clone())) {
+            out.push((
+                row.workspace,
+                PinRef {
+                    git_ref: row.git_ref,
+                    commit: row.revision,
+                },
+            ));
+        }
+    }
+    out
+}
+
+/// Every distinct pin of the job's **redaction closure** (spec § 7.4): the
+/// job's own [`referenced_pins`] (from the rows the outlet is about to show),
+/// plus the pins of every job whose content can be copied into it — its
+/// descendants (a child's output settles into its parent step), its
+/// hook-source chain (a hook payload quotes its source's step errors and
+/// output) and each source's descendants. Bounded by
+/// `job_creator::MAX_TASK_DEPTH` and `settlement::hooks::MAX_HOOK_CHAIN_DEPTH`.
+#[tracing::instrument(skip_all, fields(job_id = %job.job_id))]
+pub async fn closure_pins(
+    state: &AppState,
+    job: &JobRow,
+    steps: &[JobStepRow],
+) -> anyhow::Result<Vec<(String, PinRef)>> {
+    let rows = JobRepo::redaction_closure_pins(
+        &state.pool,
+        job.job_id,
+        crate::job_creator::MAX_TASK_DEPTH as i32,
+        crate::settlement::hooks::MAX_HOOK_CHAIN_DEPTH as i32,
+    )
+    .await?;
+    Ok(merge_pins(referenced_pins(job, steps), rows))
+}
+
+/// The live redaction set plus the secret values of every pin of the job's
+/// redaction closure ([`closure_pins`], spec § 7.4). `Err` = the closure
+/// could not be read (transient), or some pin could not be loaded (the first
+/// failing pin decides the error's kind). Outlets normally go through
 /// [`job_redaction`], which turns a permanent failure into
 /// [`JobRedaction::MaskAll`].
 #[tracing::instrument(skip_all, fields(job_id = %job.job_id, workspace = %job.workspace))]
@@ -164,7 +237,18 @@ pub async fn job_redaction_values(
 ) -> Result<Vec<String>, RedactionUnavailable> {
     let set = WorkspaceSet::load(&state.workspaces, &job.workspace, None).await;
     let mut values = collect_redaction_values(&set);
-    for (ws, pin) in referenced_pins(job, steps) {
+    let pins = match closure_pins(state, job, steps).await {
+        Ok(pins) => pins,
+        Err(e) => {
+            // A DB error: no config text, safe to log whole.
+            tracing::warn!(
+                job_id = %job.job_id,
+                "redaction set unavailable: redaction closure unreadable: {e:#}"
+            );
+            return Err(RedactionUnavailable::closure_unreadable(&job.workspace));
+        }
+    };
+    for (ws, pin) in pins {
         match state.workspaces.pins().ensure(&ws, &pin.commit).await {
             // The pin's complete set (R5): its secrets AND the `secret: true`
             // properties of its connections, whichever workspace types them.
@@ -551,7 +635,10 @@ mod tests {
         ];
         let u = RedactionUnavailable::from_pin_error("etl", &pin_23(), &transient);
         assert!(u.transient);
-        assert_eq!((u.workspace.as_str(), u.commit.as_str()), ("etl", SHA_A));
+        assert_eq!(
+            (u.workspace.as_str(), u.commit.as_deref()),
+            ("etl", Some(SHA_A))
+        );
         for e in &permanent {
             assert!(
                 !RedactionUnavailable::from_pin_error("etl", &pin_23(), e).transient,
@@ -579,6 +666,27 @@ mod tests {
         assert!(pin_failure_log_text("etl", &pin_23(), &e).contains("connection refused"));
     }
 
+    /// A DB error reading the closure: the set is unknown, so the outlet
+    /// fails closed (503), never masks-all, and the text names no pin.
+    #[test]
+    fn closure_unreadable_is_transient_and_names_no_pin() {
+        let u = RedactionUnavailable::closure_unreadable("etl");
+        assert!(u.transient);
+        assert_eq!(u.commit, None);
+        assert_eq!(JobRedaction::from_result(Err(u.clone())), Err(u.clone()));
+        let text = u.to_string();
+        assert!(text.contains("redaction closure"), "{text}");
+        assert!(text.contains("etl"), "{text}");
+        let pin = RedactionUnavailable::from_pin_error(
+            "etl",
+            &pin_23(),
+            &PinError::NotGit {
+                workspace: "etl".into(),
+            },
+        );
+        assert!(pin.to_string().contains(&format!("etl@{SHA_A}")), "{pin}");
+    }
+
     #[test]
     fn job_redaction_splits_on_the_error_kind() {
         let values = JobRedaction::from_result(Ok(vec!["s".to_string()]));
@@ -586,7 +694,7 @@ mod tests {
 
         let permanent = RedactionUnavailable {
             workspace: "etl".into(),
-            commit: SHA_A.into(),
+            commit: Some(SHA_A.into()),
             transient: false,
         };
         assert_eq!(
@@ -596,7 +704,7 @@ mod tests {
 
         let transient = RedactionUnavailable {
             workspace: "etl".into(),
-            commit: SHA_A.into(),
+            commit: Some(SHA_A.into()),
             transient: true,
         };
         assert_eq!(
@@ -716,6 +824,51 @@ mod tests {
                 ("billing".to_string(), SHA_B.to_string()),
             ]
         );
+    }
+
+    // ── merge_pins (redaction closure) ─────────────────────────────────
+
+    fn closure_row(ws: &str, git_ref: &str, commit: &str) -> ClosurePinRow {
+        ClosurePinRow {
+            workspace: ws.to_string(),
+            git_ref: git_ref.to_string(),
+            revision: commit.to_string(),
+        }
+    }
+
+    #[test]
+    fn merge_pins_keeps_own_pins_first_and_adds_unseen_closure_pins() {
+        let own = vec![("etl".to_string(), pin_23())];
+        let closure = vec![
+            // Same (workspace, commit) as an own pin, under another ref name.
+            closure_row("etl", "refs/heads/release/2.3", SHA_A),
+            closure_row("billing", "v4.1.0", SHA_B),
+            // Same commit, other workspace: a different pin.
+            closure_row("docs", "main", SHA_A),
+            closure_row("billing", "v4.1.0", SHA_B),
+        ];
+        let got: Vec<(String, String, String)> = merge_pins(own, closure)
+            .into_iter()
+            .map(|(ws, p)| (ws, p.git_ref, p.commit))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("etl".into(), "release/2.3".into(), SHA_A.into()),
+                ("billing".into(), "v4.1.0".into(), SHA_B.into()),
+                ("docs".into(), "main".into(), SHA_A.into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn merge_pins_of_an_empty_closure_is_the_jobs_own() {
+        assert!(merge_pins(vec![], vec![]).is_empty());
+        let own = vec![("etl".to_string(), pin_23())];
+        assert_eq!(merge_pins(own.clone(), vec![]), own);
+        let only_closure = merge_pins(vec![], vec![closure_row("etl", "main", SHA_B)]);
+        assert_eq!(only_closure.len(), 1);
+        assert_eq!(only_closure[0].1.commit, SHA_B);
     }
 
     #[test]
