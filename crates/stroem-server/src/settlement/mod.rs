@@ -611,6 +611,23 @@ impl Settlement {
         Ok(outcome)
     }
 
+    /// [`step_failed`](Self::step_failed) for a failure decided on a CLAIM —
+    /// recovery's stale-worker and step-timeout phases, `fail_claimed_step`:
+    /// it applies only while the row is still `running` under that claim. A
+    /// row that completed, was cancelled, released or reclaimed since is
+    /// `NotApplied` (`expected_claim` alone compares the identity, not the
+    /// status, and a completed row keeps its `worker_id` and `started_at`).
+    pub async fn claimed_step_failed(
+        &self,
+        job_id: Uuid,
+        step_name: &str,
+        error: &str,
+        claim: Option<ClaimIdentity>,
+    ) -> Result<FailOutcome> {
+        self.step_failed(job_id, step_name, error, &[StepStatus::Running], claim)
+            .await
+    }
+
     /// Run the side effects a freshly created job may already owe.
     ///
     /// - `terminal_at_creation` → `advance` (hooks, metrics, archive, parent

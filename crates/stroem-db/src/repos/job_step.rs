@@ -798,7 +798,9 @@ impl JobStepRepo {
     ///   (`NotApplied`). Recovery and `fail_claimed_step` pass the claim they
     ///   observed so a released or reclaimed step is never failed on the
     ///   strength of an earlier attempt (spec 2026-10-02 § 7.2). Everyone else
-    ///   passes `None`.
+    ///   passes `None`. It compares the identity only: a completed or
+    ///   cancelled row keeps both columns, so pair it with
+    ///   `expected = [Running]` (`Settlement::claimed_step_failed`).
     pub async fn fail_or_retry(
         pool: &PgPool,
         job_id: Uuid,

@@ -550,10 +550,25 @@ pub struct PinStoreSection {
     /// hold. Default 5.
     #[serde(default)]
     pub keep_recent_per_workspace: Option<usize>,
+    /// How long a worker's claim waits for the pins it needs to load
+    /// (spec § 7.2). Past it the claim is released back to `ready` and the
+    /// load goes on in the background. Keep it clearly BELOW the workers'
+    /// `request_timeout_secs` (30 s by default): a claim answered after the
+    /// worker gave up leaves its step `running` with nobody executing it.
+    /// Default [`DEFAULT_CLAIM_PIN_LOAD_BUDGET_SECS`].
+    #[serde(default)]
+    pub claim_load_budget_secs: Option<u64>,
 }
 
 /// Upper bound on `pin_store.keep_recent_per_workspace`.
 pub const MAX_PIN_KEEP_RECENT: usize = 1000;
+
+/// Default `pin_store.claim_load_budget_secs`: 20 s, against the worker's
+/// default `request_timeout_secs` of 30 s (`stroem-worker` `client.rs`),
+/// leaving 10 s for the rest of the claim and the network.
+pub const DEFAULT_CLAIM_PIN_LOAD_BUDGET_SECS: u64 = 20;
+// Below the worker's default claim request timeout (30 s).
+const _: () = assert!(DEFAULT_CLAIM_PIN_LOAD_BUDGET_SECS < 30);
 
 /// Data retention configuration for cleaning up old workers, jobs, and logs
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -824,8 +839,27 @@ impl ServerConfig {
                     );
                 }
             }
+            if let Some(secs) = p.claim_load_budget_secs {
+                if secs == 0 || secs > MAX_WORKSPACE_RELOAD_SECS {
+                    anyhow::bail!(
+                        "pin_store.claim_load_budget_secs must be between 1 and \
+                         {MAX_WORKSPACE_RELOAD_SECS}, got {secs}"
+                    );
+                }
+            }
         }
         Ok(())
+    }
+
+    /// `pin_store.claim_load_budget_secs`, or its default: how long a claim
+    /// waits for its pins to load before it releases the step (spec § 7.2).
+    pub fn claim_pin_load_budget(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(
+            self.pin_store
+                .as_ref()
+                .and_then(|p| p.claim_load_budget_secs)
+                .unwrap_or(DEFAULT_CLAIM_PIN_LOAD_BUDGET_SECS),
+        )
     }
 }
 
@@ -2923,7 +2957,7 @@ worker_token: "0123456789abcdef0123456789abcdef"
         let mut cfg: ServerConfig = serde_yaml::from_str(base).unwrap();
         cfg.pin_store = Some(PinStoreSection {
             dir: Some(String::new()),
-            keep_recent_per_workspace: None,
+            ..Default::default()
         });
         assert!(cfg
             .validate()
@@ -2931,8 +2965,8 @@ worker_token: "0123456789abcdef0123456789abcdef"
             .to_string()
             .contains("pin_store.dir"));
         cfg.pin_store = Some(PinStoreSection {
-            dir: None,
             keep_recent_per_workspace: Some(MAX_PIN_KEEP_RECENT + 1),
+            ..Default::default()
         });
         assert!(cfg
             .validate()
@@ -2940,10 +2974,44 @@ worker_token: "0123456789abcdef0123456789abcdef"
             .to_string()
             .contains("keep_recent_per_workspace"));
         cfg.pin_store = Some(PinStoreSection {
-            dir: None,
             keep_recent_per_workspace: Some(0),
+            ..Default::default()
         });
         cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn claim_pin_load_budget_defaults_parses_and_is_bounded() {
+        let base = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://x"
+log_storage:
+  local_dir: /tmp/logs
+worker_token: "0123456789abcdef0123456789abcdef"
+"#;
+        let mut cfg: ServerConfig = serde_yaml::from_str(base).unwrap();
+        assert_eq!(
+            cfg.claim_pin_load_budget(),
+            std::time::Duration::from_secs(DEFAULT_CLAIM_PIN_LOAD_BUDGET_SECS)
+        );
+
+        let with = format!("{base}pin_store:\n  claim_load_budget_secs: 5\n");
+        let parsed: ServerConfig = serde_yaml::from_str(&with).unwrap();
+        assert_eq!(
+            parsed.claim_pin_load_budget(),
+            std::time::Duration::from_secs(5)
+        );
+        parsed.validate().unwrap();
+
+        for bad in [0, MAX_WORKSPACE_RELOAD_SECS + 1] {
+            cfg.pin_store = Some(PinStoreSection {
+                claim_load_budget_secs: Some(bad),
+                ..Default::default()
+            });
+            let err = cfg.validate().unwrap_err().to_string();
+            assert!(err.contains("claim_load_budget_secs"), "{bad}: {err}");
+        }
     }
 
     #[test]

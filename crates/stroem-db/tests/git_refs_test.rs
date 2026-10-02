@@ -518,6 +518,61 @@ async fn fail_or_retry_expected_claim_guards_released_and_reclaimed_steps() -> R
     Ok(())
 }
 
+/// A finished row keeps its `worker_id` and `started_at`, so the claim
+/// identity alone still matches it. Every claim-decided failure pairs it
+/// with `[Running]` (`Settlement::claimed_step_failed`): a step that
+/// completed or was cancelled after the claim was observed is left alone.
+#[tokio::test]
+async fn fail_or_retry_running_and_claim_leave_a_finished_row_alone() -> Result<()> {
+    use stroem_common::models::job::StepStatus;
+    let pool = setup_db().await;
+
+    let job = create_job(&pool, "ws", "t").await;
+    let claim = claim_one(&pool, job, "s").await;
+    JobStepRepo::mark_completed(&pool, job, "s", Some(serde_json::json!({"ok": true}))).await?;
+    let done = step(&pool, job, "s").await;
+    assert_eq!(
+        (done.worker_id, done.started_at),
+        (Some(claim.worker_id), Some(claim.started_at)),
+        "the identity survives completion"
+    );
+    let out = JobStepRepo::fail_or_retry(
+        &pool,
+        job,
+        "s",
+        "Worker heartbeat timeout",
+        &[StepStatus::Running],
+        |_| 0,
+        Some(claim),
+    )
+    .await?;
+    assert_eq!(out, FailOutcome::NotApplied);
+    let after = step(&pool, job, "s").await;
+    assert_eq!(after.status, "completed");
+    assert_eq!(after.error_message, None);
+    assert_eq!(after.output, Some(serde_json::json!({"ok": true})));
+
+    let job2 = create_job(&pool, "ws", "t2").await;
+    let claim2 = claim_one(&pool, job2, "s").await;
+    sqlx::query("UPDATE job_step SET status = 'cancelled' WHERE job_id = $1")
+        .bind(job2)
+        .execute(&pool)
+        .await?;
+    let out = JobStepRepo::fail_or_retry(
+        &pool,
+        job2,
+        "s",
+        "Step timed out",
+        &[StepStatus::Running],
+        |_| 0,
+        Some(claim2),
+    )
+    .await?;
+    assert_eq!(out, FailOutcome::NotApplied);
+    assert_eq!(step(&pool, job2, "s").await.status, "cancelled");
+    Ok(())
+}
+
 // ─── Task 4: ACL scope ────────────────────────────────────────────────
 
 fn pairs(v: &[(&str, &str)]) -> Vec<(String, String)> {

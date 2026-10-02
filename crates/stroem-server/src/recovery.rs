@@ -97,16 +97,16 @@ async fn sweep(state: &AppState) -> Result<()> {
                     )
                     .await;
 
-                // Spec § 7.2: fail the step only while it is still the claim
-                // selected above — a claim released (or released and reclaimed)
-                // since then must not be failed on the old attempt's behalf.
+                // Spec § 7.2: fail the step only while it is still the running
+                // claim selected above — a claim completed, released (or
+                // released and reclaimed) since then must not be failed on the
+                // old attempt's behalf.
                 if let Err(e) = state
                     .settlement()
-                    .step_failed(
+                    .claimed_step_failed(
                         step_info.job_id,
                         &step_info.step_name,
                         &error_msg,
-                        &[],
                         step_info.claim(),
                     )
                     .await
@@ -153,15 +153,14 @@ async fn sweep(state: &AppState) -> Result<()> {
             step_info.step_name
         );
 
-        // Same claim guard as phase 1: the timeout belongs to the claim
-        // selected above, not to a later attempt of the same step.
+        // Same claim guard as phase 1: the timeout belongs to the running
+        // claim selected above, not to a later attempt or a finished one.
         if let Err(e) = state
             .settlement()
-            .step_failed(
+            .claimed_step_failed(
                 step_info.job_id,
                 &step_info.step_name,
                 &error_msg,
-                &[],
                 step_info.claim(),
             )
             .await

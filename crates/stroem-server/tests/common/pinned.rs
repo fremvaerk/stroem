@@ -31,8 +31,8 @@ use stroem_db::{create_pool, run_migrations, ApiKeyRepo, JobRepo, UserGroupRepo,
 use stroem_server::auth::{generate_api_key, hash_password};
 use stroem_server::blob_storage::{BlobArchive, LocalBlobArchive};
 use stroem_server::config::{
-    AclConfig, AuthConfig, DbConfig, JobDefaults, LogStorageConfig, McpConfig, RetentionConfig,
-    ServerConfig,
+    AclConfig, AuthConfig, DbConfig, JobDefaults, LogStorageConfig, McpConfig, PinStoreSection,
+    RetentionConfig, ServerConfig,
 };
 use stroem_server::job_creator::{create_job_for_task_pinned, CreationMode};
 use stroem_server::log_read::StepFilter;
@@ -313,6 +313,9 @@ pub struct PinnedFixtureOpts {
     pub etl_release: Option<String>,
     pub billing_main: Option<String>,
     pub billing_tagged: Option<String>,
+    /// `pin_store.claim_load_budget_secs` (every replica). Default: the
+    /// server's (20 s).
+    pub claim_load_budget_secs: Option<u64>,
 }
 
 // ─── Repos ─────────────────────────────────────────────────────────────────
@@ -601,7 +604,12 @@ pub async fn pinned_workspace_fixture(opts: PinnedFixtureOpts) -> Result<PinnedF
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
-        pin_store: None, // the store is injected below with `with_pin_store`
+        // The store itself is injected below with `with_pin_store`; the
+        // section only carries the claim budget.
+        pin_store: opts.claim_load_budget_secs.map(|secs| PinStoreSection {
+            claim_load_budget_secs: Some(secs),
+            ..Default::default()
+        }),
     };
 
     let keep_recent = opts.keep_recent_per_workspace.unwrap_or(5);

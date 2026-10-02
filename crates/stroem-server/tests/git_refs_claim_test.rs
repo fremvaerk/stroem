@@ -384,7 +384,7 @@ async fn stale_claim_identity_does_not_fail_a_released_or_reclaimed_step() -> an
     let out = fx
         .state
         .settlement()
-        .step_failed(job_id, "only", "Worker heartbeat timeout", &[], Some(old))
+        .claimed_step_failed(job_id, "only", "Worker heartbeat timeout", Some(old))
         .await?;
     assert_eq!(out, FailOutcome::NotApplied);
     assert_eq!(
@@ -402,7 +402,7 @@ async fn stale_claim_identity_does_not_fail_a_released_or_reclaimed_step() -> an
     let out = fx
         .state
         .settlement()
-        .step_failed(job_id, "only", "Step timed out", &[], Some(old))
+        .claimed_step_failed(job_id, "only", "Step timed out", Some(old))
         .await?;
     assert_eq!(out, FailOutcome::NotApplied);
     let row = JobStepRepo::get_step(&fx.pool, job_id, "only")
@@ -418,7 +418,7 @@ async fn stale_claim_identity_does_not_fail_a_released_or_reclaimed_step() -> an
     let out = fx
         .state
         .settlement()
-        .step_failed(job_id, "only", "Step timed out", &[], Some(current))
+        .claimed_step_failed(job_id, "only", "Step timed out", Some(current))
         .await?;
     assert!(matches!(out, FailOutcome::Failed { .. }), "{out:?}");
     Ok(())
@@ -735,5 +735,202 @@ async fn dotted_local_action_in_a_pinned_job_claims_by_full_key() -> anyhow::Res
     assert_eq!(body["revision"], fx.commits.etl_release.as_str());
     assert_eq!(body["input"]["greeting"], "from-pinned-common", "{body}");
     assert_eq!(body["action_spec"]["script"], "echo from-pinned-common");
+    Ok(())
+}
+
+/// Fix round 1, finding 2: a claim-decided failure (recovery phases 1 and 2,
+/// `fail_claimed_step`) never overwrites a step the worker FINISHED after
+/// the claim was observed — a completed row keeps the very same
+/// `(worker_id, started_at)`, so only the `running` requirement stops it.
+#[tokio::test]
+async fn claimed_failure_never_overwrites_a_completed_step() -> anyhow::Result<()> {
+    let fx = claim_fixture().await?;
+    let job_id = claim_execute(&fx.router, "etl", "plain").await;
+    let worker = register_worker(&fx.router, &["script"]).await;
+    let (_, body) = claim_status(&fx.router, &worker).await;
+    assert_eq!(body["step_name"], "only");
+    let row = JobStepRepo::get_step(&fx.pool, job_id, "only")
+        .await?
+        .unwrap();
+    let selected = ClaimIdentity {
+        worker_id: row.worker_id.unwrap(),
+        started_at: row.started_at.unwrap(),
+    };
+
+    // The worker reports success after a sweep selected the claim.
+    let (status, body) = worker_req(
+        &fx.router,
+        "POST",
+        &format!("/worker/jobs/{job_id}/steps/only/complete"),
+        Some(json!({"exit_code": 0, "output": {"ok": true}})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let done = JobStepRepo::get_step(&fx.pool, job_id, "only")
+        .await?
+        .unwrap();
+    assert_eq!(done.status, "completed");
+    assert_eq!(
+        (done.worker_id, done.started_at),
+        (Some(selected.worker_id), Some(selected.started_at))
+    );
+
+    let out = fx
+        .state
+        .settlement()
+        .claimed_step_failed(job_id, "only", "Worker heartbeat timeout", Some(selected))
+        .await?;
+    assert_eq!(out, FailOutcome::NotApplied);
+    let after = JobStepRepo::get_step(&fx.pool, job_id, "only")
+        .await?
+        .unwrap();
+    assert_eq!(after.status, "completed");
+    assert_eq!(after.error_message, None);
+    assert_eq!(
+        JobRepo::get(&fx.pool, job_id).await?.unwrap().status,
+        "completed"
+    );
+    Ok(())
+}
+
+// ─── Fix round 1, finding 1: bounded, disconnect-proof pin loads ────────
+
+/// A replica whose PinStore already holds etl@release/2.3's CHECKOUT, so the
+/// only blocking pin work left for a claim is the config load — the unit a
+/// `hold_loads_for_test` then parks.
+async fn claim_replica_with_warm_tree(fx: &PinnedFixture) -> anyhow::Result<Replica> {
+    let replica = fx.second_replica().await?;
+    let pins = replica.state.workspaces.pins();
+    pins.ensure_tree("etl", &fx.commits.etl_release).await?;
+    assert_eq!(pins.load_count(), 0, "no config load yet");
+    Ok(replica)
+}
+
+/// A pin load that outlasts the claim budget (below the worker's request
+/// timeout) releases the claim at the budget instead of answering after
+/// the worker gave up; the load itself goes on and warms the cache.
+#[tokio::test]
+async fn pin_load_past_the_claim_budget_releases_and_keeps_loading() -> anyhow::Result<()> {
+    let fx = pinned_workspace_fixture(PinnedFixtureOpts {
+        etl_main: Some(CLAIM_MAIN_FLOW.to_string()),
+        etl_release: Some(CLAIM_RELEASE_FLOW.to_string()),
+        claim_load_budget_secs: Some(1),
+        ..Default::default()
+    })
+    .await?;
+    let job_id = claim_execute(&fx.router, "etl", "pinned-pair").await;
+    let replica = claim_replica_with_warm_tree(&fx).await?;
+    let pins = replica.state.workspaces.pins();
+    let worker = register_worker(&replica.router, &["script"]).await;
+
+    let hold = pins.hold_loads_for_test();
+    let started = std::time::Instant::now();
+    // Bounded here too: an unbounded claim would wait on the held load
+    // forever (the hold opens on unwind, so the parked load never leaks).
+    let (status, body) = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        claim_status(&replica.router, &worker),
+    )
+    .await
+    .expect("the claim answers within its budget, whatever the pin load does");
+    let took = started.elapsed();
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["job_id"].is_null(), "released at the budget: {body}");
+    assert!(
+        took >= std::time::Duration::from_secs(1) && took < std::time::Duration::from_secs(10),
+        "answered at the 1 s budget, not when the load finished: {took:?}"
+    );
+    assert_eq!(hold.entered(), 1, "the config load was held, not failed");
+
+    let a = JobStepRepo::get_step(&fx.pool, job_id, "a").await?.unwrap();
+    assert_eq!(a.status, "ready");
+    assert_eq!(a.pin_releases, 1);
+    assert_eq!(a.retry_attempt, 0);
+    assert!(a.retry_at.is_some(), "released with a retry delay");
+    assert!(a.worker_id.is_none() && a.started_at.is_none());
+    let log = job_log_text(&fx.pool, &replica.state, job_id).await;
+    assert!(
+        log.contains("[pin] etl@release/2.3 (")
+            && log.contains("not available yet on this server")
+            && log.contains("claim budget"),
+        "{log}"
+    );
+
+    // The load the claim stopped waiting for finishes and fills the cache:
+    // the next ensure joins or reads it, with no second config load.
+    drop(hold);
+    pins.ensure("etl", &fx.commits.etl_release).await?;
+    assert_eq!(
+        pins.load_count(),
+        1,
+        "the claim's load went on in the background"
+    );
+    claim_clear_retry_at(&fx.pool, job_id).await;
+    let (status, body) = claim_status(&replica.router, &worker).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["step_name"], "a");
+    assert_eq!(body["action_spec"]["script"], "echo release-build");
+    Ok(())
+}
+
+/// The worker hangs up while the claim waits for a pin (the handler is
+/// dropped). The selection runs in its own task: once the config loads with
+/// nobody left to answer, it releases the claim instead of leaving the step
+/// `running` under a live worker that never got it.
+#[tokio::test]
+async fn claim_dropped_mid_pin_load_releases_the_step() -> anyhow::Result<()> {
+    let fx = claim_fixture().await?;
+    let job_id = claim_execute(&fx.router, "etl", "pinned-pair").await;
+    let replica = claim_replica_with_warm_tree(&fx).await?;
+    let pins = replica.state.workspaces.pins();
+    let worker = register_worker(&replica.router, &["script"]).await;
+
+    let hold = pins.hold_loads_for_test();
+    {
+        let mut claim = Box::pin(claim_status(&replica.router, &worker));
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::select! {
+                answered = &mut claim => panic!("answered while the load was held: {answered:?}"),
+                () = async {
+                    while hold.entered() == 0 {
+                        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    }
+                } => {}
+            }
+        })
+        .await
+        .expect("the claim's config load reaches the gate");
+        // `claim` drops here: the worker's request is gone mid-load.
+    }
+    assert_eq!(
+        JobStepRepo::get_step(&fx.pool, job_id, "a")
+            .await?
+            .unwrap()
+            .status,
+        "running",
+        "claimed, and nobody answered yet"
+    );
+
+    drop(hold);
+    let released = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let a = JobStepRepo::get_step(&fx.pool, job_id, "a")
+                .await
+                .unwrap()
+                .unwrap();
+            if a.status != "running" {
+                return a;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the unanswered claim is released");
+    assert_eq!(released.status, "ready");
+    assert_eq!(released.pin_releases, 1);
+    assert_eq!(released.retry_attempt, 0, "a release, not a failure");
+    assert!(released.worker_id.is_none());
+    let log = job_log_text(&fx.pool, &replica.state, job_id).await;
+    assert!(log.contains("stopped waiting"), "{log}");
     Ok(())
 }

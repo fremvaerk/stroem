@@ -446,13 +446,13 @@ pub struct PinStore {
     #[cfg(test)]
     skip_fetch_by_sha: AtomicBool,
     /// Test hook: holds the blocking pin work at its start while closed.
-    #[cfg(test)]
+    /// Compiled in (integration tests link this crate without `cfg(test)`);
+    /// never closed outside [`PinStore::hold_loads_for_test`].
     gate: Arc<TestGate>,
 }
 
 /// Test hook: blocking pin work (fetch + checkout, config load) waits at
 /// its start while the gate is closed.
-#[cfg(test)]
 #[derive(Default)]
 struct TestGate {
     closed: Mutex<bool>,
@@ -461,7 +461,26 @@ struct TestGate {
     entered: AtomicUsize,
 }
 
-#[cfg(test)]
+/// Holds every blocking pin load of one store at its start until dropped
+/// ([`PinStore::hold_loads_for_test`]). Opening on drop means a failing
+/// assertion never leaves a blocking thread parked (the runtime would wait
+/// on it forever).
+#[doc(hidden)]
+pub struct PinLoadHold(Arc<TestGate>);
+
+impl PinLoadHold {
+    /// Blocking pin work units that reached the gate since the hold began.
+    pub fn entered(&self) -> usize {
+        self.0.entered.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for PinLoadHold {
+    fn drop(&mut self) {
+        self.0.set_closed(false);
+    }
+}
+
 impl TestGate {
     fn pass(&self) {
         self.entered.fetch_add(1, Ordering::SeqCst);
@@ -542,7 +561,6 @@ impl PinStore {
             loads: AtomicUsize::new(0),
             #[cfg(test)]
             skip_fetch_by_sha: AtomicBool::new(false),
-            #[cfg(test)]
             gate: Arc::default(),
         })
     }
@@ -565,7 +583,6 @@ impl PinStore {
             loads: AtomicUsize::new(0),
             #[cfg(test)]
             skip_fetch_by_sha: AtomicBool::new(false),
-            #[cfg(test)]
             gate: Arc::default(),
         }
     }
@@ -845,11 +862,9 @@ impl PinStore {
                 let lock = self.repo_lock(ws);
                 let by_sha = self.fetch_by_sha_enabled();
                 let ws_owned = ws.to_string();
-                #[cfg(test)]
                 let gate = Arc::clone(&self.gate);
                 let dir = tokio::task::spawn_blocking(move || {
                     let _permit = permit;
-                    #[cfg(test)]
                     gate.pass();
                     let peeled = {
                         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -907,11 +922,9 @@ impl PinStore {
         // The permit and a lease on the checkout move into the blocking
         // load: both outlive a caller dropped mid-load.
         let lease = Arc::clone(&tree);
-        #[cfg(test)]
         let gate = Arc::clone(&self.gate);
         let loaded = tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            #[cfg(test)]
             gate.pass();
             super::folder::load_folder_workspace_with(&lease.dir, &budget)
         })
@@ -1025,6 +1038,16 @@ impl PinStore {
     #[doc(hidden)]
     pub fn load_count(&self) -> usize {
         self.loads.load(Ordering::Relaxed)
+    }
+
+    /// Test hook: hold every blocking pin load of this store at its start
+    /// (fetch + checkout, config load) until the returned guard drops. Not
+    /// `#[cfg(test)]`: integration test binaries link this crate without it.
+    #[doc(hidden)]
+    pub fn hold_loads_for_test(&self) -> PinLoadHold {
+        self.gate.entered.store(0, Ordering::SeqCst);
+        self.gate.set_closed(true);
+        PinLoadHold(Arc::clone(&self.gate))
     }
 }
 
@@ -1444,6 +1467,7 @@ mod tests {
         let s = crate::config::PinStoreSection {
             dir: Some("/var/lib/stroem/pins".into()),
             keep_recent_per_workspace: Some(2),
+            claim_load_budget_secs: None,
         };
         let c = PinStoreConfig::from_section(Some(&s));
         assert_eq!(c.dir, PathBuf::from("/var/lib/stroem/pins"));
@@ -2396,20 +2420,8 @@ mod tests {
         assert_send(&store.ensure_tree("w", "x"));
     }
 
-    /// Opens the gate when dropped, so a failing assertion never leaves a
-    /// blocking thread parked (the runtime would wait on it forever).
-    struct GateGuard<'a>(&'a TestGate);
-
-    impl Drop for GateGuard<'_> {
-        fn drop(&mut self) {
-            self.0.set_closed(false);
-        }
-    }
-
-    fn close_gate(store: &PinStore) -> GateGuard<'_> {
-        store.gate.entered.store(0, Ordering::SeqCst);
-        store.gate.set_closed(true);
-        GateGuard(&store.gate)
+    fn close_gate(store: &PinStore) -> PinLoadHold {
+        store.hold_loads_for_test()
     }
 
     /// Poll `fut` until its blocking work is parked at the gate, then drop

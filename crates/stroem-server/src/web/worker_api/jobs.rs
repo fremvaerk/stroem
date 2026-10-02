@@ -457,10 +457,10 @@ async fn fail_claimed_step(
 
     // Failure, retry decision and orchestration in one call: a retried step is
     // `ready` again and needs no orchestration. Applies only while the row is
-    // still this claim (a sweep may have moved it on meanwhile).
+    // still this running claim (a sweep may have moved it on meanwhile).
     if let Err(e) = state
         .settlement()
-        .step_failed(job_id, step_name, shown, &[], Some(failure.claim))
+        .claimed_step_failed(job_id, step_name, shown, Some(failure.claim))
         .await
     {
         let orch_msg = format!("Failed to orchestrate after render failure: {:#}", e);
@@ -585,6 +585,233 @@ async fn pin_failure(
     }
 }
 
+/// The configs a claim renders with (spec § 7.2 table), plus the redaction
+/// values of every pin among them.
+struct ClaimConfigs {
+    ws_handle: Option<ConfigHandle>,
+    owner_handle: Option<ConfigHandle>,
+    /// The owner config IS the job's: a local step, or the job's own
+    /// workspace at the job's own pin (live, or a self-qualified name that
+    /// inherits the job pin — `action_ref` set does not mean "explicitly
+    /// ref'd", F36).
+    owner_is_job_config: bool,
+    /// R5: the complete redaction values of every pin loaded — secrets plus
+    /// `secret: true` connection properties, whichever workspace types the
+    /// connection — not a pin's own secret map alone.
+    pin_secrets: Vec<String>,
+}
+
+/// How a claim's config selection ends: the configs to render with, or the
+/// answer `pin_failure` already decided (a released claim, a failed step).
+enum ClaimSelection {
+    Configs(ClaimConfigs),
+    Answered(Result<Response, AppError>),
+}
+
+/// `config_for_user`, bounded by the claim's `deadline` (spec § 7.2). A
+/// pinned load runs in its own task, so a claim that stops waiting does not
+/// abandon it: it finishes and warms the cache for the next claim. Running
+/// out of time is transient (`PinUnavailable`): the claim is released.
+async fn config_by_deadline(
+    state: &Arc<AppState>,
+    ws: &str,
+    pin: Option<&PinRef>,
+    deadline: tokio::time::Instant,
+) -> anyhow::Result<Option<ConfigHandle>> {
+    let Some(pin) = pin else {
+        // Live: an in-memory snapshot read, nothing to bound.
+        return state.workspaces.config_for_user(ws, None).await;
+    };
+    let load = {
+        let (state, ws, pin) = (Arc::clone(state), ws.to_string(), pin.clone());
+        tokio::spawn(async move { state.workspaces.config_for_user(&ws, Some(&pin)).await })
+    };
+    let unavailable = |message: String| -> anyhow::Error {
+        PinError::PinUnavailable {
+            workspace: ws.to_string(),
+            message,
+        }
+        .into()
+    };
+    match tokio::time::timeout_at(deadline, load).await {
+        Ok(Ok(loaded)) => loaded,
+        Ok(Err(join)) => Err(unavailable(format!("the pin load task failed: {join}"))),
+        Err(_elapsed) => Err(unavailable(
+            "its load did not finish within the claim budget \
+             (`pin_store.claim_load_budget_secs`) and goes on in the background"
+                .to_string(),
+        )),
+    }
+}
+
+/// Spec § 7.2 table: the job's own config (its pin when the job is pinned)
+/// and the step's owner config (its action pin, else the owner's live
+/// config), each pin loaded by `deadline`. A pin that cannot be loaded ends
+/// the claim here through `pin_failure`; `Answered` carries that answer.
+async fn select_claim_configs(
+    state: &Arc<AppState>,
+    job: &JobRow,
+    step: &JobStepRow,
+    claim: ClaimIdentity,
+    deadline: tokio::time::Instant,
+) -> ClaimSelection {
+    let job_pin = PinRef::of_job(job);
+    let ws_handle =
+        match config_by_deadline(state, &job.workspace, job_pin.as_ref(), deadline).await {
+            Ok(handle) => handle,
+            Err(e) => {
+                let failure = ClaimFailure {
+                    claim,
+                    pin_secrets: &[],
+                    withheld: None,
+                };
+                return ClaimSelection::Answered(
+                    pin_failure(
+                        state,
+                        job,
+                        step,
+                        &job.workspace,
+                        job_pin.as_ref(),
+                        &failure,
+                        e,
+                    )
+                    .await,
+                );
+            }
+        };
+    let mut pin_secrets: Vec<String> = Vec::new();
+    if let Some(ConfigHandle::Pinned(pinned)) = &ws_handle {
+        pin_secrets.extend(
+            state
+                .workspaces
+                .pin_redaction_values(&job.workspace, pinned)
+                .await,
+        );
+    }
+
+    // The workspace whose config + tarball this step's action belongs to. For
+    // a cross-workspace or ref'd step (action `owner.name`, or `ref:`) that's
+    // the OWNER; for a local step `action_workspace` is NULL so it is the
+    // job's own (possibly pinned) config.
+    let owner_ws_name = step.action_workspace.as_deref().unwrap_or(&job.workspace);
+    let step_pin = PinRef::of_step_action(step);
+    let owner_is_job_config =
+        step.action_workspace.is_none() || (owner_ws_name == job.workspace && step_pin == job_pin);
+    let owner_handle = if owner_is_job_config {
+        ws_handle.clone()
+    } else {
+        match config_by_deadline(state, owner_ws_name, step_pin.as_ref(), deadline).await {
+            Ok(handle) => handle,
+            Err(e) => {
+                let failure = ClaimFailure {
+                    claim,
+                    pin_secrets: &pin_secrets,
+                    withheld: None,
+                };
+                return ClaimSelection::Answered(
+                    pin_failure(
+                        state,
+                        job,
+                        step,
+                        owner_ws_name,
+                        step_pin.as_ref(),
+                        &failure,
+                        e,
+                    )
+                    .await,
+                );
+            }
+        }
+    };
+    // F46: the owner's own pass only for a config other than the job's, so
+    // the job pin's set is never built twice.
+    if !owner_is_job_config {
+        if let Some(ConfigHandle::Pinned(pinned)) = &owner_handle {
+            pin_secrets.extend(
+                state
+                    .workspaces
+                    .pin_redaction_values(owner_ws_name, pinned)
+                    .await,
+            );
+        }
+    }
+    ClaimSelection::Configs(ClaimConfigs {
+        ws_handle,
+        owner_handle,
+        owner_is_job_config,
+        pin_secrets,
+    })
+}
+
+/// [`select_claim_configs`] for a claim that loads a pin, run as its own
+/// task so a dropped handler cannot strand the step `running` under a live,
+/// heartbeating worker that never got it (the worker hung up mid-load).
+/// The task still releases or fails the step itself; and when the configs
+/// did load but nobody is left to receive them, it releases the claim.
+async fn select_pinned_claim_configs(
+    state: &Arc<AppState>,
+    job: &JobRow,
+    step: &JobStepRow,
+    claim: ClaimIdentity,
+    deadline: tokio::time::Instant,
+) -> Result<ClaimSelection, AppError> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let (state_t, job_t, step_t) = (Arc::clone(state), job.clone(), step.clone());
+    tokio::spawn(async move {
+        let selected = select_claim_configs(&state_t, &job_t, &step_t, claim, deadline).await;
+        let Err(ClaimSelection::Configs(configs)) = tx.send(selected) else {
+            return;
+        };
+        // The handler is gone, so is the worker's request: give the step
+        // back. Named after the step's pin when it has one, else the job's.
+        let (ws, pin) = match PinRef::of_step_action(&step_t) {
+            Some(pin) => (
+                step_t
+                    .action_workspace
+                    .clone()
+                    .unwrap_or_else(|| job_t.workspace.clone()),
+                Some(pin),
+            ),
+            None => (job_t.workspace.clone(), PinRef::of_job(&job_t)),
+        };
+        let lost = PinError::PinUnavailable {
+            workspace: ws.clone(),
+            message: "the claiming worker stopped waiting before its configuration loaded"
+                .to_string(),
+        };
+        let failure = ClaimFailure {
+            claim,
+            pin_secrets: &configs.pin_secrets,
+            withheld: None,
+        };
+        if let Err(e) = pin_failure(
+            &state_t,
+            &job_t,
+            &step_t,
+            &ws,
+            pin.as_ref(),
+            &failure,
+            lost.into(),
+        )
+        .await
+        {
+            tracing::error!(
+                job_id = %job_t.job_id,
+                step_name = %step_t.step_name,
+                "release of an unanswered claim failed: {:?}",
+                e
+            );
+        }
+    });
+    rx.await.map_err(|_| {
+        AppError::Internal(anyhow::anyhow!(
+            "claim config selection for step '{}' of job {} ended without an answer",
+            step.step_name,
+            job.job_id
+        ))
+    })
+}
+
 /// POST /worker/jobs/claim - Claim next ready step
 #[tracing::instrument(skip(state))]
 pub async fn claim_job(
@@ -659,103 +886,31 @@ pub async fn claim_job(
         }
     };
 
-    // Spec § 7.2: the job's own config is its pin when the job is pinned; the
-    // step's owner config is its action pin when it has one, else the owner's
-    // live config. A pin that cannot be loaded on this replica releases the
-    // claim (transient) or fails the step (permanent) — `pin_failure`.
-    // `config_for_user`: a `PinLoadFailed` arrives as its fixed sentence.
-    let job_pin = PinRef::of_job(&job);
-    let ws_handle = match state
-        .workspaces
-        .config_for_user(&job.workspace, job_pin.as_ref())
-        .await
-    {
-        Ok(handle) => handle,
-        Err(e) => {
-            let failure = ClaimFailure {
-                claim,
-                pin_secrets: &[],
-                withheld: None,
-            };
-            return pin_failure(
-                &state,
-                &job,
-                &step,
-                &job.workspace,
-                job_pin.as_ref(),
-                &failure,
-                e,
-            )
-            .await;
-        }
+    // Spec § 7.2: the job's own config (its pin when the job is pinned) and
+    // the step's owner config (its action pin, else the owner's live config).
+    // Pin loads are bounded by the claim budget, below the worker's request
+    // timeout; a pin that cannot be loaded releases the claim (transient) or
+    // fails the step (permanent) — `pin_failure`.
+    let deadline = tokio::time::Instant::now() + state.config.claim_pin_load_budget();
+    let selected = if PinRef::of_job(&job).is_none() && PinRef::of_step_action(&step).is_none() {
+        // No pin: live snapshot reads only, nothing that can outlast the worker.
+        select_claim_configs(&state, &job, &step, claim, deadline).await
+    } else {
+        select_pinned_claim_configs(&state, &job, &step, claim, deadline).await?
     };
-    // R5: the complete redaction values of every pin this claim loads —
-    // secrets plus `secret: true` connection properties, whichever workspace
-    // types the connection — not the pin's own secret map alone.
-    let mut pin_secrets: Vec<String> = Vec::new();
-    if let Some(ConfigHandle::Pinned(pinned)) = &ws_handle {
-        pin_secrets.extend(
-            state
-                .workspaces
-                .pin_redaction_values(&job.workspace, pinned)
-                .await,
-        );
-    }
-
-    // Determine the workspace whose config + tarball this step's action belongs
-    // to. For a cross-workspace or ref'd step (action `owner.name`, or `ref:`)
-    // that's the OWNER; for a local step `action_workspace` is NULL so it is
-    // the job's own (possibly pinned) config.
+    let ClaimConfigs {
+        ws_handle,
+        owner_handle,
+        owner_is_job_config,
+        pin_secrets,
+    } = match selected {
+        ClaimSelection::Configs(configs) => configs,
+        ClaimSelection::Answered(answer) => return answer,
+    };
     let owner_ws_name = step
         .action_workspace
         .clone()
         .unwrap_or_else(|| job.workspace.clone());
-    let step_pin = PinRef::of_step_action(&step);
-    // The owner config IS the job's: a local step, or the job's own workspace
-    // at the job's own pin (live, or a self-qualified name inheriting the job
-    // pin — `action_ref` set does not mean "explicitly ref'd", F36).
-    let owner_is_job_config =
-        step.action_workspace.is_none() || (owner_ws_name == job.workspace && step_pin == job_pin);
-    let owner_handle = if owner_is_job_config {
-        ws_handle.clone()
-    } else {
-        match state
-            .workspaces
-            .config_for_user(&owner_ws_name, step_pin.as_ref())
-            .await
-        {
-            Ok(handle) => handle,
-            Err(e) => {
-                let failure = ClaimFailure {
-                    claim,
-                    pin_secrets: &pin_secrets,
-                    withheld: None,
-                };
-                return pin_failure(
-                    &state,
-                    &job,
-                    &step,
-                    &owner_ws_name,
-                    step_pin.as_ref(),
-                    &failure,
-                    e,
-                )
-                .await;
-            }
-        }
-    };
-    // F46: the owner's own pass only for a config other than the job's, so
-    // the job pin's set is never built twice.
-    if !owner_is_job_config {
-        if let Some(ConfigHandle::Pinned(pinned)) = &owner_handle {
-            pin_secrets.extend(
-                state
-                    .workspaces
-                    .pin_redaction_values(&owner_ws_name, pinned)
-                    .await,
-            );
-        }
-    }
     let ws_config = ws_handle.as_ref().map(ConfigHandle::arc);
     let owner_config = owner_handle.as_ref().map(ConfigHandle::arc);
 
