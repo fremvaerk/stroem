@@ -198,7 +198,6 @@ async fn rp_worker(fx: &PinnedFixture) -> Uuid {
 }
 
 /// Raw-body worker request (state tarballs are gzip bytes, not JSON).
-#[allow(dead_code)] // the state tests (Task 19)
 async fn rp_worker_bytes(
     router: &Router,
     method: &str,
@@ -1747,6 +1746,195 @@ async fn pinned_job_in_denied_folder_is_denied_over_mcp_and_list_paginates_after
         let admin = fx.api_key(ADMIN, true).await;
         let resp = rp_mcp_call(&fx.router, Some(admin.as_str()), "list_jobs", json!({})).await;
         assert_eq!(rp_mcp_json(&resp)["count"], json!(5), "{resp}");
+        Ok(())
+    })
+    .await
+}
+
+// ── Task 19: state partitions follow the job ───────────────────────────
+
+fn rp_state_opts() -> PinnedFixtureOpts {
+    let mut o = rp_opts();
+    o.state_storage = true;
+    o
+}
+
+async fn rp_job_on_ref(fx: &PinnedFixture, git_ref: Option<&str>) -> Uuid {
+    rp_seed_job(
+        &fx.pool,
+        RpJob {
+            git_ref,
+            status: "running",
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+#[tokio::test]
+async fn state_upload_uses_job_coordinates_not_the_path() -> Result<()> {
+    rp_bounded(async {
+        let fx = pinned_workspace_fixture(rp_state_opts()).await?;
+        let job = rp_job_on_ref(&fx, Some("release/2.3")).await;
+
+        // A cross-workspace step's worker sends the action OWNER's workspace
+        // in the path; today that answered 400. The server writes the job's
+        // own partition instead.
+        let (status, _) = rp_worker_bytes(
+            &fx.router,
+            "POST",
+            &format!("/worker/state/billing/nightly/{job}"),
+            b"snap-23".to_vec(),
+        )
+        .await;
+        assert_eq!(status, 201);
+
+        let row = stroem_db::TaskStateRepo::get_latest_for_ref(
+            &fx.pool,
+            "etl",
+            "nightly",
+            Some("release/2.3"),
+        )
+        .await?
+        .unwrap();
+        assert_eq!(row.job_id, Some(job));
+        assert!(stroem_db::TaskStateRepo::get_latest_for_ref(
+            &fx.pool,
+            "billing",
+            "nightly",
+            Some("release/2.3")
+        )
+        .await?
+        .is_none());
+        assert!(
+            stroem_db::TaskStateRepo::get_latest(&fx.pool, "etl", "nightly")
+                .await?
+                .is_none()
+        );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn state_download_with_job_id_reads_the_jobs_partition_only() -> Result<()> {
+    rp_bounded(async {
+        let fx = pinned_workspace_fixture(rp_state_opts()).await?;
+        let on23 = rp_job_on_ref(&fx, Some("release/2.3")).await;
+        let on24 = rp_job_on_ref(&fx, Some("release/2.4")).await;
+        let unpinned = rp_job_on_ref(&fx, None).await;
+
+        rp_worker_bytes(
+            &fx.router,
+            "POST",
+            &format!("/worker/state/etl/nightly/{on23}"),
+            b"snap-23".to_vec(),
+        )
+        .await;
+        rp_worker_bytes(
+            &fx.router,
+            "POST",
+            &format!("/worker/state/etl/nightly/{unpinned}"),
+            b"snap-null".to_vec(),
+        )
+        .await;
+
+        let (s, body) = rp_worker_bytes(
+            &fx.router,
+            "GET",
+            &format!("/worker/state/billing/x?job_id={on23}"),
+            vec![],
+        )
+        .await;
+        assert_eq!(
+            (s, body),
+            (200, b"snap-23".to_vec()),
+            "path is ignored when job_id is given"
+        );
+        let (s, _) = rp_worker_bytes(
+            &fx.router,
+            "GET",
+            &format!("/worker/state/etl/nightly?job_id={on24}"),
+            vec![],
+        )
+        .await;
+        assert_eq!(s, 204, "release/2.4 has no state of its own");
+        // No job_id (an old worker): today's path coordinates, NULL partition.
+        let (s, body) =
+            rp_worker_bytes(&fx.router, "GET", "/worker/state/etl/nightly", vec![]).await;
+        assert_eq!((s, body), (200, b"snap-null".to_vec()));
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn global_state_partitions_follow_the_job() -> Result<()> {
+    rp_bounded(async {
+        let fx = pinned_workspace_fixture(rp_state_opts()).await?;
+        let on23 = rp_job_on_ref(&fx, Some("release/2.3")).await;
+        let on24 = rp_job_on_ref(&fx, Some("release/2.4")).await;
+
+        let (s, _) = rp_worker_bytes(
+            &fx.router,
+            "POST",
+            &format!("/worker/global-state/billing/{on23}"),
+            b"g-23".to_vec(),
+        )
+        .await;
+        assert_eq!(s, 201);
+        let (s, body) = rp_worker_bytes(
+            &fx.router,
+            "GET",
+            &format!("/worker/global-state/billing?job_id={on23}"),
+            vec![],
+        )
+        .await;
+        assert_eq!((s, body), (200, b"g-23".to_vec()));
+        let (s, _) = rp_worker_bytes(
+            &fx.router,
+            "GET",
+            &format!("/worker/global-state/etl?job_id={on24}"),
+            vec![],
+        )
+        .await;
+        assert_eq!(s, 204);
+        assert!(stroem_db::WorkspaceStateRepo::get_latest(&fx.pool, "etl")
+            .await?
+            .is_none());
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn latest_snapshots_reads_the_given_ref_partition() -> Result<()> {
+    rp_bounded(async {
+        let fx = pinned_workspace_fixture(rp_state_opts()).await?;
+        let on23 = rp_job_on_ref(&fx, Some("release/2.3")).await;
+        let unpinned = rp_job_on_ref(&fx, None).await;
+        rp_worker_bytes(
+            &fx.router,
+            "POST",
+            &format!("/worker/state/etl/nightly/{on23}"),
+            b"a".to_vec(),
+        )
+        .await;
+        rp_worker_bytes(
+            &fx.router,
+            "POST",
+            &format!("/worker/state/etl/nightly/{unpinned}"),
+            b"b".to_vec(),
+        )
+        .await;
+
+        use stroem_server::render_context::latest_snapshots;
+        let s = latest_snapshots(&fx.pool, "etl", "nightly", Some("release/2.3"), "test").await;
+        assert!(s.task.unwrap().storage_key.contains(&on23.to_string()));
+        let s = latest_snapshots(&fx.pool, "etl", "nightly", None, "test").await;
+        assert!(s.task.unwrap().storage_key.contains(&unpinned.to_string()));
+        let s = latest_snapshots(&fx.pool, "etl", "nightly", Some("release/9.9"), "test").await;
+        assert!(s.task.is_none());
         Ok(())
     })
     .await

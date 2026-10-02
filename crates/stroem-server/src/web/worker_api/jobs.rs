@@ -968,6 +968,7 @@ pub async fn claim_job(
         &state.pool,
         &job.workspace,
         &job.task_name,
+        job.git_ref.as_deref(),
         "claim",
     )
     .await;

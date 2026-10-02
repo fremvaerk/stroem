@@ -368,7 +368,7 @@ pub(crate) async fn execute_claimed_step(
     if step.state_storage_key.is_some() {
         if let Some(ref sd) = state_dir_path {
             match client
-                .download_state_tarball(&step.workspace, &step.task_name)
+                .download_state_tarball(&step.workspace, &step.task_name, Some(step.job_id))
                 .await
             {
                 Ok(Some(bytes)) => {
@@ -427,7 +427,10 @@ pub(crate) async fn execute_claimed_step(
     // Download previous global state snapshot if the server indicates one exists
     if step.global_state_storage_key.is_some() {
         if let Some(ref gsd) = global_state_dir_path {
-            match client.download_global_state_tarball(&step.workspace).await {
+            match client
+                .download_global_state_tarball(&step.workspace, Some(step.job_id))
+                .await
+            {
                 Ok(Some(bytes)) => {
                     if let Err(e) = extract_state_tarball(&bytes, gsd) {
                         tracing::warn!("Failed to extract global state tarball: {:#}", e);

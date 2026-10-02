@@ -312,6 +312,7 @@ impl Settlement {
                 &self.pool,
                 &job.workspace,
                 &job.task_name,
+                job.git_ref.as_deref(),
                 "advance",
             )
             .await;

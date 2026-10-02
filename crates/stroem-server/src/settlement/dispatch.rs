@@ -1001,7 +1001,23 @@ pub async fn init(
 ) -> Result<Option<JobStatus>> {
     // One sample per entry (spec §3.4): the creation-time cascade, the
     // `type: task` input and the approval messages all see the same snapshot.
-    let snapshots = render_context::latest_snapshots(pool, workspace_name, task_name, "init").await;
+    // The job's own state partition (spec § 7.6). Best-effort: job creation
+    // must never fail on this lookup.
+    let git_ref = match JobRepo::get(pool, job_id).await {
+        Ok(job) => job.and_then(|j| j.git_ref),
+        Err(e) => {
+            tracing::warn!(%job_id, "Failed to load job for init snapshot partition: {:#}", e);
+            None
+        }
+    };
+    let snapshots = render_context::latest_snapshots(
+        pool,
+        workspace_name,
+        task_name,
+        git_ref.as_deref(),
+        "init",
+    )
+    .await;
 
     crate::cascade::execute(pool, job_id, task, Some(workspace_config), &snapshots)
         .await

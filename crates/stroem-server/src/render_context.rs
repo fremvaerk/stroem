@@ -51,10 +51,11 @@ pub async fn latest_snapshots(
     pool: &PgPool,
     workspace: &str,
     task_name: &str,
+    git_ref: Option<&str>,
     entry: &'static str,
 ) -> Snapshots {
     let started = std::time::Instant::now();
-    let task = match TaskStateRepo::get_latest(pool, workspace, task_name).await {
+    let task = match TaskStateRepo::get_latest_for_ref(pool, workspace, task_name, git_ref).await {
         Ok(row) => row.map(|r| Snapshot {
             id: r.id,
             storage_key: r.storage_key,
@@ -65,13 +66,14 @@ pub async fn latest_snapshots(
             tracing::warn!(
                 workspace,
                 task_name,
+                git_ref,
                 "Failed to look up task state snapshot: {:#}",
                 e
             );
             None
         }
     };
-    let global = match WorkspaceStateRepo::get_latest(pool, workspace).await {
+    let global = match WorkspaceStateRepo::get_latest_for_ref(pool, workspace, git_ref).await {
         Ok(row) => row.map(|r| Snapshot {
             id: r.id,
             storage_key: r.storage_key,
@@ -81,6 +83,7 @@ pub async fn latest_snapshots(
         Err(e) => {
             tracing::warn!(
                 workspace,
+                git_ref,
                 "Failed to look up global state snapshot: {:#}",
                 e
             );
