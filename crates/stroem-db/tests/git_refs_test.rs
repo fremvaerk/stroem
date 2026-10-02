@@ -7,8 +7,8 @@ use anyhow::Result;
 use common::{create_job, setup_db};
 use sqlx::PgPool;
 use stroem_db::{
-    ClaimIdentity, FailOutcome, JobPinCols, JobRepo, JobStepRepo, NewJobStep, ReleaseOutcome,
-    TaskStateRepo, WorkerRepo, WorkspaceStateRepo,
+    ClaimIdentity, FailOutcome, JobAclScope, JobPinCols, JobRepo, JobStepRepo, NewJobStep,
+    ReleaseOutcome, TaskStateRepo, WorkerRepo, WorkspaceStateRepo,
 };
 use uuid::Uuid;
 
@@ -493,5 +493,127 @@ async fn fail_or_retry_expected_claim_guards_released_and_reclaimed_steps() -> R
     claim_one(&pool, job2, "s").await;
     let out = JobStepRepo::fail_or_retry(&pool, job2, "s", "boom", &[], |_| 0, None).await?;
     assert!(matches!(out, FailOutcome::Failed { .. }));
+    Ok(())
+}
+
+// ─── Task 4: ACL scope ────────────────────────────────────────────────
+
+fn pairs(v: &[(&str, &str)]) -> Vec<(String, String)> {
+    v.iter()
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect()
+}
+
+fn triples(v: &[(&str, &str, &str)]) -> Vec<(String, String, String)> {
+    v.iter()
+        .map(|(a, b, c)| (a.to_string(), b.to_string(), c.to_string()))
+        .collect()
+}
+
+#[tokio::test]
+async fn acl_scope_authorises_pinned_jobs_by_their_own_folder() -> Result<()> {
+    let pool = setup_db().await;
+    // Created oldest → newest; the denied one is the newest.
+    let plain = create_job(&pool, "a", "t").await;
+    let allowed = create_pinned_job(&pool, "a", "t", "release/2.3", Some("etl")).await;
+    let no_folder = create_pinned_job(&pool, "a", "t", "release/2.5", None).await;
+    let denied = create_pinned_job(&pool, "a", "t", "release/2.4", Some("secret")).await;
+    // Distinct created_at so "newest first" is deterministic.
+    for (age_min, id) in [(4, plain), (3, allowed), (2, no_folder), (1, denied)] {
+        sqlx::query(
+            "UPDATE job SET created_at = NOW() - make_interval(mins => $2) WHERE job_id = $1",
+        )
+        .bind(id)
+        .bind(age_min)
+        .execute(&pool)
+        .await?;
+    }
+
+    let scope = JobAclScope {
+        live_pairs: pairs(&[("a", "t")]),
+        pinned_triples: triples(&[("a", "t", "etl"), ("a", "t", "")]),
+    };
+    let ids: Vec<Uuid> = JobRepo::list_with_acl(&pool, &scope, None, None, None, 10, 0)
+        .await?
+        .into_iter()
+        .map(|j| j.job_id)
+        .collect();
+    assert_eq!(ids.len(), 3, "{ids:?}");
+    for id in [plain, allowed, no_folder] {
+        assert!(ids.contains(&id));
+    }
+    assert!(!ids.contains(&denied));
+    assert_eq!(
+        JobRepo::count_with_acl(&pool, &scope, None, None, None).await?,
+        3
+    );
+    let counts = JobRepo::get_status_counts_with_acl(&pool, &scope).await?;
+    assert_eq!(counts.get("pending"), Some(&3));
+
+    // The predicate applies before LIMIT: the newest job is denied, so the
+    // first page is the newest PERMITTED job.
+    let first = JobRepo::list_with_acl(&pool, &scope, None, None, None, 1, 0).await?;
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].job_id, no_folder);
+
+    // Live pairs never authorise a pinned job, even for the same task name.
+    let live_only = JobAclScope {
+        live_pairs: pairs(&[("a", "t")]),
+        pinned_triples: vec![],
+    };
+    let ids: Vec<Uuid> = JobRepo::list_with_acl(&pool, &live_only, None, None, None, 10, 0)
+        .await?
+        .into_iter()
+        .map(|j| j.job_id)
+        .collect();
+    assert_eq!(ids, vec![plain]);
+
+    // Empty scope → nothing.
+    let empty = JobAclScope::default();
+    assert!(empty.is_empty());
+    assert!(
+        JobRepo::list_with_acl(&pool, &empty, None, None, None, 10, 0)
+            .await?
+            .is_empty()
+    );
+    assert_eq!(
+        JobRepo::count_with_acl(&pool, &empty, None, None, None).await?,
+        0
+    );
+    assert!(JobRepo::get_status_counts_with_acl(&pool, &empty)
+        .await?
+        .is_empty());
+
+    // Filters still compose with the scope.
+    assert_eq!(
+        JobRepo::count_with_acl(&pool, &scope, Some("completed"), None, None).await?,
+        0
+    );
+    assert_eq!(
+        JobRepo::count_with_acl(&pool, &scope, None, Some("trigger"), None).await?,
+        2
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn pinned_task_triples_lists_distinct_pinned_tasks() -> Result<()> {
+    let pool = setup_db().await;
+    create_job(&pool, "a", "t").await;
+    create_pinned_job(&pool, "a", "t", "release/2.3", Some("etl")).await;
+    create_pinned_job(&pool, "a", "t", "release/2.3", Some("etl")).await;
+    create_pinned_job(&pool, "a", "t", "release/2.4", Some("secret")).await;
+    create_pinned_job(&pool, "b", "u", "v1", None).await;
+
+    let mut got = JobRepo::pinned_task_triples(&pool).await?;
+    got.sort();
+    assert_eq!(
+        got,
+        vec![
+            ("a".to_string(), "t".to_string(), Some("etl".to_string())),
+            ("a".to_string(), "t".to_string(), Some("secret".to_string())),
+            ("b".to_string(), "u".to_string(), None),
+        ]
+    );
     Ok(())
 }

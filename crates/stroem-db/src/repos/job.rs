@@ -136,7 +136,6 @@ pub struct RecentDurationRow {
     pub completed_at: DateTime<Utc>,
 }
 
-/// Repository for job operations
 /// Pin columns of a job created in owner@ref (spec 2026-10-02 § 6). The commit
 /// itself goes in the `revision` parameter.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,6 +144,75 @@ pub struct JobPinCols {
     pub task_folder: Option<String>,
 }
 
+/// Authorisation for job lists and counts (spec 2026-10-02 § 7.8), applied in
+/// SQL before ordering and pagination.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct JobAclScope {
+    /// `(workspace, task_name)` the user may see — for UNPINNED jobs, whose
+    /// folder is the live task's.
+    pub live_pairs: Vec<(String, String)>,
+    /// `(workspace, task_name, folder)` the user may see — for PINNED jobs,
+    /// whose folder is their own `task_folder` (`""` = no folder).
+    pub pinned_triples: Vec<(String, String, String)>,
+}
+
+impl JobAclScope {
+    pub fn is_empty(&self) -> bool {
+        self.live_pairs.is_empty() && self.pinned_triples.is_empty()
+    }
+
+    /// The predicate with placeholders from `$first`, and the next free index.
+    /// Callers must not call it on an empty scope (`IN ()` is not SQL).
+    fn predicate(&self, first: u32) -> (String, u32) {
+        let mut idx = first;
+        let mut parts = Vec::new();
+        if !self.live_pairs.is_empty() {
+            let values: Vec<String> = self
+                .live_pairs
+                .iter()
+                .map(|_| {
+                    let v = format!("(${}, ${})", idx, idx + 1);
+                    idx += 2;
+                    v
+                })
+                .collect();
+            parts.push(format!(
+                "(git_ref IS NULL AND (workspace, task_name) IN ({}))",
+                values.join(", ")
+            ));
+        }
+        if !self.pinned_triples.is_empty() {
+            let values: Vec<String> = self
+                .pinned_triples
+                .iter()
+                .map(|_| {
+                    let v = format!("(${}, ${}, ${})", idx, idx + 1, idx + 2);
+                    idx += 3;
+                    v
+                })
+                .collect();
+            parts.push(format!(
+                "(git_ref IS NOT NULL AND (workspace, task_name, COALESCE(task_folder, '')) IN ({}))",
+                values.join(", ")
+            ));
+        }
+        (format!("({})", parts.join(" OR ")), idx)
+    }
+
+    /// Bind values in placeholder order.
+    fn bind_values(&self) -> impl Iterator<Item = &str> {
+        self.live_pairs
+            .iter()
+            .flat_map(|(w, t)| [w.as_str(), t.as_str()])
+            .chain(
+                self.pinned_triples
+                    .iter()
+                    .flat_map(|(w, t, f)| [w.as_str(), t.as_str(), f.as_str()]),
+            )
+    }
+}
+
+/// Repository for job operations
 pub struct JobRepo;
 
 impl JobRepo {
@@ -1069,55 +1137,44 @@ impl JobRepo {
         Ok(rows)
     }
 
-    /// List jobs filtered to allowed workspace/task pairs (for ACL-filtered views).
-    ///
-    /// `allowed_pairs` is a list of `(workspace, task_name)` tuples the caller is permitted
-    /// to see. Returns an empty vec immediately when `allowed_pairs` is empty.
+    /// Distinct `(workspace, task_name, task_folder)` of pinned jobs — the
+    /// input from which the server builds [`JobAclScope::pinned_triples`].
+    /// Served by the partial index `idx_job_pinned_tasks`.
+    pub async fn pinned_task_triples(
+        pool: &PgPool,
+    ) -> Result<Vec<(String, String, Option<String>)>> {
+        sqlx::query_as(
+            "SELECT DISTINCT workspace, task_name, task_folder FROM job WHERE git_ref IS NOT NULL",
+        )
+        .fetch_all(pool)
+        .await
+        .context("Failed to list pinned task triples")
+    }
+
+    /// List jobs the scope allows (spec 2026-10-02 § 7.8), newest first.
+    /// Returns an empty vec immediately for an empty scope.
     pub async fn list_with_acl(
         pool: &PgPool,
-        allowed_pairs: &[(String, String)],
+        scope: &JobAclScope,
         status: Option<&str>,
         source_type: Option<&str>,
         search: Option<&str>,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<JobRow>> {
-        if allowed_pairs.is_empty() {
+        if scope.is_empty() {
             return Ok(vec![]);
         }
-        let mut conditions = Vec::new();
-        let mut param_idx = 1u32;
-        let mut values_parts = Vec::new();
-        for _ in allowed_pairs {
-            values_parts.push(format!("(${}, ${})", param_idx, param_idx + 1));
-            param_idx += 2;
-        }
-        conditions.push(format!(
-            "(workspace, task_name) IN ({})",
-            values_parts.join(", ")
-        ));
-        if status.is_some() {
-            conditions.push(format!("status = ${param_idx}"));
-            param_idx += 1;
-        }
-        if source_type.is_some() {
-            conditions.push(format!("source_type = ${param_idx}"));
-            param_idx += 1;
-        }
-        if search.is_some() {
-            conditions.push(format!("(task_name ILIKE ${param_idx} OR workspace ILIKE ${param_idx} OR source_id ILIKE ${param_idx} OR job_id::text ILIKE ${param_idx})"));
-            param_idx += 1;
-        }
-        let where_clause = format!(" WHERE {}", conditions.join(" AND "));
-        let limit_idx = param_idx;
-        let offset_idx = param_idx + 1;
+        let (acl, next) = scope.predicate(1);
+        let (filters, next) = Self::list_filters(next, status, source_type, search);
         let sql = format!(
-            "SELECT {} FROM job{} ORDER BY created_at DESC LIMIT ${limit_idx} OFFSET ${offset_idx}",
-            JOB_COLUMNS, where_clause
+            "SELECT {JOB_COLUMNS} FROM job WHERE {acl}{filters} \
+             ORDER BY created_at DESC LIMIT ${next} OFFSET ${}",
+            next + 1
         );
         let mut query = sqlx::query_as::<_, JobRow>(&sql);
-        for (ws, task) in allowed_pairs {
-            query = query.bind(ws).bind(task);
+        for v in scope.bind_values() {
+            query = query.bind(v);
         }
         if let Some(s) = status {
             query = query.bind(s);
@@ -1128,56 +1185,31 @@ impl JobRepo {
         if let Some(s) = search {
             query = query.bind(format!("%{}%", escape_like(s)));
         }
-        query = query.bind(limit).bind(offset);
-        let jobs = query
+        query
+            .bind(limit)
+            .bind(offset)
             .fetch_all(pool)
             .await
-            .context("Failed to list jobs with ACL")?;
-        Ok(jobs)
+            .context("Failed to list jobs with ACL")
     }
 
-    /// Count jobs filtered to allowed workspace/task pairs.
-    ///
-    /// Returns 0 immediately when `allowed_pairs` is empty.
+    /// Count jobs the scope allows. Returns 0 immediately for an empty scope.
     pub async fn count_with_acl(
         pool: &PgPool,
-        allowed_pairs: &[(String, String)],
+        scope: &JobAclScope,
         status: Option<&str>,
         source_type: Option<&str>,
         search: Option<&str>,
     ) -> Result<i64> {
-        if allowed_pairs.is_empty() {
+        if scope.is_empty() {
             return Ok(0);
         }
-        let mut conditions = Vec::new();
-        let mut param_idx = 1u32;
-        let mut values_parts = Vec::new();
-        for _ in allowed_pairs {
-            values_parts.push(format!("(${}, ${})", param_idx, param_idx + 1));
-            param_idx += 2;
-        }
-        conditions.push(format!(
-            "(workspace, task_name) IN ({})",
-            values_parts.join(", ")
-        ));
-        if status.is_some() {
-            conditions.push(format!("status = ${param_idx}"));
-            param_idx += 1;
-        }
-        if source_type.is_some() {
-            conditions.push(format!("source_type = ${param_idx}"));
-            param_idx += 1;
-        }
-        if search.is_some() {
-            conditions.push(format!("(task_name ILIKE ${param_idx} OR workspace ILIKE ${param_idx} OR source_id ILIKE ${param_idx} OR job_id::text ILIKE ${param_idx})"));
-            param_idx += 1;
-        }
-        let _ = param_idx;
-        let where_clause = format!(" WHERE {}", conditions.join(" AND "));
-        let sql = format!("SELECT COUNT(*) FROM job{where_clause}");
+        let (acl, next) = scope.predicate(1);
+        let (filters, _) = Self::list_filters(next, status, source_type, search);
+        let sql = format!("SELECT COUNT(*) FROM job WHERE {acl}{filters}");
         let mut query = sqlx::query_as::<_, (i64,)>(&sql);
-        for (ws, task) in allowed_pairs {
-            query = query.bind(ws).bind(task);
+        for v in scope.bind_values() {
+            query = query.bind(v);
         }
         if let Some(s) = status {
             query = query.bind(s);
@@ -1195,39 +1227,53 @@ impl JobRepo {
         Ok(count.0)
     }
 
-    /// Get job status counts filtered to allowed workspace/task pairs.
-    ///
-    /// Returns an empty map immediately when `allowed_pairs` is empty.
+    /// Status counts of the jobs the scope allows. Empty map for an empty scope.
     pub async fn get_status_counts_with_acl(
         pool: &PgPool,
-        allowed_pairs: &[(String, String)],
+        scope: &JobAclScope,
     ) -> Result<HashMap<String, i64>> {
-        if allowed_pairs.is_empty() {
+        if scope.is_empty() {
             return Ok(HashMap::new());
         }
-        let mut param_idx = 1u32;
-        let mut values_parts = Vec::new();
-        for _ in allowed_pairs {
-            values_parts.push(format!("(${}, ${})", param_idx, param_idx + 1));
-            param_idx += 2;
-        }
-        let sql = format!(
-            "SELECT status, COUNT(*) FROM job WHERE (workspace, task_name) IN ({}) GROUP BY status",
-            values_parts.join(", ")
-        );
+        let (acl, _) = scope.predicate(1);
+        let sql = format!("SELECT status, COUNT(*) FROM job WHERE {acl} GROUP BY status");
         let mut query = sqlx::query_as::<_, (String, i64)>(&sql);
-        for (ws, task) in allowed_pairs {
-            query = query.bind(ws).bind(task);
+        for v in scope.bind_values() {
+            query = query.bind(v);
         }
         let rows = query
             .fetch_all(pool)
             .await
             .context("Failed to get status counts with ACL")?;
-        let mut counts = HashMap::new();
-        for (status, count) in rows {
-            counts.insert(status, count);
+        Ok(rows.into_iter().collect())
+    }
+
+    /// ` AND …` for the optional list filters, numbered from `first`; returns
+    /// the clause and the next free placeholder index. Bind order: status,
+    /// source_type, search.
+    fn list_filters(
+        first: u32,
+        status: Option<&str>,
+        source_type: Option<&str>,
+        search: Option<&str>,
+    ) -> (String, u32) {
+        let mut idx = first;
+        let mut sql = String::new();
+        if status.is_some() {
+            sql.push_str(&format!(" AND status = ${idx}"));
+            idx += 1;
         }
-        Ok(counts)
+        if source_type.is_some() {
+            sql.push_str(&format!(" AND source_type = ${idx}"));
+            idx += 1;
+        }
+        if search.is_some() {
+            sql.push_str(&format!(
+                " AND (task_name ILIKE ${idx} OR workspace ILIKE ${idx} OR source_id ILIKE ${idx} OR job_id::text ILIKE ${idx})"
+            ));
+            idx += 1;
+        }
+        (sql, idx)
     }
 
     /// Aggregate duration statistics over the last `limit` *completed* runs of a task.

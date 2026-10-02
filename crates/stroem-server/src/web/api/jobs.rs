@@ -78,9 +78,15 @@ pub async fn get_stats(
     let acl_pairs = resolve_acl_scope(&state, &auth_user).await?;
 
     let counts = match acl_pairs {
-        Some(ref pairs) => JobRepo::get_status_counts_with_acl(&state.pool, pairs)
-            .await
-            .context("get status counts with ACL")?,
+        Some(ref pairs) => JobRepo::get_status_counts_with_acl(
+            &state.pool,
+            &stroem_db::JobAclScope {
+                live_pairs: pairs.clone(),
+                pinned_triples: Vec::new(),
+            },
+        )
+        .await
+        .context("get status counts with ACL")?,
         None => JobRepo::get_status_counts(&state.pool)
             .await
             .context("get status counts")?,
@@ -175,9 +181,13 @@ pub async fn list_jobs(
                         .collect(),
                     _ => pairs.clone(),
                 };
+            let scope = stroem_db::JobAclScope {
+                live_pairs: effective_pairs,
+                pinned_triples: Vec::new(),
+            };
             let jobs = JobRepo::list_with_acl(
                 &state.pool,
-                &effective_pairs,
+                &scope,
                 status,
                 source_type,
                 search,
@@ -186,8 +196,7 @@ pub async fn list_jobs(
             )
             .await;
             let count =
-                JobRepo::count_with_acl(&state.pool, &effective_pairs, status, source_type, search)
-                    .await;
+                JobRepo::count_with_acl(&state.pool, &scope, status, source_type, search).await;
             (jobs, count)
         }
         // No ACL filtering — use existing queries
