@@ -1,4 +1,3 @@
-use crate::job_creator::create_job_for_task_detailed;
 use crate::state::AppState;
 use crate::web::error::AppError;
 use anyhow::Context;
@@ -30,12 +29,19 @@ pub fn build_hooks_routes(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
-/// Handle incoming webhook requests.
+/// Handle incoming webhook requests (spec § 7.5).
 ///
-/// 1. Find a matching enabled Webhook trigger by name across all workspaces
-/// 2. Validate secret if configured
-/// 3. Build input from request body, headers, query params, and trigger defaults
-/// 4. Create a job for the trigger's target task
+/// 1. Match an enabled webhook by name and authenticate against that cached
+///    definition — before any reload, so an unauthenticated caller cannot
+///    trigger a git fetch of a `force_refresh` webhook's workspace. A caller
+///    holding only a newly rotated-in secret therefore gets 401 until the
+///    server has loaded it (watcher poll or another refresh).
+/// 2. If `force_refresh`: reload. A workspace left errored (no config) is a
+///    500, never a 404. Match AGAIN in the refreshed config (gone → 404) and
+///    re-authenticate against the FRESH definition, so a refresh that changed
+///    the `ref`, rotated the secret or removed the webhook wins.
+/// 3. Resolve the target task (`ws.task` and/or `ref:`) and create the job
+///    in the target workspace.
 #[tracing::instrument(skip(state, query, headers, body))]
 async fn webhook_handler(
     State(state): State<Arc<AppState>>,
@@ -45,83 +51,79 @@ async fn webhook_handler(
     method: Method,
     body: Bytes,
 ) -> axum::response::Response {
-    // 1. Find the first matching enabled webhook trigger across all workspaces
-    let wh = match find_webhook_trigger(&state, &name).await {
+    let query_secret = query.get("secret").map(String::as_str);
+
+    let cached = match find_webhook_trigger(&state, &name).await {
         Some(f) => f,
         None => return AppError::not_found("Webhook").into_response(),
     };
-
-    // 2. Validate secret (constant-time to prevent timing attacks)
-    if let Some(err) =
-        validate_webhook_secret(&wh, query.get("secret").map(String::as_str), &headers)
-    {
+    if let Some(err) = validate_webhook_secret(&cached, query_secret, &headers) {
         return err.into_response();
     }
 
-    // 3. Build input
-    let input = build_webhook_input(&method, &headers, &query, &body, &wh.default_input);
+    // The definition the job is created from, and the config snapshot it was
+    // matched in (the target resolves against that same snapshot).
+    let (wh, defining_config) = if cached.force_refresh {
+        force_refresh(&state, &cached.ws_name, &name).await;
+        // A failed reload (or a busy one over an errored snapshot) leaves the
+        // workspace without a config: a server condition, so 500 — never the
+        // 404 of a webhook that is gone. `triggers: false` is server config,
+        // fixed at startup, and the cached match already passed it.
+        let Some(config) = state.workspaces.get_config(&cached.ws_name).await else {
+            return AppError::Internal(anyhow::anyhow!(
+                "Workspace '{}' is unavailable after force_refresh of webhook '{}'",
+                cached.ws_name,
+                name
+            ))
+            .into_response();
+        };
+        let Some(fresh) = match_webhook(&cached.ws_name, &config, &name) else {
+            return AppError::not_found("Webhook").into_response();
+        };
+        if let Some(err) = validate_webhook_secret(&fresh, query_secret, &headers) {
+            return err.into_response();
+        }
+        (fresh, config)
+    } else {
+        let Some(config) = state.get_workspace(&cached.ws_name).await else {
+            return AppError::Internal(anyhow::anyhow!(
+                "Workspace '{}' not found after webhook trigger lookup",
+                cached.ws_name
+            ))
+            .into_response();
+        };
+        (cached, config)
+    };
 
+    let input = build_webhook_input(&method, &headers, &query, &body, &wh.default_input);
     let input_value = serde_json::to_value(&input).unwrap_or_default();
     let source_id = format!("{}/{}", wh.ws_name, wh.trigger_key);
 
-    // 4. Force-refresh workspace if configured (before fetching config)
-    if wh.force_refresh {
-        match state.workspaces.reload(&wh.ws_name).await {
-            Ok(()) => {
-                // Notify peer replicas that the workspace has been refreshed so
-                // they converge without waiting for their own poll tick.
-                state
-                    .event_bus
-                    .publish_workspace_reloaded(&wh.ws_name)
-                    .await;
-            }
-            Err(e) if e.downcast_ref::<crate::workspace::ReloadBusy>().is_some() => {
-                // New policy (spec § 4.5 (8)): fire from the published snapshot
-                // if it is healthy; an errored workspace is still MISSED below.
-                tracing::info!(
-                    "Webhook '{}': force_refresh skipped — a reload is already in progress",
-                    name
-                );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "Webhook '{}': force_refresh failed, continuing with cached revision: {:#}",
-                    name,
-                    e
-                );
-            }
-        }
-    }
-
-    // 5. Get workspace config and create job (after refresh so we use the latest config)
-    let config = match state.get_workspace(&wh.ws_name).await {
-        Some(c) => c,
-        None => {
-            return AppError::Internal(anyhow::anyhow!(
-                "Workspace '{}' not found after webhook trigger lookup",
-                wh.ws_name
-            ))
-            .into_response();
+    let target = match crate::trigger_target::resolve_trigger_target(
+        &state.workspaces,
+        &wh.ws_name,
+        &defining_config,
+        &wh.task,
+        wh.git_ref.as_deref(),
+    )
+    .await
+    {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!("Webhook '{}' could not resolve its target: {:#}", name, e);
+            return crate::web::api::classify_execute_error(e).into_response();
         }
     };
 
     let is_sync = wh.mode.as_deref() == Some("sync");
     let timeout_secs = wh.timeout_secs.unwrap_or(DEFAULT_SYNC_TIMEOUT_SECS);
-    let revision = state.workspaces.get_revision(&wh.ws_name);
 
-    let created = match create_job_for_task_detailed(
-        &state.workspaces,
-        &state.pool,
-        &config,
-        &wh.ws_name,
-        &wh.task,
+    let created = match crate::trigger_target::create_target_job(
+        &state,
+        &target,
         input_value,
         "webhook",
-        Some(&source_id),
-        revision.as_deref(),
-        None,
-        state.config.agents.as_ref(),
-        crate::config::JobDefaults::from(state.config.as_ref()),
+        &source_id,
     )
     .await
     .context("create webhook job")
@@ -129,75 +131,134 @@ async fn webhook_handler(
         Ok(c) => c,
         Err(e) => {
             tracing::error!("Webhook '{}' failed to create job: {:#}", name, e);
-            return AppError::Internal(e).into_response();
+            return crate::web::api::classify_execute_error(e).into_response();
         }
     };
     let job_id = created.job_id;
 
     tracing::info!(
-        "Webhook '{}' created job {} for task '{}'",
+        "Webhook '{}' created job {} for task '{}' in '{}'",
         name,
         job_id,
-        wh.task
+        target.task_name,
+        target.workspace
     );
 
-    // Fire on_suspended hooks for any root-level approval steps that were
-    // suspended during job creation (FIX 2).
+    // Initial on_suspended hooks come from the created job's own config
+    // (spec § 7.4), not from the webhook's defining workspace.
     crate::settlement::dispatch::fire_initial_suspended_hooks(&state, job_id).await;
     state.settlement().job_created(created).await;
 
-    if is_sync {
-        let mut rx = state.job_completion.subscribe(job_id).await;
-
-        // Guard against the (unlikely) race where the job completed
-        // between create_job_for_task and subscribe. If already terminal,
-        // return immediately without waiting.
-        if let Ok(Some(job)) = stroem_db::JobRepo::get(&state.pool, job_id).await {
-            if is_terminal_status(&job.status) {
-                return Json(WebhookSyncResponse {
-                    job_id: job_id.to_string(),
-                    trigger: name,
-                    task: wh.task,
-                    status: job.status,
-                    output: job.output,
-                })
-                .into_response();
-            }
-        }
-
-        let timeout = Duration::from_secs(timeout_secs);
-
-        match tokio::time::timeout(timeout, rx.recv()).await {
-            Ok(Ok(event)) => Json(WebhookSyncResponse {
-                job_id: job_id.to_string(),
-                trigger: name,
-                task: wh.task,
-                status: event.status,
-                output: event.output,
-            })
-            .into_response(),
-            _ => {
-                // Timeout or channel error — return 202 for manual polling
-                (
-                    StatusCode::ACCEPTED,
-                    Json(WebhookSyncResponse {
-                        job_id: job_id.to_string(),
-                        trigger: name,
-                        task: wh.task,
-                        status: "running".to_string(),
-                        output: None,
-                    }),
-                )
-                    .into_response()
-            }
-        }
-    } else {
-        Json(WebhookAsyncResponse {
+    if !is_sync {
+        return Json(WebhookAsyncResponse {
             job_id: job_id.to_string(),
             trigger: name,
             task: wh.task,
         })
-        .into_response()
+        .into_response();
+    }
+
+    let mut rx = state.job_completion.subscribe(job_id).await;
+
+    // Guard against the (unlikely) race where the job completed between
+    // creation and subscribe.
+    if let Ok(Some(job)) = stroem_db::JobRepo::get(&state.pool, job_id).await {
+        if is_terminal_status(&job.status) {
+            let status = job.status.clone();
+            let output = job.output.clone();
+            return sync_response(&state, &job, &name, &wh.task, status, output).await;
+        }
+    }
+
+    match tokio::time::timeout(Duration::from_secs(timeout_secs), rx.recv()).await {
+        Ok(Ok(event)) => match stroem_db::JobRepo::get(&state.pool, job_id).await {
+            Ok(Some(job)) => {
+                sync_response(&state, &job, &name, &wh.task, event.status, event.output).await
+            }
+            _ => AppError::Internal(anyhow::anyhow!(
+                "Failed to load job {job_id} after completion"
+            ))
+            .into_response(),
+        },
+        _ => {
+            // Timeout or channel error — return 202 for manual polling
+            (
+                StatusCode::ACCEPTED,
+                Json(WebhookSyncResponse {
+                    job_id: job_id.to_string(),
+                    trigger: name,
+                    task: wh.task,
+                    status: "running".to_string(),
+                    output: None,
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// `force_refresh`: reload the defining workspace. A busy reload continues
+/// with the published snapshot (spec 2026-09-17 § 4.5 (8)); a failed one
+/// leaves the workspace errored, which the caller answers with 500.
+async fn force_refresh(state: &AppState, ws_name: &str, name: &str) {
+    match state.workspaces.reload(ws_name).await {
+        Ok(()) => {
+            // Notify peer replicas that the workspace has been refreshed so
+            // they converge without waiting for their own poll tick.
+            state.event_bus.publish_workspace_reloaded(ws_name).await;
+        }
+        Err(e) if e.downcast_ref::<crate::workspace::ReloadBusy>().is_some() => {
+            tracing::info!(
+                "Webhook '{}': force_refresh skipped — a reload is already in progress",
+                name
+            );
+        }
+        Err(e) => {
+            tracing::warn!("Webhook '{}': force_refresh failed: {:#}", name, e);
+        }
+    }
+}
+
+/// Sync webhook response with `output` redacted by the job's per-job set
+/// (spec § 7.5); fails closed with 503 + `job_id`.
+async fn sync_response(
+    state: &AppState,
+    job: &stroem_db::JobRow,
+    trigger: &str,
+    task: &str,
+    status: String,
+    output: Option<serde_json::Value>,
+) -> axum::response::Response {
+    match crate::redaction::redact_job_output(state, job, output).await {
+        Ok(output) => Json(WebhookSyncResponse {
+            job_id: job.job_id.to_string(),
+            trigger: trigger.to_string(),
+            task: task.to_string(),
+            status,
+            output,
+        })
+        .into_response(),
+        Err(e) => redaction_failure(job.job_id, e),
+    }
+}
+
+/// 503 + `job_id` when the job's redaction set is (transiently) incomplete —
+/// a permanent pin failure never reaches here, `redact_job_output` masks the
+/// whole output instead; 500 for any other error.
+fn redaction_failure(job_id: Uuid, e: anyhow::Error) -> axum::response::Response {
+    if e.downcast_ref::<crate::redaction::RedactionUnavailable>()
+        .is_some()
+    {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "job_id": job_id.to_string(),
+                "error": "redaction set unavailable, retry",
+            })),
+        )
+            .into_response()
+    } else {
+        AppError::Internal(e.context("redact webhook output")).into_response()
     }
 }
 
@@ -297,8 +358,11 @@ fn with_no_cache(response: axum::response::Response) -> axum::response::Response
 
 /// Check the status of a job created by a webhook trigger.
 ///
-/// Uses the same authentication as the webhook itself (secret or open).
-/// Only returns jobs that were created by this specific webhook trigger.
+/// Authenticated with the webhook's own secret, NOT task ACL — an explicit
+/// exception to the job-ACL rule (git-refs spec § 7.8): the caller holds the
+/// webhook's secret, and only jobs this webhook created are visible. `output`
+/// is redacted with the job's per-job set in every branch (spec § 7.5),
+/// failing closed.
 /// Supports `?wait=true&timeout=30` to wait for job completion.
 #[tracing::instrument(skip(state, query, headers))]
 async fn webhook_job_status(
@@ -307,24 +371,19 @@ async fn webhook_job_status(
     Query(query): Query<StatusQuery>,
     headers: HeaderMap,
 ) -> axum::response::Response {
-    // Parse job_id
     let job_id = match Uuid::parse_str(&job_id_str) {
         Ok(id) => id,
         Err(_) => return AppError::BadRequest("Invalid job ID".into()).into_response(),
     };
 
-    // Find webhook trigger
     let wh = match find_webhook_trigger(&state, &name).await {
         Some(f) => f,
         None => return AppError::not_found("Webhook").into_response(),
     };
-
-    // Validate secret
     if let Some(err) = validate_webhook_secret(&wh, query.secret.as_deref(), &headers) {
         return err.into_response();
     }
 
-    // Load job from DB
     let job = match stroem_db::JobRepo::get(&state.pool, job_id).await {
         Ok(Some(job)) => job,
         Ok(None) => return AppError::not_found("Job").into_response(),
@@ -340,125 +399,79 @@ async fn webhook_job_status(
         return AppError::not_found("Job").into_response();
     }
 
-    let is_terminal = is_terminal_status(&job.status);
+    if !(query.wait && !is_terminal_status(&job.status)) {
+        return status_response(&state, &name, &wh.task, job, false).await;
+    }
 
-    // If wait=true and job is not terminal, wait for completion
-    if query.wait && !is_terminal {
-        let timeout_secs = query
-            .timeout
-            .unwrap_or(DEFAULT_SYNC_TIMEOUT_SECS)
-            .min(MAX_WAIT_TIMEOUT_SECS);
-        let mut rx = state.job_completion.subscribe(job_id).await;
+    let timeout_secs = query
+        .timeout
+        .unwrap_or(DEFAULT_SYNC_TIMEOUT_SECS)
+        .min(MAX_WAIT_TIMEOUT_SECS);
+    let mut rx = state.job_completion.subscribe(job_id).await;
 
-        // Re-check after subscribing (race guard)
-        if let Ok(Some(fresh_job)) = stroem_db::JobRepo::get(&state.pool, job_id).await {
-            if is_terminal_status(&fresh_job.status) {
-                return with_no_cache(
+    // Re-check after subscribing (race guard)
+    if let Ok(Some(fresh)) = stroem_db::JobRepo::get(&state.pool, job_id).await {
+        if is_terminal_status(&fresh.status) {
+            return status_response(&state, &name, &wh.task, fresh, false).await;
+        }
+    }
+
+    match tokio::time::timeout(Duration::from_secs(timeout_secs), rx.recv()).await {
+        // Completed, or the broadcast was missed (lagged): re-query the DB.
+        Ok(_) => match stroem_db::JobRepo::get(&state.pool, job_id).await {
+            Ok(Some(current)) => status_response(&state, &name, &wh.task, current, false).await,
+            _ => AppError::Internal(anyhow::anyhow!("Failed to load job after completion"))
+                .into_response(),
+        },
+        // Genuine timeout — current status with 202 for manual polling.
+        Err(_elapsed) => match stroem_db::JobRepo::get(&state.pool, job_id).await {
+            Ok(Some(current)) => status_response(&state, &name, &wh.task, current, true).await,
+            _ => with_no_cache(
+                (
+                    StatusCode::ACCEPTED,
                     Json(WebhookJobStatusResponse {
                         job_id: job_id.to_string(),
                         trigger: name,
                         task: wh.task,
-                        status: fresh_job.status,
-                        output: fresh_job.output,
-                        created_at: fresh_job.created_at.to_rfc3339(),
-                        completed_at: fresh_job.completed_at.map(|t| t.to_rfc3339()),
-                    })
+                        status: "running".to_string(),
+                        output: None,
+                        created_at: job.created_at.to_rfc3339(),
+                        completed_at: None,
+                    }),
+                )
                     .into_response(),
-                );
-            }
-        }
-
-        let timeout = Duration::from_secs(timeout_secs);
-        match tokio::time::timeout(timeout, rx.recv()).await {
-            Ok(Ok(_event)) => {
-                // Job completed — re-query DB to get accurate timestamps.
-                if let Ok(Some(current)) = stroem_db::JobRepo::get(&state.pool, job_id).await {
-                    return with_no_cache(
-                        Json(WebhookJobStatusResponse {
-                            job_id: job_id.to_string(),
-                            trigger: name,
-                            task: wh.task,
-                            status: current.status,
-                            output: current.output,
-                            created_at: current.created_at.to_rfc3339(),
-                            completed_at: current.completed_at.map(|t| t.to_rfc3339()),
-                        })
-                        .into_response(),
-                    );
-                }
-                // DB error after completion
-                return AppError::Internal(anyhow::anyhow!("Failed to load job after completion"))
-                    .into_response();
-            }
-            Ok(Err(_lagged)) => {
-                // Broadcast message was missed — job is likely already terminal. Re-query DB.
-                if let Ok(Some(current)) = stroem_db::JobRepo::get(&state.pool, job_id).await {
-                    return with_no_cache(
-                        Json(WebhookJobStatusResponse {
-                            job_id: job_id.to_string(),
-                            trigger: name,
-                            task: wh.task,
-                            status: current.status,
-                            output: current.output,
-                            created_at: current.created_at.to_rfc3339(),
-                            completed_at: current.completed_at.map(|t| t.to_rfc3339()),
-                        })
-                        .into_response(),
-                    );
-                }
-                return AppError::Internal(anyhow::anyhow!("Failed to load job after lag"))
-                    .into_response();
-            }
-            Err(_elapsed) => {
-                // Genuine timeout — return current status with 202 for manual polling
-                if let Ok(Some(current)) = stroem_db::JobRepo::get(&state.pool, job_id).await {
-                    return with_no_cache(
-                        (
-                            StatusCode::ACCEPTED,
-                            Json(WebhookJobStatusResponse {
-                                job_id: job_id.to_string(),
-                                trigger: name,
-                                task: wh.task,
-                                status: current.status,
-                                output: current.output,
-                                created_at: current.created_at.to_rfc3339(),
-                                completed_at: current.completed_at.map(|t| t.to_rfc3339()),
-                            }),
-                        )
-                            .into_response(),
-                    );
-                }
-                return with_no_cache(
-                    (
-                        StatusCode::ACCEPTED,
-                        Json(WebhookJobStatusResponse {
-                            job_id: job_id.to_string(),
-                            trigger: name,
-                            task: wh.task,
-                            status: "running".to_string(),
-                            output: None,
-                            created_at: job.created_at.to_rfc3339(),
-                            completed_at: None,
-                        }),
-                    )
-                        .into_response(),
-                );
-            }
-        }
+            ),
+        },
     }
+}
 
-    with_no_cache(
-        Json(WebhookJobStatusResponse {
-            job_id: job_id.to_string(),
-            trigger: name,
-            task: wh.task,
-            status: job.status,
-            output: job.output,
-            created_at: job.created_at.to_rfc3339(),
-            completed_at: job.completed_at.map(|t| t.to_rfc3339()),
-        })
-        .into_response(),
-    )
+/// One status response for `job`, `output` redacted (fail closed), no-store.
+async fn status_response(
+    state: &AppState,
+    trigger: &str,
+    task: &str,
+    job: stroem_db::JobRow,
+    accepted: bool,
+) -> axum::response::Response {
+    let output = match crate::redaction::redact_job_output(state, &job, job.output.clone()).await {
+        Ok(o) => o,
+        Err(e) => return with_no_cache(redaction_failure(job.job_id, e)),
+    };
+    let body = Json(WebhookJobStatusResponse {
+        job_id: job.job_id.to_string(),
+        trigger: trigger.to_string(),
+        task: task.to_string(),
+        status: job.status,
+        output,
+        created_at: job.created_at.to_rfc3339(),
+        completed_at: job.completed_at.map(|t| t.to_rfc3339()),
+    });
+    let resp = if accepted {
+        (StatusCode::ACCEPTED, body).into_response()
+    } else {
+        body.into_response()
+    };
+    with_no_cache(resp)
 }
 
 /// Search result from find_webhook_trigger.
@@ -466,6 +479,8 @@ struct WebhookMatch {
     ws_name: String,
     trigger_key: String,
     task: String,
+    /// `ref:` of the target task (spec § 4.1), resolved per fire.
+    git_ref: Option<String>,
     secret: Option<String>,
     default_input: HashMap<String, serde_json::Value>,
     mode: Option<String>,
@@ -473,21 +488,17 @@ struct WebhookMatch {
     force_refresh: bool,
 }
 
-/// Find the first enabled webhook trigger matching the given name.
-async fn find_webhook_trigger(state: &AppState, name: &str) -> Option<WebhookMatch> {
-    for ws_name in state.workspaces.names() {
-        // `workspaces.<name>.triggers: false` in the server config: the
-        // workspace's webhooks are invisible here, same as `enabled: false`.
-        if !state.workspaces.triggers_enabled(ws_name) {
-            continue;
-        }
-        let config = match state.workspaces.get_config(ws_name).await {
-            Some(c) => c,
-            None => continue,
-        };
-        for (trigger_key, trigger_def) in &config.triggers {
-            if let TriggerDef::Webhook {
-                git_ref: _,
+/// The enabled webhook named `name` in one workspace's config, if any.
+fn match_webhook(
+    ws_name: &str,
+    config: &stroem_common::models::workflow::WorkspaceConfig,
+    name: &str,
+) -> Option<WebhookMatch> {
+    config
+        .triggers
+        .iter()
+        .find_map(|(trigger_key, trigger_def)| match trigger_def {
+            TriggerDef::Webhook {
                 name: wh_name,
                 task,
                 secret,
@@ -496,24 +507,45 @@ async fn find_webhook_trigger(state: &AppState, name: &str) -> Option<WebhookMat
                 mode,
                 timeout_secs,
                 force_refresh,
-            } = trigger_def
-            {
-                if wh_name == name && *enabled {
-                    return Some(WebhookMatch {
-                        ws_name: ws_name.to_string(),
-                        trigger_key: trigger_key.clone(),
-                        task: task.clone(),
-                        secret: secret.clone(),
-                        default_input: input.clone(),
-                        mode: mode.clone(),
-                        timeout_secs: *timeout_secs,
-                        force_refresh: *force_refresh,
-                    });
-                }
-            }
+                git_ref,
+            } if wh_name == name && *enabled => Some(WebhookMatch {
+                ws_name: ws_name.to_string(),
+                trigger_key: trigger_key.clone(),
+                task: task.clone(),
+                git_ref: git_ref.clone(),
+                secret: secret.clone(),
+                default_input: input.clone(),
+                mode: mode.clone(),
+                timeout_secs: *timeout_secs,
+                force_refresh: *force_refresh,
+            }),
+            _ => None,
+        })
+}
+
+/// Find the first enabled webhook trigger matching the given name.
+async fn find_webhook_trigger(state: &AppState, name: &str) -> Option<WebhookMatch> {
+    for ws_name in state.workspaces.names() {
+        if let Some(m) = find_webhook_trigger_in(state, ws_name, name).await {
+            return Some(m);
         }
     }
     None
+}
+
+/// The webhook `name` in ONE workspace's currently published config.
+async fn find_webhook_trigger_in(
+    state: &AppState,
+    ws_name: &str,
+    name: &str,
+) -> Option<WebhookMatch> {
+    // `workspaces.<name>.triggers: false` in the server config: the
+    // workspace's webhooks are invisible here, same as `enabled: false`.
+    if !state.workspaces.triggers_enabled(ws_name) {
+        return None;
+    }
+    let config = state.workspaces.get_config(ws_name).await?;
+    match_webhook(ws_name, &config, name)
 }
 
 /// Extract secret from query param `?secret=xxx` or `Authorization: Bearer xxx` header.
@@ -641,6 +673,37 @@ mod tests {
             },
         );
         config
+    }
+
+    #[test]
+    fn match_webhook_returns_ref_and_skips_disabled() {
+        let mut config = stroem_common::models::workflow::WorkspaceConfig::new();
+        config.triggers.insert(
+            "on-nightly".to_string(),
+            TriggerDef::Webhook {
+                name: "nightly-hook".to_string(),
+                task: "billing.nightly".to_string(),
+                secret: Some("s".to_string()),
+                input: HashMap::new(),
+                enabled: true,
+                mode: None,
+                timeout_secs: None,
+                force_refresh: true,
+                git_ref: Some("release/2.3".to_string()),
+            },
+        );
+        let m = match_webhook("etl", &config, "nightly-hook").expect("matches");
+        assert_eq!(m.ws_name, "etl");
+        assert_eq!(m.trigger_key, "on-nightly");
+        assert_eq!(m.task, "billing.nightly");
+        assert_eq!(m.git_ref.as_deref(), Some("release/2.3"));
+        assert!(m.force_refresh);
+
+        if let Some(TriggerDef::Webhook { enabled, .. }) = config.triggers.get_mut("on-nightly") {
+            *enabled = false;
+        }
+        assert!(match_webhook("etl", &config, "nightly-hook").is_none());
+        assert!(match_webhook("etl", &config, "other").is_none());
     }
 
     #[tokio::test]
@@ -883,6 +946,7 @@ mod tests {
             ws_name: "default".to_string(),
             trigger_key: "test-trigger".to_string(),
             task: "deploy".to_string(),
+            git_ref: None,
             secret: Some("my-secret".to_string()),
             default_input: HashMap::new(),
             mode: None,
@@ -899,6 +963,7 @@ mod tests {
             ws_name: "default".to_string(),
             trigger_key: "test-trigger".to_string(),
             task: "deploy".to_string(),
+            git_ref: None,
             secret: Some("my-secret".to_string()),
             default_input: HashMap::new(),
             mode: None,
@@ -917,6 +982,7 @@ mod tests {
             ws_name: "default".to_string(),
             trigger_key: "test-trigger".to_string(),
             task: "deploy".to_string(),
+            git_ref: None,
             secret: Some("my-secret".to_string()),
             default_input: HashMap::new(),
             mode: None,
@@ -935,6 +1001,7 @@ mod tests {
             ws_name: "default".to_string(),
             trigger_key: "test-trigger".to_string(),
             task: "deploy".to_string(),
+            git_ref: None,
             secret: None,
             default_input: HashMap::new(),
             mode: None,
@@ -952,6 +1019,7 @@ mod tests {
             ws_name: "default".to_string(),
             trigger_key: "test-trigger".to_string(),
             task: "deploy".to_string(),
+            git_ref: None,
             secret: Some("bearer-secret".to_string()),
             default_input: HashMap::new(),
             mode: None,
