@@ -16,6 +16,8 @@ side, each from its own definitions and files. Line numbers cite
   terminal step and no live one (§ 7.3).
 - I2: a `sops`/`vals` failure of a commit is answered from memory for 30 s and
   becomes the permanent `PinLoadFailed` after an hour (§ 5.3, § 8).
+- I3: pinned Re-run / Restart also require `Run` on the task's folder at the
+  re-resolved commit (§ 7.3).
 
 **Revision 9 (2026-10-02, execution pre-flight).** Two rulings from the
 pre-flight conflict scan:
@@ -753,7 +755,11 @@ config first: re-run through the execute route's task check
 When the source has `job.ref`, both instead:
 1. Re-resolve the ref (`PinStore::resolve`) and `ensure` the new pin, before
    any task check.
-2. Look the task up in that pinned config. Restart computes its
+2. Look the task up in that pinned config, and require `Run` on the
+   folder it declares there — the new job's `task_folder` — with the execute
+   route's mapping (Deny → 404 "Task", View → 403 "View-only access"),
+   `dry_run` restart included. The source job's own `task_folder` is checked
+   first, before anything about the source is revealed. Restart computes its
    `RestartPlan` (`restart::compute_restart_set`) against the pinned flow
    and seeds carried rows in the existing creation transaction
    (`job_creator.rs:521`).

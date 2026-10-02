@@ -4,11 +4,10 @@
 //! re-resolved — a branch moves to its current tip, a tag or SHA stays put —
 //! BEFORE any task lookup. Unpinned sources keep today's live path.
 //!
-//! TODO(git-refs): both entry points authorise a pinned source by the SOURCE
-//! job's `task_folder` only (`check_job_acl`, § 7.8). The folder the task
-//! declares at the re-resolved commit — the new job's `task_folder` — is not
-//! checked, so a task moved into a stricter folder on its branch can still be
-//! re-run or restarted by a user allowed the old one.
+//! Both entry points check `Run` twice: on the SOURCE job's `task_folder`
+//! (`check_job_acl`, § 7.8) before anything about the source is revealed,
+//! and, after the re-resolution, on the folder the task declares at the new
+//! commit — the new job's `task_folder` (`tasks::require_task_run`).
 
 use crate::state::AppState;
 use crate::web::error::AppError;

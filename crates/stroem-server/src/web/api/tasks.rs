@@ -479,25 +479,7 @@ pub async fn execute_task(
         .ok_or_else(|| AppError::not_found("Task"))?;
 
     // 3. ACL check: Deny -> 404, View -> 403, Run -> proceed
-    if let Some(ref auth) = auth_user {
-        if state.acl.is_configured() {
-            let user_id = auth.user_id()?;
-            let (is_admin, groups) = load_user_acl_context(&state.pool, user_id, auth.is_admin())
-                .await
-                .context("load ACL context")?;
-            let task_path = make_task_path(task.folder.as_deref(), &name);
-            let perm = state
-                .acl
-                .evaluate(&ws, &task_path, &auth.claims.email, &groups, is_admin);
-            match perm {
-                TaskPermission::Deny => return Err(AppError::not_found("Task")),
-                TaskPermission::View => {
-                    return Err(AppError::Forbidden("View-only access".into()));
-                }
-                TaskPermission::Run => {} // allowed
-            }
-        }
-    }
+    require_task_run(&state, &auth_user, &ws, &name, task.folder.as_deref()).await?;
 
     // 4. Re-run validation: source_job_id must reference a job in this workspace
     //    that the user is allowed to view. Authorization mirrors GET /api/jobs/{id}.
@@ -549,6 +531,38 @@ pub async fn execute_task(
     }))
 }
 
+/// `Run` on the task path `{folder}/{name}` of workspace `ws`, for the
+/// execute route and for a pinned Re-run / Restart at the folder the task
+/// declares at the re-resolved commit (the new job's `task_folder`). Deny →
+/// 404 "Task", View → 403 "View-only access". No user, or no ACL → allowed.
+pub(crate) async fn require_task_run(
+    state: &AppState,
+    auth_user: &Option<AuthUser>,
+    ws: &str,
+    name: &str,
+    folder: Option<&str>,
+) -> Result<(), AppError> {
+    let Some(auth) = auth_user else {
+        return Ok(());
+    };
+    if !state.acl.is_configured() {
+        return Ok(());
+    }
+    let user_id = auth.user_id()?;
+    let (is_admin, groups) = load_user_acl_context(&state.pool, user_id, auth.is_admin())
+        .await
+        .context("load ACL context")?;
+    let task_path = make_task_path(folder, name);
+    match state
+        .acl
+        .evaluate(ws, &task_path, &auth.claims.email, &groups, is_admin)
+    {
+        TaskPermission::Deny => Err(AppError::not_found("Task")),
+        TaskPermission::View => Err(AppError::Forbidden("View-only access".into())),
+        TaskPermission::Run => Ok(()),
+    }
+}
+
 /// The source checks every re-run makes, pinned or not: same workspace, a
 /// top-level job, and a `raw_input` to replay.
 fn check_rerun_source(source_job: &stroem_db::JobRow, ws: &str) -> Result<(), AppError> {
@@ -578,11 +592,13 @@ fn check_rerun_source(source_job: &stroem_db::JobRow, ws: &str) -> Result<(), Ap
 /// denied caller learns nothing about the source: `Run` on the SOURCE's path,
 /// `{task_folder}/{task}` (§ 7.8), because the task may not exist in the live
 /// config at all. Then the source checks of the unpinned path and the task
-/// name; then the ref is re-resolved (a branch to its current tip) and the
-/// task looked up at that commit.
+/// name; then the ref is re-resolved (a branch to its current tip), the task
+/// looked up at that commit, and `Run` required on the folder it declares
+/// there — the new job's `task_folder` — as the unpinned path requires it on
+/// the live task's folder.
 ///
-/// Deny → 404, View → 403, a bad source or a task missing at the commit →
-/// 400, `RefNotFound` → 400, `PinUnavailable` → 500.
+/// Deny → 404, View → 403 (either check), a bad source or a task missing at
+/// the commit → 400, `RefNotFound` → 400, `PinUnavailable` → 500.
 async fn execute_pinned_rerun(
     state: &AppState,
     auth_user: &Option<AuthUser>,
@@ -613,7 +629,8 @@ async fn execute_pinned_rerun(
                 source_job.job_id
             ))
         })?;
-    source_pin.task(name)?;
+    let task = source_pin.task(name)?;
+    require_task_run(state, auth_user, ws, name, task.folder.as_deref()).await?;
     let input_value = serde_json::to_value(&req.input).unwrap_or_default();
 
     let created = create_job_for_task_pinned(

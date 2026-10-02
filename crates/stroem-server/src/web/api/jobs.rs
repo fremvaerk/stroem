@@ -616,7 +616,10 @@ pub(crate) fn is_top_level_job(job: &stroem_db::JobRow) -> bool {
 ///
 /// A pinned source (git-refs spec § 7.3) is authorised by its own
 /// `task_folder` (§ 7.8) and re-resolves its ref BEFORE the task lookup, so
-/// the plan uses the flow at the commit the restart will run. That adds: 400
+/// the plan uses the flow at the commit the restart will run; `Run` is then
+/// also required on the folder the task declares at that commit (404 "Task
+/// not found" / 403 "View-only access", like the execute route), `dry_run`
+/// included. That adds: 400
 /// when the ref no longer resolves (`RefNotFound`) or its config does not
 /// load (`PinLoadFailed`, withheld), 400 when the task does not exist at the
 /// re-resolved commit, and 500 when the git remote is unavailable
@@ -683,7 +686,21 @@ pub async fn restart_job(
     let source_pin = super::pinned_source::resolve_source_pin(&state, &source).await?;
     let live_workspace;
     let (workspace, task) = match &source_pin {
-        Some(sp) => (sp.handle.config(), sp.task(&source.task_name)?),
+        Some(sp) => {
+            let task = sp.task(&source.task_name)?;
+            // Final review I3: the new job is stamped with the folder the task
+            // declares at the re-resolved commit, so `Run` is required there
+            // too (the source check above covers only the source's folder).
+            super::tasks::require_task_run(
+                &state,
+                &auth_user,
+                &source.workspace,
+                &source.task_name,
+                task.folder.as_deref(),
+            )
+            .await?;
+            (sp.handle.config(), task)
+        }
         None => {
             live_workspace = state
                 .get_workspace(&source.workspace)

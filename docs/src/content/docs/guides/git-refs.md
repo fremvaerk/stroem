@@ -368,16 +368,19 @@ commit; the restarted steps run at the new one.
 
 | Situation | Answer |
 |---|---|
-| No access to the source job's folder | `404` |
-| `View` only (both need `Run`) | `403` |
+| No access to the source job's folder, or to the folder the task declares at the re-resolved commit | `404` |
+| `View` only on either folder (both need `Run` on both) | `403` |
 | Re-run posted to a different task name than the source's | `400` "Source job … is a run of task '…', not '…'" |
 | The task no longer exists at the re-resolved commit | `400` "Task '…' does not exist at ref '…' (sha)" |
 | The ref no longer exists | `400` |
 | Git server unreachable | `500` |
 
-Access is checked on the source job's folder (its `task_folder`). A restart
-dry run of a pinned job also contacts the git server, so the preview can
-answer `500` during an outage. The UI hides Re-run and Restart for a pinned
+Access is checked twice: on the source job's folder (its `task_folder`)
+first, then on the folder the task declares at the re-resolved commit — the
+folder the new job will carry. Moving a task into a stricter folder on its
+branch therefore also restricts who can re-run or restart its older jobs. A
+restart dry run of a pinned job also contacts the git server, so the preview
+can answer `500` during an outage. The UI hides Re-run and Restart for a pinned
 job whose task does not exist on the default branch; use the API for those
 (`POST /api/workspaces/{ws}/tasks/{task}/execute` with `source_job_id`, or
 `POST /api/jobs/{id}/restart`).

@@ -77,8 +77,10 @@ is computed against the flow at the new commit; carried-over steps keep the
 output they produced at the old one.
 
 Access is checked against the folder the **source** job's task declared at
-its commit, and both actions need `Run` there (no access → `404`, `View` →
-`403`). A re-run must be posted to the source job's own task name (another
+its commit, and then against the folder the task declares at the
+re-resolved commit (the folder the new job carries). Both actions need `Run`
+on both (no access → `404`, `View` → `403`), so moving a task into a stricter
+folder on its branch also restricts who can re-run or restart its older jobs. A re-run must be posted to the source job's own task name (another
 name is a `400`). If the task no longer exists at the re-resolved commit, or
 the ref itself is gone, both answer `400`; if the git server is unreachable,
 `500` — the restart **preview** contacts the git server too.

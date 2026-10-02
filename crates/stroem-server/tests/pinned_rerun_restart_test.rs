@@ -313,6 +313,111 @@ async fn pinned_rerun_authorises_against_the_source_task_folder() -> Result<()> 
     .await
 }
 
+/// Final review I3: the task moves into a stricter folder at the branch's
+/// new tip. Re-run and Restart create a job stamped with THAT folder, so they
+/// need `Run` on it too — like the unpinned path, which checks the task's
+/// current folder — not only on the source's folder: Deny → 404, View → 403.
+#[tokio::test(flavor = "multi_thread")]
+async fn pinned_rerun_and_restart_require_run_on_the_folder_at_the_new_commit() -> Result<()> {
+    const DENIED: &str = "denied@test.local";
+    const VIEWER: &str = "viewer@test.local";
+    const BOTH: &str = "both@test.local";
+    let rule = |tasks: &str, action: AclAction, users: &[&str]| AclRule {
+        workspace: "etl".into(),
+        tasks: vec![tasks.into()],
+        action,
+        groups: vec![],
+        users: users.iter().map(|u| u.to_string()).collect(),
+    };
+    let user = |email: &'static str| FixtureUser {
+        email,
+        groups: vec![],
+        admin: false,
+    };
+    rr_bounded(async {
+        let fx = pinned_workspace_fixture(PinnedFixtureOpts {
+            acl: Some(AclConfig {
+                default: AclAction::Deny,
+                rules: vec![
+                    rule("rel/*", AclAction::Run, &[DENIED, VIEWER, BOTH]),
+                    rule("locked/*", AclAction::View, &[VIEWER]),
+                    rule("locked/*", AclAction::Run, &[BOTH]),
+                ],
+            }),
+            users: vec![user(DENIED), user(VIEWER), user(BOTH)],
+            ..rr_opts()
+        })
+        .await?;
+        let source = rr_failed_pinned_source(&fx, json!({"ok": true})).await?;
+        let c2 = fx.etl.commit(
+            "release/2.3",
+            "release/2.3",
+            &[(
+                RR_YAML_PATH,
+                &RR_ETL_RELEASE.replace("folder: rel", "folder: locked"),
+            )],
+        );
+
+        let rerun_uri = "/api/workspaces/etl/tasks/only-on-release/execute";
+        let rerun_body = json!({"input": {}, "source_job_id": source});
+        let restart_uri = format!("/api/jobs/{source}/restart");
+        for (email, status, error) in [
+            (DENIED, StatusCode::NOT_FOUND, "Task not found"),
+            (VIEWER, StatusCode::FORBIDDEN, "View-only access"),
+        ] {
+            let key = fx.api_key(email, false).await;
+            let (st, body) = api_req(
+                &fx.router,
+                "POST",
+                rerun_uri,
+                Some(&key),
+                Some(rerun_body.clone()),
+            )
+            .await;
+            assert_eq!(st, status, "{email} re-run: {body}");
+            assert_eq!(rr_error(&body), error, "{email} re-run: {body}");
+            for restart in [
+                json!({"from_step": "b", "dry_run": true}),
+                json!({"from_step": "b"}),
+            ] {
+                let (st, body) =
+                    api_req(&fx.router, "POST", &restart_uri, Some(&key), Some(restart)).await;
+                assert_eq!(st, status, "{email} restart: {body}");
+                assert_eq!(rr_error(&body), error, "{email} restart: {body}");
+            }
+        }
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM job WHERE source_job_id = $1")
+            .bind(source)
+            .fetch_one(&fx.pool)
+            .await?;
+        assert_eq!(count, 0, "nothing is created for a refused caller");
+
+        // Run on both folders: allowed, and the new job carries the new folder.
+        let both = fx.api_key(BOTH, false).await;
+        let (st, body) =
+            api_req(&fx.router, "POST", rerun_uri, Some(&both), Some(rerun_body)).await;
+        assert_eq!(st, StatusCode::OK, "re-run: {body}");
+        let rerun: Uuid = body["job_id"].as_str().unwrap().parse()?;
+        let job = JobRepo::get(&fx.pool, rerun).await?.unwrap();
+        assert_eq!(job.revision.as_deref(), Some(c2.as_str()));
+        assert_eq!(job.task_folder.as_deref(), Some("locked"));
+        let (st, body) = api_req(
+            &fx.router,
+            "POST",
+            &restart_uri,
+            Some(&both),
+            Some(json!({"from_step": "b"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "restart: {body}");
+        let restart: Uuid = body["job_id"].as_str().unwrap().parse()?;
+        let job = JobRepo::get(&fx.pool, restart).await?.unwrap();
+        assert_eq!(job.task_folder.as_deref(), Some("locked"));
+        Ok(())
+    })
+    .await
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn rerun_and_restart_of_pinned_source_are_400_when_the_tip_lost_the_task() -> Result<()> {
     rr_bounded(async {

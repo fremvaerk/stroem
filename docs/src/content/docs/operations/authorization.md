@@ -68,6 +68,11 @@ cancel, approve, restart and re-run, the recent steps on a worker's detail
 page, and to the job list, dashboard counts and MCP `list_jobs`, which are
 filtered before pagination.
 
+Re-run and restart of a job on a git ref create a job at the ref's current
+commit, so they also need `Run` on the folder the task declares **there** —
+the folder the new job will carry — in addition to `Run` on the source
+job's own folder.
+
 A single-step hook job has the task name `_hook:<action>` and no folder, so
 a rule matching `_hook:*` at the root grants access to the hook payloads of
 that workspace — including the step errors of the jobs that fired them. A
