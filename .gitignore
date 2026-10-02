@@ -23,3 +23,6 @@ test_output.txt
 
 # Local Codex CLI config (holds credentials)
 .codex/
+
+# e2e git-refs fixture (built by tests/e2e.sh)
+tests/.e2e-refs/
