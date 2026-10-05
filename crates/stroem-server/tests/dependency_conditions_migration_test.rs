@@ -100,7 +100,9 @@ fn task_with_flow(flow: Vec<(&str, FlowStep)>) -> TaskDef {
 fn workspace_with(task: &TaskDef) -> WorkspaceConfig {
     let mut ws = WorkspaceConfig::new();
     ws.tasks.insert(
-        task.name.clone().expect("task_with_flow always sets a name"),
+        task.name
+            .clone()
+            .expect("task_with_flow always sets a name"),
         task.clone(),
     );
     ws
