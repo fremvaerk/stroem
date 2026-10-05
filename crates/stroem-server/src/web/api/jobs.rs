@@ -415,7 +415,7 @@ pub async fn get_job(
                 for (name, fs) in &task.flow {
                     let mut dep_names = Vec::new();
                     stroem_common::depends_on::collect_names(&fs.depends_on, &mut dep_names);
-                    if dep_names.iter().any(|d| *d == node) {
+                    if dep_names.contains(&node) {
                         if let Some(deg) = in_deg.get_mut(name.as_str()) {
                             *deg -= 1;
                             if *deg == 0 {
