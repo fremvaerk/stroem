@@ -111,12 +111,21 @@ struct RunSummary {
     outcome: RunOutcome,
 }
 
+/// Only `Condition`/`Empty` are actually reached from this file's own call
+/// sites — a `Gate::Omitted` step is reported through its own fixed message
+/// at the call site above (`"blocked by a dependency's outcome"`), never
+/// through this function. `Cascade`/`Unreachable` exist only so this match
+/// stays exhaustive against the shared `SkipReason` enum; their text is
+/// dead/historical-only here, kept in sync with the already-fixed UI
+/// wording (`ui/src/lib/skip-reason.ts`) rather than the retired "an
+/// upstream step failed" framing — a step can be omitted for reasons that
+/// have nothing to do with an upstream step failing at all.
 fn skip_label(reason: SkipReason) -> &'static str {
     match reason {
         SkipReason::Condition => "condition false",
         SkipReason::Empty => "empty for_each",
-        SkipReason::Cascade => "a dependency was skipped",
-        SkipReason::Unreachable => "an upstream step failed",
+        SkipReason::Cascade => "a dependency was skipped (pre-0.18 only)",
+        SkipReason::Unreachable => "a dependency condition was not satisfied",
     }
 }
 
@@ -134,13 +143,15 @@ fn record_failure(
     errors.insert(step.to_string(), msg);
 }
 
-/// A `for_each` loop that failed without its own `continue_on_failure`: unlike
-/// an ordinary failed step (`record_failure`, output always masked), its
-/// per-iteration output array is still exposed to a dependent — mirrors the
-/// scoping rule in `render_context.rs`'s failed-row branch (spec §4/§12):
-/// only a tolerated loop rollup's output is newly exposed, never an ordinary
-/// failed step's. `build_render_context` just renders whatever is in
-/// `outputs`, so the scoping decision lives entirely here, at the call site.
+/// A `for_each` loop that failed — called for EVERY failed rollup now,
+/// `continue_on_failure` or not (spec 2026-10-01 §4: the flag only excuses
+/// the job, never the rollup's own status). Unlike an ordinary failed step
+/// (`record_failure`, output always masked), its per-iteration output array
+/// is still exposed unconditionally to a dependent whose own `accept` lets
+/// it see this step at all — mirrors the scoping rule in
+/// `render_context.rs`'s failed-row branch. `build_render_context` just
+/// renders whatever is in `outputs`, so the scoping decision lives entirely
+/// here, at the call site.
 fn record_failed_loop(
     outcomes: &mut HashMap<String, DepOutcome>,
     outputs: &mut HashMap<String, Option<serde_json::Value>>,

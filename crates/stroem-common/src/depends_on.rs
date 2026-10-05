@@ -9,7 +9,7 @@ use std::fmt;
 /// Spec §2.1. No `Pending` variant here — this is the schema-facing
 /// vocabulary used inside `accept`, never a row's live state (see
 /// `gate::DepOutcome` for that).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
     Completed,
@@ -178,6 +178,15 @@ fn check_nested(entry: &DependsOnEntry, errors: &mut Vec<String>) {
             if let AcceptSet::Outcomes(v) = &s.accept {
                 if v.is_empty() {
                     errors.push(format!("'{}' has an empty accept list", s.step));
+                }
+                let mut seen = std::collections::HashSet::new();
+                for o in v {
+                    if !seen.insert(*o) {
+                        errors.push(format!(
+                            "'{}' has a duplicate outcome '{:?}' in its accept list",
+                            s.step, o
+                        ));
+                    }
                 }
             }
         }

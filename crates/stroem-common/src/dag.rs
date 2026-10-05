@@ -3,7 +3,18 @@ use crate::models::workflow::FlowStep;
 use anyhow::{bail, Result};
 use std::collections::{HashMap, HashSet, VecDeque};
 
-/// Returns step names whose dependencies are all in `completed` and that are not themselves completed
+/// Returns step names whose dependencies are all in `completed` and that are not themselves completed.
+///
+/// **Limitation**: treats every name in a `depends_on` tree as "must be in
+/// `completed`," ignoring `any`/`accept` semantics entirely — a dependency
+/// that's `failed`/`skipped`/`omitted` with an `accept` set that would
+/// tolerate it is never considered ready here, and an `any` group's
+/// short-circuit isn't modeled either. Production readiness decisions go
+/// through `crate::gate::gate` instead (used by `cascade.rs` and
+/// `stroem run`); this function is example/doc/test-only today — not called
+/// from any production dispatch path — so the gap has not mattered in
+/// practice, but don't reach for it as a readiness check without fixing this
+/// first.
 pub fn ready_steps(flow: &HashMap<String, FlowStep>, completed: &HashSet<String>) -> Vec<String> {
     flow.iter()
         .filter_map(|(step_name, step)| {

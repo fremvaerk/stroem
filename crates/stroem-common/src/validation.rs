@@ -2521,6 +2521,30 @@ tasks:
     }
 
     #[test]
+    fn test_duplicate_outcome_in_accept_list_is_rejected() {
+        // Spec §7: `Outcomes` is "validated non-empty, no duplicates" —
+        // a duplicate entry is harmless at runtime (AcceptSet::contains
+        // doesn't care) but is almost certainly a typo, same reasoning as
+        // the sibling-duplicate check above.
+        let yaml = r#"
+actions:
+  noop:
+    type: script
+    script: "echo noop"
+tasks:
+  t:
+    flow:
+      a: { action: noop }
+      m: { action: noop, depends_on: [{ step: a, accept: [completed, failed, completed] }] }
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("duplicate") && msg.contains("accept"), "{msg}");
+    }
+
+    #[test]
     fn test_cross_branch_duplicate_reference_is_accepted() {
         let yaml = r#"
 actions:
