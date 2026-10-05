@@ -113,7 +113,7 @@ struct RunSummary {
 
 /// Only `Condition`/`Empty` are actually reached from this file's own call
 /// sites — a `Gate::Omitted` step is reported through its own fixed message
-/// at the call site above (`"blocked by a dependency's outcome"`), never
+/// at the call site below (`"blocked by a dependency's outcome"`), never
 /// through this function. `Cascade`/`Unreachable` exist only so this match
 /// stays exhaustive against the shared `SkipReason` enum; their text is
 /// dead/historical-only here, kept in sync with the already-fixed UI

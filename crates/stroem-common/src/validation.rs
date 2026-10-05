@@ -55,8 +55,10 @@ pub fn validate_workflow_config_with_cross_workspace_resolver(
 }
 
 /// Validates the dependency-shape rules for a single task's flow: the legacy
-/// `continue_when_skipped` flag (removed in 0.18.0, a named parse-time error
-/// rather than silent acceptance-and-ignore) and `depends_on` tree shape
+/// `continue_when_skipped` flag (removed in 0.18.0, a named error from this
+/// function's callers below rather than silent acceptance-and-ignore — not
+/// a parse error, and not caught by merely loading the workspace) and
+/// `depends_on` tree shape
 /// (duplicate siblings, empty groups, empty `accept` lists via
 /// [`crate::depends_on::validate_tree`]).
 ///

@@ -27,6 +27,18 @@ impl Outcome {
         Outcome::Skipped,
         Outcome::Omitted,
     ];
+
+    /// The exact YAML spelling (matches the `rename_all = "snake_case"`
+    /// serde form) — for user-facing error text, never `{:?}`'s PascalCase.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Outcome::Completed => "completed",
+            Outcome::Failed => "failed",
+            Outcome::Cancelled => "cancelled",
+            Outcome::Skipped => "skipped",
+            Outcome::Omitted => "omitted",
+        }
+    }
 }
 
 /// Deserializes only from the exact string "terminal"; any other value is a
@@ -183,8 +195,9 @@ fn check_nested(entry: &DependsOnEntry, errors: &mut Vec<String>) {
                 for o in v {
                     if !seen.insert(*o) {
                         errors.push(format!(
-                            "'{}' has a duplicate outcome '{:?}' in its accept list",
-                            s.step, o
+                            "'{}' has a duplicate outcome '{}' in its accept list",
+                            s.step,
+                            o.as_str()
                         ));
                     }
                 }

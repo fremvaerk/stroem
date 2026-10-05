@@ -401,7 +401,8 @@ pub(crate) fn classify_execute_error(e: anyhow::Error) -> AppError {
         || chain.contains("was removed in 0.18.0") // legacy continue_when_skipped flag (validate_task_dependency_shape)
         || chain.contains("must not be empty") // depends_on tree shape: empty all/any group
         || chain.contains("empty accept list") // depends_on tree shape: accept: []
-        || chain.contains("duplicate dependency"); // depends_on tree shape: duplicate sibling
+        || chain.contains("duplicate dependency") // depends_on tree shape: duplicate sibling
+        || chain.contains("duplicate outcome"); // depends_on tree shape: duplicate entry in accept: [...]
     if precise_user_error {
         return AppError::BadRequest(chain);
     }
@@ -566,6 +567,21 @@ mod classify_execute_error_tests {
         let err = classify_execute_error(e);
         match err {
             AppError::BadRequest(msg) => assert!(msg.contains("must not be empty"), "{msg}"),
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    /// Same classification requirement for the third precheck error shape:
+    /// a duplicate entry inside one `accept: [...]` list.
+    #[test]
+    fn duplicate_outcome_in_accept_list_precheck_error_is_bad_request() {
+        let e = anyhow::anyhow!(
+            "Task 'demo' step 'b': 'a' has a duplicate outcome 'completed' in its accept list"
+        );
+
+        let err = classify_execute_error(e);
+        match err {
+            AppError::BadRequest(msg) => assert!(msg.contains("duplicate outcome"), "{msg}"),
             other => panic!("expected BadRequest, got {other:?}"),
         }
     }
