@@ -1,6 +1,99 @@
 use anyhow::{Context, Result};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
+use testcontainers::core::ImageExt;
+use testcontainers::runners::AsyncRunner;
+use testcontainers::ContainerAsync;
+use testcontainers_modules::postgres::Postgres;
+use tokio::sync::OnceCell;
+use uuid::Uuid;
+
+pub struct TestDb {
+    pub pool: PgPool,
+    pub url: String,
+}
+
+struct SharedContainer {
+    // Kept only to hold the container alive for this binary's process
+    // lifetime; never read directly. `static` values are never dropped at
+    // process exit — this container's eventual removal is
+    // `scripts/test-clean.sh`'s job, not this field's, and that's by
+    // design (see the design spec § 3.1).
+    _container: ContainerAsync<Postgres>,
+    base_url: String,
+}
+
+static SHARED: OnceCell<SharedContainer> = OnceCell::const_new();
+
+async fn default_base_url() -> Result<String> {
+    let shared = SHARED
+        .get_or_try_init(|| async {
+            let container = Postgres::default()
+                .with_label("stroem.test", "true")
+                .with_cmd(["-c", "max_connections=200"])
+                .start()
+                .await
+                .context("start per-binary postgres container")?;
+            let port = container
+                .get_host_port_ipv4(5432)
+                .await
+                .context("get postgres container port")?;
+            let base_url = format!("postgres://postgres:postgres@localhost:{port}");
+            Ok::<_, anyhow::Error>(SharedContainer {
+                _container: container,
+                base_url,
+            })
+        })
+        .await?;
+    Ok(shared.base_url.clone())
+}
+
+async fn resolve_base_url() -> Result<String> {
+    if let Ok(url) = std::env::var("TEST_DATABASE_URL") {
+        return Ok(url);
+    }
+    default_base_url().await
+}
+
+/// Returns a fresh, migrated, isolated Postgres database for one test —
+/// both a ready-to-use pool and its raw connection URL (several existing
+/// call sites need the URL to build a real server's `DbConfig`, not just
+/// a pool).
+pub async fn test_db() -> TestDb {
+    let admin_url = resolve_base_url()
+        .await
+        .expect("resolve test postgres base url");
+    ensure_template_migrated(&admin_url)
+        .await
+        .expect("ensure stroem_template is migrated");
+
+    let db_name = format!("t_{}", Uuid::new_v4().simple());
+    let admin_pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&format!("{admin_url}/postgres"))
+        .await
+        .expect("connect to postgres admin database");
+    sqlx::query(&format!(
+        r#"CREATE DATABASE "{db_name}" TEMPLATE stroem_template"#
+    ))
+    .execute(&admin_pool)
+    .await
+    .expect("create isolated test database");
+
+    let url = format!("{admin_url}/{db_name}");
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&url)
+        .await
+        .expect("connect to isolated test database");
+
+    TestDb { pool, url }
+}
+
+/// Convenience wrapper for call sites that only need the pool.
+pub async fn test_pool() -> PgPool {
+    test_db().await.pool
+}
 
 /// Fixed key for the Postgres advisory lock guarding template
 /// creation/migration. Arbitrary but stable — never reuse this constant
@@ -101,6 +194,37 @@ async fn ensure_template_migrated_locked(admin_pool: &PgPool, admin_url: &str) -
 mod tests {
     use testcontainers::runners::AsyncRunner;
     use testcontainers_modules::postgres::Postgres;
+
+    #[tokio::test]
+    async fn test_db_returns_isolated_databases() {
+        // Concurrent, not sequential: two tests in one binary calling test_db()
+        // at the same time is the normal case this design has to handle,
+        // including both hitting ensure_template_migrated's advisory lock at
+        // once.
+        let (a, b) = tokio::join!(super::test_db(), super::test_db());
+        assert_ne!(a.url, b.url, "each call gets its own database");
+
+        sqlx::query("CREATE TABLE marker (n int)")
+            .execute(&a.pool)
+            .await
+            .unwrap();
+        // b's database must not see a's table — they're genuinely separate.
+        let err = sqlx::query("SELECT * FROM marker")
+            .execute(&b.pool)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("marker") || err.as_database_error().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_pool_is_already_migrated() {
+        let pool = super::test_pool().await;
+        // The `job` table only exists if migrations actually ran.
+        sqlx::query("SELECT 1 FROM job LIMIT 0")
+            .execute(&pool)
+            .await
+            .expect("job table should exist after migration");
+    }
 
     #[tokio::test]
     async fn ensure_template_migrated_creates_marker_and_is_idempotent() {
