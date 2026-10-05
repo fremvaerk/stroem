@@ -167,8 +167,40 @@ first branch — `accept` only ever answers "do I run," never "does the job
 still count as succeeded." The origin step still needs its own
 `continue_on_failure` for that.
 
+## Rollout ordering (mixed replicas, mixed CLI)
+
+Don't merge workflow YAML using the new `depends_on` shapes (`{step, accept}`,
+`all`, `any`) until every server replica — and every `stroem` / `stroem-api`
+CLI binary anyone might load that workspace with — is running 0.18.0+. A
+pre-0.18 parser doesn't reject the new shape outright; it silently mis-parses
+it, and which failure mode you get depends on the step:
+
+- **Inline step** (`type: ...`): the old parser's `depends_on` falls through
+  a bare-name-list path with a `.unwrap_or_default()`-style fallback — a
+  `{step: a, accept: [...]}` entry or an `all`/`any` group doesn't deserialize
+  as a plain string, so the whole `depends_on` list quietly becomes **empty**
+  instead of erroring. The step becomes an unintended root: it runs
+  immediately, with no dependency gate at all, instead of waiting for what
+  the new YAML actually says.
+- **Reference step** (`action: ...`): the old parser fails outright on the
+  unrecognized shape, and — same as any other reference-step parse
+  failure — the **whole file** is skipped with only a log warning: every
+  task, action, and trigger it defines disappears from that replica (cron
+  triggers silently stop firing, webhooks 404) until it catches up.
+
+Helm's default 2-replica `RollingUpdate` creates a real window where an old
+and a new replica both serve traffic at once, and a developer's local CLI can
+easily lag the fleet by more than that window. Roll the server fleet and
+upgrade every CLI binary **first**; only merge YAML using the new
+`depends_on` shapes once every replica and every CLI that touches this
+workspace is confirmed on 0.18.0+.
+
 ## Checklist
 
+- [ ] Confirm every server replica and every CLI binary (`stroem`,
+  `stroem-api`) that loads this workspace is on 0.18.0+ before merging YAML
+  with the new `depends_on` shapes — see
+  [Rollout ordering](#rollout-ordering-mixed-replicas-mixed-cli) above.
 - [ ] Run `stroem validate` (or load the workspace against a 0.18+ server) —
   any lingering `continue_when_skipped` is now a hard parse error naming the
   task and step.
