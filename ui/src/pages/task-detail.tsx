@@ -41,7 +41,11 @@ function topoSortFlow(
   const entries = Object.entries(flow);
   const inDegree = new Map<string, number>();
   for (const [name, step] of entries) {
-    inDegree.set(name, collectDependsOnNames(step.depends_on ?? []).length);
+    // A name can legitimately appear more than once (e.g. an `any`/`all`
+    // tree referencing the same step from two branches) — it's still one
+    // graph edge for topo-sort purposes.
+    const unique = new Set(collectDependsOnNames(step.depends_on ?? []));
+    inDegree.set(name, unique.size);
   }
 
   const sorted: [string, FlowStep][] = [];

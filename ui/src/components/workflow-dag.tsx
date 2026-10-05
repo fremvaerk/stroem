@@ -252,7 +252,10 @@ export function WorkflowDag({
                 : undefined,
           } satisfies StepNodeData,
         });
-        for (const dep of collectDependsOnNames(step.depends_on ?? [])) {
+        // A name can legitimately appear more than once (e.g. an `any`/`all`
+        // tree referencing the same step from two branches) — dedupe so it
+        // produces one edge, not a duplicate React Flow edge id.
+        for (const dep of new Set(collectDependsOnNames(step.depends_on ?? []))) {
           targets.add(dep);
           hasDeps.add(step.step_name);
           const sourceStatus = statusMap.get(dep);
@@ -325,7 +328,7 @@ export function WorkflowDag({
             hasForEach: flowStep.for_each !== undefined,
           } satisfies StepNodeData,
         });
-        for (const dep of collectDependsOnNames(flowStep.depends_on ?? [])) {
+        for (const dep of new Set(collectDependsOnNames(flowStep.depends_on ?? []))) {
           targets.add(dep);
           hasDeps.add(name);
           rawEdges.push({

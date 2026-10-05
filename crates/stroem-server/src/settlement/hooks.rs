@@ -475,18 +475,36 @@ async fn list_hook_artifacts(
 
 /// Pure: one `FailedStepInfo` per failed row, both flags read directly from
 /// the failed row's own flow step (spec 2026-10-01 §6 — self-scoped only, no
-/// downstream propagation). A loop instance is judged by its placeholder
-/// (`flow_step_name`) — and a failed loop instance's OWN row is excluded
-/// here, since its failure is already represented by the placeholder's
-/// single rolled-up `Failed` row (`cascade.rs::phase_rollup`'s R6); counting
-/// both would double-report the same underlying failure (e.g. `["true",
-/// "true"]` for one actual failure instead of `["true"]`). Split out from
-/// `build_hook_context` so this can be unit-tested without a DB pool.
+/// downstream propagation; `hook.failed_steps` is explicitly unaffected by
+/// that spec). A loop instance is judged by its placeholder
+/// (`flow_step_name`).
+///
+/// A placeholder's own `Failed` row is excluded ONLY when at least one of
+/// its instances is itself `Failed` — the instance(s) then represent the
+/// failure (real per-instance error text, e.g. exit code/stderr) instead of
+/// the placeholder's generic rolled-up message
+/// (`cascade.rs::phase_rollup`'s R6 always rolls up `Failed` when any
+/// instance failed, spec 2026-10-01 §4, regardless of the loop's own
+/// `continue_on_failure`), which would otherwise double-report the same
+/// underlying failure. A placeholder that fails with NO failed instance at
+/// all (e.g. a `for_each` render error on a non-array value — instances
+/// never existed) keeps its own row, since there's nothing else to
+/// represent it. Split out from `build_hook_context` so this can be
+/// unit-tested without a DB pool.
 fn build_failed_steps(task: &TaskDef, steps: &[JobStepRow]) -> Vec<FailedStepInfo> {
+    let placeholders_with_failed_instance: std::collections::HashSet<&str> = steps
+        .iter()
+        .filter(|s| s.status == StepStatus::Failed.as_ref())
+        .filter_map(|s| s.loop_source.as_deref())
+        .collect();
+
     steps
         .iter()
         .filter(|s| s.status == StepStatus::Failed.as_ref())
-        .filter(|s| s.loop_source.is_none())
+        .filter(|s| {
+            s.loop_source.is_some()
+                || !placeholders_with_failed_instance.contains(s.step_name.as_str())
+        })
         .map(|s| {
             let flow_name =
                 stroem_common::gate::flow_step_name(&s.step_name, s.loop_source.as_deref());
@@ -834,7 +852,10 @@ mod tests {
         // failed_steps entry must show tolerated: false AND
         // continue_on_failure: false, even though b would have caught it
         // under the old structural rule (spec 2026-10-01 §6).
-        let task = task_with_flow(vec![("a", flow_step(&[], false)), ("b", flow_step(&["a"], true))]);
+        let task = task_with_flow(vec![
+            ("a", flow_step(&[], false)),
+            ("b", flow_step(&["a"], true)),
+        ]);
         let steps = vec![step_row("a", "failed"), step_row("b", "skipped")];
         let failed_steps = build_failed_steps(&task, &steps);
         let a_entry = failed_steps.iter().find(|f| f.step_name == "a").unwrap();
@@ -843,18 +864,61 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_loop_instance_is_not_double_counted_with_its_rolled_up_placeholder() {
+    fn a_failed_loop_instance_is_reported_once_not_doubled_with_its_placeholder() {
         // A for_each placeholder's failure rolls up onto its own row
-        // (cascade.rs::phase_rollup R6) while the failed INSTANCE row also
-        // stays `failed` in the DB — build_failed_steps must report the
-        // placeholder once, not the instance a second time.
+        // (cascade.rs::phase_rollup R6, spec §4 — always Failed when any
+        // instance failed, cof'd or not) while the failed INSTANCE row also
+        // stays `failed` in the DB. The INSTANCE represents the failure
+        // (real error text); the placeholder's own generic rolled-up row is
+        // dropped to avoid double-reporting the same underlying failure.
         let task = task_with_flow(vec![("loop", flow_step(&[], true))]);
         let mut instance = step_row("loop[0]", "failed");
         instance.loop_source = Some("loop".to_string());
-        let placeholder = step_row("loop", "failed");
+        instance.error_message = Some("exit code 1".to_string());
+        let mut placeholder = step_row("loop", "failed");
+        placeholder.error_message = Some("for_each loop failed: instances [0] failed".to_string());
         let failed_steps = build_failed_steps(&task, &[instance, placeholder]);
         assert_eq!(failed_steps.len(), 1);
+        assert_eq!(failed_steps[0].step_name, "loop[0]");
+        assert_eq!(
+            failed_steps[0].error_message.as_deref(),
+            Some("exit code 1")
+        );
+        // The instance's flags resolve through its PLACEHOLDER's own flow
+        // step (flow_step_name), not an instance-specific one (instances
+        // aren't in `flow` at all) — this is the actual point of
+        // `test_gate_flagged_loop_instance_failure_reports_placeholder_flag`.
+        assert!(failed_steps[0].continue_on_failure);
+        assert!(failed_steps[0].tolerated);
+    }
+
+    #[test]
+    fn a_placeholder_with_no_failed_instances_keeps_its_own_row() {
+        // A for_each render error (e.g. a non-array value) fails the
+        // placeholder directly — no instances ever existed, so there's
+        // nothing to represent it instead.
+        let task = task_with_flow(vec![("loop", flow_step(&[], false))]);
+        let placeholder = step_row("loop", "failed");
+        let failed_steps = build_failed_steps(&task, &[placeholder]);
+        assert_eq!(failed_steps.len(), 1);
         assert_eq!(failed_steps[0].step_name, "loop");
+    }
+
+    #[test]
+    fn multiple_failed_instances_are_each_reported_and_the_placeholder_dropped() {
+        let task = task_with_flow(vec![("loop", flow_step(&[], false))]);
+        let mut i0 = step_row("loop[0]", "failed");
+        i0.loop_source = Some("loop".to_string());
+        let mut i2 = step_row("loop[2]", "failed");
+        i2.loop_source = Some("loop".to_string());
+        let placeholder = step_row("loop", "failed");
+        let failed_steps = build_failed_steps(&task, &[i0, i2, placeholder]);
+        let names: std::collections::HashSet<&str> =
+            failed_steps.iter().map(|f| f.step_name.as_str()).collect();
+        assert_eq!(
+            names,
+            std::collections::HashSet::from(["loop[0]", "loop[2]"])
+        );
     }
 
     #[test]

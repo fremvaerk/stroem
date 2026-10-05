@@ -392,7 +392,12 @@ pub async fn get_job(
                 .map(|(name, fs)| {
                     let mut names = Vec::new();
                     stroem_common::depends_on::collect_names(&fs.depends_on, &mut names);
-                    (name.as_str(), names.len())
+                    // A name can legitimately appear more than once (e.g. an
+                    // `any`/`all` tree referencing the same step from two
+                    // branches) — it's still one graph edge for topo-sort
+                    // purposes.
+                    let unique: std::collections::HashSet<&str> = names.into_iter().collect();
+                    (name.as_str(), unique.len())
                 })
                 .collect();
 
@@ -1522,6 +1527,42 @@ mod tests {
             steps_json[0]["depends_on"],
             json!([{"any": ["build", "test"]}])
         );
+    }
+
+    /// A name can legitimately appear more than once in a `depends_on` tree
+    /// (e.g. `{any: [{all: [a, b]}, {all: [a, c]}]}` references `a` from two
+    /// branches) — the job-detail topo-sort's in-degree count must dedupe to
+    /// the number of DISTINCT names, not the raw (possibly repeated) count
+    /// `collect_names` returns, or a step like this would never reach
+    /// in-degree zero.
+    #[test]
+    fn test_topo_sort_in_degree_dedupes_a_name_referenced_from_two_branches() {
+        use stroem_common::depends_on::{AnyEntry, DependsOnEntry};
+
+        let depends_on = vec![DependsOnEntry::Any(AnyEntry {
+            any: vec![
+                DependsOnEntry::All(stroem_common::depends_on::AllEntry {
+                    all: vec![
+                        DependsOnEntry::Name("a".to_string()),
+                        DependsOnEntry::Name("b".to_string()),
+                    ],
+                }),
+                DependsOnEntry::All(stroem_common::depends_on::AllEntry {
+                    all: vec![
+                        DependsOnEntry::Name("a".to_string()),
+                        DependsOnEntry::Name("c".to_string()),
+                    ],
+                }),
+            ],
+        })];
+
+        let mut names = Vec::new();
+        stroem_common::depends_on::collect_names(&depends_on, &mut names);
+        // Raw names repeat "a" — this is the duplicate the fix must survive.
+        assert_eq!(names, vec!["a", "b", "a", "c"]);
+
+        let unique: std::collections::HashSet<&str> = names.into_iter().collect();
+        assert_eq!(unique.len(), 3, "a, b, c are each counted once");
     }
 
     #[test]

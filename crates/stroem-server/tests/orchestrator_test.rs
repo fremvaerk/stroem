@@ -937,7 +937,10 @@ async fn test_skipped_dep_treated_as_satisfied_with_truthy_when() -> Result<()> 
         "c".to_string(),
         FlowStep {
             when: Some("true".to_string()),
-            depends_on: vec![DependsOnEntry::Name("a".to_string()), accept("b", &[Outcome::Skipped])],
+            depends_on: vec![
+                DependsOnEntry::Name("a".to_string()),
+                accept("b", &[Outcome::Skipped]),
+            ],
             ..flow_step(vec![])
         },
     );
@@ -1523,7 +1526,10 @@ async fn test_mixed_skipped_and_failed_dep_runs_when_both_deps_pass() -> Result<
     flow.insert(
         "c".to_string(),
         FlowStep {
-            depends_on: vec![accept("a", &[Outcome::Skipped]), accept("b", &[Outcome::Failed])],
+            depends_on: vec![
+                accept("a", &[Outcome::Skipped]),
+                accept("b", &[Outcome::Failed]),
+            ],
             ..flow_step(vec![])
         },
     );
@@ -1583,7 +1589,10 @@ async fn test_mixed_skipped_and_failed_dep_runs_when_both_deps_pass() -> Result<
     flow_no_cws.insert(
         "c".to_string(),
         FlowStep {
-            depends_on: vec![DependsOnEntry::Name("a".to_string()), accept("b", &[Outcome::Failed])],
+            depends_on: vec![
+                DependsOnEntry::Name("a".to_string()),
+                accept("b", &[Outcome::Failed]),
+            ],
             ..flow_step(vec![])
         },
     );
@@ -1648,7 +1657,10 @@ async fn test_single_completed_plus_single_skipped_convergence() -> Result<()> {
     flow.insert(
         "c".to_string(),
         FlowStep {
-            depends_on: vec![DependsOnEntry::Name("a".to_string()), accept("b", &[Outcome::Skipped])],
+            depends_on: vec![
+                DependsOnEntry::Name("a".to_string()),
+                accept("b", &[Outcome::Skipped]),
+            ],
             ..flow_step(vec![])
         },
     );

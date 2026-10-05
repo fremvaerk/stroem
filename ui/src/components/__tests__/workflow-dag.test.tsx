@@ -45,4 +45,28 @@ describe("WorkflowDag fullscreen", () => {
 
     expect(screen.queryByRole("dialog")).toBeNull();
   });
+
+  it("renders without duplicate edge ids when a name is referenced from two branches", () => {
+    // `{any: [{all: [A, B]}, {all: [A, C]}]}` legitimately references "a"
+    // twice — collectDependsOnNames preserves duplicates, but the edge
+    // builder must dedupe them into one `a->merge` edge.
+    const flowWithDuplicateDep: Record<string, FlowStep> = {
+      a: { action: "curl" } as FlowStep,
+      b: { action: "curl" } as FlowStep,
+      c: { action: "curl" } as FlowStep,
+      merge: {
+        action: "make",
+        depends_on: [
+          { any: [{ all: ["a", "b"] }, { all: ["a", "c"] }] },
+        ],
+      } as FlowStep,
+    };
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    render(
+      <WorkflowDag flow={flowWithDuplicateDep} selectedStep={null} onSelectStep={() => {}} />,
+    );
+    expect(screen.getByText("merge")).toBeInTheDocument();
+    expect(errorSpy).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
+  });
 });

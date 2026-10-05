@@ -448,6 +448,10 @@ impl StromMcpHandler {
             .map(|(name, step)| {
                 let mut depends_on = Vec::new();
                 stroem_common::depends_on::collect_names(&step.depends_on, &mut depends_on);
+                // A name can legitimately appear more than once (e.g. an
+                // `any`/`all` tree referencing the same step from two
+                // branches) — dedupe for a clean summary list.
+                let depends_on: std::collections::BTreeSet<&str> = depends_on.into_iter().collect();
                 let depends_on = depends_on.into_iter().map(str::to_string).collect();
                 FlowStepSummary {
                     name: name.clone(),

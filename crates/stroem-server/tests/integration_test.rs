@@ -556,7 +556,10 @@ fn test_workspace() -> WorkspaceConfig {
             action: "greet".to_string(),
             name: None,
             description: None,
-            depends_on: vec![DependsOnEntry::Name("step2".to_string()), DependsOnEntry::Name("step3".to_string())],
+            depends_on: vec![
+                DependsOnEntry::Name("step2".to_string()),
+                DependsOnEntry::Name("step3".to_string()),
+            ],
             input: HashMap::new(),
             continue_on_failure: false,
             legacy_continue_when_skipped: None,
@@ -32371,8 +32374,8 @@ async fn test_gate_failed_sequential_loop_untolerated_fails_job_despite_downstre
     complete_step(&state, &pool, job_id, "d", w).await?;
 
     // The loop's own failure is untolerated (no continue_on_failure of its
-    // own) — the job fails UNCONDITIONALLY, regardless of c and d both
-    // running to completion via their own accept edges.
+    // own) — the job fails UNCONDITIONALLY, regardless of c being omitted
+    // and d still reaching completion via its own accept edge.
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
     assert_eq!(job.status, "failed");
     Ok(())
