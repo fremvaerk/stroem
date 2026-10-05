@@ -3386,4 +3386,47 @@ mod tests {
             "b must see a's Skipped outcome and run, not condition-skip on a stale read: {plan:?}"
         );
     }
+
+    // ── migration timing: in-flight loop rollup cutover (spec §11) ─────
+
+    #[test]
+    fn a_loop_already_rolled_up_before_upgrade_keeps_its_historical_status_hiding_a_failure() {
+        // Simulates a loop that finished (rolled up to completed, hiding a
+        // tolerated failure) before the upgrade took effect — P0 only
+        // visits RUNNING placeholders, so an already-terminal one must
+        // never be revisited or re-rolled-up.
+        let t = task(vec![("p", fs_cof(&[]))]);
+        let rows = vec![
+            placeholder("p", "completed", "[1]"), // already rolled up, pre-upgrade style
+            instance("p", 0, "failed", None),
+        ];
+        let plan = phase_rollup(&Snapshot::new(rows), &t);
+        assert!(
+            plan.is_empty(),
+            "an already-completed placeholder must not be re-rolled-up: {plan:?}"
+        );
+    }
+
+    #[test]
+    fn a_loop_still_running_at_upgrade_time_rolls_up_under_the_new_rule() {
+        let t = task(vec![("p", fs_cof(&[]))]);
+        let rows = vec![
+            placeholder("p", "running", "[1]"),
+            instance("p", 0, "failed", None),
+        ];
+        let plan = phase_rollup(&Snapshot::new(rows), &t);
+        let rolled_up_as_failed = plan.iter().any(|c| {
+            matches!(
+                c,
+                Change::Rollup {
+                    outcome: RollupOutcome::Failed(..),
+                    ..
+                }
+            )
+        });
+        assert!(
+            rolled_up_as_failed,
+            "a mid-flight loop must roll up under the new (truthful-status) rule: {plan:?}"
+        );
+    }
 }
