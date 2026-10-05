@@ -683,9 +683,10 @@ else
     fail "expected 400 for unshared foreign connection, got $XCONN_PRIV_CODE"
 fi
 
-# --- continue_when_skipped (on the skipped step, since 0.16.3): a dependent of a
-# --- flagged skip runs; a dependent of an unflagged skip cascades ---
-info "Triggering conditional-report task (continue_when_skipped)..."
+# --- per-edge accept (0.18, replaces the retired continue_when_skipped flag):
+# --- a dependent with a tolerant accept set runs past an upstream skip; a
+# --- dependent with the default accept set is omitted (unreachable) ---
+info "Triggering conditional-report task (per-edge accept)..."
 EXEC_RESP_CWS=$(acurl -X POST "$BASE_URL/api/workspaces/test/tasks/conditional-report/execute" \
     -H "Content-Type: application/json" \
     -d '{"input": {}}')
@@ -723,14 +724,14 @@ CWS_PLAIN=$(echo "$CWS_DETAIL" | jq -r '.steps[] | select(.step_name == "plain-c
 [ "$CWS_CHECK" = "skipped/condition" ] || { echo "$CWS_DETAIL" | jq .steps; fail "optional-check expected skipped/condition, got $CWS_CHECK"; }
 [ "$CWS_PLAIN" = "skipped/condition" ] || { echo "$CWS_DETAIL" | jq .steps; fail "plain-check expected skipped/condition, got $CWS_PLAIN"; }
 [ "$CWS_REPORT" = "completed/null" ] || { echo "$CWS_DETAIL" | jq .steps; fail "report expected completed/null, got $CWS_REPORT"; }
-[ "$CWS_FOLLOW" = "skipped/cascade" ] || { echo "$CWS_DETAIL" | jq .steps; fail "follow-up expected skipped/cascade, got $CWS_FOLLOW"; }
-pass "continue_when_skipped: dependent of a flagged skip ran, dependent of an unflagged skip cascaded"
+[ "$CWS_FOLLOW" = "skipped/unreachable" ] || { echo "$CWS_DETAIL" | jq .steps; fail "follow-up expected skipped/unreachable, got $CWS_FOLLOW"; }
+pass "per-edge accept: dependent with a tolerant accept set ran, dependent with the default accept set was omitted"
 
 CWS_PMERGE=$(echo "$CWS_DETAIL" | jq -r '.steps[] | select(.step_name == "plain-merge") | "\(.status)/\(.skip_reason)"')
 CWS_CMERGE=$(echo "$CWS_DETAIL" | jq -r '.steps[] | select(.step_name == "cws-merge") | "\(.status)/\(.skip_reason)"')
-[ "$CWS_PMERGE" = "skipped/cascade" ] || { echo "$CWS_DETAIL" | jq .steps; fail "plain-merge expected skipped/cascade, got $CWS_PMERGE"; }
+[ "$CWS_PMERGE" = "skipped/unreachable" ] || { echo "$CWS_DETAIL" | jq .steps; fail "plain-merge expected skipped/unreachable, got $CWS_PMERGE"; }
 [ "$CWS_CMERGE" = "completed/null" ] || { echo "$CWS_DETAIL" | jq .steps; fail "cws-merge expected completed/null, got $CWS_CMERGE"; }
-pass "strict AND: merge with an unflagged skipped branch skipped, flagged branch ran"
+pass "strict AND: merge with the default-accept skipped branch omitted, tolerant-accept branch ran"
 
 # --- dependency-conditions `any`/`all` grouping, end to end ---
 # fanin-demo: `ranked` depends on `audit` (accept: terminal, ordering only)
