@@ -397,7 +397,11 @@ pub(crate) fn classify_execute_error(e: anyhow::Error) -> AppError {
     }
     let precise_user_error = chain.contains("is not shared") // cross-workspace connection gate
         || chain.contains("unknown workspace") // qualified ref to a workspace that is not configured
-        || chain.contains("has no connection"); // cross-workspace: owner workspace exists, connection doesn't
+        || chain.contains("has no connection") // cross-workspace: owner workspace exists, connection doesn't
+        || chain.contains("was removed in 0.18.0") // legacy continue_when_skipped flag (validate_task_dependency_shape)
+        || chain.contains("must not be empty") // depends_on tree shape: empty all/any group
+        || chain.contains("empty accept list") // depends_on tree shape: accept: []
+        || chain.contains("duplicate dependency"); // depends_on tree shape: duplicate sibling
     if precise_user_error {
         return AppError::BadRequest(chain);
     }
@@ -526,6 +530,42 @@ mod classify_execute_error_tests {
                 assert!(msg.contains("Failed to resolve connection inputs"), "{msg}");
                 assert!(msg.contains("does not exist"), "{msg}");
             }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    /// `validate_task_dependency_shape`'s legacy-flag bail
+    /// (`job_creator.rs`'s new job-creation-time precheck) must classify as
+    /// 400, matching every other precheck above, not 500 — its own message
+    /// doesn't happen to contain any of the legacy-tier phrases ("required",
+    /// "invalid", "validation"), which is why it needs its own precise-tier
+    /// match rather than falling through to that catch-all.
+    #[test]
+    fn legacy_continue_when_skipped_precheck_error_is_bad_request() {
+        let e = anyhow::anyhow!(
+            "Task 'demo' step 'b': continue_when_skipped was removed in 0.18.0; \
+             see the 0.18 upgrade guide to choose the right `accept` set for \
+             this step's dependents — it depends on what else was present on \
+             this dependency."
+        );
+
+        let err = classify_execute_error(e);
+        match err {
+            AppError::BadRequest(msg) => assert!(msg.contains("continue_when_skipped"), "{msg}"),
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    /// Same classification requirement for the sibling precheck: a malformed
+    /// `depends_on` tree shape (`depends_on::validate_tree`'s errors, joined
+    /// into `validate_task_dependency_shape`'s bail).
+    #[test]
+    fn malformed_depends_on_tree_precheck_error_is_bad_request() {
+        let e = anyhow::anyhow!("Task 'demo' step 'b': an 'all' group must not be empty");
+
+        let err = classify_execute_error(e);
+        match err {
+            AppError::BadRequest(msg) => assert!(msg.contains("must not be empty"), "{msg}"),
             other => panic!("expected BadRequest, got {other:?}"),
         }
     }

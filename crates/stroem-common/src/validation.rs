@@ -1,5 +1,5 @@
 use crate::dag;
-use crate::models::workflow::{ActionDef, ConnectionTypeDef, WorkspaceConfig};
+use crate::models::workflow::{ActionDef, ConnectionTypeDef, TaskDef, WorkspaceConfig};
 use anyhow::{bail, Result};
 use std::collections::HashMap;
 
@@ -52,6 +52,48 @@ pub fn validate_workflow_config_with_cross_workspace_resolver(
     resolver: &dyn CrossWorkspaceResolver,
 ) -> Result<Vec<String>> {
     validate_workflow_config_inner(config, true, Some(resolver))
+}
+
+/// Validates the dependency-shape rules for a single task's flow: the legacy
+/// `continue_when_skipped` flag (removed in 0.18.0, a named parse-time error
+/// rather than silent acceptance-and-ignore) and `depends_on` tree shape
+/// (duplicate siblings, empty groups, empty `accept` lists via
+/// [`crate::depends_on::validate_tree`]).
+///
+/// Shared by the full-workspace validator above (every task) and by
+/// job-creation-time / `stroem run` prechecks (just the triggered task),
+/// which is why it's `pub`: those callers are not positioned to run the rest
+/// of [`validate_workflow_config`] (it also validates actions, cross-task
+/// self-references, and every other task's flow — `stroem-server`'s
+/// job-creation path and `stroem run`'s execution path only ever resolve one
+/// task at a time, and intentionally don't recurse into `type: task`
+/// children, matching `job_creator.rs`'s existing literal-connection
+/// prechecks' scope).
+pub fn validate_task_dependency_shape(task_name: &str, task: &TaskDef) -> Result<()> {
+    for (step_name, step) in &task.flow {
+        // Legacy flag detection — a named, actionable error, not a generic "unknown field."
+        if step.legacy_continue_when_skipped.is_some() {
+            bail!(
+                "Task '{}' step '{}': continue_when_skipped was removed in 0.18.0; \
+                 see the 0.18 upgrade guide to choose the right `accept` set for \
+                 this step's dependents — it depends on what else was present on \
+                 this dependency.",
+                task_name,
+                step_name
+            );
+        }
+
+        // Tree-shape validation (duplicate siblings, empty groups, empty accept lists).
+        if let Err(tree_errors) = crate::depends_on::validate_tree(&step.depends_on) {
+            bail!(
+                "Task '{}' step '{}': {}",
+                task_name,
+                step_name,
+                tree_errors.join("; ")
+            );
+        }
+    }
+    Ok(())
 }
 
 fn validate_workflow_config_inner(
@@ -147,6 +189,8 @@ fn validate_workflow_config_inner(
 
     // Validate each task
     for (task_name, task) in &config.tasks {
+        validate_task_dependency_shape(task_name, task)?;
+
         // Validate that flow steps reference existing actions
         for (step_name, step) in &task.flow {
             let action_ref = &step.action;
@@ -186,28 +230,6 @@ fn validate_workflow_config_inner(
                         action_ref
                     );
                 }
-            }
-
-            // Legacy flag detection — a named, actionable error, not a generic "unknown field."
-            if step.legacy_continue_when_skipped.is_some() {
-                bail!(
-                    "Task '{}' step '{}': continue_when_skipped was removed in 0.18.0; \
-                     see the 0.18 upgrade guide to choose the right `accept` set for \
-                     this step's dependents — it depends on what else was present on \
-                     this dependency.",
-                    task_name,
-                    step_name
-                );
-            }
-
-            // Tree-shape validation (duplicate siblings, empty groups, empty accept lists).
-            if let Err(tree_errors) = crate::depends_on::validate_tree(&step.depends_on) {
-                bail!(
-                    "Task '{}' step '{}': {}",
-                    task_name,
-                    step_name,
-                    tree_errors.join("; ")
-                );
             }
 
             // Validate depends_on references — walks the whole tree, not just

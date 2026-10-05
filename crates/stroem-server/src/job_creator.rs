@@ -253,6 +253,15 @@ pub(crate) fn create_job_for_task_inner<'a>(
             )
         })?;
 
+        // Reject a leftover legacy `continue_when_skipped` flag or a
+        // malformed `depends_on` tree shape on the TRIGGERED task's own flow
+        // before any step is built — the one path (besides `stroem validate`
+        // and `stroem run`, see run.rs) that actually enforces this, since
+        // nothing on the job-creation path previously called
+        // `validate_workflow_config`. Scoped to this task only, matching the
+        // other prechecks below (no recursion into `type: task` children).
+        stroem_common::validation::validate_task_dependency_shape(task_name, task)?;
+
         // Lineage resolution.
         //
         // Re-run flow: resolve any "reuse from source" sentinels in the incoming

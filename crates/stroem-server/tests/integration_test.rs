@@ -2066,6 +2066,76 @@ async fn test_cross_workspace_action_caller_bare_unshared_name_fails_at_creation
     Ok(())
 }
 
+/// A single-task workspace built from inline YAML — for the two
+/// job-creation-time dependency-shape precheck tests below
+/// (`validate_task_dependency_shape`, wired into `create_job_for_task_inner`
+/// right after the task lookup).
+fn test_workspace_from_flow_yaml(flow_yaml: &str) -> WorkspaceConfig {
+    let yaml = format!(
+        r#"
+actions:
+  noop: {{ type: script, script: "true" }}
+tasks:
+  demo:
+    flow:
+{flow_yaml}
+"#
+    );
+    serde_yaml::from_str(&yaml).expect("dependency-shape precheck workspace yaml")
+}
+
+#[tokio::test]
+async fn test_execute_task_rejects_legacy_continue_when_skipped_at_creation() -> Result<()> {
+    // A workspace left un-migrated for 0.18.0 (a leftover
+    // `continue_when_skipped: true`) must be rejected at job creation —
+    // before this fix round it loaded and ran with the flag silently
+    // ignored (the exact "silently mis-run steps" failure mode this
+    // redesign exists to eliminate, just relocated to the upgrade
+    // boundary). See CLAUDE.md § Conditional Flow Steps.
+    let workspace = test_workspace_from_flow_yaml(
+        r#"      a: { action: noop }
+      b: { action: noop, depends_on: [a], continue_when_skipped: true }"#,
+    );
+    let (router, _pool, _tmp, _container) = setup_with_workspace(workspace).await?;
+
+    let response = router
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/demo/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let text = body_json(response).await.to_string();
+    assert!(text.contains("continue_when_skipped"), "{text}");
+    assert!(text.contains("0.18"), "{text}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_execute_task_rejects_malformed_depends_on_tree_at_creation() -> Result<()> {
+    // An empty `all` group (`depends_on::validate_tree`'s tree-shape rule)
+    // would otherwise pass vacuously and run `b` immediately — rejected at
+    // job creation instead of silently mis-behaving.
+    let workspace = test_workspace_from_flow_yaml(
+        r#"      a: { action: noop }
+      b: { action: noop, depends_on: [{ all: [] }] }"#,
+    );
+    let (router, _pool, _tmp, _container) = setup_with_workspace(workspace).await?;
+
+    let response = router
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/demo/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let text = body_json(response).await.to_string();
+    assert!(text.contains("must not be empty"), "{text}");
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_cross_workspace_action_owner_default_resolves_ungated() -> Result<()> {
     // B.remote's own default `prod` (UNSHARED in B) must still resolve at claim

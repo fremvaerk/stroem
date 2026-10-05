@@ -38,6 +38,14 @@ pub async fn cmd_run(task_name: &str, path: &str, input: Option<&str>) -> Result
     // Validate DAG
     dag::validate_dag(&task.flow).context("Invalid task DAG")?;
 
+    // Reject a leftover legacy `continue_when_skipped` flag or a malformed
+    // `depends_on` tree shape before running — the same enforcement
+    // `stroem validate` already performs, so a workspace that hasn't been
+    // migrated for 0.18.0 fails fast here too instead of silently ignoring
+    // the flag / vacuously satisfying an empty group.
+    stroem_common::validation::validate_task_dependency_shape(task_name, task)
+        .context("Invalid task dependency shape")?;
+
     // Validate all actions are local script
     validate_actions_local(&task.flow, &config)?;
 
@@ -1727,6 +1735,68 @@ tasks:
             result.unwrap_err().to_string().contains("Cycle detected"),
             "Expected 'Cycle detected' in dag error message"
         );
+    }
+
+    #[tokio::test]
+    async fn test_cmd_run_rejects_legacy_continue_when_skipped() {
+        // Before this fix, `stroem run` loaded this exact workspace and ran
+        // it with the flag silently ignored — `cmd_run` only ran
+        // `dag::validate_dag`, never `validate_task_dependency_shape`. Now
+        // it fails fast, matching `stroem validate`.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("test.yaml"),
+            r#"
+actions:
+  noop:
+    type: script
+    script: "true"
+tasks:
+  demo:
+    flow:
+      a:
+        action: noop
+      b:
+        action: noop
+        depends_on: [a]
+        continue_when_skipped: true
+"#,
+        )
+        .unwrap();
+
+        let result = cmd_run("demo", dir.path().to_str().unwrap(), None).await;
+        let err = format!("{:#}", result.unwrap_err());
+        assert!(err.contains("continue_when_skipped"), "{err}");
+        assert!(err.contains("0.18"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_cmd_run_rejects_malformed_depends_on_tree() {
+        // An empty `all` group would otherwise pass vacuously and run `b`
+        // immediately — rejected before execution instead.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("test.yaml"),
+            r#"
+actions:
+  noop:
+    type: script
+    script: "true"
+tasks:
+  demo:
+    flow:
+      a:
+        action: noop
+      b:
+        action: noop
+        depends_on: [{ all: [] }]
+"#,
+        )
+        .unwrap();
+
+        let result = cmd_run("demo", dir.path().to_str().unwrap(), None).await;
+        let err = format!("{:#}", result.unwrap_err());
+        assert!(err.contains("must not be empty"), "{err}");
     }
 
     // --- Integration tests ---
