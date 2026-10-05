@@ -70,7 +70,7 @@ The validator checks:
 - DAG cycle detection
 - Trigger cron expression syntax
 - Hook action references
-- Dependency shape: a leftover `continue_when_skipped` flag, or a malformed `depends_on` tree (duplicate siblings, empty `all`/`any` groups, empty `accept` lists) — a named, actionable error, not a silent warning (see the [0.18 upgrade guide](/operations/upgrade-0-18-dependency-conditions/)). `stroem run` enforces the same check before executing.
+- Dependency shape: a leftover `continue_when_skipped` flag, or a malformed `depends_on` tree (duplicate siblings, empty `all`/`any` groups, empty or duplicate-entry `accept` lists) — a named, actionable error, not a silent warning (see the [0.18 upgrade guide](/operations/upgrade-0-18-dependency-conditions/)). `stroem run` and job creation on the server enforce the same check; loading a workspace on its own does not.
 
 ### `tasks`
 

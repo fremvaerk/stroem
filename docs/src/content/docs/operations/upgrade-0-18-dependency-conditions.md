@@ -24,10 +24,12 @@ Full design: `docs/superpowers/specs/2026-10-01-dependency-conditions-design.md`
 Full syntax and worked examples: the [Conditionals guide](/guides/conditionals/).
 In short:
 
-- **`continue_when_skipped` is gone.** A workspace config that still sets it
-  gets a named, actionable parse error (`continue_when_skipped was removed
+- **`continue_when_skipped` is gone.** A task with a step that still sets it
+  gets a named, actionable error (`continue_when_skipped was removed
   in 0.18.0; see the 0.18 upgrade guide...`) instead of silently being
-  ignored.
+  ignored — at job creation (server) or before execution (`stroem run`),
+  and from `stroem validate`. It is *not* a parse error and does not fire
+  just from loading the workspace — see the Checklist below.
 - **`continue_on_failure` is now self-scoped only.** It means this step's own
   `failed` status doesn't fail the *job*. It no longer has any effect on
   whether a dependent runs.
@@ -201,9 +203,19 @@ workspace is confirmed on 0.18.0+.
   `stroem-api`) that loads this workspace is on 0.18.0+ before merging YAML
   with the new `depends_on` shapes — see
   [Rollout ordering](#rollout-ordering-mixed-replicas-mixed-cli) above.
-- [ ] Run `stroem validate` (or load the workspace against a 0.18+ server) —
-  any lingering `continue_when_skipped` is now a hard parse error naming the
-  task and step.
+- [ ] Run `stroem validate` over the whole workspace before upgrading —
+  any lingering `continue_when_skipped`, or a malformed `depends_on` tree
+  shape (an empty `all`/`any` group, an empty or duplicate `accept` list),
+  is now a named, actionable error naming the task and step. **This is not
+  a parse error and does not fire just from the server loading or reloading
+  the workspace** — a server only catches it when a job for the affected
+  task is actually created (triggered, scheduled, re-run, restarted, or
+  dispatched as a `type: task` child), and by then the trigger/schedule/
+  webhook/hook has already "fired and missed": the job creation request
+  fails with a 400 and a clear message, but a cron/webhook/event-source/
+  hook-sourced attempt has nowhere to surface that beyond the server log.
+  `stroem validate` (or `stroem run` for a single task) is the only way to
+  catch this ahead of time, before anything tries to actually run it.
 - [ ] For every dependency that had `continue_when_skipped` or
   `continue_on_failure` under 0.17.0, find its dependents and give each edge
   the right `accept` set from the [migration table](#migration-table) above

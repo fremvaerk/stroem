@@ -206,8 +206,8 @@ A dependent's own `when` is still evaluated on its own terms once its `depends_o
 - Every step name referenced anywhere in a `depends_on` tree — including nested inside `all`/`any` — must exist in the flow.
 - A typo'd key in a `depends_on` entry (e.g. `accpet` instead of `accept`), or a mapping carrying two discriminating keys at once (e.g. both `step` and `any`), is a hard parse error.
 - The same step name may appear more than once across *different* branches of a tree with different `accept` sets — that's a legitimate OR expression, not a mistake. It's rejected only as a **direct sibling** of the same `all`/`any` node (including the implicit top-level `all`): `depends_on: [a, a]`-style duplicates must be deduplicated.
-- An empty `Outcomes` list, or a nested `all: []`/`any: []`, is a validation error (it would trivially always or never pass). The one exception: a step with **no** `depends_on` at all — field absent or explicitly `depends_on: []` — is unchanged from today and ready immediately.
-- `continue_when_skipped` is retired. A workspace config that still sets it gets a named parse error pointing at the [0.18 upgrade guide](/operations/upgrade-0-18-dependency-conditions/), not silent acceptance.
+- An empty `Outcomes` list, a duplicate entry within one `accept: [...]` list, or a nested `all: []`/`any: []`, is a validation error (an empty group would trivially always or never pass; a duplicate outcome is always redundant). The one exception: a step with **no** `depends_on` at all — field absent or explicitly `depends_on: []` — is unchanged from today and ready immediately.
+- `continue_when_skipped` is retired. A task with a step that still sets it gets a named error pointing at the [0.18 upgrade guide](/operations/upgrade-0-18-dependency-conditions/) instead of silent acceptance — from `stroem validate`, or at job-creation time (server) / before execution (`stroem run`). It is **not** a parse error: a server loading or reloading the workspace does not catch it on its own, only an actual job-creation attempt for the affected task does.
 
 ## Outcomes and skip reasons
 
