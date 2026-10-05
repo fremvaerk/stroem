@@ -106,6 +106,16 @@ pub struct RetentionJobInfo {
     pub created_at: DateTime<Utc>,
 }
 
+/// A row of [`JobRepo::get_stalled_pinned_jobs`]: the job and its own pin's
+/// workspace + commit (`revision`), so recovery can skip the other jobs of a
+/// pin it just failed to load.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct StalledPinnedJob {
+    pub job_id: Uuid,
+    pub workspace: String,
+    pub revision: Option<String>,
+}
+
 /// Aggregate duration statistics over a window of completed jobs.
 ///
 /// `sample_size` is the row count behind the percentiles. Callers should treat
@@ -696,6 +706,42 @@ impl JobRepo {
         .await
         .context("Failed to settle job")?;
         Ok(result.rows_affected() > 0)
+    }
+
+    /// Link a task-retry job to its chain inside the transaction that creates
+    /// it: `retry_of_job_id` (the chain's root) + `retry_attempt` on the new
+    /// job, `retry_job_id` on the job that failed. The redaction closure
+    /// follows `retry_of_job_id` to the jobs a retry copied its input from, so
+    /// a retry row must never be committed without it.
+    ///
+    /// Takes `&mut PgConnection` (two statements in one transaction) — pass
+    /// `&mut tx` at the call site.
+    pub async fn link_retry_tx(
+        tx: &mut sqlx::PgConnection,
+        failed_job_id: Uuid,
+        retry_job_id: Uuid,
+        root_job_id: Uuid,
+        retry_attempt: i32,
+    ) -> Result<()> {
+        let linked = sqlx::query(
+            "UPDATE job SET retry_of_job_id = $1, retry_attempt = $2 WHERE job_id = $3",
+        )
+        .bind(root_job_id)
+        .bind(retry_attempt)
+        .bind(retry_job_id)
+        .execute(&mut *tx)
+        .await
+        .context("set retry lineage on the retry job")?;
+        if linked.rows_affected() != 1 {
+            anyhow::bail!("retry job {retry_job_id} not found while linking its lineage");
+        }
+        sqlx::query("UPDATE job SET retry_job_id = $1 WHERE job_id = $2")
+            .bind(retry_job_id)
+            .bind(failed_job_id)
+            .execute(&mut *tx)
+            .await
+            .context("link the failed job to its retry")?;
+        Ok(())
     }
 
     /// Mark job as failed
@@ -1314,10 +1360,19 @@ impl JobRepo {
     /// listable while its init still runs — the same race class as the
     /// failure's own `advance`. A restart's carried-over rows are terminal
     /// from creation on, so they do not count.
-    pub async fn get_stalled_pinned_jobs(pool: &PgPool) -> Result<Vec<Uuid>> {
-        let ids = sqlx::query_scalar::<_, Uuid>(
+    ///
+    /// One page of at most `limit` rows, in `job_id` order starting AFTER
+    /// `after` and wrapping around to the lowest ids (recovery keeps the last
+    /// visited id as a cursor, so a bounded sweep resumes where the previous
+    /// one stopped and every stalled job is reached in turn).
+    pub async fn get_stalled_pinned_jobs(
+        pool: &PgPool,
+        after: Option<Uuid>,
+        limit: i64,
+    ) -> Result<Vec<StalledPinnedJob>> {
+        let rows = sqlx::query_as::<_, StalledPinnedJob>(
             r#"
-            SELECT j.job_id
+            SELECT j.job_id, j.workspace, j.revision
             FROM job j
             WHERE j.status IN ('pending', 'running')
               AND j.git_ref IS NOT NULL
@@ -1335,13 +1390,16 @@ impl JobRepo {
                         AND NOT s.carried_over
                   )
               )
-            ORDER BY j.created_at, j.job_id
+            ORDER BY ($1::uuid IS NOT NULL AND j.job_id <= $1), j.job_id
+            LIMIT $2
             "#,
         )
+        .bind(after)
+        .bind(limit)
         .fetch_all(pool)
         .await
         .context("Failed to list stalled pinned jobs")?;
-        Ok(ids)
+        Ok(rows)
     }
 
     /// Return up to `batch_size` terminal jobs that FINISHED more than the given

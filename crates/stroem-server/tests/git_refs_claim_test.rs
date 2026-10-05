@@ -265,7 +265,9 @@ async fn pin_release_cap_on_a_pinned_job_is_settled_by_recovery() -> anyhow::Res
         JobRepo::get(&fx.pool, job_id).await?.unwrap().status,
         "failed"
     );
-    assert!(JobRepo::get_stalled_pinned_jobs(&fx.pool).await?.is_empty());
+    assert!(JobRepo::get_stalled_pinned_jobs(&fx.pool, None, 1000)
+        .await?
+        .is_empty());
     Ok(())
 }
 

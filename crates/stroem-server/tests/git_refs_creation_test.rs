@@ -52,6 +52,15 @@ async fn cr_step(pool: &sqlx::PgPool, job_id: Uuid, name: &str) -> JobStepRow {
         .unwrap_or_else(|| panic!("step {name} exists"))
 }
 
+/// Every stalled pinned job's id (recovery Phase 4.5's listing, unbounded).
+async fn cr_stalled(pool: &sqlx::PgPool) -> Result<Vec<Uuid>> {
+    Ok(JobRepo::get_stalled_pinned_jobs(pool, None, 1000)
+        .await?
+        .into_iter()
+        .map(|j| j.job_id)
+        .collect())
+}
+
 async fn cr_jobs_where(pool: &sqlx::PgPool, sql: &str, id: Uuid) -> Vec<JobRow> {
     let ids: Vec<Uuid> = sqlx::query_scalar(sql)
         .bind(id)
@@ -667,6 +676,75 @@ async fn task_retry_of_pinned_job_keeps_pin() -> Result<()> {
     Ok(())
 }
 
+/// The redaction closure reaches a retry's source through `retry_of_job_id`,
+/// and job detail shows a retry's copied `input` / `raw_input`. So a retry job
+/// must never be committed without that link: the link is written in the
+/// creation transaction, not in a later one (a reader in between, or a
+/// failed later transaction, would see the copied values with an incomplete
+/// redaction set). A deferred constraint trigger checks it at every COMMIT
+/// that inserted a retry job, for a pinned and an unpinned retry.
+#[tokio::test]
+async fn task_retry_job_is_never_committed_without_its_lineage() -> Result<()> {
+    let fx = pinned_workspace_fixture(PinnedFixtureOpts {
+        etl_main: Some(ETL_MAIN.replacen(
+            "tasks:\n",
+            "tasks:\n  flaky-main:\n    retry:\n      max_attempts: 2\n      delay: 1s\n    \
+             flow:\n      only:\n        action: hello\n",
+            1,
+        )),
+        ..Default::default()
+    })
+    .await?;
+    sqlx::query(
+        "CREATE FUNCTION test_retry_lineage_at_commit() RETURNS trigger AS $$
+         BEGIN
+           IF NEW.source_type = 'retry'
+              AND (SELECT retry_of_job_id FROM job WHERE job_id = NEW.job_id) IS NULL THEN
+             RAISE EXCEPTION 'retry job % committed without retry_of_job_id', NEW.job_id;
+           END IF;
+           RETURN NULL;
+         END $$ LANGUAGE plpgsql",
+    )
+    .execute(&fx.pool)
+    .await?;
+    sqlx::query(
+        "CREATE CONSTRAINT TRIGGER retry_lineage_at_commit AFTER INSERT ON job
+         DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+         EXECUTE PROCEDURE test_retry_lineage_at_commit()",
+    )
+    .execute(&fx.pool)
+    .await?;
+
+    let pinned = cr_create_pinned_etl(&fx, "flaky").await?;
+    let (status, body) = execute_task(&fx.router, "etl", "flaky-main", json!({}), None).await;
+    assert!(status.is_success(), "{status}: {body}");
+    let unpinned: Uuid = body["job_id"].as_str().unwrap().parse()?;
+
+    for job_id in [pinned, unpinned] {
+        JobStepRepo::mark_failed(&fx.pool, job_id, "only", "boom").await?;
+        fx.state.settlement().advance(job_id).await?;
+
+        let retries = cr_jobs_where(
+            &fx.pool,
+            "SELECT job_id FROM job WHERE retry_of_job_id = $1",
+            job_id,
+        )
+        .await;
+        assert_eq!(
+            retries.len(),
+            1,
+            "job {job_id}: {retries:?}\n{}",
+            job_log_text(&fx.pool, &fx.state, job_id).await
+        );
+        assert_eq!(retries[0].retry_attempt, 1);
+        assert_eq!(
+            JobRepo::get(&fx.pool, job_id).await?.unwrap().retry_job_id,
+            Some(retries[0].job_id)
+        );
+    }
+    Ok(())
+}
+
 /// `approval-root` exists only at release/2.3: firing the initial `on_suspended`
 /// hooks from the caller's (live main) config would find no task at all.
 #[tokio::test]
@@ -773,10 +851,7 @@ async fn stalled_pinned_job_is_readvanced_by_recovery() -> Result<()> {
         "running"
     );
     assert_eq!(cr_step(&fx.pool, job_id, "b").await.status, "pending");
-    assert_eq!(
-        JobRepo::get_stalled_pinned_jobs(&fx.pool).await?,
-        vec![job_id]
-    );
+    assert_eq!(cr_stalled(&fx.pool).await?, vec![job_id]);
     let log = job_log_text(&fx.pool, &replica.state, job_id).await;
     assert!(log.contains("[pin] etl@release/2.3 ("), "{log}");
     assert!(log.contains("not available yet"), "{log}");
@@ -785,7 +860,7 @@ async fn stalled_pinned_job_is_readvanced_by_recovery() -> Result<()> {
     fx.etl.restore_remote();
     stroem_server::recovery::sweep_once(&replica.state).await?;
     assert_eq!(cr_step(&fx.pool, job_id, "b").await.status, "ready");
-    assert!(JobRepo::get_stalled_pinned_jobs(&fx.pool).await?.is_empty());
+    assert!(cr_stalled(&fx.pool).await?.is_empty());
 
     JobStepRepo::mark_completed(&fx.pool, job_id, "b", None).await?;
     replica.state.settlement().advance(job_id).await?;
@@ -793,6 +868,79 @@ async fn stalled_pinned_job_is_readvanced_by_recovery() -> Result<()> {
         JobRepo::get(&fx.pool, job_id).await?.unwrap().status,
         "completed"
     );
+    Ok(())
+}
+
+/// Phase 4.5 is bounded so a git outage cannot hold up the rest of recovery:
+/// within one sweep a pin that was just seen unavailable is not loaded again
+/// for its other jobs; the sweep keeps a cursor, so the next one starts with
+/// the job after the last it visited; and with the time budget spent, a
+/// sweep still advances one job and leaves the rest to later sweeps.
+#[tokio::test]
+async fn stalled_pinned_sweep_is_bounded_and_resumes_on_the_next_tick() -> Result<()> {
+    use stroem_server::recovery::{readvance_stalled_pinned_jobs, StalledSweepBounds};
+    let fx = pinned_workspace_fixture(PinnedFixtureOpts::default()).await?;
+    let mut jobs = Vec::new();
+    for _ in 0..2 {
+        let job_id = cr_create_pinned_etl(&fx, "nightly").await?;
+        JobRepo::mark_running_if_pending_server(&fx.pool, job_id).await?;
+        JobStepRepo::mark_completed(&fx.pool, job_id, "a", None).await?;
+        jobs.push(job_id);
+    }
+    let mut both = jobs.clone();
+    both.sort();
+    assert_eq!(cr_stalled(&fx.pool).await?, both);
+
+    let replica = fx.second_replica().await?;
+    let unavailable_lines = |job_id: Uuid| {
+        let state = replica.state.clone();
+        let pool = fx.pool.clone();
+        async move {
+            job_log_text(&pool, &state, job_id)
+                .await
+                .matches("not available yet")
+                .count()
+        }
+    };
+    let roomy = StalledSweepBounds {
+        max_jobs: 10,
+        budget: std::time::Duration::from_secs(60),
+    };
+
+    // Remote down, cold replica: the first job's advance fails to load the
+    // pin; the second job, on the same commit, is skipped in that sweep.
+    fx.etl.break_remote();
+    readvance_stalled_pinned_jobs(&replica.state, roomy).await;
+    let first = [
+        unavailable_lines(jobs[0]).await,
+        unavailable_lines(jobs[1]).await,
+    ];
+    assert_eq!(first.iter().sum::<usize>(), 1, "{first:?}");
+
+    // The next sweep starts after the job the cursor points at: the other
+    // job is the one tried now.
+    readvance_stalled_pinned_jobs(&replica.state, roomy).await;
+    assert_eq!(
+        [
+            unavailable_lines(jobs[0]).await,
+            unavailable_lines(jobs[1]).await
+        ],
+        [1, 1]
+    );
+
+    // Remote back, budget already spent: each sweep still advances one job.
+    fx.etl.restore_remote();
+    let spent = StalledSweepBounds {
+        max_jobs: 10,
+        budget: std::time::Duration::ZERO,
+    };
+    readvance_stalled_pinned_jobs(&replica.state, spent).await;
+    assert_eq!(cr_stalled(&fx.pool).await?.len(), 1);
+    readvance_stalled_pinned_jobs(&replica.state, spent).await;
+    assert!(cr_stalled(&fx.pool).await?.is_empty());
+    for job_id in jobs {
+        assert_eq!(cr_step(&fx.pool, job_id, "b").await.status, "ready");
+    }
     Ok(())
 }
 
@@ -848,7 +996,7 @@ async fn permanent_pin_error_at_advance_fails_the_job_once() -> Result<()> {
         cases.push((job_id, line));
     }
 
-    assert!(JobRepo::get_stalled_pinned_jobs(&fx.pool).await?.is_empty());
+    assert!(cr_stalled(&fx.pool).await?.is_empty());
     stroem_server::recovery::sweep_once(&fx.state).await?;
     for (job_id, line) in cases {
         let log = job_log_text(&fx.pool, &fx.state, job_id).await;
@@ -1100,10 +1248,7 @@ async fn permanent_pin_failure_that_cannot_be_written_is_retried_by_recovery() -
         "the failed write rolls the job back instead of stranding it `failed`"
     );
     assert_eq!(cr_step(&fx.pool, job_id, "b").await.status, "pending");
-    assert_eq!(
-        JobRepo::get_stalled_pinned_jobs(&fx.pool).await?,
-        vec![job_id]
-    );
+    assert_eq!(cr_stalled(&fx.pool).await?, vec![job_id]);
 
     sqlx::raw_sql(
         "DROP TRIGGER test_reject_cancel_trg ON job_step; DROP FUNCTION test_reject_cancel();",

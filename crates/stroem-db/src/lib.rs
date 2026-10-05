@@ -6,7 +6,7 @@ pub use pool::{create_pool, run_migrations};
 pub use repos::api_key::{ApiKeyRepo, ApiKeyRow};
 pub use repos::job::{
     ClosureBounds, ClosurePinRow, DurationStatsRow, JobAclScope, JobPinCols, JobRepo, JobRow,
-    RecentDurationRow, RedactionClosure, RetentionJobInfo,
+    RecentDurationRow, RedactionClosure, RetentionJobInfo, StalledPinnedJob,
 };
 pub use repos::job_step::{
     ClaimIdentity, FailOutcome, JobStepRepo, JobStepRow, NewJobStep, ReleaseOutcome, Seed,

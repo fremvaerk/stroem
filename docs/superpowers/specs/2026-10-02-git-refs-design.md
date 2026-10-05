@@ -11,6 +11,19 @@ side, each from its own definitions and files. Line numbers cite
 
 ## Revision history
 
+**Revision 11 (2026-10-05, Codex implementation review).** Two fixes:
+- A task retry's chain (`retry_of_job_id`, `retry_attempt`, the failed job's
+  `retry_job_id`) is written in the transaction that creates the retry job
+  (`CreationMode::Retry`), never in a later one. The redaction closure follows
+  `retry_of_job_id` (§ 7.4), so a retry was briefly — or, if the second
+  transaction failed, permanently — readable with an incomplete redaction set.
+- The re-advance phase is bounded per sweep (§ 7.3): at most 50 jobs, no new
+  `advance` after 60 s (the first always runs), a cursor so the next sweep
+  resumes after the last advanced job, and within one sweep a pin just seen
+  unavailable is not loaded again for its other jobs. Unbounded, a git outage
+  with many cold pins could hold the next sweep's stale-worker and timeout
+  phases for tens of minutes.
+
 **Revision 10 (2026-10-02, final review).** Fixes from the whole-branch review:
 - I1: the re-advance phase also lists a `pending` pinned job that has a
   terminal step and no live one (§ 7.3).
@@ -746,6 +759,18 @@ the same race class as that failure's own `advance`.
 It calls `Settlement::advance` for each job, with one heartbeat per job
 (CLAUDE.md § Health Check). `advance` is idempotent, so a job that is
 merely between events loses nothing.
+
+The phase is bounded per sweep, because during a git outage each `advance`
+can spend up to the pin-load budget and the phase must not hold up the next
+sweep's stale-worker and timeout phases (rev 11). One sweep lists at most 50
+jobs, ordered by `job_id` starting after a cursor and wrapping around; it
+starts no new `advance` once 60 s have passed (the first always runs); and
+it moves the cursor only past jobs it advanced, so the next sweep resumes
+there. A job whose own pin (`workspace`, `revision`) is still not in the
+PinStore after its `advance`, while the job is still non-terminal, marks that
+pin unavailable for the rest of the sweep: the sweep skips the other jobs on
+that commit instead of paying the same failing load again, and they come
+first in the next sweep.
 
 A **permanent** pin error (`NotGit`, `CommitNotFound`, `PinLoadFailed`) in
 `Settlement::resolve` behaves differently from a transient one. It does not

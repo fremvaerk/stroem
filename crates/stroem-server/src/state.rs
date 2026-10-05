@@ -138,6 +138,9 @@ pub struct AppState {
     /// Unix timestamp (seconds) of the last retention cleanup run.
     /// Initialized to 0 so the first sweep always triggers a cleanup.
     pub last_retention_run: Arc<AtomicI64>,
+    /// Recovery Phase 4.5 cursor: the last stalled pinned job a bounded sweep
+    /// visited, so the next sweep resumes after it (git-refs spec § 7.3).
+    pub stalled_pinned_cursor: Arc<std::sync::Mutex<Option<Uuid>>>,
     /// Optional task state snapshot storage (None when feature is not configured).
     pub state_storage: Option<Arc<StateStorage>>,
     /// Shared blob archive backend used by logs, state, and artifacts.
@@ -191,6 +194,7 @@ impl AppState {
             cancelled_jobs: Arc::new(std::sync::RwLock::new(HashSet::new())),
             background_tasks: BackgroundTasks::new(),
             last_retention_run: Arc::new(AtomicI64::new(0)),
+            stalled_pinned_cursor: Arc::new(std::sync::Mutex::new(None)),
             state_storage: state_storage.map(Arc::new),
             blob_archive: None,
             artifact_blob: None,

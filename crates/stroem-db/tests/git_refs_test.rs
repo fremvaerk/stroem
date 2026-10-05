@@ -606,9 +606,9 @@ async fn stalled_candidate(
 /// Final review I1: a pinned job whose only claimed step failed before any
 /// worker called `/start` is still `pending`; it is listed like a `running`
 /// one. A `pending` job with no terminal step is a job whose creation-time
-/// init has not promoted anything yet, and must never be advanced
-/// concurrently with that init; a carried-over row (a restart's) does not
-/// count, it is terminal from creation on.
+/// init has not promoted anything yet, and is left to that init; a
+/// carried-over row (a restart's) does not count, it is terminal from
+/// creation on.
 #[tokio::test]
 async fn stalled_pinned_jobs_include_pending_jobs_with_a_terminal_step() -> Result<()> {
     let pool = setup_db().await;
@@ -638,11 +638,52 @@ async fn stalled_pinned_jobs_include_pending_jobs_with_a_terminal_step() -> Resu
         .execute(&pool)
         .await?;
 
-    let mut got = JobRepo::get_stalled_pinned_jobs(&pool).await?;
+    let mut got: Vec<Uuid> = JobRepo::get_stalled_pinned_jobs(&pool, None, 1000)
+        .await?
+        .into_iter()
+        .map(|j| j.job_id)
+        .collect();
     got.sort();
     let mut want = vec![running, pending_failed, pending_skipped];
     want.sort();
     assert_eq!(got, want);
+    Ok(())
+}
+
+/// Recovery keeps the last visited stalled job as a cursor: a page starts
+/// with the job after it, wraps around to the lowest ids, and holds at most
+/// `limit` rows. Each row carries the job's own pin (workspace + commit).
+#[tokio::test]
+async fn stalled_pinned_jobs_page_resumes_after_the_cursor_and_wraps() -> Result<()> {
+    let pool = setup_db().await;
+    let r = Some("release/2.3");
+    let mut ids = Vec::new();
+    for _ in 0..3 {
+        ids.push(
+            stalled_candidate(&pool, r, "running", &[("a", "completed"), ("b", "pending")]).await,
+        );
+    }
+    ids.sort();
+    let page = |after: Option<Uuid>, limit: i64| {
+        let pool = pool.clone();
+        async move {
+            JobRepo::get_stalled_pinned_jobs(&pool, after, limit)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|j| j.job_id)
+                .collect::<Vec<Uuid>>()
+        }
+    };
+    assert_eq!(page(None, 10).await, ids);
+    assert_eq!(page(Some(ids[0]), 10).await, vec![ids[1], ids[2], ids[0]]);
+    assert_eq!(page(Some(ids[2]), 10).await, ids);
+    assert_eq!(page(Some(ids[1]), 2).await, vec![ids[2], ids[0]]);
+
+    let row = &JobRepo::get_stalled_pinned_jobs(&pool, None, 1).await?[0];
+    let job = JobRepo::get(&pool, row.job_id).await?.unwrap();
+    assert_eq!(row.workspace, job.workspace);
+    assert_eq!(row.revision, job.revision);
     Ok(())
 }
 

@@ -290,7 +290,7 @@ async fn sweep(state: &AppState) -> Result<()> {
     }
 
     // Phase 4.5 (git refs, R7): re-advance pinned jobs with no live step.
-    readvance_stalled_pinned_jobs(state).await;
+    readvance_stalled_pinned_jobs(state, StalledSweepBounds::default()).await;
 
     // Phase 5: Data retention (rate-limited — runs at most once per retention_interval_secs)
     //
@@ -321,24 +321,96 @@ async fn sweep(state: &AppState) -> Result<()> {
 /// (CLAUDE.md § Health Check, "Beat = progress"); a unit is bounded by the
 /// pin-load budget.
 ///
+/// The phase is BOUNDED so it cannot hold up the next sweep's stale-worker
+/// and timeout phases during a git outage, when each `advance` may spend up
+/// to the pin-load budget: at most [`StalledSweepBounds::max_jobs`] jobs,
+/// and no new `advance` starts once [`StalledSweepBounds::budget`] has
+/// elapsed (the first one always runs, so every sweep makes progress). The
+/// last ADVANCED job is kept in `AppState::stalled_pinned_cursor`; the next
+/// sweep resumes after it and wraps around, so every stalled job is reached
+/// in turn. Within one sweep, a job whose own pin (`workspace`, `revision`)
+/// was just seen unavailable — the job is still non-terminal and the commit
+/// is not in the PinStore after its `advance` — makes the sweep skip the
+/// other jobs on that commit instead of paying the same failing load again.
+///
 /// A failed listing query is logged and skipped: it must not cost the rest
 /// of the sweep (retention) its tick.
-async fn readvance_stalled_pinned_jobs(state: &AppState) {
-    let stalled = match JobRepo::get_stalled_pinned_jobs(&state.pool).await {
-        Ok(ids) => ids,
+pub async fn readvance_stalled_pinned_jobs(state: &AppState, bounds: StalledSweepBounds) {
+    let after = *state
+        .stalled_pinned_cursor
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let stalled = match JobRepo::get_stalled_pinned_jobs(&state.pool, after, bounds.max_jobs).await
+    {
+        Ok(rows) => rows,
         Err(e) => {
             tracing::error!("Failed to list stalled pinned jobs: {:#}", e);
             return;
         }
     };
-    for job_id in &stalled {
+    let started = std::time::Instant::now();
+    let mut unavailable: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
+    for (i, job) in stalled.iter().enumerate() {
+        if i > 0 && started.elapsed() >= bounds.budget {
+            break;
+        }
+        let pin = job
+            .revision
+            .as_ref()
+            .map(|commit| (job.workspace.clone(), commit.clone()));
+        if pin.as_ref().is_some_and(|p| unavailable.contains(p)) {
+            continue;
+        }
+        // Only an advanced job moves the cursor: a job skipped above must
+        // come first next time, or it would be skipped behind the same
+        // failing job on every sweep.
+        *state
+            .stalled_pinned_cursor
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(job.job_id);
         state.background_tasks.recovery_beat.beat();
-        if let Err(e) = state.settlement().advance(*job_id).await {
+        if let Err(e) = state.settlement().advance(job.job_id).await {
             tracing::error!(
                 "Failed to re-advance stalled pinned job {}: {:#}",
-                job_id,
+                job.job_id,
                 e
             );
+        }
+        if let Some((ws, commit)) = pin {
+            let still_live = matches!(
+                JobRepo::get(&state.pool, job.job_id).await,
+                Ok(Some(row)) if matches!(row.status.as_str(), "pending" | "running")
+            );
+            if still_live
+                && !state
+                    .workspaces
+                    .pins()
+                    .cached_commits(&ws)
+                    .contains(&commit)
+            {
+                unavailable.insert((ws, commit));
+            }
+        }
+    }
+}
+
+/// How much of the stalled pinned-job backlog one recovery sweep handles
+/// (Phase 4.5, see [`readvance_stalled_pinned_jobs`]).
+#[derive(Debug, Clone, Copy)]
+pub struct StalledSweepBounds {
+    /// At most this many jobs are listed per sweep.
+    pub max_jobs: i64,
+    /// No new `advance` starts after this much time in the phase (the first
+    /// always runs).
+    pub budget: Duration,
+}
+
+impl Default for StalledSweepBounds {
+    fn default() -> Self {
+        Self {
+            max_jobs: 50,
+            budget: Duration::from_secs(60),
         }
     }
 }

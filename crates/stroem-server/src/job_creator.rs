@@ -50,6 +50,16 @@ pub enum CreationMode<'a> {
         from_step: &'a str,
         plan: &'a crate::restart::RestartPlan,
     },
+    /// A task-level retry of `failed_job_id`: input is handled exactly like
+    /// `Normal`; the retry chain (`retry_of_job_id` = `root_job_id`,
+    /// `retry_attempt`, and the failed job's `retry_job_id`) is written in the
+    /// creation transaction, so the row is never visible without the lineage
+    /// the redaction closure follows (`JobRepo::link_retry_tx`).
+    Retry {
+        failed_job_id: Uuid,
+        root_job_id: Uuid,
+        retry_attempt: i32,
+    },
 }
 
 /// Create a job and its steps for a task in a workspace, reporting
@@ -336,7 +346,7 @@ pub(crate) fn create_job_for_task_inner<'a>(
         // lineage pointers to persist.
         let mut effective_input = input;
         let (lineage_source_job_id, restart_from_step): (Option<Uuid>, Option<&str>) = match &mode {
-            CreationMode::Normal => (None, None),
+            CreationMode::Normal | CreationMode::Retry { .. } => (None, None),
             CreationMode::Hook { source_job_id } => (Some(*source_job_id), None),
             CreationMode::Rerun { source_job_id } => {
                 let src_id = *source_job_id;
@@ -626,6 +636,22 @@ pub(crate) fn create_job_for_task_inner<'a>(
             JobStepRepo::seed_steps_tx(&mut tx, job_id, &plan.carried)
                 .await
                 .context("seed carried-over steps")?;
+        }
+        if let CreationMode::Retry {
+            failed_job_id,
+            root_job_id,
+            retry_attempt,
+        } = &mode
+        {
+            JobRepo::link_retry_tx(
+                &mut tx,
+                *failed_job_id,
+                job_id,
+                *root_job_id,
+                *retry_attempt,
+            )
+            .await
+            .context("link the retry job to its chain")?;
         }
 
         tx.commit().await.context("Failed to commit job creation")?;
