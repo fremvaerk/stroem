@@ -1,27 +1,20 @@
 //! Integration tests for `cascade::apply` — the write side of the step
 //! cascade. Exercises the six stroem-db `_tx` primitives against a real
-//! Postgres database (via testcontainers) to verify transactionality and
-//! row-count guards.
+//! Postgres database (via `stroem_test_support`) to verify transactionality
+//! and row-count guards.
 
 use anyhow::Result;
 use serde_json::json;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use stroem_common::models::workflow::{FlowStep, TaskDef, WorkspaceConfig};
-use stroem_db::{create_pool, run_migrations, JobRepo, JobStepRepo, NewJobStep};
+use stroem_db::{JobRepo, JobStepRepo, NewJobStep};
 use stroem_server::cascade::execute;
 use stroem_server::cascade::{apply, ApplyError, Change, Plan, RollupOutcome, SkipReason};
-use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::postgres::Postgres;
 use uuid::Uuid;
 
-async fn setup_db() -> Result<(PgPool, testcontainers::ContainerAsync<Postgres>)> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
-    Ok((pool, container))
+async fn setup_db() -> Result<PgPool> {
+    Ok(stroem_test_support::test_pool().await)
 }
 
 async fn create_job(pool: &PgPool) -> Uuid {
@@ -101,7 +94,7 @@ async fn step_statuses(pool: &PgPool, job_id: Uuid) -> HashMap<String, String> {
 
 #[tokio::test]
 async fn apply_is_transactional_expand_rolls_back_without_commit() -> Result<()> {
-    let (pool, _c) = setup_db().await?;
+    let pool = setup_db().await?;
     let job_id = create_job(&pool).await;
     JobStepRepo::create_steps(&pool, &[placeholder(job_id, "p", "pending")]).await?;
     let plan = Plan {
@@ -130,7 +123,7 @@ async fn apply_is_transactional_expand_rolls_back_without_commit() -> Result<()>
 
 #[tokio::test]
 async fn apply_sets_timestamps_and_statuses() -> Result<()> {
-    let (pool, _c) = setup_db().await?;
+    let pool = setup_db().await?;
     let job_id = create_job(&pool).await;
     JobStepRepo::create_steps(
         &pool,
@@ -239,7 +232,7 @@ async fn apply_sets_timestamps_and_statuses() -> Result<()> {
 /// leaves the job `running`.
 #[tokio::test]
 async fn apply_adopt_rollup_promote_issues_the_job_update_last() -> Result<()> {
-    let (pool, _c) = setup_db().await?;
+    let pool = setup_db().await?;
     let job_id = create_job(&pool).await;
     JobStepRepo::create_steps(
         &pool,
@@ -282,7 +275,7 @@ async fn apply_adopt_rollup_promote_issues_the_job_update_last() -> Result<()> {
 /// never inherited, only its retry *configuration*.
 #[tokio::test]
 async fn apply_expand_starts_instances_at_retry_attempt_zero() -> Result<()> {
-    let (pool, _c) = setup_db().await?;
+    let pool = setup_db().await?;
     let job_id = create_job(&pool).await;
     JobStepRepo::create_steps(&pool, &[placeholder(job_id, "p", "pending")]).await?;
     sqlx::query(
@@ -318,7 +311,7 @@ async fn apply_expand_starts_instances_at_retry_attempt_zero() -> Result<()> {
 
 #[tokio::test]
 async fn apply_guard_miss_returns_error_and_writes_nothing_after_rollback() -> Result<()> {
-    let (pool, _c) = setup_db().await?;
+    let pool = setup_db().await?;
     let job_id = create_job(&pool).await;
     JobStepRepo::create_steps(
         &pool,
@@ -346,7 +339,7 @@ async fn apply_guard_miss_returns_error_and_writes_nothing_after_rollback() -> R
 
 #[tokio::test]
 async fn apply_rollup_on_non_running_placeholder_is_a_guard_miss() -> Result<()> {
-    let (pool, _c) = setup_db().await?;
+    let pool = setup_db().await?;
     let job_id = create_job(&pool).await;
     JobStepRepo::create_steps(&pool, &[placeholder(job_id, "q", "cancelled")]).await?;
     let plan = Plan {
@@ -363,7 +356,7 @@ async fn apply_rollup_on_non_running_placeholder_is_a_guard_miss() -> Result<()>
 
 #[tokio::test]
 async fn apply_job_running_update_may_match_zero_rows() -> Result<()> {
-    let (pool, _c) = setup_db().await?;
+    let pool = setup_db().await?;
     let job_id = create_job(&pool).await;
     sqlx::query("UPDATE job SET status = 'running' WHERE job_id = $1")
         .bind(job_id)
@@ -424,7 +417,7 @@ fn flow_step(depends_on: Vec<&str>) -> FlowStep {
 
 #[tokio::test]
 async fn execute_empty_plan_touches_nothing() -> Result<()> {
-    let (pool, _c) = setup_db().await?;
+    let pool = setup_db().await?;
     let job_id = create_job(&pool).await;
     JobStepRepo::create_steps(&pool, &[step(job_id, "a", "running")]).await?;
     let task = make_task(HashMap::from([("a".to_string(), flow_step(vec![]))]));
@@ -449,7 +442,7 @@ async fn execute_empty_plan_touches_nothing() -> Result<()> {
 /// mid-flight guard miss and exercises the retry arm.
 #[tokio::test]
 async fn execute_replans_from_a_fresh_snapshot() -> Result<()> {
-    let (pool, _c) = setup_db().await?;
+    let pool = setup_db().await?;
     let job_id = create_job(&pool).await;
     JobStepRepo::create_steps(
         &pool,
@@ -493,7 +486,7 @@ async fn execute_replans_from_a_fresh_snapshot() -> Result<()> {
 /// exactly once, final state equals a serial run. Smoke test of the re-run path.
 #[tokio::test]
 async fn execute_concurrently_promotes_join_once() -> Result<()> {
-    let (pool, _c) = setup_db().await?;
+    let pool = setup_db().await?;
     let job_id = create_job(&pool).await;
     JobStepRepo::create_steps(
         &pool,
@@ -545,7 +538,7 @@ async fn execute_concurrently_promotes_join_once() -> Result<()> {
 /// would instead return `Err` ("cascade guard miss...").
 #[tokio::test]
 async fn execute_retries_after_a_real_guard_miss() -> Result<()> {
-    let (pool, _c) = setup_db().await?;
+    let pool = setup_db().await?;
     let job_id = create_job(&pool).await;
     JobStepRepo::create_steps(
         &pool,
@@ -626,7 +619,7 @@ async fn execute_retries_after_a_real_guard_miss() -> Result<()> {
 /// reason the plan named for it.
 #[tokio::test]
 async fn apply_writes_skip_reason_per_bucket() -> Result<()> {
-    let (pool, _c) = setup_db().await?;
+    let pool = setup_db().await?;
     let job_id = create_job(&pool).await;
     JobStepRepo::create_steps(
         &pool,
@@ -679,7 +672,7 @@ async fn apply_writes_skip_reason_per_bucket() -> Result<()> {
 /// bucket's write is rolled back with it.
 #[tokio::test]
 async fn apply_skip_guard_miss_in_later_bucket_rolls_back_earlier_bucket() -> Result<()> {
-    let (pool, _c) = setup_db().await?;
+    let pool = setup_db().await?;
     let job_id = create_job(&pool).await;
     JobStepRepo::create_steps(
         &pool,

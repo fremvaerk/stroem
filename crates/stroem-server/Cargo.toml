@@ -75,13 +75,10 @@ http = { workspace = true, optional = true }
 [dev-dependencies]
 tempfile = "3"
 stroem-test-support.workspace = true
-# NOTE: the "watchdog" feature is intentionally NOT enabled. Its
-# `conquer_once::Lazy` signal-cleanup thread races on concurrent init and panics
-# ("entered unreachable code", conquer-once cell.rs) under parallel testcontainer
-# startup, flaking CI (testcontainers' own docs note the watchdog "may panic").
-# RAII Drop cleans up on normal exit; CI runners are ephemeral.
+# Still needed directly: s3_integration_test.rs starts its own MinIO
+# container (unrelated to Postgres) via the bare `testcontainers` crate.
 testcontainers = { version = "0.27" }
-testcontainers-modules = { version = "0.15", features = ["postgres", "minio"] }
+testcontainers-modules = { version = "0.15", features = ["minio"] }
 http = "1"
 http-body-util = "0.1"
 tokio-tungstenite = "0.29"
