@@ -18,7 +18,7 @@ use stroem_common::models::workflow::{
     ActionDef, ConnectionDef, ConnectionPropertyDef, ConnectionTypeDef, FlowStep, HookDef,
     InputFieldDef, TaskDef, WorkspaceConfig,
 };
-use stroem_db::{create_pool, run_migrations, JobRepo, JobStepRepo, JobStepRow, Seed};
+use stroem_db::{JobRepo, JobStepRepo, JobStepRow, Seed};
 use stroem_server::config::{
     DbConfig, JobDefaults, LogStorageConfig, RetentionConfig, ServerConfig, WorkspaceSourceDef,
 };
@@ -27,21 +27,15 @@ use stroem_server::state::AppState;
 use stroem_server::web::build_router;
 use stroem_server::workspace::WorkspaceManager;
 use tempfile::TempDir;
-use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::postgres::Postgres;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 use uuid::Uuid;
 
 const WORKER_TOKEN: &str = "test-token";
 
-async fn spawn_pg() -> Result<(PgPool, testcontainers::ContainerAsync<Postgres>)> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
-    Ok((pool, container))
+async fn spawn_pg() -> Result<PgPool> {
+    let pool = stroem_test_support::test_pool().await;
+    Ok(pool)
 }
 
 fn script_action(cmd: &str) -> ActionDef {
@@ -186,17 +180,12 @@ struct TestApp {
     /// restart test behaves oddly, and note that
     /// `build_test_app_with_pool` gives the second app a fully separate pair.
     mgr: WorkspaceManager,
-    /// Kept alive for the lifetime of the app. `None` for a second app built
-    /// over another app's pool (`build_test_app_with_pool`) — that app owns it.
-    _pg: Option<testcontainers::ContainerAsync<Postgres>>,
     _tmp: TempDir,
 }
 
 async fn build_test_app(workspace_name: &str, workspace: WorkspaceConfig) -> Result<TestApp> {
-    let (pool, pg) = spawn_pg().await?;
-    let mut app = build_test_app_with_pool(pool, workspace_name, workspace).await?;
-    app._pg = Some(pg);
-    Ok(app)
+    let pool = spawn_pg().await?;
+    build_test_app_with_pool(pool, workspace_name, workspace).await
 }
 
 /// Build a second app — its own router, workspace config and manager — over an
@@ -265,7 +254,6 @@ async fn build_test_app_with_pool(
         pool,
         workspace,
         mgr,
-        _pg: None,
         _tmp: tmp,
     })
 }

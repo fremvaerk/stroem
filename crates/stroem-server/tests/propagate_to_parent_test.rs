@@ -1,8 +1,9 @@
 //! Integration tests for `Settlement::propagate` — child job completion
 //! propagating to parent jobs via the public `step_settled` / `advance` API.
 //!
-//! Each test spins up its own isolated Postgres container so they can run fully
-//! in parallel.
+//! Each test gets its own isolated database (via `stroem_test_support`) so
+//! they can run fully in parallel, sharing this binary's one Postgres
+//! container.
 
 use anyhow::Result;
 use serde_json::json;
@@ -10,7 +11,7 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use stroem_common::depends_on::DependsOnEntry;
 use stroem_common::models::workflow::{ActionDef, FlowStep, TaskDef, WorkspaceConfig};
-use stroem_db::{create_pool, run_migrations, JobRepo, JobStepRepo, NewJobStep, WorkerRepo};
+use stroem_db::{JobRepo, JobStepRepo, NewJobStep, WorkerRepo};
 use stroem_server::config::{
     DbConfig, LogStorageConfig, RecoveryConfig, RetentionConfig, ServerConfig,
 };
@@ -18,19 +19,13 @@ use stroem_server::log_storage::LogStorage;
 use stroem_server::state::AppState;
 use stroem_server::workspace::WorkspaceManager;
 use tempfile::TempDir;
-use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::postgres::Postgres;
 use uuid::Uuid;
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-async fn setup_db() -> Result<(PgPool, testcontainers::ContainerAsync<Postgres>)> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
-    Ok((pool, container))
+async fn setup_db() -> Result<PgPool> {
+    let pool = stroem_test_support::test_pool().await;
+    Ok(pool)
 }
 
 fn setup_state(
@@ -358,7 +353,7 @@ async fn step_statuses(pool: &PgPool, job_id: Uuid) -> HashMap<String, String> {
 /// marked completed and the parent job must reach "completed" status.
 #[tokio::test]
 async fn child_completed_propagates_to_parent() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
     let temp_dir = TempDir::new()?;
     let state = setup_state(pool.clone(), make_workspace_config(), temp_dir.path());
 
@@ -430,7 +425,7 @@ async fn child_completed_propagates_to_parent() -> Result<()> {
 /// and the parent job must reach "failed" status.
 #[tokio::test]
 async fn child_failed_propagates_to_parent() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
     let temp_dir = TempDir::new()?;
     let state = setup_state(pool.clone(), make_workspace_config(), temp_dir.path());
     let worker_id = register_worker(&pool).await;
@@ -501,7 +496,7 @@ async fn child_failed_propagates_to_parent() -> Result<()> {
 /// cancelled via `Settlement::advance`.
 #[tokio::test]
 async fn child_cancelled_propagates_to_parent() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
     let temp_dir = TempDir::new()?;
     let state = setup_state(pool.clone(), make_workspace_config(), temp_dir.path());
     let worker_id = register_worker(&pool).await;
@@ -565,7 +560,7 @@ async fn child_cancelled_propagates_to_parent() -> Result<()> {
 /// way up so that both the parent and grandparent jobs reach "completed".
 #[tokio::test]
 async fn deep_nesting_three_levels() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
     let temp_dir = TempDir::new()?;
 
     // Build a workspace with three tasks:
@@ -961,7 +956,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
 /// shell step promotes the task step, completing the child job completes parent.
 #[tokio::test]
 async fn parent_with_mixed_steps() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
     let temp_dir = TempDir::new()?;
 
     // Build workspace config with a parent that has both a shell and task step

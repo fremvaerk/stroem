@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use stroem_common::models::workflow::{
     ActionDef, FlowStep, InputFieldDef, TaskDef, WorkspaceConfig,
 };
-use stroem_db::{create_pool, run_migrations, JobRepo};
+use stroem_db::JobRepo;
 use stroem_server::config::{
     DbConfig, LogStorageConfig, RetentionConfig, ServerConfig, WorkspaceSourceDef,
 };
@@ -19,8 +19,6 @@ use stroem_server::state::AppState;
 use stroem_server::web::build_router;
 use stroem_server::workspace::WorkspaceManager;
 use tempfile::TempDir;
-use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::postgres::Postgres;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -131,17 +129,10 @@ fn stats_test_workspace() -> WorkspaceConfig {
 
 // ─── Test infrastructure ────────────────────────────────────────────────────
 
-async fn setup() -> Result<(
-    Router,
-    PgPool,
-    TempDir,
-    testcontainers::ContainerAsync<Postgres>,
-)> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+async fn setup() -> Result<(Router, PgPool, TempDir)> {
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let url = test_db.url;
 
     let temp_dir = TempDir::new()?;
     let log_dir = temp_dir.path().join("logs");
@@ -187,7 +178,7 @@ async fn setup() -> Result<(
     let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None);
     let router = build_router(state, CancellationToken::new());
 
-    Ok((router, pool, temp_dir, container))
+    Ok((router, pool, temp_dir))
 }
 
 fn api_get(uri: &str) -> Request<Body> {
@@ -276,7 +267,7 @@ async fn insert_completed_step(
 /// GET /api/workspaces/nonexistent/tasks/foo/stats → 404
 #[tokio::test]
 async fn test_stats_nonexistent_workspace_returns_404() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     let response = router
         .oneshot(api_get("/api/workspaces/nonexistent/tasks/foo/stats"))
@@ -289,7 +280,7 @@ async fn test_stats_nonexistent_workspace_returns_404() -> Result<()> {
 /// Missing task within valid workspace → 404
 #[tokio::test]
 async fn test_stats_missing_task_returns_404() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     let response = router
         .oneshot(api_get("/api/workspaces/default/tasks/no-such-task/stats"))
@@ -302,7 +293,7 @@ async fn test_stats_missing_task_returns_404() -> Result<()> {
 /// Zero completed runs → 200 with `sample_size: 0` and null aggregates
 #[tokio::test]
 async fn test_stats_zero_completed_runs() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     let response = router
         .oneshot(api_get("/api/workspaces/default/tasks/my-task/stats"))
@@ -325,7 +316,7 @@ async fn test_stats_zero_completed_runs() -> Result<()> {
 /// `?limit=0` — clamps to minimum (1)
 #[tokio::test]
 async fn test_stats_limit_zero_clamped() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     // Insert two completed jobs so the limit matters.
     insert_completed_job(&pool, "default", "my-task", 1).await?;
@@ -349,7 +340,7 @@ async fn test_stats_limit_zero_clamped() -> Result<()> {
 /// `?limit=9999` — clamps to maximum (500)
 #[tokio::test]
 async fn test_stats_limit_large_clamped() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     insert_completed_job(&pool, "default", "my-task", 5).await?;
 
@@ -370,7 +361,7 @@ async fn test_stats_limit_large_clamped() -> Result<()> {
 /// `?limit=abc` — non-numeric limit → 400 (axum query extractor rejects it)
 #[tokio::test]
 async fn test_stats_limit_non_numeric_returns_400() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     let response = router
         .oneshot(api_get(
@@ -387,7 +378,7 @@ async fn test_stats_limit_non_numeric_returns_400() -> Result<()> {
 /// → after clamp becomes 1, so 200 with window=1.
 #[tokio::test]
 async fn test_stats_limit_negative_clamped() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     insert_completed_job(&pool, "default", "my-task", 3).await?;
     insert_completed_job(&pool, "default", "my-task", 3).await?;
@@ -412,7 +403,7 @@ async fn test_stats_limit_negative_clamped() -> Result<()> {
 /// run must not shrink `min_ms` or skew percentiles for real runs.
 #[tokio::test]
 async fn test_stats_excludes_restart_jobs() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     let job1 = insert_completed_job(&pool, "default", "my-task", 10).await?;
     let job2 = insert_completed_job(&pool, "default", "my-task", 20).await?;

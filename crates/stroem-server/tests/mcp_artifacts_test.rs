@@ -16,7 +16,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use stroem_common::models::workflow::WorkspaceConfig;
 use stroem_db::repos::job_artifact::{JobArtifactRepo, NewArtifactRow};
-use stroem_db::{create_pool, run_migrations};
 use stroem_server::blob_storage::{BlobArchive, LocalBlobArchive};
 use stroem_server::config::{
     ArtifactStorageConfig, DbConfig, LogStorageConfig, McpConfig, RetentionConfig, ServerConfig,
@@ -27,8 +26,6 @@ use stroem_server::state::AppState;
 use stroem_server::web::build_router;
 use stroem_server::workspace::WorkspaceManager;
 use tempfile::TempDir;
-use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::postgres::Postgres;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -39,16 +36,13 @@ struct TestApp {
     router: Router,
     pool: PgPool,
     archive: Arc<dyn BlobArchive>,
-    _pg: testcontainers::ContainerAsync<Postgres>,
     _tmp: TempDir,
 }
 
 async fn build_test_app() -> Result<TestApp> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let url = test_db.url;
 
     let tmp = TempDir::new()?;
     let log_dir = tmp.path().join("logs");
@@ -106,7 +100,6 @@ async fn build_test_app() -> Result<TestApp> {
         router,
         pool,
         archive,
-        _pg: container,
         _tmp: tmp,
     })
 }
@@ -580,16 +573,13 @@ mod acl_deny {
         router: Router,
         pool: PgPool,
         archive: Arc<dyn BlobArchive>,
-        _pg: testcontainers::ContainerAsync<Postgres>,
         _tmp: TempDir,
     }
 
     async fn build_auth_app_with_default_deny() -> Result<AuthApp> {
-        let container = Postgres::default().start().await?;
-        let port = container.get_host_port_ipv4(5432).await?;
-        let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-        let pool = create_pool(&url).await?;
-        run_migrations(&pool).await?;
+        let test_db = stroem_test_support::test_db().await;
+        let pool = test_db.pool.clone();
+        let url = test_db.url;
 
         let tmp = TempDir::new()?;
         let log_dir = tmp.path().join("logs");
@@ -672,7 +662,6 @@ mod acl_deny {
             router,
             pool,
             archive,
-            _pg: container,
             _tmp: tmp,
         })
     }
