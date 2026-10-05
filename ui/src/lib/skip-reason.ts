@@ -27,7 +27,7 @@ export function skipExplanation(reason: SkipReason | null): string {
     case "empty":
       return "Skipped: for_each produced no items.";
     case "cascade":
-      return "Skipped (pre-0.18 only): a dependency was itself skipped, and that dependency's continue_when_skipped let this step run anyway. New rows no longer use this reason — see the 0.18 upgrade guide.";
+      return "Skipped (pre-0.18 only): a dependency was itself skipped, and that dependency's own lack of continue_when_skipped kept this step from running. New rows no longer use this reason — see the 0.18 upgrade guide.";
     case "unreachable":
       return "Skipped: a dependency's outcome did not satisfy this step's own depends_on condition, or the row has no recorded reason (jobs from before 0.16.2).";
     default:
