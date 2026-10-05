@@ -1,25 +1,14 @@
 use anyhow::Result;
 use sqlx::PgPool;
 use stroem_db::run_migrations;
-use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::postgres::Postgres;
 
-async fn setup_db() -> Result<(PgPool, testcontainers::ContainerAsync<Postgres>)> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .acquire_timeout(std::time::Duration::from_secs(30))
-        .connect(&url)
-        .await?;
-    run_migrations(&pool).await?;
-    Ok((pool, container))
+async fn setup_db() -> Result<PgPool> {
+    Ok(stroem_test_support::test_pool().await)
 }
 
 #[tokio::test]
 async fn test_double_migration_is_idempotent() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     // Insert some data
     let job_id = uuid::Uuid::new_v4();
@@ -50,7 +39,7 @@ async fn test_double_migration_is_idempotent() -> Result<()> {
 
 #[tokio::test]
 async fn test_schema_completeness() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     // Query information_schema for all tables
     let tables: Vec<(String,)> = sqlx::query_as(
@@ -95,7 +84,7 @@ async fn test_schema_completeness() -> Result<()> {
 /// second application is exactly what the first did to legacy data.
 #[tokio::test]
 async fn test_048_backfills_hook_source_job_id() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     async fn insert(
         pool: &PgPool,
@@ -163,7 +152,7 @@ async fn test_048_backfills_hook_source_job_id() -> Result<()> {
 /// files are re-runnable (an operator may have pre-run them by hand).
 #[tokio::test]
 async fn test_049_050_git_ref_columns_and_indexes() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     for (table, column) in [
         ("job", "git_ref"),

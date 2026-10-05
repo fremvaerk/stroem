@@ -5,32 +5,18 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use stroem_common::models::job::JobStatus;
 use stroem_db::{
-    run_migrations, JobRepo, JobStepRepo, NewJobStep, RefreshTokenRepo, Seed, TaskStateRepo,
-    UserAuthLinkRepo, UserRepo, WorkerRepo, WorkspaceStateRepo,
+    JobRepo, JobStepRepo, NewJobStep, RefreshTokenRepo, Seed, TaskStateRepo, UserAuthLinkRepo,
+    UserRepo, WorkerRepo, WorkspaceStateRepo,
 };
-use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::postgres::Postgres;
 use uuid::Uuid;
 
-async fn setup_db() -> Result<(PgPool, testcontainers::ContainerAsync<Postgres>)> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    // Use a lightweight pool for tests: no eager min_connections (avoids
-    // timeouts when many containers start simultaneously under Docker pressure),
-    // and a longer acquire timeout to tolerate slow container startup.
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .acquire_timeout(std::time::Duration::from_secs(30))
-        .connect(&url)
-        .await?;
-    run_migrations(&pool).await?;
-    Ok((pool, container))
+async fn setup_db() -> Result<PgPool> {
+    Ok(stroem_test_support::test_pool().await)
 }
 
 #[tokio::test]
 async fn test_create_and_get_job() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     // Create a job
     let job_id = JobRepo::create(
@@ -64,7 +50,7 @@ async fn test_create_and_get_job() -> Result<()> {
 
 #[tokio::test]
 async fn test_list_jobs() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     // Create multiple jobs
     for i in 0..5 {
@@ -149,7 +135,7 @@ async fn test_list_jobs() -> Result<()> {
 /// exercise it).
 #[tokio::test]
 async fn test_list_children_orders_newest_first_with_id_tiebreak() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let parent_id = JobRepo::create(
         &pool,
@@ -240,7 +226,7 @@ async fn test_list_children_orders_newest_first_with_id_tiebreak() -> Result<()>
 
 #[tokio::test]
 async fn test_create_steps_and_claim() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     // Register a worker
     let worker_id = Uuid::new_v4();
@@ -381,7 +367,7 @@ async fn test_create_steps_and_claim() -> Result<()> {
 
 #[tokio::test]
 async fn test_claim_concurrency() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     // Create a job with multiple ready steps
     let job_id = JobRepo::create(
@@ -488,7 +474,7 @@ async fn test_claim_concurrency() -> Result<()> {
 
 #[tokio::test]
 async fn test_step_lifecycle() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let job_id = JobRepo::create(
         &pool,
@@ -583,7 +569,7 @@ async fn test_step_lifecycle() -> Result<()> {
 
 #[tokio::test]
 async fn test_update_input() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let job_id = JobRepo::create(
         &pool,
@@ -647,7 +633,7 @@ async fn test_update_input() -> Result<()> {
 
 #[tokio::test]
 async fn test_worker_register_and_heartbeat() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let worker_id = Uuid::new_v4();
     let tags = vec!["script".to_string(), "docker".to_string()];
@@ -681,7 +667,7 @@ async fn test_worker_register_and_heartbeat() -> Result<()> {
 
 #[tokio::test]
 async fn test_all_steps_terminal() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let job_id = JobRepo::create(
         &pool,
@@ -778,7 +764,7 @@ async fn test_all_steps_terminal() -> Result<()> {
 
 #[tokio::test]
 async fn test_any_step_failed() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let job_id = JobRepo::create(
         &pool,
@@ -874,7 +860,7 @@ async fn test_any_step_failed() -> Result<()> {
 
 #[tokio::test]
 async fn test_mark_failed_stores_error() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let job_id = JobRepo::create(
         &pool,
@@ -939,7 +925,7 @@ async fn test_mark_failed_stores_error() -> Result<()> {
 
 #[tokio::test]
 async fn test_job_status_transitions() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     // Create job -> pending
     let job_id = JobRepo::create(
@@ -1012,7 +998,7 @@ async fn test_job_status_transitions() -> Result<()> {
 
 #[tokio::test]
 async fn test_claim_with_capability_filter() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let job_id = JobRepo::create(
         &pool,
@@ -1145,7 +1131,7 @@ async fn test_claim_with_capability_filter() -> Result<()> {
 
 #[tokio::test]
 async fn test_claim_superset_worker_tags_can_claim_subset_step() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     // Worker has a superset of tags: ["script", "docker", "gpu"]
     let worker_id = Uuid::new_v4();
@@ -1218,7 +1204,7 @@ async fn test_claim_superset_worker_tags_can_claim_subset_step() -> Result<()> {
 
 #[tokio::test]
 async fn test_claim_empty_worker_tags_cannot_claim_tagged_step() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     // Post-042 affinity: a worker with tags=[] fails the subset check
     // for any step that requests a tag, so it can't accidentally pick
@@ -1296,7 +1282,7 @@ async fn test_claim_empty_worker_tags_cannot_claim_tagged_step() -> Result<()> {
 
 #[tokio::test]
 async fn test_claim_empty_required_tags_claimable_by_any_worker() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     // Worker has only "script"
     let worker_id = Uuid::new_v4();
@@ -1379,7 +1365,7 @@ async fn test_claim_empty_required_tags_claimable_by_any_worker() -> Result<()> 
 /// matched).
 #[tokio::test]
 async fn test_claim_multi_tag_step_requires_all_tags() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let job_id = JobRepo::create(
         &pool,
@@ -1464,7 +1450,7 @@ async fn test_claim_multi_tag_step_requires_all_tags() -> Result<()> {
 
 #[tokio::test]
 async fn test_claim_skips_non_matching_step_claims_matching() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let job_id = JobRepo::create(
         &pool,
@@ -1540,7 +1526,7 @@ async fn test_claim_skips_non_matching_step_claims_matching() -> Result<()> {
 
 #[tokio::test]
 async fn test_claim_task_type_never_claimed() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let job_id = JobRepo::create(
         &pool,
@@ -1633,7 +1619,7 @@ async fn test_claim_task_type_never_claimed() -> Result<()> {
 
 #[tokio::test]
 async fn test_worker_list() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     // Register two workers with different tags
     let w1 = Uuid::new_v4();
@@ -1697,7 +1683,7 @@ async fn test_worker_list() -> Result<()> {
 
 #[tokio::test]
 async fn test_create_user_and_get_by_email() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let user_id = Uuid::new_v4();
     UserRepo::create(
@@ -1722,7 +1708,7 @@ async fn test_create_user_and_get_by_email() -> Result<()> {
 
 #[tokio::test]
 async fn test_get_user_by_id() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let user_id = Uuid::new_v4();
     UserRepo::create(&pool, user_id, "bob@example.com", None, None).await?;
@@ -1738,7 +1724,7 @@ async fn test_get_user_by_id() -> Result<()> {
 
 #[tokio::test]
 async fn test_get_nonexistent_user() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let result = UserRepo::get_by_email(&pool, "nobody@example.com").await?;
     assert!(result.is_none());
@@ -1751,7 +1737,7 @@ async fn test_get_nonexistent_user() -> Result<()> {
 
 #[tokio::test]
 async fn test_duplicate_email_fails() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     UserRepo::create(&pool, Uuid::new_v4(), "dup@example.com", None, None).await?;
     let result = UserRepo::create(&pool, Uuid::new_v4(), "dup@example.com", None, None).await;
@@ -1764,7 +1750,7 @@ async fn test_duplicate_email_fails() -> Result<()> {
 
 #[tokio::test]
 async fn test_create_and_get_refresh_token() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let user_id = Uuid::new_v4();
     UserRepo::create(&pool, user_id, "token@example.com", None, None).await?;
@@ -1783,7 +1769,7 @@ async fn test_create_and_get_refresh_token() -> Result<()> {
 
 #[tokio::test]
 async fn test_delete_refresh_token() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let user_id = Uuid::new_v4();
     UserRepo::create(&pool, user_id, "del@example.com", None, None).await?;
@@ -1800,7 +1786,7 @@ async fn test_delete_refresh_token() -> Result<()> {
 
 #[tokio::test]
 async fn test_delete_all_tokens_for_user() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let user_id = Uuid::new_v4();
     UserRepo::create(&pool, user_id, "alltoken@example.com", None, None).await?;
@@ -1825,7 +1811,7 @@ async fn test_delete_all_tokens_for_user() -> Result<()> {
 
 #[tokio::test]
 async fn test_user_list() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     // Empty list on fresh DB
     let empty = UserRepo::list(&pool, 50, 0).await?;
@@ -1895,7 +1881,7 @@ async fn test_user_list() -> Result<()> {
 
 #[tokio::test]
 async fn test_user_touch_last_login() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let uid = Uuid::new_v4();
     UserRepo::create(
@@ -1930,7 +1916,7 @@ async fn test_user_touch_last_login() -> Result<()> {
 
 #[tokio::test]
 async fn test_auth_link_list_by_user_ids() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let u1 = Uuid::new_v4();
     let u2 = Uuid::new_v4();
@@ -1965,7 +1951,7 @@ async fn test_auth_link_list_by_user_ids() -> Result<()> {
 
 #[tokio::test]
 async fn test_user_list_with_auth_links() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     // User with password + OIDC
     let u1 = Uuid::new_v4();
@@ -2038,7 +2024,7 @@ async fn test_user_list_with_auth_links() -> Result<()> {
 
 #[tokio::test]
 async fn test_expired_token_still_retrievable() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let user_id = Uuid::new_v4();
     UserRepo::create(&pool, user_id, "expired@example.com", None, None).await?;
@@ -2060,7 +2046,7 @@ async fn test_expired_token_still_retrievable() -> Result<()> {
 
 #[tokio::test]
 async fn test_list_jobs_with_status_filter() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     // Create 3 jobs, transition them to different statuses
     let job1 = JobRepo::create(
@@ -2143,7 +2129,7 @@ async fn test_list_jobs_with_status_filter() -> Result<()> {
 
 #[tokio::test]
 async fn test_list_jobs_with_workspace_and_status_filter() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     // Create jobs in two workspaces
     let j1 = JobRepo::create(
@@ -2216,7 +2202,7 @@ async fn test_list_jobs_with_workspace_and_status_filter() -> Result<()> {
 
 #[tokio::test]
 async fn test_list_by_task_with_status_filter() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let j1 = JobRepo::create(
         &pool,
@@ -2289,7 +2275,7 @@ async fn test_list_by_task_with_status_filter() -> Result<()> {
 
 #[tokio::test]
 async fn test_status_filter_returns_empty_for_nonexistent_status() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     JobRepo::create(
         &pool,
@@ -2319,7 +2305,7 @@ async fn test_status_filter_returns_empty_for_nonexistent_status() -> Result<()>
 
 #[tokio::test]
 async fn test_transaction_rollback_on_step_failure() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let job_id = Uuid::new_v4();
 
@@ -2369,7 +2355,7 @@ async fn test_transaction_rollback_on_step_failure() -> Result<()> {
 
 #[tokio::test]
 async fn test_transaction_commit_persists_job_and_steps() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let job_id = Uuid::new_v4();
 
@@ -2448,7 +2434,7 @@ async fn test_transaction_commit_persists_job_and_steps() -> Result<()> {
 
 #[tokio::test]
 async fn test_cancel_job() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     // Create a job with default pending status
     let job_id = JobRepo::create(
@@ -2497,7 +2483,7 @@ async fn test_cancel_job() -> Result<()> {
 
 #[tokio::test]
 async fn test_cancel_job_running() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     // Create a worker and a job, then transition to running
     let worker_id = Uuid::new_v4();
@@ -2548,7 +2534,7 @@ async fn test_cancel_job_running() -> Result<()> {
 
 #[tokio::test]
 async fn settle_writes_once_and_never_overwrites_a_terminal_row() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let worker_id = Uuid::new_v4();
     WorkerRepo::register(
@@ -2623,7 +2609,7 @@ async fn settle_writes_once_and_never_overwrites_a_terminal_row() -> Result<()> 
 
 #[tokio::test]
 async fn test_cancel_job_already_completed() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let job_id = JobRepo::create(
         &pool,
@@ -2664,7 +2650,7 @@ async fn test_cancel_job_already_completed() -> Result<()> {
 
 #[tokio::test]
 async fn test_get_child_jobs() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     // Create a parent job
     let parent_id = JobRepo::create(
@@ -2747,7 +2733,7 @@ async fn test_get_child_jobs() -> Result<()> {
 
 #[tokio::test]
 async fn test_cancel_pending_steps() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     // Need a worker to mark a step as running
     let worker_id = Uuid::new_v4();
@@ -2896,7 +2882,7 @@ async fn test_cancel_pending_steps() -> Result<()> {
 
 #[tokio::test]
 async fn test_get_running_steps() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let worker_id = Uuid::new_v4();
     WorkerRepo::register(
@@ -3106,7 +3092,7 @@ async fn test_get_running_steps() -> Result<()> {
 
 #[tokio::test]
 async fn test_mark_cancelled_only_running() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let worker_id = Uuid::new_v4();
     WorkerRepo::register(
@@ -3242,7 +3228,7 @@ async fn test_mark_cancelled_only_running() -> Result<()> {
 
 #[tokio::test]
 async fn test_cancel_pending_steps_empty() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let worker_id = Uuid::new_v4();
     WorkerRepo::register(
@@ -3362,7 +3348,7 @@ async fn test_cancel_pending_steps_empty() -> Result<()> {
 
 #[tokio::test]
 async fn test_get_status_counts() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     // Empty database — all counts should be zero (or absent from the map)
     let counts = JobRepo::get_status_counts(&pool).await?;
@@ -3433,7 +3419,7 @@ async fn test_get_status_counts() -> Result<()> {
 
 #[tokio::test]
 async fn test_worker_register_stores_version() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     // Register WITH a version string
     let worker_id = Uuid::new_v4();
@@ -3476,7 +3462,7 @@ async fn test_worker_register_stores_version() -> Result<()> {
 
 #[tokio::test]
 async fn test_worker_list_includes_version() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let worker_id = Uuid::new_v4();
     WorkerRepo::register(
@@ -3499,7 +3485,7 @@ async fn test_worker_list_includes_version() -> Result<()> {
 
 #[tokio::test]
 async fn test_claim_random_order_no_duplicates() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let job_id = JobRepo::create(
         &pool,
@@ -3595,7 +3581,7 @@ async fn test_claim_random_order_no_duplicates() -> Result<()> {
 /// started_at NULL, and no steps. It must not be counted as active.
 #[tokio::test]
 async fn test_create_skipped_job() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let input = serde_json::json!({"env": "prod"});
     let job_id = JobRepo::create_skipped(
@@ -3656,7 +3642,7 @@ async fn test_create_skipped_job() -> Result<()> {
 /// `created_at`.
 #[tokio::test]
 async fn test_retention_counts_from_completion_not_creation() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     async fn insert(
         pool: &PgPool,
@@ -3702,7 +3688,7 @@ async fn test_retention_counts_from_completion_not_creation() -> Result<()> {
 
 #[tokio::test]
 async fn test_job_stores_revision() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     // Create a job with a revision
     let job_id = JobRepo::create(
@@ -3747,7 +3733,7 @@ async fn test_job_stores_revision() -> Result<()> {
 
 #[tokio::test]
 async fn test_skipped_job_stores_revision() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let job_id = JobRepo::create_skipped(
         &pool,
@@ -3772,7 +3758,7 @@ async fn test_skipped_job_stores_revision() -> Result<()> {
 
 #[tokio::test]
 async fn test_sub_job_inherits_revision() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     // Create parent with revision
     let parent_id = JobRepo::create(
@@ -3828,7 +3814,7 @@ async fn test_sub_job_inherits_revision() -> Result<()> {
 /// be inserted without a constraint violation.
 #[tokio::test]
 async fn test_event_source_job_source_type() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     // Insert a job with source_type = 'event_source'.
     // If migration 026 is not applied (or the constraint wasn't updated) this
@@ -3879,7 +3865,7 @@ async fn create_test_job(pool: &PgPool, workspace: &str, task_name: &str) -> Res
 
 #[tokio::test]
 async fn test_task_state_insert_and_get_latest() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let job_id = create_test_job(&pool, "prod", "deploy").await?;
 
@@ -3926,7 +3912,7 @@ async fn test_task_state_insert_and_get_latest() -> Result<()> {
 
 #[tokio::test]
 async fn test_task_state_get_by_id() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let job_id = create_test_job(&pool, "ws", "my-task").await?;
     let key = "state/ws/my-task/abc.tar.gz";
@@ -3954,7 +3940,7 @@ async fn test_task_state_get_by_id() -> Result<()> {
 
 #[tokio::test]
 async fn test_task_state_list() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let job_id = create_test_job(&pool, "ws", "batch").await?;
 
@@ -3992,7 +3978,7 @@ async fn test_task_state_list() -> Result<()> {
 
 #[tokio::test]
 async fn test_task_state_prune() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let job_id = create_test_job(&pool, "ws", "prune-task").await?;
 
@@ -4033,7 +4019,7 @@ async fn test_task_state_prune() -> Result<()> {
 
 #[tokio::test]
 async fn test_task_state_delete_all() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let job_id = create_test_job(&pool, "ws", "task-a").await?;
     let job_id_b = create_test_job(&pool, "ws", "task-b").await?;
@@ -4067,7 +4053,7 @@ async fn test_task_state_delete_all() -> Result<()> {
 
 #[tokio::test]
 async fn test_task_state_job_fk_on_delete_set_null() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let job_id = create_test_job(&pool, "ws", "fk-task").await?;
     let key = "state/ws/fk-task/snap.tar.gz";
@@ -4103,7 +4089,7 @@ async fn test_task_state_job_fk_on_delete_set_null() -> Result<()> {
 
 #[tokio::test]
 async fn test_workspace_state_insert_and_get_latest() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
     let job_id = create_test_job(&pool, "default", "task-a").await?;
 
     // Nothing yet for this workspace
@@ -4150,7 +4136,7 @@ async fn test_workspace_state_insert_and_get_latest() -> Result<()> {
 
 #[tokio::test]
 async fn test_workspace_state_insert_and_prune() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
     let job_id = create_test_job(&pool, "default", "task-x").await?;
 
     // Insert 5 snapshots
@@ -4206,7 +4192,7 @@ async fn test_workspace_state_insert_and_prune() -> Result<()> {
 
 #[tokio::test]
 async fn test_workspace_state_delete_all() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
     let job_id = create_test_job(&pool, "ws-a", "task").await?;
 
     // Insert snapshots for workspace A
@@ -4249,7 +4235,7 @@ async fn test_workspace_state_delete_all() -> Result<()> {
 /// `create_event_source_job` from completing.
 #[tokio::test]
 async fn test_event_source_step_action_type() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     // Create parent job first (with allowed source_type)
     let job_id = JobRepo::create(
@@ -4351,7 +4337,7 @@ async fn create_completed_job(
 
 #[tokio::test]
 async fn test_task_duration_stats_basic_percentiles() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     // Five completed runs: 1s, 2s, 3s, 4s, 5s. p50 = 3s, p95 ≈ 4.8s.
     for secs in [1, 2, 3, 4, 5] {
@@ -4388,7 +4374,7 @@ async fn test_task_duration_stats_basic_percentiles() -> Result<()> {
 
 #[tokio::test]
 async fn test_task_duration_stats_empty_returns_zero_sample() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
     let stats = JobRepo::get_task_duration_stats(&pool, "default", "nope", 50).await?;
     assert_eq!(stats.sample_size, 0);
     assert!(stats.p50_ms.is_none());
@@ -4398,7 +4384,7 @@ async fn test_task_duration_stats_empty_returns_zero_sample() -> Result<()> {
 
 #[tokio::test]
 async fn test_task_duration_stats_excludes_non_completed() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     // One completed job — should be the only thing counted.
     create_completed_job(&pool, "default", "build", 10).await?;
@@ -4445,7 +4431,7 @@ async fn test_task_duration_stats_excludes_non_completed() -> Result<()> {
 
 #[tokio::test]
 async fn test_task_duration_stats_respects_limit() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     // 10 runs of 1s each.
     for _ in 0..10 {
@@ -4474,7 +4460,7 @@ async fn test_task_duration_stats_respects_limit() -> Result<()> {
 
 #[tokio::test]
 async fn test_recent_durations_ordered_newest_first() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     // Insert in an order such that the oldest is the longest.
     create_completed_job(&pool, "default", "build", 30).await?;
@@ -4495,7 +4481,7 @@ async fn test_recent_durations_ordered_newest_first() -> Result<()> {
 
 #[tokio::test]
 async fn test_step_duration_stats_aggregates_per_step() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     // Create three completed jobs with two steps each: "build" and "test".
     // "build" varies between runs; "test" is constant.
@@ -4549,7 +4535,7 @@ async fn test_step_duration_stats_aggregates_per_step() -> Result<()> {
 
 #[tokio::test]
 async fn test_step_duration_stats_excludes_for_each_instances() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let job_id = create_completed_job(&pool, "default", "fanout", 30).await?;
 
@@ -4583,7 +4569,7 @@ async fn test_step_duration_stats_excludes_for_each_instances() -> Result<()> {
 
 #[tokio::test]
 async fn test_task_duration_stats_single_sample() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     create_completed_job(&pool, "ws1", "solo", 7).await?;
 
@@ -4615,7 +4601,7 @@ async fn test_task_duration_stats_single_sample() -> Result<()> {
 
 #[tokio::test]
 async fn test_task_duration_stats_zero_ms_duration() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     // Force started_at == completed_at (zero-duration run).
     let job_id = JobRepo::create(
@@ -4653,7 +4639,7 @@ async fn test_task_duration_stats_zero_ms_duration() -> Result<()> {
 
 #[tokio::test]
 async fn test_task_duration_stats_excludes_negative_duration() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     // Force completed_at < started_at (clock skew anomaly).
     let job_id = JobRepo::create(
@@ -4693,7 +4679,7 @@ async fn test_task_duration_stats_excludes_negative_duration() -> Result<()> {
 
 #[tokio::test]
 async fn test_recent_durations_tie_breaker_deterministic() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     // Create three jobs and then force them all to the same completed_at
     // timestamp so that only job_id ordering distinguishes them.
@@ -4727,7 +4713,7 @@ async fn test_recent_durations_tie_breaker_deterministic() -> Result<()> {
 
 #[tokio::test]
 async fn test_step_duration_stats_includes_for_each_placeholder() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let job_id = create_completed_job(&pool, "ws5", "fanned", 60).await?;
 
@@ -4768,7 +4754,7 @@ async fn test_step_duration_stats_includes_for_each_placeholder() -> Result<()> 
 
 #[tokio::test]
 async fn test_step_duration_stats_handles_partial_coverage() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     // 3 jobs: only the most recent has a "cleanup" step.
     // All jobs have a "build" step.
@@ -4834,7 +4820,7 @@ async fn test_step_duration_stats_handles_partial_coverage() -> Result<()> {
 
 #[tokio::test]
 async fn test_exclusive_worker_reserves_worker_for_matching_steps_only() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let job_id = JobRepo::create(
         &pool,
@@ -4955,7 +4941,7 @@ async fn test_exclusive_worker_reserves_worker_for_matching_steps_only() -> Resu
 // `exclusive: true` restores that behaviour.
 #[tokio::test]
 async fn test_non_exclusive_tagged_worker_claims_untagged_step() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let job_id = JobRepo::create(
         &pool,
@@ -5018,7 +5004,7 @@ async fn test_non_exclusive_tagged_worker_claims_untagged_step() -> Result<()> {
 // don't request all of its tags — mirrors the claim SQL exactly.
 #[tokio::test]
 async fn test_sweep_treats_exclusive_worker_as_unmatched_for_untagged_steps() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let job_id = JobRepo::create(
         &pool,
@@ -5116,7 +5102,7 @@ fn agent_step(job_id: Uuid, name: &str) -> NewJobStep {
 /// capability must be able to claim an `action_type = 'agent'` step.
 #[tokio::test]
 async fn test_claim_agent_step_claimable_by_agent_capable_worker() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
     let job_id = JobRepo::create(
         &pool,
         "default",
@@ -5178,7 +5164,7 @@ async fn test_claim_agent_step_claimable_by_agent_capable_worker() -> Result<()>
 /// so recovery can fail it instead of leaving it ready forever.
 #[tokio::test]
 async fn test_unmatched_sweep_reports_agent_step_without_agent_worker() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
     let job_id = JobRepo::create(
         &pool,
         "default",
@@ -5256,7 +5242,7 @@ fn plain_step(job_id: Uuid, name: &str, status: &str) -> NewJobStep {
 
 #[tokio::test]
 async fn test_job_mark_cancelled_sets_completed_at() -> Result<()> {
-    let (pool, _c) = setup_db().await?;
+    let pool = setup_db().await?;
     let job_id = JobRepo::create(
         &pool,
         "default",
@@ -5281,7 +5267,7 @@ async fn test_job_mark_cancelled_sets_completed_at() -> Result<()> {
 
 #[tokio::test]
 async fn test_fail_non_terminal_steps_only_touches_live_rows() -> Result<()> {
-    let (pool, _c) = setup_db().await?;
+    let pool = setup_db().await?;
     let job_id = JobRepo::create(
         &pool,
         "default",
@@ -5324,7 +5310,7 @@ async fn test_fail_non_terminal_steps_only_touches_live_rows() -> Result<()> {
 /// transaction back must leave both untouched.
 #[tokio::test]
 async fn test_compensation_writes_are_atomic() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let job_id = JobRepo::create(
         &pool,
@@ -5378,7 +5364,7 @@ async fn test_compensation_writes_are_atomic() -> Result<()> {
 /// calls) and re-fire its hooks on every unrelated sibling-step completion.
 #[tokio::test]
 async fn test_get_settled_descendants_with_running_parent_step_excludes_agent_tool() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let parent_id = JobRepo::create(
         &pool,
@@ -5467,7 +5453,7 @@ async fn test_get_settled_descendants_with_running_parent_step_excludes_agent_to
 /// orchestration never runs), so reconciliation rooted at P must find it.
 #[tokio::test]
 async fn test_get_settled_descendants_walks_grandchildren() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let parent_id = JobRepo::create(
         &pool,
@@ -5555,7 +5541,7 @@ async fn test_get_settled_descendants_walks_grandchildren() -> Result<()> {
 /// running child whose own grandchild settled.
 #[tokio::test]
 async fn test_get_settled_descendants_orders_deepest_first() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let parent_id = JobRepo::create(
         &pool,
@@ -5654,7 +5640,7 @@ async fn test_get_settled_descendants_orders_deepest_first() -> Result<()> {
 /// the child is settled may reconciliation consume its terminal handling.
 #[tokio::test]
 async fn test_get_settled_descendants_excludes_jobs_with_live_steps() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let parent_id = JobRepo::create(
         &pool,
@@ -5734,7 +5720,7 @@ async fn test_get_settled_descendants_excludes_jobs_with_live_steps() -> Result<
 
 #[tokio::test]
 async fn test_seed_steps_tx_overwrites_status_output_and_flags_row() -> Result<()> {
-    let (pool, _c) = setup_db().await?;
+    let pool = setup_db().await?;
     let job_id = JobRepo::create(
         &pool,
         "default",
@@ -5817,7 +5803,7 @@ async fn test_seed_steps_tx_overwrites_status_output_and_flags_row() -> Result<(
 
 #[tokio::test]
 async fn test_seed_steps_tx_unknown_step_aborts() -> Result<()> {
-    let (pool, _c) = setup_db().await?;
+    let pool = setup_db().await?;
     let job_id = JobRepo::create(
         &pool,
         "default",

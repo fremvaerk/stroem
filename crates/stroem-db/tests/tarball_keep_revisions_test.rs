@@ -1,17 +1,10 @@
 use anyhow::Result;
 use sqlx::PgPool;
-use stroem_db::{create_pool, run_migrations, JobRepo, JobStepRepo, NewJobStep};
-use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::postgres::Postgres;
+use stroem_db::{JobRepo, JobStepRepo, NewJobStep};
 use uuid::Uuid;
 
-async fn setup_db() -> Result<(PgPool, testcontainers::ContainerAsync<Postgres>)> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
-    Ok((pool, container))
+async fn setup_db() -> Result<PgPool> {
+    Ok(stroem_test_support::test_pool().await)
 }
 
 async fn job(pool: &PgPool, workspace: &str, revision: &str) -> Result<Uuid> {
@@ -93,7 +86,7 @@ fn has(rows: &[(String, String)], ws: &str, rev: &str) -> bool {
 
 #[tokio::test]
 async fn keeps_active_job_revision_and_drops_finished() -> Result<()> {
-    let (pool, _c) = setup_db().await?;
+    let pool = setup_db().await?;
     let _active = job(&pool, "default", "r-active").await?;
     let done = job(&pool, "default", "r-done").await?;
     set_status(&pool, done, "completed").await?;
@@ -105,7 +98,7 @@ async fn keeps_active_job_revision_and_drops_finished() -> Result<()> {
 
 #[tokio::test]
 async fn keeps_cross_workspace_action_revision_of_active_job() -> Result<()> {
-    let (pool, _c) = setup_db().await?;
+    let pool = setup_db().await?;
     let caller = job(&pool, "caller", "c1").await?;
     cross_ws_step(&pool, caller, "owner", "o7").await?;
     let rows = JobRepo::tarball_keep_revisions(&pool).await?;
@@ -118,7 +111,7 @@ async fn keeps_cross_workspace_action_revision_of_active_job() -> Result<()> {
 
 #[tokio::test]
 async fn drops_cross_workspace_action_revision_of_finished_job() -> Result<()> {
-    let (pool, _c) = setup_db().await?;
+    let pool = setup_db().await?;
     let caller = job(&pool, "caller", "c1").await?;
     cross_ws_step(&pool, caller, "owner", "o7").await?;
     set_status(&pool, caller, "completed").await?;
@@ -129,7 +122,7 @@ async fn drops_cross_workspace_action_revision_of_finished_job() -> Result<()> {
 
 #[tokio::test]
 async fn keeps_revision_of_failed_job_awaiting_task_retry() -> Result<()> {
-    let (pool, _c) = setup_db().await?;
+    let pool = setup_db().await?;
     let id = job(&pool, "default", "r-retry").await?;
     owed_retry(&pool, id, 0, 2, "1 minute").await?;
     let rows = JobRepo::tarball_keep_revisions(&pool).await?;
@@ -142,7 +135,7 @@ async fn keeps_revision_of_failed_job_awaiting_task_retry() -> Result<()> {
 
 #[tokio::test]
 async fn drops_failed_revision_once_retry_created_or_exhausted_or_stale() -> Result<()> {
-    let (pool, _c) = setup_db().await?;
+    let pool = setup_db().await?;
     let created = job(&pool, "default", "r-created").await?;
     owed_retry(&pool, created, 0, 2, "1 minute").await?;
     let retry = job(&pool, "other", "x").await?;
@@ -164,7 +157,7 @@ async fn drops_failed_revision_once_retry_created_or_exhausted_or_stale() -> Res
 
 #[tokio::test]
 async fn child_jobs_never_hold_a_retry_window() -> Result<()> {
-    let (pool, _c) = setup_db().await?;
+    let pool = setup_db().await?;
     let parent = job(&pool, "default", "r-parent").await?;
     set_status(&pool, parent, "completed").await?;
     let child = job(&pool, "default", "r-child").await?;
@@ -232,7 +225,7 @@ async fn pinned_step(
 
 #[tokio::test]
 async fn pin_keep_set_keeps_only_active_pinned_jobs() -> Result<()> {
-    let (pool, _c) = setup_db().await?;
+    let pool = setup_db().await?;
     pin_job(&pool, "w", "p-active", "release/1").await?;
     let done = pin_job(&pool, "w", "p-done", "release/1").await?;
     set_status(&pool, done, "completed").await?;
@@ -249,7 +242,7 @@ async fn pin_keep_set_keeps_only_active_pinned_jobs() -> Result<()> {
 
 #[tokio::test]
 async fn pin_keep_set_keeps_action_and_task_pins_of_active_jobs() -> Result<()> {
-    let (pool, _c) = setup_db().await?;
+    let pool = setup_db().await?;
     let active = job(&pool, "caller", "c1").await?;
     pinned_step(&pool, active, "a", Some(("w", "release/2", "a-pin")), None).await?;
     pinned_step(&pool, active, "t", None, Some(("billing", "v4", "t-pin"))).await?;
@@ -280,7 +273,7 @@ async fn pin_keep_set_keeps_action_and_task_pins_of_active_jobs() -> Result<()> 
 
 #[tokio::test]
 async fn pin_keep_set_keeps_a_failed_pinned_job_awaiting_task_retry() -> Result<()> {
-    let (pool, _c) = setup_db().await?;
+    let pool = setup_db().await?;
     let owed = pin_job(&pool, "w", "p-retry", "release/1").await?;
     owed_retry(&pool, owed, 0, 2, "1 minute").await?;
     let stale = pin_job(&pool, "w", "p-stale", "release/1").await?;
