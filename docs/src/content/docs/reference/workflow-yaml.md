@@ -145,7 +145,8 @@ References another task, creating a child job. The step is dispatched server-sid
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `task` | string | **required** | Name of the task to execute |
+| `task` | string | **required** | Name of the task to execute. May be another workspace's task (`ws.task`) |
+| `ref` | string | — | Branch, tag or full commit SHA of the task's owner workspace to run the task from — see [Git Refs](/guides/git-refs/). Only valid on `type: task` actions |
 
 Cannot use any other execution fields (`cmd`, `script`, `source`, `image`, `runner`, `language`, `manifest`, etc.).
 
@@ -172,6 +173,11 @@ tasks:
 
 Child jobs have a max nesting depth of 10 levels.
 
+With `ref`, the task is looked up at that ref of its owner workspace and the
+child runs pinned to the commit the ref resolved to when the parent job was
+created. A task may call itself at another ref (bounded by the nesting
+depth). A `type: task` action carrying `ref` cannot be used as a hook.
+
 ### `type: agent`
 
 Calls an LLM as a workflow step. The step is dispatched server-side (workers never claim it).
@@ -187,6 +193,12 @@ Calls an LLM as a workflow step. The step is dispatched server-side (workers nev
 | `output` | object | — | Output schema (converted to JSON Schema at dispatch) |
 
 Cannot use any other execution fields (`cmd`, `script`, `source`, `image`, `runner`, `language`, `manifest`, `task`, etc.).
+
+`ref` is not supported with agents yet: a flow step that names an agent
+action with `ref` is rejected with `400`, and a `tools: [{task: …}]` entry
+with `ref` is a validation error (a tool call naming it is rejected). Agent
+steps *inside* a job that runs on a [git ref](/guides/git-refs/) work and use
+that commit's definitions.
 
 ```yaml
 actions:
@@ -399,6 +411,7 @@ Each entry in a task's `flow` map defines a step. Steps can reference a named ac
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `action` | string | **required** | Action name to execute. Omit when using inline action |
+| `ref` | string | — | Run `action` from this branch, tag or full commit SHA of its owner workspace — see [Git Refs](/guides/git-refs/). The action need not exist on the default branch. Not allowed when the action is `type: agent` |
 | `name` | string | — | Human-readable step display name |
 | `description` | string | — | What this step does |
 | `depends_on` | list | `[]` | Dependencies that must reach a terminal state before this one is decided (see [Dependencies](#dependencies) for the full `{step, accept}` / `all` / `any` shape) |
@@ -792,6 +805,10 @@ Hooks fire when a job reaches a terminal state. Defined on tasks or at the top l
 | `action` | string | **required** | Action to execute. Can be a `type: task` action for full child job |
 | `input` | map | `{}` | Input values. Supports Tera templates with `hook` context |
 
+`ref` is not supported on hooks yet: a hook with `ref`, or one whose action
+is a `type: task` action carrying `ref`, is a validation error and is never
+fired.
+
 ### Hook template context
 
 | Variable | Type | Description |
@@ -808,6 +825,8 @@ Hooks fire when a job reaches a terminal state. Defined on tasks or at the top l
 | `hook.completed_at` | string/null | ISO 8601 timestamp |
 | `hook.duration_secs` | number/null | Execution duration in seconds |
 | `hook.failed_steps` | list | Failed step details (see below) |
+| `hook.revision` | string/null | Workspace revision pinned on the job (git SHA or folder hash) |
+| `hook.ref` | string/null | The [git ref](/guides/git-refs/) the job runs at; `null` unless it is a pinned job |
 
 Each entry in `hook.failed_steps`:
 
@@ -846,7 +865,8 @@ Hook jobs use `source_type = "hook"` and never trigger further hooks (recursion 
 |-------|------|---------|-------------|
 | `type` | string | **required** | `scheduler` |
 | `cron` | string | **required** | Cron expression (5-field, or 6-field with optional seconds) |
-| `task` | string | **required** | Task to execute |
+| `task` | string | **required** | Task to execute. May be another workspace's task (`ws.task`) |
+| `ref` | string | — | Branch, tag or full commit SHA of the task's owner workspace — see [Git Refs](/guides/git-refs/) |
 | `input` | map | `{}` | Input values |
 | `enabled` | bool | `true` | Whether the trigger is active |
 | `timezone` | string | UTC | IANA timezone name (e.g., `Europe/Copenhagen`) |
@@ -868,7 +888,8 @@ triggers:
 |-------|------|---------|-------------|
 | `type` | string | **required** | `webhook` |
 | `name` | string | **required** | URL-safe name (alphanumeric, `-`, `_`). Endpoint: `/hooks/{name}` |
-| `task` | string | **required** | Task to execute |
+| `task` | string | **required** | Task to execute. May be another workspace's task (`ws.task`) |
+| `ref` | string | — | Branch, tag or full commit SHA of the task's owner workspace — see [Git Refs](/guides/git-refs/) |
 | `secret` | string | — | Auth via `?secret=xxx` or `Authorization: Bearer xxx` |
 | `input` | map | `{}` | Default input values. Request body/headers/query merged in |
 | `enabled` | bool | `true` | Whether the webhook is active |
@@ -918,6 +939,9 @@ triggers:
 ```
 
 The consumer task runs as a normal job. Any step's `OUTPUT: ` lines (followed by valid JSON) create jobs for `target_task`. The `input` defaults are merged with the emitted JSON (emitted data wins on conflict).
+
+`ref` is not supported on event-source triggers yet: it is a validation
+error, and the server does not start such a consumer.
 
 ---
 

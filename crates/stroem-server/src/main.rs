@@ -121,6 +121,31 @@ async fn async_main(worker_threads: usize) -> Result<()> {
         stroem_server::workspace::availability::ReloadSettings::from(&config.workspace_reload),
     )
     .await;
+    // A server with no git workspace has nothing to pin: do not create or
+    // lock the pin dir. `open` removes leftover checkouts synchronously, so
+    // it runs on the blocking pool.
+    let pin_sources = stroem_server::workspace::pins::pin_sources(&config.workspaces);
+    let pin_store = if pin_sources.is_empty() {
+        stroem_server::workspace::pins::PinStore::disabled()
+    } else {
+        let pin_cfg =
+            stroem_server::workspace::pins::PinStoreConfig::from_section(config.pin_store.as_ref());
+        let libraries = workspace_manager.resolved_libraries();
+        let settings =
+            stroem_server::workspace::availability::ReloadSettings::from(&config.workspace_reload);
+        tokio::task::spawn_blocking(move || {
+            stroem_server::workspace::pins::PinStore::open(
+                pin_cfg,
+                pin_sources,
+                libraries,
+                settings,
+            )
+        })
+        .await
+        .context("pin store open task")?
+        .context("open pin store")?
+    };
+    let workspace_manager = workspace_manager.with_pin_store(pin_store);
 
     for info in workspace_manager.list_workspace_info().await {
         if let Some(ref error) = info.error {

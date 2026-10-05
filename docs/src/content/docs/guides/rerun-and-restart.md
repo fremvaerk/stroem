@@ -60,11 +60,42 @@ Restart from a step does not fully reconstruct the source job's environment for 
 - **Artifacts** are not copied. A rerun step that reads `/artifacts/` from a step that was carried over (rather than actually rerun) finds nothing there, because artifacts belong to the job that produced them.
 - **Revision drift**: carried-over output was produced under the source job's workspace revision, but the rerun steps run under the current one. If templates or scripts changed incompatibly, a rerun step consuming a carried step's output can fail at render or run time.
 - **Cross-workspace carried steps** keep the *current* action definition (in case it changed) but the *old* output — the only link back to what actually produced that output is the job's `source_job_id`.
-- **Secret redaction** on carried output and error messages only covers currently configured connection/secret values, same limitation as job input generally — a value from a since-removed or rotated connection, or a user-typed secret, is not redacted.
+- **Secret redaction** on carried output and error messages only covers currently configured connection/secret values, same limitation as job input generally — a value from a since-removed or rotated connection, or a user-typed secret, is not redacted. The one exception is a value that came from a [git ref](/guides/git-refs/): the restart is masked with the secrets of every pinned commit the source job was connected to as well.
 - **Child jobs** created by a carried `type: task` step are not re-linked to the new job; only the step's final output comes along.
 - **Duration statistics**: restart jobs (whole job and per-step) are excluded from the task duration stats used for percentile charts and ETA, even when the restart reran from the very first step. A restarted job also never falls back to the whole-task p50 for its ETA — it either computes a step-weighted estimate from steps it's actually rerunning, or shows none.
 
 If a failure you want to retry isn't in the set you'd get by restarting from where it happened (because an earlier carried step is also failed and untolerated), restart from that earlier step instead so it reruns too.
+
+## Pinned jobs
+
+Re-running or restarting a job that runs on a [git ref](/guides/git-refs/)
+(for example, one started by a trigger with `ref:`) re-resolves that ref: a
+branch moves to its current tip, a tag or a commit SHA stays where it is. The
+task is looked up at the new commit, so it may exist only on that branch, and
+the new job runs pinned to that commit with the same ref. A restart's plan
+is computed against the flow at the new commit; carried-over steps keep the
+output they produced at the old one.
+
+Access is checked against the folder the **source** job's task declared at
+its commit, and then against the folder the task declares at the
+re-resolved commit (the folder the new job carries). Both actions need `Run`
+on both (no access → `404`, `View` → `403`), so moving a task into a stricter
+folder on its branch also restricts who can re-run or restart its older jobs. A re-run must be posted to the source job's own task name (another
+name is a `400`). If the task no longer exists at the re-resolved commit, or
+the ref itself is gone, both answer `400`; if the git server is unreachable,
+`500` — the restart **preview** contacts the git server too.
+
+The new job's input and output are masked with the secrets of every pinned
+commit its source job was connected to, as well as its own: a re-run
+replays the source's input, and a task retry's input is the failed job's
+fully resolved input, so a re-run of a retry can carry a secret of the
+older commit.
+
+The UI hides Re-run and Restart for a pinned job whose task does not exist on
+the default branch, because the task page reads the default branch. Use the
+API for those: `POST /api/workspaces/{ws}/tasks/{task}/execute` with
+`source_job_id` (and the source's `raw_input` as `input`), or
+`POST /api/jobs/{id}/restart`.
 
 ## Related
 

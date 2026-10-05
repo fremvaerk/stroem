@@ -11,6 +11,62 @@ use axum::{
 use std::sync::Arc;
 use uuid::Uuid;
 
+/// The state partition a request reads or writes (spec § 7.6): a job's own
+/// `(workspace, task, git_ref)`. Derived on the server from the job, never
+/// from the client's path — a cross-workspace step's worker sends the action
+/// OWNER's workspace there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateCoords {
+    pub workspace: String,
+    pub task_name: String,
+    pub git_ref: Option<String>,
+}
+
+impl StateCoords {
+    pub fn of_job(job: &stroem_db::JobRow) -> Self {
+        StateCoords {
+            workspace: job.workspace.clone(),
+            task_name: job.task_name.clone(),
+            git_ref: job.git_ref.clone(),
+        }
+    }
+
+    /// An old worker's download (no `job_id`): the path, NULL partition.
+    pub fn from_path(workspace: &str, task_name: &str) -> Self {
+        StateCoords {
+            workspace: workspace.to_string(),
+            task_name: task_name.to_string(),
+            git_ref: None,
+        }
+    }
+}
+
+/// `?job_id=` on state downloads.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct StateDownloadQuery {
+    #[serde(default)]
+    pub job_id: Option<Uuid>,
+}
+
+async fn load_job(state: &AppState, job_id: Uuid) -> Result<stroem_db::JobRow, AppError> {
+    stroem_db::JobRepo::get(&state.pool, job_id)
+        .await
+        .context("lookup job for state request")?
+        .ok_or_else(|| AppError::NotFound(format!("Job {} not found", job_id)))
+}
+
+async fn download_coords(
+    state: &AppState,
+    path_workspace: &str,
+    path_task: &str,
+    job_id: Option<Uuid>,
+) -> Result<StateCoords, AppError> {
+    match job_id {
+        Some(id) => Ok(StateCoords::of_job(&load_job(state, id).await?)),
+        None => Ok(StateCoords::from_path(path_workspace, path_task)),
+    }
+}
+
 /// GET /worker/global-state/{ws} — Download the latest global workspace state snapshot.
 ///
 /// Returns `200 OK` with `Content-Type: application/gzip` and an
@@ -25,15 +81,21 @@ use uuid::Uuid;
 pub async fn download_global_state(
     State(state): State<Arc<AppState>>,
     Path(workspace): Path<String>,
+    Query(query): Query<StateDownloadQuery>,
 ) -> Result<impl IntoResponse, AppError> {
     let storage = state
         .state_storage
         .as_ref()
         .ok_or_else(|| AppError::NotFound("State storage not configured".into()))?;
 
-    let snapshot = match stroem_db::WorkspaceStateRepo::get_latest(&state.pool, &workspace)
-        .await
-        .context("lookup latest global state snapshot")?
+    let coords = download_coords(&state, &workspace, "", query.job_id).await?;
+    let snapshot = match stroem_db::WorkspaceStateRepo::get_latest_for_ref(
+        &state.pool,
+        &coords.workspace,
+        coords.git_ref.as_deref(),
+    )
+    .await
+    .context("lookup latest global state snapshot")?
     {
         Some(s) => s,
         None => return Ok(StatusCode::NO_CONTENT.into_response()),
@@ -76,15 +138,14 @@ pub async fn download_global_state(
 /// - State storage is not configured.
 /// - The referenced job does not exist.
 ///
-/// The upload is rejected with `400 Bad Request` when the job does not
-/// belong to the specified workspace.
+/// The partition is the job's own `(workspace, ref)`, not the path's.
 ///
 /// Old snapshots beyond the configured retention limit are pruned from
 /// both the DB and the archive backend (best-effort, in the background).
 #[tracing::instrument(skip(state, body))]
 pub async fn upload_global_state(
     State(state): State<Arc<AppState>>,
-    Path((workspace, job_id)): Path<(String, Uuid)>,
+    Path((_path_workspace, job_id)): Path<(String, Uuid)>,
     Query(query): Query<UploadStateQuery>,
     body: Bytes,
 ) -> Result<impl IntoResponse, AppError> {
@@ -93,20 +154,12 @@ pub async fn upload_global_state(
         .as_ref()
         .ok_or_else(|| AppError::NotFound("State storage not configured".into()))?;
 
-    // Validate the job exists and belongs to this workspace.
-    let job = stroem_db::JobRepo::get(&state.pool, job_id)
-        .await
-        .context("lookup job for global state upload")?
-        .ok_or_else(|| AppError::NotFound(format!("Job {} not found", job_id)))?;
-
-    if job.workspace != workspace {
-        return Err(AppError::BadRequest(
-            "Job does not belong to this workspace".into(),
-        ));
-    }
+    // The job, not the path, decides the partition (spec § 7.6).
+    let job = load_job(&state, job_id).await?;
+    let coords = StateCoords::of_job(&job);
 
     // Build storage key and persist the bytes.
-    let key = storage.global_storage_key(&workspace, job_id);
+    let key = storage.global_storage_key(&coords.workspace, job_id);
     storage
         .store(&key, &body)
         .await
@@ -133,9 +186,10 @@ pub async fn upload_global_state(
         }
     };
 
-    let (snapshot_id, deleted_keys) = match stroem_db::WorkspaceStateRepo::insert_and_prune(
+    let (snapshot_id, deleted_keys) = match stroem_db::WorkspaceStateRepo::insert_and_prune_for_ref(
         &mut tx,
-        &workspace,
+        &coords.workspace,
+        coords.git_ref.as_deref(),
         &job.task_name,
         job_id,
         &key,
@@ -187,7 +241,7 @@ pub async fn upload_global_state(
     }
 
     tracing::info!(
-        workspace = %workspace,
+        workspace = %coords.workspace,
         task_name = %job.task_name,
         %job_id,
         bytes = body.len(),
@@ -306,6 +360,34 @@ mod tests {
         let result = extract_state_json(&tarball);
         assert_eq!(result, Some(serde_json::json!({"nested": true})));
     }
+
+    #[test]
+    fn state_coords_of_job_uses_the_jobs_own_partition() {
+        let mut job = stroem_db::JobRow::test_default();
+        job.workspace = "etl".to_string();
+        job.task_name = "nightly".to_string();
+        job.git_ref = Some("release/2.3".to_string());
+        assert_eq!(
+            StateCoords::of_job(&job),
+            StateCoords {
+                workspace: "etl".to_string(),
+                task_name: "nightly".to_string(),
+                git_ref: Some("release/2.3".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn state_coords_from_path_is_the_null_partition() {
+        assert_eq!(
+            StateCoords::from_path("billing", "export"),
+            StateCoords {
+                workspace: "billing".to_string(),
+                task_name: "export".to_string(),
+                git_ref: None,
+            }
+        );
+    }
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -329,15 +411,22 @@ pub struct UploadStateQuery {
 pub async fn download_state(
     State(state): State<Arc<AppState>>,
     Path((workspace, task_name)): Path<(String, String)>,
+    Query(query): Query<StateDownloadQuery>,
 ) -> Result<impl IntoResponse, AppError> {
     let storage = state
         .state_storage
         .as_ref()
         .ok_or_else(|| AppError::NotFound("State storage not configured".into()))?;
 
-    let snapshot = match stroem_db::TaskStateRepo::get_latest(&state.pool, &workspace, &task_name)
-        .await
-        .context("lookup latest state snapshot")?
+    let coords = download_coords(&state, &workspace, &task_name, query.job_id).await?;
+    let snapshot = match stroem_db::TaskStateRepo::get_latest_for_ref(
+        &state.pool,
+        &coords.workspace,
+        &coords.task_name,
+        coords.git_ref.as_deref(),
+    )
+    .await
+    .context("lookup latest state snapshot")?
     {
         Some(s) => s,
         None => return Ok(StatusCode::NO_CONTENT.into_response()),
@@ -380,15 +469,14 @@ pub async fn download_state(
 /// - State storage is not configured.
 /// - The referenced job does not exist.
 ///
-/// The upload is rejected with `400 Bad Request` when the job does not
-/// belong to the specified workspace and task.
+/// The partition is the job's own `(workspace, task, ref)`, not the path's.
 ///
 /// Old snapshots beyond the configured retention limit are pruned from
 /// both the DB and the archive backend (best-effort, in the background).
 #[tracing::instrument(skip(state, body))]
 pub async fn upload_state(
     State(state): State<Arc<AppState>>,
-    Path((workspace, task_name, job_id)): Path<(String, String, Uuid)>,
+    Path((_path_workspace, _path_task, job_id)): Path<(String, String, Uuid)>,
     Query(query): Query<UploadStateQuery>,
     body: Bytes,
 ) -> Result<impl IntoResponse, AppError> {
@@ -397,20 +485,14 @@ pub async fn upload_state(
         .as_ref()
         .ok_or_else(|| AppError::NotFound("State storage not configured".into()))?;
 
-    // Validate the job exists and belongs to this workspace + task.
-    let job = stroem_db::JobRepo::get(&state.pool, job_id)
-        .await
-        .context("lookup job for state upload")?
-        .ok_or_else(|| AppError::NotFound(format!("Job {} not found", job_id)))?;
-
-    if job.workspace != workspace || job.task_name != task_name {
-        return Err(AppError::BadRequest(
-            "Job does not belong to this workspace/task".into(),
-        ));
-    }
+    // The job, not the path, decides the partition (spec § 7.6). A
+    // cross-workspace step's worker sends the action owner's workspace in
+    // the path; that used to answer 400 and lose the state.
+    let job = load_job(&state, job_id).await?;
+    let coords = StateCoords::of_job(&job);
 
     // Build storage key and persist the bytes.
-    let key = storage.storage_key(&workspace, &task_name, job_id);
+    let key = storage.storage_key(&coords.workspace, &coords.task_name, job_id);
     storage
         .store(&key, &body)
         .await
@@ -437,10 +519,11 @@ pub async fn upload_state(
         }
     };
 
-    let (snapshot_id, deleted_keys) = match stroem_db::TaskStateRepo::insert_and_prune(
+    let (snapshot_id, deleted_keys) = match stroem_db::TaskStateRepo::insert_and_prune_for_ref(
         &mut tx,
-        &workspace,
-        &task_name,
+        &coords.workspace,
+        &coords.task_name,
+        coords.git_ref.as_deref(),
         job_id,
         &key,
         body.len() as i64,
@@ -488,8 +571,8 @@ pub async fn upload_state(
     }
 
     tracing::info!(
-        workspace = %workspace,
-        task_name = %task_name,
+        workspace = %coords.workspace,
+        task_name = %coords.task_name,
         %job_id,
         bytes = body.len(),
         has_json = query.has_json,

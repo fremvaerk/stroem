@@ -66,6 +66,7 @@ mod tests {
             flow.insert(
                 format!("step{}", i),
                 FlowStep {
+                    git_ref: None,
                     action: "act".to_string(),
                     name: None,
                     description: None,

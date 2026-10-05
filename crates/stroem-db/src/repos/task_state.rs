@@ -16,47 +16,72 @@ pub struct TaskStateRow {
     pub has_json: bool,
     pub state_json: Option<serde_json::Value>,
     pub created_at: DateTime<Utc>,
+    /// The partition (spec 2026-10-02 § 7.6): the pinned job's ref string, or
+    /// `None` for unpinned jobs and manual uploads.
+    pub git_ref: Option<String>,
+}
+
+const INSERT_SQL: &str = "INSERT INTO task_state (id, workspace, task_name, job_id, storage_key, size_bytes, has_json, state_json, git_ref) \
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8::json, $9)";
+
+const COLUMNS: &str = "id, workspace, task_name, job_id, storage_key, size_bytes, has_json, state_json, created_at, git_ref";
+
+/// `git_ref = $n`, or `git_ref IS NULL` for the unpinned partition. Two shapes
+/// rather than `IS NOT DISTINCT FROM`, so the btree index applies.
+fn partition(param: usize, git_ref: Option<&str>) -> String {
+    match git_ref {
+        Some(_) => format!("git_ref = ${param}"),
+        None => "git_ref IS NULL".to_string(),
+    }
 }
 
 pub struct TaskStateRepo;
 
 impl TaskStateRepo {
-    /// Get the latest snapshot for a workspace+task.
+    /// Latest snapshot of the unpinned partition. See [`Self::get_latest_for_ref`].
     pub async fn get_latest(
         pool: &PgPool,
         workspace: &str,
         task_name: &str,
     ) -> Result<Option<TaskStateRow>> {
-        let row = sqlx::query_as::<_, TaskStateRow>(
-            "SELECT id, workspace, task_name, job_id, storage_key, size_bytes, has_json, state_json, created_at \
-             FROM task_state \
-             WHERE workspace = $1 AND task_name = $2 \
-             ORDER BY created_at DESC, id DESC \
-             LIMIT 1",
-        )
-        .bind(workspace)
-        .bind(task_name)
-        .fetch_optional(pool)
-        .await
-        .context("Failed to get latest task state snapshot")?;
-        Ok(row)
+        Self::get_latest_for_ref(pool, workspace, task_name, None).await
+    }
+
+    /// Latest snapshot of one `(workspace, task, git_ref)` partition.
+    pub async fn get_latest_for_ref(
+        pool: &PgPool,
+        workspace: &str,
+        task_name: &str,
+        git_ref: Option<&str>,
+    ) -> Result<Option<TaskStateRow>> {
+        let sql = format!(
+            "SELECT {COLUMNS} FROM task_state \
+             WHERE workspace = $1 AND task_name = $2 AND {} \
+             ORDER BY created_at DESC, id DESC LIMIT 1",
+            partition(3, git_ref)
+        );
+        let mut q = sqlx::query_as::<_, TaskStateRow>(&sql)
+            .bind(workspace)
+            .bind(task_name);
+        if let Some(r) = git_ref {
+            q = q.bind(r);
+        }
+        q.fetch_optional(pool)
+            .await
+            .context("Failed to get latest task state snapshot")
     }
 
     /// Get a specific snapshot by ID.
     pub async fn get(pool: &PgPool, id: Uuid) -> Result<Option<TaskStateRow>> {
-        let row = sqlx::query_as::<_, TaskStateRow>(
-            "SELECT id, workspace, task_name, job_id, storage_key, size_bytes, has_json, state_json, created_at \
-             FROM task_state \
-             WHERE id = $1",
-        )
-        .bind(id)
-        .fetch_optional(pool)
-        .await
-        .context("Failed to get task state snapshot")?;
-        Ok(row)
+        let sql = format!("SELECT {COLUMNS} FROM task_state WHERE id = $1");
+        sqlx::query_as::<_, TaskStateRow>(&sql)
+            .bind(id)
+            .fetch_optional(pool)
+            .await
+            .context("Failed to get task state snapshot")
     }
 
-    /// Insert a new snapshot record. Returns the generated ID.
+    /// Insert into the unpinned partition. See [`Self::insert_for_ref`].
     #[allow(clippy::too_many_arguments)]
     pub async fn insert(
         pool: &PgPool,
@@ -68,38 +93,52 @@ impl TaskStateRepo {
         has_json: bool,
         state_json: Option<&serde_json::Value>,
     ) -> Result<Uuid> {
+        Self::insert_for_ref(
+            pool,
+            workspace,
+            task_name,
+            None,
+            job_id,
+            storage_key,
+            size_bytes,
+            has_json,
+            state_json,
+        )
+        .await
+    }
+
+    /// Insert a new snapshot record into `git_ref`'s partition. Returns the ID.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_for_ref(
+        pool: &PgPool,
+        workspace: &str,
+        task_name: &str,
+        git_ref: Option<&str>,
+        job_id: Uuid,
+        storage_key: &str,
+        size_bytes: i64,
+        has_json: bool,
+        state_json: Option<&serde_json::Value>,
+    ) -> Result<Uuid> {
         let id = Uuid::new_v4();
         let state_json_text = state_json.map(|v| v.to_string());
-        sqlx::query(
-            "INSERT INTO task_state (id, workspace, task_name, job_id, storage_key, size_bytes, has_json, state_json) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8::json)",
-        )
-        .bind(id)
-        .bind(workspace)
-        .bind(task_name)
-        .bind(job_id)
-        .bind(storage_key)
-        .bind(size_bytes)
-        .bind(has_json)
-        .bind(state_json_text)
-        .execute(pool)
-        .await
-        .context("Failed to insert task state snapshot")?;
+        sqlx::query(INSERT_SQL)
+            .bind(id)
+            .bind(workspace)
+            .bind(task_name)
+            .bind(job_id)
+            .bind(storage_key)
+            .bind(size_bytes)
+            .bind(has_json)
+            .bind(state_json_text)
+            .bind(git_ref)
+            .execute(pool)
+            .await
+            .context("Failed to insert task state snapshot")?;
         Ok(id)
     }
 
-    /// Insert a new snapshot and prune old ones, running both statements against
-    /// the provided transaction.
-    ///
-    /// The caller is responsible for beginning and committing (or rolling back)
-    /// the transaction. This lets callers compose additional SQL statements —
-    /// such as inserting a synthetic job row — in the same atomic unit.
-    ///
-    /// `snapshot_id`: pass `Some(id)` to use a pre-generated UUID (useful when
-    /// the caller needs the ID before calling this method, e.g. to include it in
-    /// a job `output` column). Pass `None` to let the method generate one.
-    ///
-    /// Returns the snapshot UUID and the storage keys of any pruned rows.
+    /// [`Self::insert_and_prune_for_ref`] on the unpinned partition.
     #[allow(clippy::too_many_arguments)]
     pub async fn insert_and_prune<'a>(
         tx: &mut Tx<'a>,
@@ -113,90 +152,121 @@ impl TaskStateRepo {
         keep: usize,
         snapshot_id: Option<Uuid>,
     ) -> Result<(Uuid, Vec<String>)> {
+        Self::insert_and_prune_for_ref(
+            tx,
+            workspace,
+            task_name,
+            None,
+            job_id,
+            storage_key,
+            size_bytes,
+            has_json,
+            state_json,
+            keep,
+            snapshot_id,
+        )
+        .await
+    }
+
+    /// Insert a new snapshot into `git_ref`'s partition and prune that
+    /// partition to `keep`, both against the caller's transaction. Other
+    /// partitions are never touched (spec 2026-10-02 § 7.6).
+    ///
+    /// `snapshot_id`: pass `Some(id)` to use a pre-generated UUID. Returns the
+    /// snapshot UUID and the storage keys of any pruned rows.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_and_prune_for_ref<'a>(
+        tx: &mut Tx<'a>,
+        workspace: &str,
+        task_name: &str,
+        git_ref: Option<&str>,
+        job_id: Uuid,
+        storage_key: &str,
+        size_bytes: i64,
+        has_json: bool,
+        state_json: Option<&serde_json::Value>,
+        keep: usize,
+        snapshot_id: Option<Uuid>,
+    ) -> Result<(Uuid, Vec<String>)> {
         let id = snapshot_id.unwrap_or_else(Uuid::new_v4);
         let state_json_text = state_json.map(|v| v.to_string());
 
-        sqlx::query(
-            "INSERT INTO task_state (id, workspace, task_name, job_id, storage_key, size_bytes, has_json, state_json) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8::json)",
-        )
-        .bind(id)
-        .bind(workspace)
-        .bind(task_name)
-        .bind(job_id)
-        .bind(storage_key)
-        .bind(size_bytes)
-        .bind(has_json)
-        .bind(state_json_text)
-        .execute(&mut **tx)
-        .await
-        .context("Failed to insert task state snapshot")?;
+        sqlx::query(INSERT_SQL)
+            .bind(id)
+            .bind(workspace)
+            .bind(task_name)
+            .bind(job_id)
+            .bind(storage_key)
+            .bind(size_bytes)
+            .bind(has_json)
+            .bind(state_json_text)
+            .bind(git_ref)
+            .execute(&mut **tx)
+            .await
+            .context("Failed to insert task state snapshot")?;
 
-        let deleted_keys = sqlx::query_scalar::<_, String>(
-            "DELETE FROM task_state \
-             WHERE id IN ( \
-                 SELECT id FROM task_state \
-                 WHERE workspace = $1 AND task_name = $2 \
-                 ORDER BY created_at DESC, id DESC \
-                 OFFSET $3 \
-             ) \
-             RETURNING storage_key",
-        )
-        .bind(workspace)
-        .bind(task_name)
-        .bind(keep as i64)
-        .fetch_all(&mut **tx)
-        .await
-        .context("Failed to prune task state snapshots")?;
-
+        let mut q = sqlx::query_scalar::<_, String>(prune_sql(git_ref))
+            .bind(workspace)
+            .bind(task_name)
+            .bind(keep as i64);
+        if let Some(r) = git_ref {
+            q = q.bind(r);
+        }
+        let deleted_keys = q
+            .fetch_all(&mut **tx)
+            .await
+            .context("Failed to prune task state snapshots")?;
         Ok((id, deleted_keys))
     }
 
-    /// List snapshots for a workspace+task ordered by created_at DESC.
+    /// List every snapshot of a workspace+task, all partitions, newest first.
     pub async fn list(
         pool: &PgPool,
         workspace: &str,
         task_name: &str,
     ) -> Result<Vec<TaskStateRow>> {
-        let rows = sqlx::query_as::<_, TaskStateRow>(
-            "SELECT id, workspace, task_name, job_id, storage_key, size_bytes, has_json, state_json, created_at \
-             FROM task_state \
+        let sql = format!(
+            "SELECT {COLUMNS} FROM task_state \
              WHERE workspace = $1 AND task_name = $2 \
-             ORDER BY created_at DESC, id DESC",
-        )
-        .bind(workspace)
-        .bind(task_name)
-        .fetch_all(pool)
-        .await
-        .context("Failed to list task state snapshots")?;
-        Ok(rows)
+             ORDER BY created_at DESC, id DESC"
+        );
+        sqlx::query_as::<_, TaskStateRow>(&sql)
+            .bind(workspace)
+            .bind(task_name)
+            .fetch_all(pool)
+            .await
+            .context("Failed to list task state snapshots")
     }
 
-    /// Delete old snapshots, keeping the N most recent.
-    /// Returns the storage keys of deleted rows so the caller can remove them from the archive.
+    /// [`Self::prune_for_ref`] on the unpinned partition.
     pub async fn prune(
         pool: &PgPool,
         workspace: &str,
         task_name: &str,
         keep: usize,
     ) -> Result<Vec<String>> {
-        let keys = sqlx::query_scalar::<_, String>(
-            "DELETE FROM task_state \
-             WHERE id IN ( \
-                 SELECT id FROM task_state \
-                 WHERE workspace = $1 AND task_name = $2 \
-                 ORDER BY created_at DESC, id DESC \
-                 OFFSET $3 \
-             ) \
-             RETURNING storage_key",
-        )
-        .bind(workspace)
-        .bind(task_name)
-        .bind(keep as i64)
-        .fetch_all(pool)
-        .await
-        .context("Failed to prune task state snapshots")?;
-        Ok(keys)
+        Self::prune_for_ref(pool, workspace, task_name, None, keep).await
+    }
+
+    /// Keep the `keep` newest snapshots of one partition; returns the deleted
+    /// storage keys so the caller can remove them from the archive.
+    pub async fn prune_for_ref(
+        pool: &PgPool,
+        workspace: &str,
+        task_name: &str,
+        git_ref: Option<&str>,
+        keep: usize,
+    ) -> Result<Vec<String>> {
+        let mut q = sqlx::query_scalar::<_, String>(prune_sql(git_ref))
+            .bind(workspace)
+            .bind(task_name)
+            .bind(keep as i64);
+        if let Some(r) = git_ref {
+            q = q.bind(r);
+        }
+        q.fetch_all(pool)
+            .await
+            .context("Failed to prune task state snapshots")
     }
 
     /// Delete all snapshots for a task.
@@ -217,5 +287,27 @@ impl TaskStateRepo {
         .await
         .context("Failed to delete all task state snapshots")?;
         Ok(keys)
+    }
+}
+
+/// The prune statement for one partition: `$1` workspace, `$2` task, `$3`
+/// keep, and `$4` git_ref only for `Some`. Two `'static` shapes rather than
+/// `IS NOT DISTINCT FROM`, so the btree index applies.
+fn prune_sql(git_ref: Option<&str>) -> &'static str {
+    match git_ref {
+        Some(_) => {
+            "DELETE FROM task_state WHERE id IN ( \
+                 SELECT id FROM task_state \
+                 WHERE workspace = $1 AND task_name = $2 AND git_ref = $4 \
+                 ORDER BY created_at DESC, id DESC OFFSET $3) \
+             RETURNING storage_key"
+        }
+        None => {
+            "DELETE FROM task_state WHERE id IN ( \
+                 SELECT id FROM task_state \
+                 WHERE workspace = $1 AND task_name = $2 AND git_ref IS NULL \
+                 ORDER BY created_at DESC, id DESC OFFSET $3) \
+             RETURNING storage_key"
+        }
     }
 }

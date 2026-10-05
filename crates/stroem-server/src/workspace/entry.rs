@@ -3,7 +3,7 @@
 //! published snapshot (clone/swap an `Arc`). Readers touch ONLY the snapshot.
 
 use super::availability::{transition, Availability, Caller, Effect, Event, Policy};
-use super::library::{merge_library_into_workspace, ResolvedLibrary};
+use super::library::{merge_libraries_into_workspace, ResolvedLibrary};
 use super::source::{LoadOutcome, WorkspaceSource};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -159,9 +159,7 @@ impl WorkspaceEntry {
                  warnings,
                  revision,
              }| {
-                for lib in libs.values() {
-                    merge_library_into_workspace(&mut config, lib);
-                }
+                merge_libraries_into_workspace(&mut config, libs);
                 if !warnings.is_empty() {
                     tracing::warn!(
                         "Workspace '{}': {} file(s) skipped due to errors",

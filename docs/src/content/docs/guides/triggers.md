@@ -50,6 +50,15 @@ Extended features (via the `croner` library):
 - Jobs created by triggers have `source_type: "trigger"` and `source_id: "{workspace}/{trigger_name}"` for audit trail.
 - If the server was down when a trigger was due, it fires on the next startup.
 
+A trigger's `task` may name another workspace's task (`ws.task`), and may
+carry a `ref` — see [Git Refs](/guides/git-refs/). Such a trigger creates its
+job in the task's owner workspace (at that commit, with `ref`). The ref is
+resolved when the trigger fires, before the concurrency policy; a fire that
+cannot resolve its task or ref is logged as `Trigger '…' MISSED: …` and has
+no other effect (no `cancel_previous`, no skipped row). The concurrency
+policy and `source_id` stay keyed on the **defining** workspace's trigger,
+and `triggers: false` on the defining workspace still suppresses it.
+
 ### Concurrency policy
 
 Control what happens when a trigger fires while a previous run is still active:
@@ -105,7 +114,8 @@ Common timezone examples:
 |-------|----------|-------------|
 | `type` | Yes | `scheduler` |
 | `cron` | Yes | Cron expression (5 or 6 fields) |
-| `task` | Yes | Name of the task to execute |
+| `task` | Yes | Name of the task to execute. May be another workspace's task (`ws.task`) |
+| `ref` | No | Branch, tag or full commit SHA of the task's owner workspace to run the task from — see [Git Refs](/guides/git-refs/) |
 | `input` | No | Input values passed to the task |
 | `timezone` | No | IANA timezone name (default: `"UTC"`). Example: `"Europe/Copenhagen"` |
 | `concurrency` | No | What to do when previous runs are active: `allow` (default), `skip`, `cancel_previous` |
@@ -158,6 +168,18 @@ curl -X POST http://localhost:8080/hooks/public-hook \
 - If the trigger has a `secret` field, callers must provide it via `?secret=xxx` query parameter or `Authorization: Bearer xxx` header.
 - If no `secret` is configured, the webhook is public.
 - Invalid or missing secrets return `401 Unauthorized`.
+- With `force_refresh: true`, the caller is authenticated against the
+  definition the server has loaded **before** the workspace is reloaded, so
+  an unauthenticated caller can never trigger a git fetch. After the reload
+  the webhook is matched again (gone → `404`) and the caller is
+  authenticated again against the refreshed `secret`; the job is created
+  from the refreshed definition, so a changed `task` or `ref` takes effect.
+  A secret that was rotated in git is therefore accepted only once the
+  server has loaded it (its watcher poll, or an earlier refresh). A reload
+  that leaves the workspace unavailable answers `500`.
+- An unknown task, a bad or missing `ref` and similar configuration errors
+  answer `400`; a transient problem (for example, the git server is
+  unreachable) answers `500`.
 
 ### Input structure
 
@@ -185,7 +207,8 @@ The webhook handler wraps the entire HTTP request into a structured input map:
 |-------|----------|-------------|
 | `type` | Yes | `webhook` |
 | `name` | Yes | URL-safe name (alphanumeric, hyphens, underscores) |
-| `task` | Yes | Name of the task to execute |
+| `task` | Yes | Name of the task to execute. May be another workspace's task (`ws.task`) |
+| `ref` | No | Branch, tag or full commit SHA of the task's owner workspace to run the task from — see [Git Refs](/guides/git-refs/) |
 | `secret` | No | Secret for authentication |
 | `input` | No | Default input values merged with request data |
 | `enabled` | No | Whether the trigger is active (default: `true`) |
@@ -220,6 +243,13 @@ HTTP status: `200 OK`.
 }
 ```
 HTTP status: `202 Accepted` — use the `job_id` to poll manually.
+
+The `output` of a sync response, and of the job-status poll below, is
+masked like job detail: workspace secrets (and the secrets of any
+[pinned commit](/guides/git-refs/#secrets-and-redaction) the job is connected
+to) appear as `••••••`. If those secrets cannot be loaded at the moment, the
+answer is `503` with `{"job_id": "...", "error": "redaction set unavailable,
+retry"}` — the job exists; poll it again later.
 
 ### Checking async job status
 

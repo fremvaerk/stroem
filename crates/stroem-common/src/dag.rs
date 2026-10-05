@@ -130,6 +130,7 @@ mod tests {
         depends_on: Vec<crate::depends_on::DependsOnEntry>,
     ) -> FlowStep {
         FlowStep {
+            git_ref: None,
             action: action.to_string(),
             name: None,
             description: None,

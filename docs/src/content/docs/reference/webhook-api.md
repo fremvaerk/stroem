@@ -26,6 +26,14 @@ If the webhook trigger has a `secret` configured, the caller must provide it via
 
 Webhooks without a `secret` are public and accept any request.
 
+For a webhook with `force_refresh: true`, the secret is checked twice: first
+against the definition the server has loaded, **before** the workspace is
+reloaded (an unauthenticated caller never triggers a git fetch), then
+against the refreshed definition. The job is created from the refreshed
+definition, so a refresh that changed the webhook's `task` or `ref` takes
+effect at once. A secret newly rotated in git is accepted only after the
+server has loaded it.
+
 ### Request body (POST)
 
 The body is included in the job input. JSON bodies (with `Content-Type: application/json`) are parsed; other content types are passed as a raw string.
@@ -39,6 +47,15 @@ The body is included in the job input. JSON bodies (with `Content-Type: applicat
   "task": "ci-pipeline"
 }
 ```
+
+The job is created in the workspace that owns the trigger's `task` — another
+workspace for `task: ws.task` — at the trigger's `ref`, if it has one (see
+[Git Refs](/guides/git-refs/)).
+
+In `mode: sync`, the response also carries `status` and `output` once the
+job finishes (`200`), or `status: "running"` without `output` on timeout
+(`202`). `output` is masked like job detail: secret values appear as
+`••••••`.
 
 ### Input structure
 
@@ -67,8 +84,11 @@ Trigger YAML `input` defaults merge at the top level. Reserved keys (`body`, `he
 
 | Status | Description |
 |--------|-------------|
+| `400` | The trigger's target cannot be resolved: unknown task or workspace, a `ref` that does not exist or is invalid, a task missing at the ref, YAML at the ref that does not load |
 | `401` | Missing or invalid secret |
-| `404` | Webhook not found or disabled |
+| `404` | Webhook not found or disabled — including a webhook removed by its own `force_refresh` |
+| `500` | The workspace is unavailable after `force_refresh`, a transient failure resolving the target (for example, the git server is unreachable), or another job-creation error |
+| `503` | Sync mode only: the job finished, but the secrets needed to mask its output cannot be loaded right now. The body is `{"job_id": "...", "error": "redaction set unavailable, retry"}`; poll the job-status endpoint later |
 
 ### Examples
 
@@ -140,7 +160,7 @@ Same as the trigger endpoint — provide the `secret` via query parameter or `Au
 | `trigger` | string | Webhook trigger name |
 | `task` | string | Target task name |
 | `status` | string | `pending`, `running`, `completed`, `failed`, or `cancelled` |
-| `output` | object/null | Job output (only populated for completed jobs) |
+| `output` | object/null | Job output (only populated for completed jobs), with secret values masked as `••••••` |
 | `created_at` | string | ISO 8601 timestamp of job creation |
 | `completed_at` | string/null | ISO 8601 timestamp of job completion (null if still running) |
 
@@ -150,10 +170,22 @@ Same as the trigger endpoint — provide the `secret` via query parameter or `Au
 - `400 Bad Request` — Invalid job ID format
 - `401 Unauthorized` — Missing or invalid secret
 - `404 Not Found` — Webhook not found, or job was not created by this webhook
+- `503 Service Unavailable` — The secrets needed to mask the job's output cannot be loaded right now (a [pinned commit](/guides/git-refs/#secrets-and-redaction) the job is connected to is unreachable). The body is `{"job_id": "...", "error": "redaction set unavailable, retry"}`; retry later
+
+Every response that carries job data (including the `503`) has `Cache-Control: no-store`.
+
+`output` is masked with the same secret set as `GET /api/jobs/{id}`. When a
+pinned commit the job is connected to can never be loaded again (for
+example, it was force-pushed away), the answer is `200` with every string in
+`output` masked.
 
 ### Security
 
 This endpoint only returns jobs with `source_type = "webhook"` and a matching `source_id` for the trigger. It cannot be used to query arbitrary jobs.
+
+It is authenticated by the webhook's own secret, not by user ACL: anyone
+holding the secret can read the status and (masked) output of the jobs that
+webhook created, whatever task folder they run in.
 
 ### Examples
 

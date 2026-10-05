@@ -4,10 +4,13 @@ pub mod repos;
 // Re-export commonly used items
 pub use pool::{create_pool, run_migrations};
 pub use repos::api_key::{ApiKeyRepo, ApiKeyRow};
-pub use repos::job::{DurationStatsRow, JobRepo, JobRow, RecentDurationRow, RetentionJobInfo};
+pub use repos::job::{
+    ClosureBounds, ClosurePinRow, DurationStatsRow, JobAclScope, JobPinCols, JobRepo, JobRow,
+    RecentDurationRow, RedactionClosure, RetentionJobInfo, StalledPinnedJob,
+};
 pub use repos::job_step::{
-    FailOutcome, JobStepRepo, JobStepRow, NewJobStep, Seed, StaleStepInfo, StepDurationStatsRow,
-    WorkerStepRow,
+    ClaimIdentity, FailOutcome, JobStepRepo, JobStepRow, NewJobStep, ReleaseOutcome, Seed,
+    StaleStepInfo, StepDurationStatsRow, WorkerStepRow,
 };
 pub use repos::oauth_authorization_code::{OAuthAuthorizationCodeRepo, OAuthAuthorizationCodeRow};
 pub use repos::oauth_client::{OAuthClientRepo, OAuthClientRow};

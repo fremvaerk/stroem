@@ -69,6 +69,7 @@ fn setup_state(
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
     let mgr = WorkspaceManager::from_config("default", workspace_config);
     let log_storage = LogStorage::new(log_dir);
@@ -84,6 +85,7 @@ fn make_workspace_config() -> WorkspaceConfig {
     actions.insert(
         "noop".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "script".to_string(),
             name: None,
             description: None,
@@ -122,6 +124,7 @@ fn make_workspace_config() -> WorkspaceConfig {
     actions.insert(
         "run-child-action".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "task".to_string(),
             name: None,
             description: None,
@@ -162,6 +165,7 @@ fn make_workspace_config() -> WorkspaceConfig {
     parent_flow.insert(
         "run-child".to_string(),
         FlowStep {
+            git_ref: None,
             action: "run-child-action".to_string(),
             name: None,
             description: None,
@@ -182,6 +186,7 @@ fn make_workspace_config() -> WorkspaceConfig {
     child_flow.insert(
         "do-work".to_string(),
         FlowStep {
+            git_ref: None,
             action: "noop".to_string(),
             name: None,
             description: None,
@@ -255,6 +260,10 @@ fn make_workspace_config() -> WorkspaceConfig {
 /// A NewJobStep with task-type action (the parent's "run-child" step).
 fn task_step(job_id: Uuid, name: &str) -> NewJobStep {
     NewJobStep {
+        action_ref: None,
+        task_workspace: None,
+        task_ref: None,
+        task_revision: None,
         job_id,
         step_name: name.to_string(),
         action_name: "run-child-action".to_string(),
@@ -285,6 +294,10 @@ fn task_step(job_id: Uuid, name: &str) -> NewJobStep {
 /// A NewJobStep with shell-type action (the child's "do-work" step).
 fn shell_step(job_id: Uuid, name: &str, status: &str) -> NewJobStep {
     NewJobStep {
+        action_ref: None,
+        task_workspace: None,
+        task_ref: None,
+        task_revision: None,
         job_id,
         step_name: name.to_string(),
         action_name: "noop".to_string(),
@@ -563,6 +576,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
     actions.insert(
         "noop".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "script".to_string(),
             name: None,
             description: None,
@@ -605,6 +619,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
         actions.insert(
             action_name.to_string(),
             ActionDef {
+                git_ref: None,
                 action_type: "task".to_string(),
                 name: None,
                 description: None,
@@ -648,6 +663,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
     gp_flow.insert(
         "run-parent".to_string(),
         FlowStep {
+            git_ref: None,
             action: "run-parent-action".to_string(),
             name: None,
             description: None,
@@ -686,6 +702,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
     p_flow.insert(
         "run-child".to_string(),
         FlowStep {
+            git_ref: None,
             action: "run-child-action".to_string(),
             name: None,
             description: None,
@@ -724,6 +741,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
     c_flow.insert(
         "do-work".to_string(),
         FlowStep {
+            git_ref: None,
             action: "noop".to_string(),
             name: None,
             description: None,
@@ -832,6 +850,10 @@ async fn deep_nesting_three_levels() -> Result<()> {
     JobStepRepo::create_steps(
         &pool,
         &[NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id: gp_job_id,
             step_name: "run-parent".to_string(),
             action_name: "run-parent-action".to_string(),
@@ -864,6 +886,10 @@ async fn deep_nesting_three_levels() -> Result<()> {
     JobStepRepo::create_steps(
         &pool,
         &[NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id: p_job_id,
             step_name: "run-child".to_string(),
             action_name: "run-child-action".to_string(),
@@ -943,6 +969,7 @@ async fn parent_with_mixed_steps() -> Result<()> {
     actions.insert(
         "noop".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "script".to_string(),
             name: None,
             description: None,
@@ -981,6 +1008,7 @@ async fn parent_with_mixed_steps() -> Result<()> {
     actions.insert(
         "run-child-action".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "task".to_string(),
             name: None,
             description: None,
@@ -1021,6 +1049,7 @@ async fn parent_with_mixed_steps() -> Result<()> {
     parent_flow.insert(
         "shell-step".to_string(),
         FlowStep {
+            git_ref: None,
             action: "noop".to_string(),
             name: None,
             description: None,
@@ -1039,6 +1068,7 @@ async fn parent_with_mixed_steps() -> Result<()> {
     parent_flow.insert(
         "task-step".to_string(),
         FlowStep {
+            git_ref: None,
             action: "run-child-action".to_string(),
             name: None,
             description: None,
@@ -1059,6 +1089,7 @@ async fn parent_with_mixed_steps() -> Result<()> {
     child_flow.insert(
         "do-work".to_string(),
         FlowStep {
+            git_ref: None,
             action: "noop".to_string(),
             name: None,
             description: None,
@@ -1150,6 +1181,10 @@ async fn parent_with_mixed_steps() -> Result<()> {
         &[
             shell_step(parent_job_id, "shell-step", "ready"),
             NewJobStep {
+                action_ref: None,
+                task_workspace: None,
+                task_ref: None,
+                task_revision: None,
                 job_id: parent_job_id,
                 step_name: "task-step".to_string(),
                 action_name: "run-child-action".to_string(),

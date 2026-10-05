@@ -1,6 +1,8 @@
 use super::rendering;
 use crate::state::AppState;
 use crate::web::error::AppError;
+use crate::workspace::pins::{PinError, PinRef};
+use crate::workspace::ConfigHandle;
 use anyhow::Context;
 use axum::{
     extract::{Path, State},
@@ -12,7 +14,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
 use stroem_common::secret::{into_exposed, Secret};
-use stroem_db::{JobRepo, JobStepRepo, WorkerRepo};
+use stroem_db::{
+    ClaimIdentity, JobRepo, JobRow, JobStepRepo, JobStepRow, ReleaseOutcome, WorkerRepo,
+};
 use uuid::Uuid;
 
 #[derive(Debug, Deserialize)]
@@ -165,6 +169,38 @@ pub struct ClaimResponse {
     /// in Tera templates.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub global_state_has_json: Option<bool>,
+}
+
+impl ClaimResponse {
+    /// "No work for you": every field `None`. Also the answer to a released
+    /// claim (spec § 7.2) — the worker simply polls again.
+    fn no_work() -> Self {
+        Self {
+            workspace: None,
+            job_id: None,
+            task_name: None,
+            step_name: None,
+            action_name: None,
+            action_type: None,
+            action_image: None,
+            action_spec: None,
+            input: None,
+            runner: None,
+            timeout_secs: None,
+            revision: None,
+            agent_provider_name: None,
+            agent_prompt: None,
+            agent_system_prompt: None,
+            mcp_servers: None,
+            agent_state: None,
+            agent_tool_tasks: None,
+            event_source_config: None,
+            state_storage_key: None,
+            state_has_json: None,
+            global_state_storage_key: None,
+            global_state_has_json: None,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -359,6 +395,38 @@ pub async fn heartbeat(
     Ok(Json(json!({"status": "ok"})))
 }
 
+/// Spec § 7.2: a step whose pin is unavailable on this replica is released
+/// back to `ready` at most this many times, then fails (a job with no
+/// timeout would otherwise loop forever on a dead remote).
+pub(crate) const MAX_PIN_RELEASES: i32 = 30;
+/// Delay before a released step may be claimed again.
+pub(crate) const PIN_RELEASE_RETRY_SECS: i64 = 10;
+
+/// What `fail_claimed_step` needs besides the message (spec § 7.2, § 7.4).
+struct ClaimFailure<'a> {
+    /// The claim this request holds: the failure applies only while the row
+    /// is still this claim (`fail_or_retry`'s `expected_claim`).
+    claim: ClaimIdentity,
+    /// Redaction values of every pin this claim loaded (job pin, step owner
+    /// pin) — the live set alone misses a value that exists only at a ref.
+    pin_secrets: &'a [String],
+    /// Value-free sentence (`rendering::withheld_owner_error`) persisted,
+    /// logged and returned INSTEAD of the error: an owner-side render error
+    /// across a workspace boundary (spec § 7.2).
+    withheld: Option<String>,
+}
+
+/// The live redaction values (`ws_set`) plus every loaded pin's: the
+/// per-job set a claim-time message is scrubbed with (spec § 7.4, § 9).
+fn claim_redaction_values(
+    ws_set: &crate::workspace_set::WorkspaceSet<'_>,
+    pin_secrets: &[String],
+) -> Vec<String> {
+    let mut values = crate::workspace_set::collect_redaction_values(ws_set);
+    values.extend_from_slice(pin_secrets);
+    values
+}
+
 /// Fail a step that was claimed but couldn't be rendered.
 /// Marks the step as failed, logs the error, and triggers orchestration.
 async fn fail_claimed_step(
@@ -367,29 +435,33 @@ async fn fail_claimed_step(
     step_name: &str,
     error_msg: &str,
     ws_set: &crate::workspace_set::WorkspaceSet<'_>,
+    failure: &ClaimFailure<'_>,
 ) -> Response {
     // Tera quotes the offending value in filter/type errors, so a render error
     // touching `{{ secret.* }}` embeds the secret verbatim. Scrub it here, at
     // the single choke point every claim-time render failure passes through:
     // everything below persists or returns this string (job log,
     // `job_step.error_message`, `retry_history`, the 422 body), and only
-    // `error_message` is masked again on read.
-    let secret_values = crate::workspace_set::collect_redaction_values(ws_set);
-    let error_msg = &crate::workspace_set::redact_secrets_in_str(error_msg, &secret_values)[..];
+    // `error_message` is masked again on read. The pins' own values join the
+    // live set (spec § 7.4): a secret that exists only at a ref is not in it.
+    let secret_values = claim_redaction_values(ws_set, failure.pin_secrets);
+    let scrubbed = crate::workspace_set::redact_secrets_in_str(error_msg, &secret_values);
 
     tracing::error!(
         job_id = %job_id,
         step_name = %step_name,
         "Template rendering failed at claim time: {}",
-        error_msg
+        scrubbed
     );
-    state.append_server_log(job_id, error_msg).await;
+    let shown: &str = failure.withheld.as_deref().unwrap_or(&scrubbed);
+    state.append_server_log(job_id, shown).await;
 
     // Failure, retry decision and orchestration in one call: a retried step is
-    // `ready` again and needs no orchestration.
+    // `ready` again and needs no orchestration. Applies only while the row is
+    // still this running claim (a sweep may have moved it on meanwhile).
     if let Err(e) = state
         .settlement()
-        .step_failed(job_id, step_name, error_msg, &[])
+        .claimed_step_failed(job_id, step_name, shown, Some(failure.claim))
         .await
     {
         let orch_msg = format!("Failed to orchestrate after render failure: {:#}", e);
@@ -399,7 +471,7 @@ async fn fail_claimed_step(
 
     (
         StatusCode::UNPROCESSABLE_ENTITY,
-        Json(json!({"error": error_msg})),
+        Json(json!({"error": shown})),
     )
         .into_response()
 }
@@ -413,6 +485,7 @@ async fn fail_claimed_step_with_collisions(
     step_name: &str,
     error_msg: &str,
     ws_set: &crate::workspace_set::WorkspaceSet<'_>,
+    failure: &ClaimFailure<'_>,
     mut collision_lines: Vec<String>,
 ) -> Response {
     collision_lines.sort();
@@ -421,7 +494,323 @@ async fn fail_claimed_step_with_collisions(
         state.append_server_log(job_id, line).await;
         tracing::warn!(job_id = %job_id, "{line}");
     }
-    fail_claimed_step(state, job_id, step_name, error_msg, ws_set).await
+    fail_claimed_step(state, job_id, step_name, error_msg, ws_set, failure).await
+}
+
+/// Spec § 7.2: a pin this claim needs could not be loaded on this replica.
+/// Transient (`PinError::is_transient`) → release the claim back to `ready`
+/// instead of failing the job; permanent → fail the step like any claim-time
+/// failure. `ws` / `pin` name the config that failed (job pin or step pin);
+/// `err` comes from `config_for_user`, so a `PinLoadFailed` is already its
+/// fixed, value-free sentence. `failure.pin_secrets` holds the redaction
+/// values of the pins this claim DID load (F37: the job pin when a step pin
+/// fails); the message is scrubbed with them and the live set.
+async fn pin_failure(
+    state: &Arc<AppState>,
+    job: &JobRow,
+    step: &JobStepRow,
+    ws: &str,
+    pin: Option<&PinRef>,
+    failure: &ClaimFailure<'_>,
+    err: anyhow::Error,
+) -> Result<Response, AppError> {
+    let label = match pin {
+        Some(p) => crate::workspace::pins::pin_label(ws, p),
+        None => ws.to_string(),
+    };
+    let ws_set =
+        crate::workspace_set::WorkspaceSet::load(&state.workspaces, &job.workspace, None).await;
+    let transient = err
+        .downcast_ref::<PinError>()
+        .is_some_and(PinError::is_transient);
+
+    if !transient {
+        let msg = match pin {
+            Some(p) => crate::workspace::pins::cannot_be_loaded(ws, p, &err),
+            None => format!("[pin] {label} cannot be loaded: {err:#}"),
+        };
+        return Ok(
+            fail_claimed_step(state, job.job_id, &step.step_name, &msg, &ws_set, failure).await,
+        );
+    }
+    let secrets = claim_redaction_values(&ws_set, failure.pin_secrets);
+    let detail = crate::workspace_set::redact_secrets_in_str(&format!("{err:#}"), &secrets);
+
+    let outcome = JobStepRepo::release_claim(
+        &state.pool,
+        job.job_id,
+        &step.step_name,
+        failure.claim,
+        chrono::Duration::seconds(PIN_RELEASE_RETRY_SECS),
+        MAX_PIN_RELEASES,
+    )
+    .await
+    .context("release claim after pin failure")?;
+
+    match outcome {
+        ReleaseOutcome::Released => {
+            let line =
+                format!("[pin] {label} not available yet on this server, retrying: {detail}");
+            tracing::warn!(job_id = %job.job_id, step_name = %step.step_name, "{line}");
+            state.append_server_log(job.job_id, &line).await;
+            Ok(Json(ClaimResponse::no_work()).into_response())
+        }
+        ReleaseOutcome::Cancelled => {
+            state
+                .append_server_log(
+                    job.job_id,
+                    &format!(
+                        "[pin] {label} not available and the job was cancelled; step '{}' cancelled",
+                        step.step_name
+                    ),
+                )
+                .await;
+            // The step (and its unclaimed siblings) are terminal now: let the
+            // drain gate see it and run terminal handling.
+            if let Err(e) = state
+                .settlement()
+                .step_settled(job.job_id, &step.step_name)
+                .await
+            {
+                tracing::error!(job_id = %job.job_id, "settle after cancelled release: {:#}", e);
+            }
+            Ok(Json(ClaimResponse::no_work()).into_response())
+        }
+        ReleaseOutcome::CapReached => {
+            let msg = format!(
+                "[pin] {label} still unavailable after {MAX_PIN_RELEASES} attempts: {detail}"
+            );
+            Ok(fail_claimed_step(state, job.job_id, &step.step_name, &msg, &ws_set, failure).await)
+        }
+        ReleaseOutcome::NotApplied => Ok(Json(ClaimResponse::no_work()).into_response()),
+    }
+}
+
+/// The configs a claim renders with (spec § 7.2 table), plus the redaction
+/// values of every pin among them.
+struct ClaimConfigs {
+    ws_handle: Option<ConfigHandle>,
+    owner_handle: Option<ConfigHandle>,
+    /// The owner config IS the job's: a local step, or the job's own
+    /// workspace at the job's own pin (live, or a self-qualified name that
+    /// inherits the job pin — `action_ref` set does not mean "explicitly
+    /// ref'd", F36).
+    owner_is_job_config: bool,
+    /// R5: the complete redaction values of every pin loaded — secrets plus
+    /// `secret: true` connection properties, whichever workspace types the
+    /// connection — not a pin's own secret map alone.
+    pin_secrets: Vec<String>,
+}
+
+/// How a claim's config selection ends: the configs to render with, or the
+/// answer `pin_failure` already decided (a released claim, a failed step).
+enum ClaimSelection {
+    Configs(ClaimConfigs),
+    Answered(Result<Response, AppError>),
+}
+
+/// `config_for_user`, bounded by the claim's `deadline` (spec § 7.2). A
+/// pinned load runs in its own task, so a claim that stops waiting does not
+/// abandon it: it finishes and warms the cache for the next claim. Running
+/// out of time is transient (`PinUnavailable`): the claim is released.
+async fn config_by_deadline(
+    state: &Arc<AppState>,
+    ws: &str,
+    pin: Option<&PinRef>,
+    deadline: tokio::time::Instant,
+) -> anyhow::Result<Option<ConfigHandle>> {
+    let Some(pin) = pin else {
+        // Live: an in-memory snapshot read, nothing to bound.
+        return state.workspaces.config_for_user(ws, None).await;
+    };
+    let load = {
+        let (state, ws, pin) = (Arc::clone(state), ws.to_string(), pin.clone());
+        tokio::spawn(async move { state.workspaces.config_for_user(&ws, Some(&pin)).await })
+    };
+    let unavailable = |message: String| -> anyhow::Error {
+        PinError::PinUnavailable {
+            workspace: ws.to_string(),
+            message,
+        }
+        .into()
+    };
+    match tokio::time::timeout_at(deadline, load).await {
+        Ok(Ok(loaded)) => loaded,
+        Ok(Err(join)) => Err(unavailable(format!("the pin load task failed: {join}"))),
+        Err(_elapsed) => Err(unavailable(
+            "its load did not finish within the claim budget \
+             (`pin_store.claim_load_budget_secs`) and goes on in the background"
+                .to_string(),
+        )),
+    }
+}
+
+/// Spec § 7.2 table: the job's own config (its pin when the job is pinned)
+/// and the step's owner config (its action pin, else the owner's live
+/// config), each pin loaded by `deadline`. A pin that cannot be loaded ends
+/// the claim here through `pin_failure`; `Answered` carries that answer.
+async fn select_claim_configs(
+    state: &Arc<AppState>,
+    job: &JobRow,
+    step: &JobStepRow,
+    claim: ClaimIdentity,
+    deadline: tokio::time::Instant,
+) -> ClaimSelection {
+    let job_pin = PinRef::of_job(job);
+    let ws_handle =
+        match config_by_deadline(state, &job.workspace, job_pin.as_ref(), deadline).await {
+            Ok(handle) => handle,
+            Err(e) => {
+                let failure = ClaimFailure {
+                    claim,
+                    pin_secrets: &[],
+                    withheld: None,
+                };
+                return ClaimSelection::Answered(
+                    pin_failure(
+                        state,
+                        job,
+                        step,
+                        &job.workspace,
+                        job_pin.as_ref(),
+                        &failure,
+                        e,
+                    )
+                    .await,
+                );
+            }
+        };
+    let mut pin_secrets: Vec<String> = Vec::new();
+    if let Some(ConfigHandle::Pinned(pinned)) = &ws_handle {
+        pin_secrets.extend(
+            state
+                .workspaces
+                .pin_redaction_values(&job.workspace, pinned)
+                .await,
+        );
+    }
+
+    // The workspace whose config + tarball this step's action belongs to. For
+    // a cross-workspace or ref'd step (action `owner.name`, or `ref:`) that's
+    // the OWNER; for a local step `action_workspace` is NULL so it is the
+    // job's own (possibly pinned) config.
+    let owner_ws_name = step.action_workspace.as_deref().unwrap_or(&job.workspace);
+    let step_pin = PinRef::of_step_action(step);
+    let owner_is_job_config =
+        step.action_workspace.is_none() || (owner_ws_name == job.workspace && step_pin == job_pin);
+    let owner_handle = if owner_is_job_config {
+        ws_handle.clone()
+    } else {
+        match config_by_deadline(state, owner_ws_name, step_pin.as_ref(), deadline).await {
+            Ok(handle) => handle,
+            Err(e) => {
+                let failure = ClaimFailure {
+                    claim,
+                    pin_secrets: &pin_secrets,
+                    withheld: None,
+                };
+                return ClaimSelection::Answered(
+                    pin_failure(
+                        state,
+                        job,
+                        step,
+                        owner_ws_name,
+                        step_pin.as_ref(),
+                        &failure,
+                        e,
+                    )
+                    .await,
+                );
+            }
+        }
+    };
+    // F46: the owner's own pass only for a config other than the job's, so
+    // the job pin's set is never built twice.
+    if !owner_is_job_config {
+        if let Some(ConfigHandle::Pinned(pinned)) = &owner_handle {
+            pin_secrets.extend(
+                state
+                    .workspaces
+                    .pin_redaction_values(owner_ws_name, pinned)
+                    .await,
+            );
+        }
+    }
+    ClaimSelection::Configs(ClaimConfigs {
+        ws_handle,
+        owner_handle,
+        owner_is_job_config,
+        pin_secrets,
+    })
+}
+
+/// [`select_claim_configs`] for a claim that loads a pin, run as its own
+/// task so a dropped handler cannot strand the step `running` under a live,
+/// heartbeating worker that never got it (the worker hung up mid-load).
+/// The task still releases or fails the step itself; and when the configs
+/// did load but nobody is left to receive them, it releases the claim.
+async fn select_pinned_claim_configs(
+    state: &Arc<AppState>,
+    job: &JobRow,
+    step: &JobStepRow,
+    claim: ClaimIdentity,
+    deadline: tokio::time::Instant,
+) -> Result<ClaimSelection, AppError> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let (state_t, job_t, step_t) = (Arc::clone(state), job.clone(), step.clone());
+    tokio::spawn(async move {
+        let selected = select_claim_configs(&state_t, &job_t, &step_t, claim, deadline).await;
+        let Err(ClaimSelection::Configs(configs)) = tx.send(selected) else {
+            return;
+        };
+        // The handler is gone, so is the worker's request: give the step
+        // back. Named after the step's pin when it has one, else the job's.
+        let (ws, pin) = match PinRef::of_step_action(&step_t) {
+            Some(pin) => (
+                step_t
+                    .action_workspace
+                    .clone()
+                    .unwrap_or_else(|| job_t.workspace.clone()),
+                Some(pin),
+            ),
+            None => (job_t.workspace.clone(), PinRef::of_job(&job_t)),
+        };
+        let lost = PinError::PinUnavailable {
+            workspace: ws.clone(),
+            message: "the claiming worker stopped waiting before its configuration loaded"
+                .to_string(),
+        };
+        let failure = ClaimFailure {
+            claim,
+            pin_secrets: &configs.pin_secrets,
+            withheld: None,
+        };
+        if let Err(e) = pin_failure(
+            &state_t,
+            &job_t,
+            &step_t,
+            &ws,
+            pin.as_ref(),
+            &failure,
+            lost.into(),
+        )
+        .await
+        {
+            tracing::error!(
+                job_id = %job_t.job_id,
+                step_name = %step_t.step_name,
+                "release of an unanswered claim failed: {:?}",
+                e
+            );
+        }
+    });
+    rx.await.map_err(|_| {
+        AppError::Internal(anyhow::anyhow!(
+            "claim config selection for step '{}' of job {} ended without an answer",
+            step.step_name,
+            job.job_id
+        ))
+    })
 }
 
 /// POST /worker/jobs/claim - Claim next ready step
@@ -466,34 +855,7 @@ pub async fn claim_job(
     .context("claim ready step")?
     {
         Some(step) => step,
-        None => {
-            return Ok(Json(ClaimResponse {
-                workspace: None,
-                job_id: None,
-                task_name: None,
-                step_name: None,
-                action_name: None,
-                action_type: None,
-                action_image: None,
-                action_spec: None,
-                input: None,
-                runner: None,
-                timeout_secs: None,
-                revision: None,
-                agent_provider_name: None,
-                agent_prompt: None,
-                agent_system_prompt: None,
-                mcp_servers: None,
-                agent_state: None,
-                agent_tool_tasks: None,
-                event_source_config: None,
-                state_storage_key: None,
-                state_has_json: None,
-                global_state_storage_key: None,
-                global_state_has_json: None,
-            })
-            .into_response());
-        }
+        None => return Ok(Json(ClaimResponse::no_work()).into_response()),
     };
 
     tracing::info!(
@@ -502,6 +864,13 @@ pub async fn claim_job(
         step.step_name,
         step.job_id
     );
+
+    // The claim this request holds (spec § 7.2): every later write that acts
+    // on this step — release, failure — applies only while the row is still it.
+    let claim = ClaimIdentity {
+        worker_id,
+        started_at: step.started_at.context("claimed step has no started_at")?,
+    };
 
     // Get the job to access task_name, workspace, and job input
     let job = match JobRepo::get(&state.pool, step.job_id)
@@ -518,22 +887,73 @@ pub async fn claim_job(
         }
     };
 
-    // Fetch workspace config once — used for template rendering, secrets, and action defaults
-    let ws_config = state.get_workspace(&job.workspace).await;
-
-    // Determine the workspace whose config + tarball this step's action belongs
-    // to. For a cross-workspace step (action `owner.name`) that's the OWNER; for
-    // a local step `action_workspace` is NULL so it resolves to the caller and
-    // everything below is byte-for-byte identical to today's behaviour.
+    // Spec § 7.2: the job's own config (its pin when the job is pinned) and
+    // the step's owner config (its action pin, else the owner's live config).
+    // Pin loads are bounded by the claim budget, below the worker's request
+    // timeout; a pin that cannot be loaded releases the claim (transient) or
+    // fails the step (permanent) — `pin_failure`.
+    let deadline = tokio::time::Instant::now() + state.config.claim_pin_load_budget();
+    let selected = if PinRef::of_job(&job).is_none() && PinRef::of_step_action(&step).is_none() {
+        // No pin: live snapshot reads only, nothing that can outlast the worker.
+        select_claim_configs(&state, &job, &step, claim, deadline).await
+    } else {
+        select_pinned_claim_configs(&state, &job, &step, claim, deadline).await?
+    };
+    let ClaimConfigs {
+        ws_handle,
+        owner_handle,
+        owner_is_job_config,
+        pin_secrets,
+    } = match selected {
+        ClaimSelection::Configs(configs) => configs,
+        ClaimSelection::Answered(answer) => return answer,
+    };
     let owner_ws_name = step
         .action_workspace
         .clone()
         .unwrap_or_else(|| job.workspace.clone());
-    let owner_config = if owner_ws_name == job.workspace {
-        ws_config.clone()
-    } else {
-        state.get_workspace(&owner_ws_name).await
+    // Spec § 7.2: an error raised rendering the action OWNER's templates is
+    // withheld once that owner is another workspace (pinned or live). The
+    // boundary is the workspace NAME — an own-workspace ref crosses none.
+    let owner_side_withheld = || {
+        (owner_ws_name != job.workspace)
+            .then(|| rendering::withheld_owner_error(&step.action_name, &owner_ws_name))
     };
+    let ws_config = ws_handle.as_ref().map(ConfigHandle::arc);
+    let owner_config = owner_handle.as_ref().map(ConfigHandle::arc);
+
+    // Snapshot of every workspace config: cross-workspace connection references
+    // in this step's input resolve against it (gated by `shared`).
+    let ws_set = crate::workspace_set::WorkspaceSet::load(
+        &state.workspaces,
+        &job.workspace,
+        ws_config.as_deref(),
+    )
+    .await;
+
+    // F47: an owner whose config is not available (a live owner that failed
+    // to load) fails here, before ANY action lookup — never a fall-through to
+    // the caller's config by the step's full name. A pinned owner that cannot
+    // load was handled above.
+    if !owner_is_job_config && owner_config.is_none() {
+        let msg = format!(
+            "Failed to prepare action input: action owner: workspace '{}' is not available",
+            owner_ws_name
+        );
+        return Ok(fail_claimed_step(
+            &state,
+            step.job_id,
+            &step.step_name,
+            &msg,
+            &ws_set,
+            &ClaimFailure {
+                claim,
+                pin_secrets: &pin_secrets,
+                withheld: None,
+            },
+        )
+        .await);
+    }
 
     // Fetch all steps once — reused for both the template context and agent rendering.
     let all_steps_for_job = JobStepRepo::get_steps_for_job(&state.pool, step.job_id)
@@ -548,6 +968,7 @@ pub async fn claim_job(
         &state.pool,
         &job.workspace,
         &job.task_name,
+        job.git_ref.as_deref(),
         "claim",
     )
     .await;
@@ -583,15 +1004,6 @@ pub async fn claim_job(
             (None, None, None, None)
         };
 
-    // Snapshot of every workspace config: cross-workspace connection references
-    // in this step's input resolve against it (gated by `shared`).
-    let ws_set = crate::workspace_set::WorkspaceSet::load(
-        &state.workspaces,
-        &job.workspace,
-        ws_config.as_deref(),
-    )
-    .await;
-
     // One JobContext per claim; one build per scope (spec §3.2).
     let empty_secrets: std::collections::HashMap<String, serde_json::Value> = Default::default();
     let job_ctx = crate::render_context::JobContext {
@@ -607,6 +1019,7 @@ pub async fn claim_job(
             .unwrap_or(&empty_secrets),
         snapshots: &snapshots,
         job_revision: job.revision.as_deref(),
+        job_ref: job.git_ref.as_deref(),
     };
     let step_views = crate::render_context::views(&all_steps_for_job);
     let loop_slot = crate::render_context::LoopSlot::of(&step);
@@ -656,6 +1069,11 @@ pub async fn claim_job(
                     &step.step_name,
                     &msg,
                     &ws_set,
+                    &ClaimFailure {
+                        claim,
+                        pin_secrets: &pin_secrets,
+                        withheld: None,
+                    },
                     std::mem::take(&mut collision_lines),
                 )
                 .await);
@@ -666,12 +1084,25 @@ pub async fn claim_job(
             Ok(input) => input,
             Err(e) => {
                 let msg = format!("{:#}", e);
+                // By origin: only the owner's defaults merge / owner
+                // connection pass is owner-side; a bad caller-supplied value
+                // is the caller's own.
+                let withheld = if rendering::is_owner_side_prepare_error(&e) {
+                    owner_side_withheld()
+                } else {
+                    None
+                };
                 return Ok(fail_claimed_step_with_collisions(
                     &state,
                     step.job_id,
                     &step.step_name,
                     &msg,
                     &ws_set,
+                    &ClaimFailure {
+                        claim,
+                        pin_secrets: &pin_secrets,
+                        withheld,
+                    },
                     std::mem::take(&mut collision_lines),
                 )
                 .await);
@@ -692,7 +1123,9 @@ pub async fn claim_job(
     );
     collision_lines.extend(body_ctx.log_lines());
 
-    // Render action_spec env/cmd/script/manifest templates
+    // Render action_spec env/cmd/script/manifest templates. The action body
+    // and image are the owner's templates rendered with the owner's secrets:
+    // the call site is the origin.
     let rendered_action_spec =
         match rendering::render_action_spec(step.action_spec.as_ref(), &body_ctx) {
             Ok(spec) => spec,
@@ -704,6 +1137,11 @@ pub async fn claim_job(
                     &step.step_name,
                     &msg,
                     &ws_set,
+                    &ClaimFailure {
+                        claim,
+                        pin_secrets: &pin_secrets,
+                        withheld: owner_side_withheld(),
+                    },
                     std::mem::take(&mut collision_lines),
                 )
                 .await);
@@ -721,6 +1159,11 @@ pub async fn claim_job(
                 &step.step_name,
                 &msg,
                 &ws_set,
+                &ClaimFailure {
+                    claim,
+                    pin_secrets: &pin_secrets,
+                    withheld: owner_side_withheld(),
+                },
                 std::mem::take(&mut collision_lines),
             )
             .await);
@@ -779,6 +1222,14 @@ pub async fn claim_job(
                     &step.step_name,
                     &msg,
                     &ws_set,
+                    &ClaimFailure {
+                        claim,
+                        pin_secrets: &pin_secrets,
+                        // Prompts render in the CALLER's context (job input,
+                        // caller secrets — `Scope::AgentPrompt`): not
+                        // owner-side, so visible, scrubbed.
+                        withheld: None,
+                    },
                     std::mem::take(&mut collision_lines),
                 )
                 .await);
@@ -824,7 +1275,9 @@ pub async fn claim_job(
         {
             let mut tools_map = serde_json::Map::new();
             for tool_ref in &action.tools {
-                if let stroem_common::models::workflow::AgentToolRef::Task { task } = tool_ref {
+                if let stroem_common::models::workflow::AgentToolRef::Task { git_ref: _, task } =
+                    tool_ref
+                {
                     if let Some(task_def) = workspace.tasks.get(task) {
                         tools_map.insert(task.clone(), serde_json::json!({
                                 "description": task_def.description,
@@ -947,7 +1400,7 @@ pub async fn complete_step(
         // itself when the outcome is `Failed`.
         state
             .settlement()
-            .step_failed(job_id, &step_name, &error_msg, &[])
+            .step_failed(job_id, &step_name, &error_msg, &[], None)
             .await
             .context("mark step failed")?;
         return Ok(Json(json!({"status": "ok"})));
@@ -1090,21 +1543,40 @@ pub async fn agent_task_tool(
 
     if let Some(ref spec) = step.action_spec {
         if let Some(tools) = spec.get("tools").and_then(|v| v.as_array()) {
-            let allowed = tools
+            let entry = tools
                 .iter()
-                .any(|t| t.get("task").and_then(|v| v.as_str()) == Some(&req.task_name));
-            if !allowed {
-                return Err(AppError::BadRequest(format!(
-                    "Task '{}' is not in the agent step's allowed tools list",
-                    req.task_name
-                )));
+                .find(|t| t.get("task").and_then(|v| v.as_str()) == Some(&req.task_name));
+            match entry {
+                None => {
+                    return Err(AppError::BadRequest(format!(
+                        "Task '{}' is not in the agent step's allowed tools list",
+                        req.task_name
+                    )));
+                }
+                // `ref` on agent task tools is out of v1 (git-refs spec § 4.6):
+                // serde would otherwise drop it and run the default branch.
+                // The persisted action_spec serialises `AgentToolRef::Task.git_ref`
+                // as `ref`.
+                Some(t) if t.get("ref").is_some_and(|r| !r.is_null()) => {
+                    return Err(AppError::BadRequest(format!(
+                        "`ref` is not supported on agent task tools yet (task tool '{}')",
+                        req.task_name
+                    )));
+                }
+                Some(_) => {}
             }
         }
     }
 
-    let workspace = state
-        .get_workspace(&job.workspace)
+    // The job's OWN config (git-refs spec § 7.3): a pinned job's tool tasks
+    // come from its commit, and the child inherits the pin. A `PinLoadFailed`
+    // is withheld by `config_for_user`; the body of an `Internal` is generic.
+    let pin = crate::workspace::pins::PinRef::of_job(&job);
+    let handle = state
+        .workspaces
+        .config_for_user(&job.workspace, pin.as_ref())
         .await
+        .map_err(AppError::Internal)?
         .ok_or_else(|| AppError::not_found("Workspace"))?;
 
     let source_id = format!("{}/{}", job_id, step_name);
@@ -1112,7 +1584,7 @@ pub async fn agent_task_tool(
     let created = crate::job_creator::create_child_job_for_task_detailed(
         &state.workspaces,
         &state.pool,
-        &workspace,
+        handle.config(),
         &job.workspace,
         &req.task_name,
         into_exposed(req.input),
@@ -1122,6 +1594,7 @@ pub async fn agent_task_tool(
         &step_name,
         job.revision.as_deref(),
         crate::config::JobDefaults::from(state.config.as_ref()),
+        job.git_ref.as_deref(),
     )
     .await
     .context("create child job for task tool")?;
@@ -1206,21 +1679,22 @@ pub async fn agent_suspend_step(
         )
         .await;
 
-    // Fire on_suspended hooks
+    // Fire on_suspended hooks from the job's OWN config (git-refs spec § 7.3):
+    // a pinned job's hooks come from its commit, like the hook job they create.
     let job = JobRepo::get(&state.pool, job_id).await.context("get job")?;
     if let Some(ref job) = job {
-        if let Some(workspace) = state.get_workspace(&job.workspace).await {
-            if let Some(task) = workspace.tasks.get(&job.task_name) {
-                crate::settlement::hooks::fire_suspended_hooks(
-                    &state.settlement(),
-                    &workspace,
-                    job,
-                    task,
-                    &step_name,
-                    &req.message,
-                )
-                .await;
-            }
+        if let Some((handle, task)) =
+            crate::settlement::dispatch::job_config_and_task(&state, job).await
+        {
+            crate::settlement::hooks::fire_suspended_hooks(
+                &state.settlement(),
+                handle.config(),
+                job,
+                &task,
+                &step_name,
+                &req.message,
+            )
+            .await;
         }
     }
 

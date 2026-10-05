@@ -11,6 +11,12 @@ use crate::client::ServerClient;
 /// Default number of old revisions to retain per workspace.
 const DEFAULT_MAX_RETAINED_REVISIONS: usize = 2;
 
+/// R7: a pinned tarball the server answers 503 for is retried every
+/// `PINNED_503_DELAY`, up to `PINNED_503_ATTEMPTS` requests (about 55 s of
+/// waiting), before the step fails as it did before.
+pub(crate) const PINNED_503_ATTEMPTS: u32 = 12;
+pub(crate) const PINNED_503_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// RAII guard that keeps a revision directory alive while a step is using it.
 ///
 /// Holds a reference count on the revision directory. While at least one guard
@@ -276,11 +282,17 @@ impl WorkspaceCache {
         }
         // Lock released — proceed with download (which re-acquires the lock for extraction).
 
-        // Not cached — download the specific revision from the server.
-        let result = client
-            .download_workspace_tarball(workspace, None, Some(revision))
-            .await
-            .context("Failed to download pinned workspace revision")?;
+        // Not cached — download the specific revision from the server,
+        // riding out a 503 while its PinStore cannot reach git (R7).
+        let result = download_pinned_with_retry(
+            client,
+            workspace,
+            revision,
+            PINNED_503_ATTEMPTS,
+            PINNED_503_DELAY,
+        )
+        .await
+        .context("Failed to download pinned workspace revision")?;
 
         let (data, returned_revision) = result.ok_or_else(|| {
             anyhow::anyhow!(
@@ -616,6 +628,41 @@ fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Download a pinned revision, retrying ONLY a 503 (`TarballUnavailable`)
+/// every `delay`, up to `attempts` requests. Any other result (success,
+/// 404, transport error) is returned at once, exactly as before.
+pub(crate) async fn download_pinned_with_retry(
+    client: &ServerClient,
+    workspace: &str,
+    revision: &str,
+    attempts: u32,
+    delay: std::time::Duration,
+) -> Result<Option<(Vec<u8>, String)>> {
+    let mut attempt = 1;
+    loop {
+        match client
+            .download_workspace_tarball(workspace, None, Some(revision))
+            .await
+        {
+            Err(e)
+                if attempt < attempts
+                    && e.downcast_ref::<crate::client::TarballUnavailable>()
+                        .is_some() =>
+            {
+                tracing::warn!(
+                    workspace,
+                    revision,
+                    attempt,
+                    "Pinned workspace revision unavailable on the server (503), retrying"
+                );
+                tokio::time::sleep(delay).await;
+                attempt += 1;
+            }
+            other => return other,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1459,5 +1506,100 @@ mod tests {
 
         drop(guard);
         assert_eq!(rc.load(Ordering::Acquire), 0);
+    }
+
+    /// R7: a 503 from the server's PinStore is retried, every `delay`, up to
+    /// `attempts`; the first 2xx wins.
+    #[tokio::test]
+    async fn test_pinned_download_retries_503_then_succeeds() {
+        use wiremock::matchers::{method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"/worker/workspace/.+\.tar\.gz"))
+            .respond_with(ResponseTemplate::new(503).insert_header("Retry-After", "5"))
+            .up_to_n_times(2)
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"/worker/workspace/.+\.tar\.gz"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("X-Revision", "abc123")
+                    .set_body_bytes(build_test_tarball()),
+            )
+            .mount(&mock)
+            .await;
+
+        let client = ServerClient::new(&mock.uri(), "t", Some(5), Some(30));
+        let got = download_pinned_with_retry(
+            &client,
+            "etl",
+            "abc123",
+            5,
+            std::time::Duration::from_millis(10),
+        )
+        .await
+        .expect("third attempt succeeds")
+        .expect("pinned download never answers 304");
+        assert_eq!(got.1, "abc123");
+        assert_eq!(mock.received_requests().await.unwrap().len(), 3);
+    }
+
+    /// A 503 that never clears fails after exactly `attempts` requests.
+    #[tokio::test]
+    async fn test_pinned_download_gives_up_after_attempts() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&mock)
+            .await;
+
+        let client = ServerClient::new(&mock.uri(), "t", Some(5), Some(30));
+        let err = download_pinned_with_retry(
+            &client,
+            "etl",
+            "abc123",
+            3,
+            std::time::Duration::from_millis(10),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.downcast_ref::<crate::client::TarballUnavailable>()
+                .is_some(),
+            "{err:#}"
+        );
+        assert_eq!(mock.received_requests().await.unwrap().len(), 3);
+    }
+
+    /// Only 503 is retried: a 404 (commit gone) fails at once, as today.
+    #[tokio::test]
+    async fn test_pinned_download_does_not_retry_404() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock)
+            .await;
+
+        let client = ServerClient::new(&mock.uri(), "t", Some(5), Some(30));
+        let err = download_pinned_with_retry(
+            &client,
+            "etl",
+            "abc123",
+            12,
+            std::time::Duration::from_millis(10),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("404"), "{err:#}");
+        assert_eq!(mock.received_requests().await.unwrap().len(), 1);
     }
 }

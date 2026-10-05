@@ -163,6 +163,20 @@ struct StepCompleteRequest {
     error: Option<String>,
 }
 
+/// The server answered 503 for a workspace tarball: its PinStore could not
+/// load the pinned revision yet (spec § 5.4, e.g. git briefly unreachable on
+/// that replica). `WorkspaceCache::ensure_revision` retries it.
+#[derive(Debug)]
+pub struct TarballUnavailable;
+
+impl std::fmt::Display for TarballUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "workspace tarball temporarily unavailable (503)")
+    }
+}
+
+impl std::error::Error for TarballUnavailable {}
+
 impl ServerClient {
     pub fn new(
         base_url: &str,
@@ -434,6 +448,10 @@ impl ServerClient {
             return Ok(None);
         }
 
+        if response.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+            return Err(anyhow::Error::new(TarballUnavailable));
+        }
+
         let response = Self::check_response(response, "Download workspace").await?;
 
         let revision = response
@@ -617,15 +635,20 @@ impl ServerClient {
         Ok(resp.job_id)
     }
 
-    /// Download the latest state tarball for a task.
-    /// Returns `None` if no state exists (server returns 204 No Content).
+    /// Download the latest state tarball for a task. With `job_id` the server
+    /// reads that job's own `(workspace, task, ref)` partition and ignores the
+    /// path (spec § 7.6). Returns `None` if no state exists (204).
     #[tracing::instrument(skip(self))]
     pub async fn download_state_tarball(
         &self,
         workspace: &str,
         task_name: &str,
+        job_id: Option<Uuid>,
     ) -> Result<Option<Vec<u8>>> {
-        let url = format!("{}/worker/state/{}/{}", self.base_url, workspace, task_name);
+        let mut url = format!("{}/worker/state/{}/{}", self.base_url, workspace, task_name);
+        if let Some(id) = job_id {
+            url.push_str(&format!("?job_id={id}"));
+        }
         let response = self
             .client
             .get(&url)
@@ -676,11 +699,19 @@ impl ServerClient {
         Ok(())
     }
 
-    /// Download the latest global workspace state tarball.
-    /// Returns `None` if no global state exists (server returns 204 No Content).
+    /// Download the latest global workspace state tarball. With `job_id` the
+    /// server reads that job's own `(workspace, ref)` partition (spec § 7.6).
+    /// Returns `None` if no global state exists (204).
     #[tracing::instrument(skip(self))]
-    pub async fn download_global_state_tarball(&self, workspace: &str) -> Result<Option<Vec<u8>>> {
-        let url = format!("{}/worker/global-state/{}", self.base_url, workspace);
+    pub async fn download_global_state_tarball(
+        &self,
+        workspace: &str,
+        job_id: Option<Uuid>,
+    ) -> Result<Option<Vec<u8>>> {
+        let mut url = format!("{}/worker/global-state/{}", self.base_url, workspace);
+        if let Some(id) = job_id {
+            url.push_str(&format!("?job_id={id}"));
+        }
         let response = self
             .client
             .get(&url)
@@ -1372,5 +1403,61 @@ mod tests {
             let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
             assert_eq!(body["step_name"], step_name);
         }
+    }
+
+    #[tokio::test]
+    async fn test_download_state_tarball_sends_job_id() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock = MockServer::start().await;
+        let job_id = Uuid::new_v4();
+        Mock::given(method("GET"))
+            .and(path("/worker/state/billing/nightly"))
+            .and(query_param("job_id", job_id.to_string()))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/worker/global-state/billing"))
+            .and(query_param("job_id", job_id.to_string()))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let client = ServerClient::new(&mock.uri(), "t", Some(5), Some(30));
+        assert!(client
+            .download_state_tarball("billing", "nightly", Some(job_id))
+            .await
+            .unwrap()
+            .is_none());
+        assert!(client
+            .download_global_state_tarball("billing", Some(job_id))
+            .await
+            .unwrap()
+            .is_none());
+        // wiremock verifies `expect(1)` on drop.
+    }
+
+    #[tokio::test]
+    async fn test_download_state_tarball_without_job_id_sends_no_query() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/worker/state/billing/nightly"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&mock)
+            .await;
+        let client = ServerClient::new(&mock.uri(), "t", Some(5), Some(30));
+        client
+            .download_state_tarball("billing", "nightly", None)
+            .await
+            .unwrap();
+        let reqs = mock.received_requests().await.unwrap();
+        assert_eq!(reqs[0].url.query(), None);
     }
 }

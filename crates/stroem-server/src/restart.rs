@@ -154,6 +154,7 @@ mod tests {
 
     fn fs(deps: &[&str], cof: bool) -> FlowStep {
         FlowStep {
+            git_ref: None,
             action: "noop".into(),
             name: None,
             description: None,

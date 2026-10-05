@@ -48,11 +48,13 @@ workspaces:
       token: "ghp_xxx"
 ```
 
+The workspace's `ref` is the branch the server loads and tracks. To run an action or task from another branch, a tag or a commit of the repository, use `ref:` in the workflow YAML instead — see [Git Refs](/guides/git-refs/).
+
 Git workspaces use `poll_interval_secs` (default: 60) to control how often the server checks for new commits. The check uses a lightweight ls-remote operation — only when the remote HEAD actually changes does the server perform a full fetch and reload.
 
 At startup, and on every reload, all configured workspaces are loaded concurrently rather than one at a time, so a single slow or misbehaving source doesn't delay the others. If a git workspace's clone/fetch fails with an error containing "credential rejected by remote", it means the configured deploy key or token is not authorized for that repository — the server fails that attempt immediately instead of letting it retry for over a minute.
 
-While a workspace is in its load-error state its tasks cannot be run and its files are not served. Cron triggers keep their schedule through the outage — the server treats the workspace's contents as *unknown*, not *removed* — but a fire that lands inside it cannot create a job: it is logged as `Trigger '<ws>/<name>' MISSED: workspace '<ws>' is unavailable`, has no side effects (a `cancel_previous` trigger does not cancel the running job), and is not replayed afterwards. Event-source consumers of the workspace are cancelled at the next reconcile (within about 30 seconds) and recreated once it loads again, which limits how much a consumer reads while jobs cannot be created for its events; events emitted before the cancellation takes effect are rejected and lost.
+While a workspace is in its load-error state its tasks cannot be run and its files are not served — except a git workspace's files at a specific commit that a job already pinned (a job created before the error, or one running on a [git ref](/guides/git-refs/)), which the server serves from a separate clean checkout. Cron triggers keep their schedule through the outage — the server treats the workspace's contents as *unknown*, not *removed* — but a fire that lands inside it cannot create a job: it is logged as `Trigger '<ws>/<name>' MISSED: workspace '<ws>' is unavailable`, has no side effects (a `cancel_previous` trigger does not cancel the running job), and is not replayed afterwards. Event-source consumers of the workspace are cancelled at the next reconcile (within about 30 seconds) and recreated once it loads again, which limits how much a consumer reads while jobs cannot be created for its events; events emitted before the cancellation takes effect are rejected and lost.
 
 ## How workspaces are refreshed
 
@@ -134,6 +136,8 @@ stroem trigger etl-pipeline --workspace data-team --input '{"date": "2025-01-01"
 ## Worker behavior
 
 Workers automatically download the correct workspace files before executing each step. Workspace tarballs are cached locally using ETag-based caching, so workers only re-download when a workspace changes.
+
+Each step downloads the workspace at the revision its job was created with. For a git workspace, a revision that is no longer the current one is built from a clean checkout of that commit (no `.git` directory). If the server cannot reach the git server to fetch it, it answers `503` and the worker tries again every 5 seconds — up to 12 attempts in all, about a minute — before failing the step.
 
 Configure the local cache directory in the worker config:
 

@@ -266,6 +266,7 @@ pub(super) async fn build_minimal_task_def(s: &Settlement, job_id: Uuid) -> Resu
         flow.insert(
             step.step_name.clone(),
             FlowStep {
+                git_ref: None,
                 action: step.action_name.clone(),
                 name: None,
                 description: None,

@@ -1,6 +1,7 @@
 use crate::acl::{load_user_acl_context, make_task_path, AllowedScope, TaskPermission};
 use crate::auth::{hash_api_key, validate_access_token};
 use crate::state::AppState;
+use std::collections::HashSet;
 use std::sync::Arc;
 use stroem_common::models::auth::Claims;
 
@@ -111,6 +112,22 @@ pub async fn authenticate(
     Ok(Some(McpAuthContext { claims }))
 }
 
+/// The caller's `(is_admin, groups)` for ACL evaluation (admin re-derived
+/// per request, see [`authenticate`]).
+async fn acl_context(
+    state: &AppState,
+    auth: &McpAuthContext,
+) -> Result<(bool, HashSet<String>), String> {
+    let user_id: uuid::Uuid = auth
+        .claims
+        .sub
+        .parse()
+        .map_err(|_| "Invalid user ID in token".to_string())?;
+    load_user_acl_context(&state.pool, user_id, auth.claims.is_admin)
+        .await
+        .map_err(|e| format!("Failed to load ACL context: {e}"))
+}
+
 /// Resolve the ACL permission for a task, handling the case where auth may not be configured.
 #[tracing::instrument(skip(state, auth))]
 pub async fn check_task_acl(
@@ -129,15 +146,7 @@ pub async fn check_task_acl(
         return Ok(TaskPermission::Run);
     }
 
-    let user_id: uuid::Uuid = auth
-        .claims
-        .sub
-        .parse()
-        .map_err(|_| "Invalid user ID in token".to_string())?;
-
-    let (is_admin, groups) = load_user_acl_context(&state.pool, user_id, auth.claims.is_admin)
-        .await
-        .map_err(|e| format!("Failed to load ACL context: {e}"))?;
+    let (is_admin, groups) = acl_context(state, auth).await?;
 
     let task_path = make_task_path(folder, task_name);
     Ok(state
@@ -165,23 +174,9 @@ pub async fn resolve_acl_scope(
         return Ok(None);
     }
 
-    let user_id: uuid::Uuid = auth
-        .claims
-        .sub
-        .parse()
-        .map_err(|_| "Invalid user ID in token".to_string())?;
+    let (is_admin, groups) = acl_context(state, auth).await?;
 
-    let (is_admin, groups) = load_user_acl_context(&state.pool, user_id, auth.claims.is_admin)
-        .await
-        .map_err(|e| format!("Failed to load ACL context: {e}"))?;
-
-    let mut all_tasks = Vec::new();
-    for (ws_name, ws_config) in state.workspaces.get_all_configs().await {
-        for (task_name, task_def) in &ws_config.tasks {
-            all_tasks.push((ws_name.clone(), task_name.clone(), task_def.folder.clone()));
-        }
-    }
-
+    let all_tasks = crate::acl::live_task_folders(state).await;
     match state
         .acl
         .allowed_scope(&all_tasks, &auth.claims.email, &groups, is_admin)
@@ -189,4 +184,24 @@ pub async fn resolve_acl_scope(
         AllowedScope::All => Ok(None),
         AllowedScope::Filtered(items) => Ok(Some(items)),
     }
+}
+
+/// Job-list scope for this MCP caller (spec § 7.8), the same rule as REST.
+/// `None` = no filtering (no auth, admin, or no ACL).
+#[tracing::instrument(skip_all)]
+pub async fn resolve_job_acl_scope(
+    state: &Arc<AppState>,
+    auth: &Option<McpAuthContext>,
+) -> Result<Option<stroem_db::JobAclScope>, String> {
+    let auth = match auth {
+        Some(a) => a,
+        None => return Ok(None),
+    };
+    if !state.acl.is_configured() {
+        return Ok(None);
+    }
+    let (is_admin, groups) = acl_context(state, auth).await?;
+    crate::acl::build_job_acl_scope(state, &auth.claims.email, &groups, is_admin)
+        .await
+        .map_err(|e| format!("Failed to build job ACL scope: {e}"))
 }

@@ -52,6 +52,7 @@ export default defineConfig({
               label: "Cross-Workspace References",
               slug: "guides/cross-workspace-references",
             },
+            { label: "Git Refs", slug: "guides/git-refs" },
             { label: "Task State", slug: "guides/task-state" },
             { label: "Artifacts", slug: "guides/artifacts" },
             { label: "Event Sources", slug: "guides/event-sources" },
@@ -79,6 +80,10 @@ export default defineConfig({
             {
               label: "Upgrading to 0.17 — Dependency Flags",
               slug: "operations/upgrade-0-17-dependency-flags",
+            },
+            {
+              label: "Migrations 049–050 — Git Refs",
+              slug: "operations/migration-049-050",
             },
           ],
         },

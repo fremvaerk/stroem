@@ -47,6 +47,7 @@ Hook input values are Tera templates with access to a `hook` object containing j
 | `hook.duration_secs` | number/null | Execution duration in seconds |
 | `hook.failed_steps` | array | Failed step details (see below) |
 | `hook.revision` | string/null | Workspace revision (git SHA or folder hash) pinned on the job |
+| `hook.ref` | string/null | The [git ref](/guides/git-refs/) the job runs at, as written; `null` unless it is a pinned job |
 
 Each entry in `hook.failed_steps` contains:
 
@@ -124,6 +125,7 @@ tasks:
 | `hook.source_type` | string | Original job source (`"api"`, `"trigger"`, etc.) |
 | `hook.source_id` | string/null | Original job source ID |
 | `hook.revision` | string/null | Workspace revision (git SHA or folder hash) pinned on the job |
+| `hook.ref` | string/null | The [git ref](/guides/git-refs/) the job runs at, as written; `null` unless it is a pinned job |
 
 ### Practical examples
 
@@ -202,6 +204,8 @@ tasks:
 - **Multiple hooks**: You can define multiple hooks per event. They all fire independently.
 - **Validation**: Hook action references are validated at parse time — referencing a non-existent action is an error.
 - **Failure visibility**: If a hook job fails at runtime, the failure is logged as a server event on the original job (visible in the "Server Events" panel on the job detail page).
+- **Pinned jobs**: The hooks of a job that runs on a [git ref](/guides/git-refs/) come from that job's commit, and the hook job runs at the same ref and commit.
+- **No `ref` on hooks**: `ref:` on a hook, or a hook whose action is a `type: task` action carrying `ref`, is rejected by `stroem validate`. At runtime such a hook is not fired, and the error is logged as a server event on the original job.
 
 ## Workspace-level hooks
 

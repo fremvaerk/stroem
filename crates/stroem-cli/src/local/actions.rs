@@ -62,6 +62,7 @@ mod tests {
 
     fn make_action(action_type: &str, runner: Option<&str>, language: Option<&str>) -> ActionDef {
         ActionDef {
+            git_ref: None,
             action_type: action_type.to_string(),
             name: None,
             description: None,

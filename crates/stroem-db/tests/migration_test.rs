@@ -157,3 +157,69 @@ async fn test_048_backfills_hook_source_job_id() -> Result<()> {
 
     Ok(())
 }
+
+/// Migrations 049 + 050 (spec 2026-10-02 § 6): the new columns exist, the
+/// state lookups use the new `_ref` indexes, the old ones are gone, and both
+/// files are re-runnable (an operator may have pre-run them by hand).
+#[tokio::test]
+async fn test_049_050_git_ref_columns_and_indexes() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    for (table, column) in [
+        ("job", "git_ref"),
+        ("job", "task_folder"),
+        ("job_step", "action_ref"),
+        ("job_step", "task_workspace"),
+        ("job_step", "task_ref"),
+        ("job_step", "task_revision"),
+        ("job_step", "pin_releases"),
+        ("task_state", "git_ref"),
+        ("workspace_state", "git_ref"),
+    ] {
+        let found: Option<(String,)> = sqlx::query_as(
+            "SELECT column_name::text FROM information_schema.columns \
+             WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2",
+        )
+        .bind(table)
+        .bind(column)
+        .fetch_optional(&pool)
+        .await?;
+        assert!(found.is_some(), "{table}.{column} missing");
+    }
+
+    let indexes: Vec<(String,)> =
+        sqlx::query_as("SELECT indexname::text FROM pg_indexes WHERE schemaname = 'public'")
+            .fetch_all(&pool)
+            .await?;
+    let names: Vec<&str> = indexes.iter().map(|r| r.0.as_str()).collect();
+    for want in [
+        "idx_task_state_lookup_ref",
+        "idx_workspace_state_lookup_ref",
+        "idx_job_pinned_tasks",
+        "idx_job_step_pinned",
+    ] {
+        assert!(names.contains(&want), "{want} missing: {names:?}");
+    }
+    // The redaction short-circuit's step probe is the partial index's own
+    // predicate, so the planner can answer it from the (tiny) index.
+    let (def,): (String,) = sqlx::query_as(
+        "SELECT indexdef::text FROM pg_indexes WHERE indexname = 'idx_job_step_pinned'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        def.contains("(action_ref IS NOT NULL) OR (task_ref IS NOT NULL)"),
+        "{def}"
+    );
+    for gone in ["idx_task_state_lookup", "idx_workspace_state_lookup"] {
+        assert!(!names.contains(&gone), "{gone} should be dropped");
+    }
+
+    sqlx::raw_sql(include_str!("../migrations/049_git_refs.sql"))
+        .execute(&pool)
+        .await?;
+    sqlx::raw_sql(include_str!("../migrations/050_git_refs_indexes.sql"))
+        .execute(&pool)
+        .await?;
+    Ok(())
+}

@@ -33,6 +33,7 @@ fn stats_test_workspace() -> WorkspaceConfig {
     workspace.actions.insert(
         "noop".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "script".to_string(),
             name: None,
             description: None,
@@ -73,6 +74,7 @@ fn stats_test_workspace() -> WorkspaceConfig {
     flow.insert(
         "run".to_string(),
         FlowStep {
+            git_ref: None,
             action: "noop".to_string(),
             name: None,
             description: None,
@@ -176,6 +178,7 @@ async fn setup() -> Result<(
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let workspace = stats_test_workspace();

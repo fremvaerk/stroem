@@ -71,6 +71,22 @@ healthy; recovering is an operator decision (restart the pod).
 intervals means refreshes are being skipped — usually the remote is
 unreachable (see `stroem_workspace_peek_failures_total`).
 
+### Pin store
+
+Pinned commits for [git refs](/guides/git-refs/), held per replica (see
+[`pin_store`](/getting-started/configuration/#pin_store)).
+
+| Name | Type | Labels | Meaning |
+|---|---|---|---|
+| `stroem_pin_loads_total` | counter | `workspace`, `result` | Pinned-commit config loads (fetch + checkout + config load) that were not already cached, by outcome: `ok`, `not_git`, `ref_not_found`, `commit_not_found`, `load_failed` (the YAML at that commit does not load, or its `sops`/`vals` secrets have failed to load for an hour), `unavailable` (git server unreachable, load timeout, a `sops`/`vals` failure younger than an hour). A caller that waited behind another caller's failed load and ran out of its own time budget also counts as `unavailable`. A `sops`/`vals` failure is remembered for 30 seconds; requests answered from that memory are not loads and are not counted. Tarball-only checkouts are not counted. |
+| `stroem_pins_cached` | gauge | `workspace` | Pinned commit configs held in memory on THIS replica. `0` (not absent) for a git workspace with none cached. |
+
+A rising `unavailable` rate means claims are being released and pinned jobs
+are waiting for the git server (or for a commit's secrets to decrypt);
+`load_failed` means a referenced commit has YAML that does not load, or
+secrets that have not decrypted for an hour, which fails every step and job
+that needs it.
+
 ## Prometheus Scrape Config
 
 ### Default (Bearer auth)

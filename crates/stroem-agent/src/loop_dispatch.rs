@@ -490,7 +490,7 @@ pub async fn dispatch_agent_loop(
 
                 // Verify the task is in the allowed tool set
                 let allowed = action_spec.tools.iter().any(|t| match t {
-                    AgentToolRef::Task { task } => {
+                    AgentToolRef::Task { git_ref: _, task } => {
                         task == &resolved_task_name || task.replace('-', "_") == task_name
                     }
                     _ => false,
@@ -554,7 +554,7 @@ fn build_tool_definitions(
 
     for tool_ref in &action_spec.tools {
         match tool_ref {
-            AgentToolRef::Task { task } => {
+            AgentToolRef::Task { git_ref: _, task } => {
                 if let Some(info) = task_tool_infos.iter().find(|t| &t.name == task) {
                     if let Some(ref schema) = info.parameters_schema {
                         // Use pre-built schema from server — avoids re-running

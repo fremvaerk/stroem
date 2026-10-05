@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use sqlx::{self, PgPool};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use stroem_common::models::job::StepStatus;
 use stroem_common::models::workflow::resolve_step_retry_config;
@@ -8,14 +8,16 @@ use stroem_common::models::workflow::{
     ActionDef, BackoffStrategy, FlowStep, TaskDef, WorkspaceConfig,
 };
 use stroem_common::template::{
-    merge_defaults, resolve_connection_inputs, resolve_connection_inputs_scoped, ResolveScope,
+    merge_defaults, parse_qualified_ref, resolve_connection_inputs, RoleConfig, RoleScope,
 };
 use stroem_common::validation::{compute_required_ability, compute_required_tags, derive_runner};
-use stroem_db::{JobRepo, JobRow, JobStepRepo, NewJobStep};
+use stroem_db::{JobPinCols, JobRepo, JobRow, JobStepRepo, NewJobStep};
 use uuid::Uuid;
 
 use crate::config::{AgentsConfig, JobDefaults};
+use crate::refs::{inherited_pin, plan_reference, RefPlan, RefResolveError, RefWorld};
 use crate::settlement::CreatedJob;
+use crate::workspace::pins::{PinRef, Pinned};
 use crate::workspace::WorkspaceManager;
 use crate::workspace_set::WorkspaceSet;
 
@@ -47,6 +49,16 @@ pub enum CreationMode<'a> {
         source: &'a JobRow,
         from_step: &'a str,
         plan: &'a crate::restart::RestartPlan,
+    },
+    /// A task-level retry of `failed_job_id`: input is handled exactly like
+    /// `Normal`; the retry chain (`retry_of_job_id` = `root_job_id`,
+    /// `retry_attempt`, and the failed job's `retry_job_id`) is written in the
+    /// creation transaction, so the row is never visible without the lineage
+    /// the redaction closure follows (`JobRepo::link_retry_tx`).
+    Retry {
+        failed_job_id: Uuid,
+        root_job_id: Uuid,
+        retry_attempt: i32,
     },
 }
 
@@ -96,6 +108,7 @@ pub async fn create_job_for_task_detailed(
         },
         agents_config,
         defaults,
+        None,
     )
     .await
 }
@@ -110,6 +123,10 @@ pub async fn create_job_for_task_detailed(
 /// Reports `terminal_at_creation` like every other creation entry point — the
 /// caller must run `Settlement::job_created` when it is true (a
 /// restart whose whole restart set cascades to skipped settles immediately).
+///
+/// `git_ref` is the source's ref when it is a pinned job (spec § 7.3): the
+/// caller re-resolved it, `workspace_config` is that commit's config and
+/// `revision` its SHA; the new job is stamped with the same ref.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_restart_job(
     workspaces: &WorkspaceManager,
@@ -122,6 +139,7 @@ pub async fn create_restart_job(
     source_id: Option<&str>,
     revision: Option<&str>,
     defaults: JobDefaults,
+    git_ref: Option<&str>,
 ) -> Result<CreatedJob> {
     debug_assert!(
         plan.restart_steps.iter().any(|s| s == from_step),
@@ -154,6 +172,7 @@ pub async fn create_restart_job(
         },
         None,
         defaults,
+        git_ref,
     )
     .await
 }
@@ -162,8 +181,10 @@ pub async fn create_restart_job(
 /// reporting `terminal_at_creation` so the caller can finalize (or reject) a
 /// child that settled synchronously.
 ///
-/// Used by `handle_task_steps` to create sub-jobs that propagate back to the
-/// parent step on completion.
+/// Used by `agent_task_tool` to create tool children that propagate back to
+/// the parent step on completion. `git_ref` set ⇒ the child is pinned like
+/// its parent (git-refs spec § 7.3): `workspace_config` is the parent's pinned
+/// config and `revision` its commit.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_child_job_for_task_detailed(
     workspaces: &WorkspaceManager,
@@ -178,6 +199,7 @@ pub async fn create_child_job_for_task_detailed(
     parent_step_name: &str,
     revision: Option<&str>,
     defaults: JobDefaults,
+    git_ref: Option<&str>,
 ) -> Result<CreatedJob> {
     create_job_for_task_inner(
         workspaces,
@@ -194,6 +216,48 @@ pub async fn create_child_job_for_task_detailed(
         CreationMode::Normal, // child paths never carry re-run/restart lineage
         None,
         defaults,
+        git_ref,
+    )
+    .await
+}
+
+/// Create a top-level job pinned to `git_ref` @ `commit` (spec § 7.1, § 7.3,
+/// § 7.5). `workspace_config` MUST be `workspace_name`'s pinned config at
+/// `commit` (`PinStore::ensure`). Used by triggers with `ref:`, task-level
+/// retry of a pinned job, and Re-run / Restart of a pinned source.
+#[allow(clippy::too_many_arguments)]
+#[tracing::instrument(skip_all, fields(workspace = %workspace_name, task = %task_name, git_ref = %git_ref, commit = %commit))]
+pub async fn create_job_for_task_pinned(
+    workspaces: &WorkspaceManager,
+    pool: &PgPool,
+    workspace_config: &WorkspaceConfig,
+    workspace_name: &str,
+    task_name: &str,
+    input: serde_json::Value,
+    source_type: &str,
+    source_id: Option<&str>,
+    commit: &str,
+    git_ref: &str,
+    mode: CreationMode<'_>,
+    agents_config: Option<&AgentsConfig>,
+    defaults: JobDefaults,
+) -> Result<CreatedJob> {
+    create_job_for_task_inner(
+        workspaces,
+        pool,
+        workspace_config,
+        workspace_name,
+        task_name,
+        input,
+        source_type,
+        source_id,
+        None,
+        None,
+        Some(commit),
+        mode,
+        agents_config,
+        defaults,
+        Some(git_ref),
     )
     .await
 }
@@ -227,6 +291,11 @@ impl std::fmt::Display for OwnerSideRender {
 impl std::error::Error for OwnerSideRender {}
 
 /// Create a job with parent tracking (for type: task sub-jobs).
+///
+/// `git_ref` set ⇒ a pinned job: `workspace_config` is the pinned config at
+/// `revision` (the commit), and `git_ref` + the task's folder are persisted
+/// (spec § 6). Every name the flow resolves without `ref:` inherits that pin
+/// when it lands in `workspace_name` (§ 4.3).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn create_job_for_task_inner<'a>(
     workspaces: &'a WorkspaceManager,
@@ -243,8 +312,20 @@ pub(crate) fn create_job_for_task_inner<'a>(
     mode: CreationMode<'a>,
     _agents_config: Option<&'a AgentsConfig>,
     defaults: JobDefaults,
+    git_ref: Option<&'a str>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<CreatedJob>> + Send + 'a>> {
     Box::pin(async move {
+        // A pin needs both halves (spec § 6): never persist `git_ref` without
+        // its commit. Before any lookup, so nothing is written.
+        if let (Some(r), None) = (git_ref, revision) {
+            bail!(
+                "job of task '{}' in workspace '{}' would carry ref '{}' without its commit",
+                task_name,
+                workspace_name,
+                r
+            );
+        }
+
         // Look up task
         let task = workspace_config.tasks.get(task_name).with_context(|| {
             format!(
@@ -274,7 +355,7 @@ pub(crate) fn create_job_for_task_inner<'a>(
         // lineage pointers to persist.
         let mut effective_input = input;
         let (lineage_source_job_id, restart_from_step): (Option<Uuid>, Option<&str>) = match &mode {
-            CreationMode::Normal => (None, None),
+            CreationMode::Normal | CreationMode::Retry { .. } => (None, None),
             CreationMode::Hook { source_job_id } => (Some(*source_job_id), None),
             CreationMode::Rerun { source_job_id } => {
                 let src_id = *source_job_id;
@@ -364,78 +445,84 @@ pub(crate) fn create_job_for_task_inner<'a>(
             .context(OwnerSideRender)
             .context("Failed to resolve connection inputs")?;
 
-        // Build job steps from the task flow
+        // § 4.3: the world a `ref:` resolves in, and this job's own pin — the
+        // base pin of every un-ref'd name written in `workspace_config`.
+        let (library_names, configured, git) = ref_world_sets(workspaces);
+        let world = RefWorld {
+            library_names: &library_names,
+            configured: &configured,
+            git: &git,
+        };
+        let job_pin: Option<PinRef> = git_ref.zip(revision).map(|(r, c)| PinRef {
+            git_ref: r.to_string(),
+            commit: c.to_string(),
+        });
+
+        let memo = RefMemo::seeded(workspace_name, job_pin.as_ref());
+
+        // Build job steps from the task flow. Every pin is resolved and
+        // ensured here, before the creation transaction opens: a pin failure
+        // returns before any row is written.
         let mut new_steps = Vec::new();
         // Generate job_id upfront so steps can reference it
         let job_id = Uuid::new_v4();
 
         for (step_name, flow_step) in &task.flow {
-            // flow_step.action may be "owner_ws.action" (cross-workspace) or a local name.
-            let (owner_ws, bare_action) =
-                stroem_common::template::parse_qualified_ref(&flow_step.action);
-            // Cross-workspace only when it isn't already a local/library-flattened key
-            // AND the named workspace exists (library precedence + backward compat).
-            let is_cross = owner_ws.is_some()
-                && !workspace_config.actions.contains_key(&flow_step.action)
-                && owner_ws
-                    .map(|ws| workspaces.has_workspace(ws))
-                    .unwrap_or(false);
-
-            let (owned_action, action_workspace, action_revision, action_name, cross_cfg) =
-                if is_cross {
-                    let ws = owner_ws.unwrap();
-                    let owner_cfg = workspaces.get_config(ws).await.ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "action '{}': workspace '{}' is not available",
-                            flow_step.action,
-                            ws
-                        )
-                    })?;
-                    let a = owner_cfg.actions.get(bare_action).cloned().ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "action '{}': workspace '{}' has no action '{}'",
-                            flow_step.action,
-                            ws,
-                            bare_action
-                        )
-                    })?;
-                    (
-                        a,
-                        Some(ws.to_string()),
-                        workspaces.get_revision(ws),
-                        bare_action.to_string(),
-                        Some(owner_cfg),
-                    )
-                } else {
-                    let a = workspace_config
-                        .actions
-                        .get(&flow_step.action)
-                        .cloned()
-                        .ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "Action '{}' not found in workspace '{}'",
-                                flow_step.action,
-                                workspace_name
-                            )
-                        })?;
-                    (a, None, None, flow_step.action.clone(), None)
-                };
-            let action = &owned_action;
+            let StepAction {
+                action,
+                workspace: action_workspace,
+                revision: action_revision,
+                name: action_name,
+                owner_cfg,
+                pin: action_pin,
+            } = resolve_step_action(
+                workspaces,
+                workspace_name,
+                workspace_config,
+                job_pin.as_ref(),
+                step_name,
+                flow_step,
+                &world,
+                &memo,
+            )
+            .await?;
 
             // Fail fast (400) on literal connection references the worker would
             // otherwise reject at claim time. Templated values cannot be checked here.
+            let mut task_pin: Option<TaskPinStamp> = None;
             if action.action_type == "task" {
                 let task_ref = action
                     .task
                     .as_deref()
                     .context("type: task action missing task field")?;
                 let base_ws: &str = action_workspace.as_deref().unwrap_or(workspace_name);
-                let base_cfg: &WorkspaceConfig = match cross_cfg.as_deref() {
-                    Some(c) => c,
-                    None => workspace_config,
+                let base_cfg: &WorkspaceConfig = owner_cfg.as_deref().unwrap_or(workspace_config);
+                // The pin of the config this action is written in (§ 4.3 base
+                // pin): the step's action pin, else — for an action of the
+                // job's own config — the job's. A live foreign action has none.
+                let base_pin: Option<PinRef> = match (&action_pin, &action_workspace) {
+                    (Some(p), _) => Some(p.clone()),
+                    (None, None) => job_pin.clone(),
+                    (None, Some(_)) => None,
                 };
-                let resolved = resolve_task_ref(workspaces, base_ws, base_cfg, task_ref).await?;
-                if resolved.workspace == workspace_name && resolved.task_name == task_name {
+                let (resolved, pin) = resolve_task_for_step(
+                    workspaces,
+                    base_ws,
+                    base_cfg,
+                    base_pin.as_ref(),
+                    task_ref,
+                    action.git_ref.as_deref(),
+                    &world,
+                    &memo,
+                )
+                .await?;
+                // A self-reference is the same task at the same pin; the same
+                // task at another commit is a different version (bounded by
+                // MAX_TASK_DEPTH like any nesting).
+                if resolved.workspace == workspace_name
+                    && resolved.task_name == task_name
+                    && pin.as_ref() == job_pin.as_ref()
+                {
                     bail!(
                         "task '{}' is a self-reference to '{}/{}' (invalid)",
                         task_ref,
@@ -448,19 +535,35 @@ pub(crate) fn create_job_for_task_inner<'a>(
                     flow_step,
                     &resolved,
                     workspaces,
-                    workspace_name,
+                    RoleConfig {
+                        workspace: workspace_name,
+                        config: workspace_config,
+                    },
                     base_cfg,
                 )
                 .await?;
+                task_pin = pin.map(|p| TaskPinStamp {
+                    workspace: resolved.workspace.clone(),
+                    git_ref: p.git_ref,
+                    commit: p.commit,
+                });
             } else {
-                precheck_literal_connection_inputs(
-                    step_name,
-                    flow_step,
-                    action,
-                    &ws_set,
-                    workspace_name,
-                    action_workspace.as_deref(),
-                )?;
+                // Role-scoped (spec § 7.4): the job's own config is the
+                // caller, the action's owner config (pinned or live) its owner
+                // — the same roles the claim path resolves with.
+                let roles = RoleScope {
+                    caller: RoleConfig {
+                        workspace: workspace_name,
+                        config: workspace_config,
+                    },
+                    action_owner: action_workspace.as_deref().map(|ws| RoleConfig {
+                        workspace: ws,
+                        config: owner_cfg.as_deref().unwrap_or(workspace_config),
+                    }),
+                    task_owner: None,
+                    others: &ws_set,
+                };
+                precheck_literal_connection_inputs(step_name, flow_step, &action, &roles)?;
             }
 
             let status = if flow_step.for_each.is_some() {
@@ -479,18 +582,24 @@ pub(crate) fn create_job_for_task_inner<'a>(
                 step_name,
                 action_name,
                 flow_step,
-                action,
+                &action,
                 Some(serde_json::to_value(&flow_step.input).unwrap_or_default()),
                 status,
                 defaults,
                 action_workspace,
                 action_revision,
+                action_pin.map(|p| p.git_ref),
+                task_pin,
             ));
         }
 
         // Create job and steps atomically in a transaction
         let mut tx = pool.begin().await.context("Failed to begin transaction")?;
 
+        let pin_cols = git_ref.map(|r| JobPinCols {
+            git_ref: r.to_string(),
+            task_folder: task.folder.clone(),
+        });
         JobRepo::create_with_parent_tx_id(
             &mut *tx,
             job_id,
@@ -519,6 +628,7 @@ pub(crate) fn create_job_for_task_inner<'a>(
             task.retry
                 .as_ref()
                 .map(|r| i32::try_from(r.max_attempts - 1).expect("max_attempts fits i32")),
+            pin_cols.as_ref(),
         )
         .await
         .context("Failed to create job")?;
@@ -535,6 +645,22 @@ pub(crate) fn create_job_for_task_inner<'a>(
             JobStepRepo::seed_steps_tx(&mut tx, job_id, &plan.carried)
                 .await
                 .context("seed carried-over steps")?;
+        }
+        if let CreationMode::Retry {
+            failed_job_id,
+            root_job_id,
+            retry_attempt,
+        } = &mode
+        {
+            JobRepo::link_retry_tx(
+                &mut tx,
+                *failed_job_id,
+                job_id,
+                *root_job_id,
+                *retry_attempt,
+            )
+            .await
+            .context("link the retry job to its chain")?;
         }
 
         tx.commit().await.context("Failed to commit job creation")?;
@@ -587,12 +713,14 @@ pub(crate) fn create_job_for_task_inner<'a>(
                     .begin()
                     .await
                     .context("begin compensation transaction after initialisation error")?;
-                JobStepRepo::fail_non_terminal_steps_tx(&mut *tx, job_id, &msg)
-                    .await
-                    .context("fail steps after initialisation error")?;
+                // Job row before steps: the lock order of `release_claim`
+                // (job → step), so the two never deadlock (40P01).
                 JobRepo::mark_failed_tx(&mut *tx, job_id)
                     .await
                     .context("mark job failed after initialisation error")?;
+                JobStepRepo::fail_non_terminal_steps_tx(&mut *tx, job_id, &msg)
+                    .await
+                    .context("fail steps after initialisation error")?;
                 tx.commit()
                     .await
                     .context("commit compensation after initialisation error")?;
@@ -602,6 +730,16 @@ pub(crate) fn create_job_for_task_inner<'a>(
 
         Ok(CreatedJob::new(job_id, settled.is_some()))
     })
+}
+
+/// The task pin a `type: task` step carries (spec § 6 `task_*` columns): the
+/// task owner `T` and the commit its task runs at. Stamped at parent creation;
+/// dispatch reads it and never infers a pin from the parent job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TaskPinStamp {
+    pub workspace: String,
+    pub git_ref: String,
+    pub commit: String,
 }
 
 /// The one place a `NewJobStep` is built from a flow step and its resolved
@@ -618,6 +756,8 @@ pub(crate) fn build_step(
     defaults: JobDefaults,
     action_workspace: Option<String>,
     action_revision: Option<String>,
+    action_ref: Option<String>,
+    task_pin: Option<TaskPinStamp>,
 ) -> NewJobStep {
     let action_spec = serde_json::to_value(action).ok();
     let required_ability = compute_required_ability(action);
@@ -673,6 +813,10 @@ pub(crate) fn build_step(
         retry_jitter: retry.as_ref().is_some_and(|r| r.jitter),
         action_workspace,
         action_revision,
+        action_ref,
+        task_workspace: task_pin.as_ref().map(|p| p.workspace.clone()),
+        task_ref: task_pin.as_ref().map(|p| p.git_ref.clone()),
+        task_revision: task_pin.map(|p| p.commit),
     }
 }
 
@@ -717,9 +861,39 @@ impl ResolvedTask {
     }
 }
 
+/// Where today's rule (§ 4.3 without `ref`) puts a `type: task` reference
+/// written in `base_cfg`.
+enum TaskRefOwner<'r> {
+    /// A key of `base_cfg.tasks` (local and library-flattened names).
+    BaseKey,
+    /// A dotted `ws.task` on a base miss, `ws` configured.
+    Qualified { ws: &'r str, name: &'r str },
+}
+
+/// Today's owner rule for `task_ref`: a key of `base_cfg.tasks` first, else a
+/// dotted `ws.task` naming a configured workspace. Errors are the outermost
+/// message on purpose — `classify_execute_error` keys off them.
+fn task_ref_owner<'r>(
+    workspaces: &WorkspaceManager,
+    base_ws: &str,
+    base_cfg: &WorkspaceConfig,
+    task_ref: &'r str,
+) -> Result<TaskRefOwner<'r>> {
+    if base_cfg.tasks.contains_key(task_ref) {
+        return Ok(TaskRefOwner::BaseKey);
+    }
+    if let (Some(ws), name) = parse_qualified_ref(task_ref) {
+        if !workspaces.has_workspace(ws) {
+            bail!("task '{}': unknown workspace '{}'", task_ref, ws);
+        }
+        return Ok(TaskRefOwner::Qualified { ws, name });
+    }
+    bail!("Task '{}' not found in workspace '{}'", task_ref, base_ws)
+}
+
 /// Resolve `task_ref` relative to `base_ws` (the ACTION's owner): a key of
 /// `base_cfg.tasks` first (local and library-flattened names), else a dotted
-/// `ws.task` against another loaded workspace. Errors are the outermost
+/// `ws.task` against another loaded workspace, LIVE. Errors are the outermost
 /// message on purpose — `classify_execute_error` keys off them.
 pub(crate) async fn resolve_task_ref(
     workspaces: &WorkspaceManager,
@@ -727,49 +901,398 @@ pub(crate) async fn resolve_task_ref(
     base_cfg: &WorkspaceConfig,
     task_ref: &str,
 ) -> Result<ResolvedTask> {
-    if let Some(task) = base_cfg.tasks.get(task_ref) {
-        return Ok(ResolvedTask {
-            workspace: base_ws.to_string(),
-            task_name: task_ref.to_string(),
-            task: task.clone(),
-            config: OwnerConfig::Base,
-        });
-    }
-    if let (Some(ws), name) = stroem_common::template::parse_qualified_ref(task_ref) {
-        if !workspaces.has_workspace(ws) {
-            bail!("task '{}': unknown workspace '{}'", task_ref, ws);
+    let (ws, name) = match task_ref_owner(workspaces, base_ws, base_cfg, task_ref)? {
+        TaskRefOwner::BaseKey => {
+            return Ok(ResolvedTask {
+                workspace: base_ws.to_string(),
+                task_name: task_ref.to_string(),
+                task: base_cfg.tasks[task_ref].clone(),
+                config: OwnerConfig::Base,
+            })
         }
-        let cfg = workspaces.get_config(ws).await.ok_or_else(|| {
-            anyhow::anyhow!("task '{}': workspace '{}' is not available", task_ref, ws)
-        })?;
-        let task = cfg.tasks.get(name).cloned().ok_or_else(|| {
-            anyhow::anyhow!(
-                "task '{}': workspace '{}' has no task '{}'",
+        TaskRefOwner::Qualified { ws, name } => (ws, name),
+    };
+    let cfg = workspaces.get_config(ws).await.ok_or_else(|| {
+        anyhow::anyhow!("task '{}': workspace '{}' is not available", task_ref, ws)
+    })?;
+    let task = cfg.tasks.get(name).cloned().ok_or_else(|| {
+        anyhow::anyhow!(
+            "task '{}': workspace '{}' has no task '{}'",
+            task_ref,
+            ws,
+            name
+        )
+    })?;
+    Ok(ResolvedTask {
+        workspace: ws.to_string(),
+        task_name: name.to_string(),
+        task,
+        config: OwnerConfig::Foreign(cfg),
+    })
+}
+
+/// The sets a `ref:` resolves in (spec § 4.3): library prefixes, configured
+/// workspaces, and the git workspaces among them (only those can be pinned).
+pub(crate) fn ref_world_sets(
+    workspaces: &WorkspaceManager,
+) -> (HashSet<String>, HashSet<String>, HashSet<String>) {
+    let libraries: HashSet<String> = workspaces.get_library_paths().into_keys().collect();
+    let configured: HashSet<String> = workspaces.configured_names().into_iter().collect();
+    let git: HashSet<String> = configured
+        .iter()
+        .filter(|n| workspaces.pins().is_git(n))
+        .cloned()
+        .collect();
+    (libraries, configured, git)
+}
+
+/// F43: a `ref:` is parsed before it is resolved, so a malformed one is a
+/// [`GitRefError`](stroem_common::git_ref::GitRefError) (a 400 "invalid ref
+/// name"), never a ref that was not found. `what` names where it is written.
+fn parse_ref(git_ref: &str, what: &str) -> Result<()> {
+    stroem_common::git_ref::parse_git_ref(git_ref)
+        .map(|_| ())
+        .with_context(|| format!("{what}: invalid ref name"))
+}
+
+/// One job creation's `(owner workspace, ref as written) → PinRef` memo: every
+/// ref in a creation resolves to a commit ONCE, so a branch that moves between
+/// two steps cannot split the job across two commits of the same ref. Keyed by
+/// the string as written (`release/2.3` and `refs/heads/release/2.3` are
+/// distinct, as their state partitions are). A std mutex, locked briefly and
+/// never across an `.await`.
+#[derive(Default)]
+pub(crate) struct RefMemo(std::sync::Mutex<HashMap<(String, String), PinRef>>);
+
+impl RefMemo {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// A memo seeded with the job's own pin, so an explicit `ref:` naming the
+    /// job's workspace at the job's ref string reuses the job's commit.
+    fn seeded(workspace: &str, pin: Option<&PinRef>) -> Self {
+        let memo = Self::new();
+        if let Some(p) = pin {
+            memo.insert(workspace, &p.git_ref, p.clone());
+        }
+        memo
+    }
+
+    fn get(&self, owner: &str, git_ref: &str) -> Option<PinRef> {
+        let map = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        map.get(&(owner.to_string(), git_ref.to_string())).cloned()
+    }
+
+    fn insert(&self, owner: &str, git_ref: &str, pin: PinRef) {
+        let mut map = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        map.entry((owner.to_string(), git_ref.to_string()))
+            .or_insert(pin);
+    }
+}
+
+/// § 4.3 steps 4–5: `owner`@`git_ref` resolved to a commit, and the config at
+/// that commit. The commit is resolved once per `memo` (a hit only ensures the
+/// memoised commit). A `PinLoadFailed` is replaced by its fixed sentence
+/// ([`WorkspaceManager::pin_error_for_user`]); every other `PinError`
+/// propagates as is, for `classify_execute_error` to downcast.
+pub(crate) async fn pin_at_ref(
+    workspaces: &WorkspaceManager,
+    memo: &RefMemo,
+    owner: &str,
+    git_ref: &str,
+) -> Result<(PinRef, Arc<Pinned>)> {
+    let pin = match memo.get(owner, git_ref) {
+        Some(pin) => pin,
+        None => {
+            let pin = workspaces.pins().resolve(owner, git_ref).await?.pin_ref();
+            memo.insert(owner, git_ref, pin.clone());
+            // A concurrent insert cannot happen within one creation, but
+            // re-read so the memoised value always wins.
+            memo.get(owner, git_ref).unwrap_or(pin)
+        }
+    };
+    match workspaces.pins().ensure(owner, &pin.commit).await {
+        Ok(pinned) => Ok((pin, pinned)),
+        Err(e) => Err(workspaces.pin_error_for_user(owner, &pin, e).await),
+    }
+}
+
+/// Action `local` of `cfg`, the config of `owner` at ref `git_ref`. Missing →
+/// the "has no action … at ref" phrase (a 400).
+fn action_at(
+    written: &str,
+    owner: &str,
+    cfg: &WorkspaceConfig,
+    local: &str,
+    git_ref: &str,
+) -> Result<ActionDef> {
+    cfg.actions.get(local).cloned().ok_or_else(|| {
+        anyhow::anyhow!(
+            "action '{}': workspace '{}' has no action '{}' at ref '{}'",
+            written,
+            owner,
+            local,
+            git_ref
+        )
+    })
+}
+
+/// Task `local` of `cfg`, the config of `ws` at ref `git_ref`. Missing → the
+/// "has no task … at ref" phrase (a 400).
+fn task_named_at(
+    task_ref: &str,
+    ws: &str,
+    cfg: &WorkspaceConfig,
+    local: &str,
+    git_ref: &str,
+) -> Result<TaskDef> {
+    cfg.tasks.get(local).cloned().ok_or_else(|| {
+        anyhow::anyhow!(
+            "task '{}': workspace '{}' has no task '{}' at ref '{}'",
+            task_ref,
+            ws,
+            local,
+            git_ref
+        )
+    })
+}
+
+/// The task `task_ref` names in `cfg`, the PINNED config of `ws` at ref
+/// `git_ref`: its full key first (local and library-flattened names), its
+/// bare name otherwise (`ws.task`). Returns the local name and the task. For
+/// an inherited pin (§ 4.3) and for a step's stamped task pin (dispatch).
+pub(crate) fn task_at(
+    ws: &str,
+    cfg: &WorkspaceConfig,
+    task_ref: &str,
+    git_ref: &str,
+) -> Result<(String, TaskDef)> {
+    let local = if cfg.tasks.contains_key(task_ref) {
+        task_ref
+    } else {
+        parse_qualified_ref(task_ref).1
+    };
+    let task = task_named_at(task_ref, ws, cfg, local, git_ref)?;
+    Ok((local.to_string(), task))
+}
+
+/// § 4.3 / § 7.1 for a `type: task` action whose config is `base_cfg` (workspace
+/// `base_ws`, pinned at `base_pin` or live): the task owner `T`, its task, and the
+/// pin to stamp. `None` ⇒ unpinned; dispatch resolves it live, as today.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn resolve_task_for_step(
+    workspaces: &WorkspaceManager,
+    base_ws: &str,
+    base_cfg: &WorkspaceConfig,
+    base_pin: Option<&PinRef>,
+    task_ref: &str,
+    git_ref: Option<&str>,
+    world: &RefWorld<'_>,
+    memo: &RefMemo,
+) -> Result<(ResolvedTask, Option<PinRef>)> {
+    if let Some(r) = git_ref {
+        parse_ref(r, &format!("task '{task_ref}'"))?;
+    }
+    match plan_reference(base_ws, base_pin, task_ref, git_ref, world)? {
+        RefPlan::AtRef { target, git_ref } => {
+            let (pin, pinned) = pin_at_ref(workspaces, memo, &target.owner, &git_ref).await?;
+            let task = task_named_at(
                 task_ref,
-                ws,
-                name
-            )
-        })?;
-        return Ok(ResolvedTask {
-            workspace: ws.to_string(),
-            task_name: name.to_string(),
-            task,
-            config: OwnerConfig::Foreign(cfg),
+                &target.owner,
+                &pinned.config,
+                &target.local_name,
+                &git_ref,
+            )?;
+            Ok((
+                ResolvedTask {
+                    workspace: target.owner,
+                    task_name: target.local_name,
+                    task,
+                    config: OwnerConfig::Foreign(Arc::clone(&pinned.config)),
+                },
+                Some(pin),
+            ))
+        }
+        RefPlan::Today { base_pin } => {
+            // Inheritance follows the RESOLVED owner, never the spelling
+            // (F36): `base.task` lands in the base like `task` does, so it is
+            // read from the pinned base config, not the live one.
+            let owner = match task_ref_owner(workspaces, base_ws, base_cfg, task_ref)? {
+                TaskRefOwner::BaseKey => base_ws,
+                TaskRefOwner::Qualified { ws, .. } => ws,
+            };
+            match inherited_pin(base_ws, base_pin.as_ref(), owner) {
+                None => Ok((
+                    resolve_task_ref(workspaces, base_ws, base_cfg, task_ref).await?,
+                    None,
+                )),
+                Some(pin) => {
+                    let (task_name, task) = task_at(base_ws, base_cfg, task_ref, &pin.git_ref)?;
+                    Ok((
+                        ResolvedTask {
+                            workspace: base_ws.to_string(),
+                            task_name,
+                            task,
+                            config: OwnerConfig::Base,
+                        },
+                        Some(pin),
+                    ))
+                }
+            }
+        }
+    }
+}
+
+/// A flow step's action as its row stamps it (§ 4.3, § 7.1).
+struct StepAction {
+    action: ActionDef,
+    /// `action_workspace`: the owner, when the action is not read from the
+    /// job's own config by its full key.
+    workspace: Option<String>,
+    /// `action_revision`.
+    revision: Option<String>,
+    /// The owner's local key (`action_name`).
+    name: String,
+    /// The owner's config when it is not the job's `workspace_config`.
+    owner_cfg: Option<Arc<WorkspaceConfig>>,
+    /// The pin the action was resolved at: its `ref:`, or the job pin a
+    /// self-qualified name inherits. Stamped as `action_ref` + revision.
+    pin: Option<PinRef>,
+}
+
+/// § 4.3 for a flow step's `action` (+ `ref`), written in `workspace_config`
+/// (`workspace_name`, pinned at `job_pin` or live).
+#[allow(clippy::too_many_arguments)]
+async fn resolve_step_action(
+    workspaces: &WorkspaceManager,
+    workspace_name: &str,
+    workspace_config: &WorkspaceConfig,
+    job_pin: Option<&PinRef>,
+    step_name: &str,
+    flow_step: &FlowStep,
+    world: &RefWorld<'_>,
+    memo: &RefMemo,
+) -> Result<StepAction> {
+    if let Some(step_ref) = flow_step.git_ref.as_deref() {
+        // With `ref:` the owner is decided syntactically, then the name is
+        // looked up in owner@ref (§ 7.1).
+        parse_ref(step_ref, &format!("step '{step_name}'"))?;
+        let RefPlan::AtRef { target, git_ref } = plan_reference(
+            workspace_name,
+            None,
+            &flow_step.action,
+            Some(step_ref),
+            world,
+        )?
+        else {
+            unreachable!("plan_reference returns AtRef whenever a ref is given")
+        };
+        let (pin, pinned) = pin_at_ref(workspaces, memo, &target.owner, &git_ref).await?;
+        let action = action_at(
+            &flow_step.action,
+            &target.owner,
+            &pinned.config,
+            &target.local_name,
+            &git_ref,
+        )?;
+        if action.action_type == "agent" {
+            return Err(RefResolveError::AgentAction(flow_step.action.clone()).into());
+        }
+        return Ok(StepAction {
+            action,
+            workspace: Some(target.owner),
+            revision: Some(pin.commit.clone()),
+            name: target.local_name,
+            owner_cfg: Some(Arc::clone(&pinned.config)),
+            pin: Some(pin),
         });
     }
-    bail!("Task '{}' not found in workspace '{}'", task_ref, base_ws)
+
+    // flow_step.action may be "owner_ws.action" (cross-workspace) or a local name.
+    let (owner_ws, bare_action) = parse_qualified_ref(&flow_step.action);
+    // Cross-workspace only when it isn't already a local/library-flattened key
+    // AND the named workspace exists (library precedence + backward compat).
+    let qualified_owner = owner_ws.filter(|ws| {
+        !workspace_config.actions.contains_key(&flow_step.action) && workspaces.has_workspace(ws)
+    });
+    let Some(ws) = qualified_owner else {
+        let action = workspace_config
+            .actions
+            .get(&flow_step.action)
+            .cloned()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Action '{}' not found in workspace '{}'",
+                    flow_step.action,
+                    workspace_name
+                )
+            })?;
+        return Ok(StepAction {
+            action,
+            workspace: None,
+            revision: None,
+            name: flow_step.action.clone(),
+            owner_cfg: None,
+            pin: None,
+        });
+    };
+
+    // Inheritance follows the RESOLVED owner, never the spelling (F36):
+    // `etl.hello` inside an etl@R job is etl's own, so it inherits the job pin
+    // and is read from the pinned config, not the live one.
+    if let Some(pin) = inherited_pin(workspace_name, job_pin, ws) {
+        let action = action_at(
+            &flow_step.action,
+            ws,
+            workspace_config,
+            bare_action,
+            &pin.git_ref,
+        )?;
+        return Ok(StepAction {
+            action,
+            workspace: Some(ws.to_string()),
+            revision: Some(pin.commit.clone()),
+            name: bare_action.to_string(),
+            owner_cfg: None,
+            pin: Some(pin),
+        });
+    }
+
+    let owner_cfg = workspaces.get_config(ws).await.ok_or_else(|| {
+        anyhow::anyhow!(
+            "action '{}': workspace '{}' is not available",
+            flow_step.action,
+            ws
+        )
+    })?;
+    let action = owner_cfg.actions.get(bare_action).cloned().ok_or_else(|| {
+        anyhow::anyhow!(
+            "action '{}': workspace '{}' has no action '{}'",
+            flow_step.action,
+            ws,
+            bare_action
+        )
+    })?;
+    Ok(StepAction {
+        action,
+        workspace: Some(ws.to_string()),
+        revision: workspaces.get_revision(ws),
+        name: bare_action.to_string(),
+        owner_cfg: Some(owner_cfg),
+        pin: None,
+    })
 }
 
 /// Resolve the flow step's connection-typed inputs that are plain string
-/// literals (no `{{`), using the same scope the claim path will use, so an
-/// author mistake surfaces as a job-creation error instead of a failed step.
+/// literals (no `{{`), with the same role scope the claim path will use
+/// (spec § 7.4), so an author mistake surfaces as a job-creation error instead
+/// of a failed step.
 pub(crate) fn precheck_literal_connection_inputs(
     step_name: &str,
     flow_step: &FlowStep,
     action: &ActionDef,
-    set: &WorkspaceSet,
-    caller_ws: &str,
-    owner_ws: Option<&str>,
+    roles: &RoleScope<'_>,
 ) -> Result<()> {
     if flow_step.when.is_some() {
         // A `when`-guarded step may never run at all (condition false, or the
@@ -779,7 +1302,6 @@ pub(crate) fn precheck_literal_connection_inputs(
         // claim time, only if the step is actually reached.
         return Ok(());
     }
-    let owner_ws = owner_ws.unwrap_or(caller_ws);
     let mut literal_schema = HashMap::new();
     let mut literal_values = serde_json::Map::new();
     for (field, def) in &action.input {
@@ -796,19 +1318,13 @@ pub(crate) fn precheck_literal_connection_inputs(
     if literal_schema.is_empty() {
         return Ok(());
     }
-    resolve_connection_inputs_scoped(
+    let owner = roles.action_owner.unwrap_or(roles.caller);
+    stroem_common::template::resolve_bucket_by_role(
         &serde_json::Value::Object(literal_values),
         &literal_schema,
-        &ResolveScope {
-            lookup: set,
-            schema_ws: owner_ws,
-            value_ws: caller_ws,
-            fallback_ws: if owner_ws == caller_ws {
-                None
-            } else {
-                Some(owner_ws)
-            },
-        },
+        roles.caller,
+        owner,
+        roles.others,
     )
     .with_context(|| format!("step '{}': failed to resolve connection inputs", step_name))
     .map(|_| ())
@@ -816,17 +1332,19 @@ pub(crate) fn precheck_literal_connection_inputs(
 
 /// Creation-time pre-check for a `type: task` step (spec § 3.2 item 3): the
 /// caller's LITERAL values for the TASK's connection-typed inputs are checked
-/// with the same scope dispatch will use (caller first, task owner if shared),
-/// including the cross-workspace shape rule. `when`-guarded steps are not
-/// pre-checked (the step may never run). The error is wrapped so the
-/// classifier's "resolve connection" phrase answers 400; an unavailable owner
-/// inside the chain still answers 500.
+/// with the same role scope dispatch will use (spec § 7.4). `caller` is the
+/// job's own config (pinned or live); the task owner answers with `resolved`'s
+/// config at its pin. Caller first, then the task owner — gated by `shared`
+/// across a workspace boundary — including the cross-workspace shape rule.
+/// `when`-guarded steps are not pre-checked (the step may never run). The
+/// error is wrapped so the classifier's "resolve connection" phrase answers
+/// 400; an unavailable owner inside the chain still answers 500.
 pub(crate) async fn precheck_task_step_literals(
     step_name: &str,
     flow_step: &FlowStep,
     resolved: &ResolvedTask,
     workspaces: &WorkspaceManager,
-    caller_ws: &str,
+    caller: RoleConfig<'_>,
     base_cfg: &WorkspaceConfig,
 ) -> Result<()> {
     if flow_step.when.is_some() {
@@ -850,14 +1368,20 @@ pub(crate) async fn precheck_task_step_literals(
     }
     let t_cfg = resolved.config(base_cfg);
     let set = WorkspaceSet::load(workspaces, &resolved.workspace, Some(t_cfg)).await;
-    stroem_common::template::resolve_task_input_by_provenance(
+    let roles = RoleScope {
+        caller,
+        action_owner: None,
+        task_owner: Some(RoleConfig {
+            workspace: &resolved.workspace,
+            config: t_cfg,
+        }),
+        others: &set,
+    };
+    stroem_common::template::resolve_task_input_by_provenance_roles(
         &serde_json::Value::Object(literals),
         &serde_json::json!({}),
         &resolved.task.input,
-        &set,
-        caller_ws,
-        caller_ws,
-        &resolved.workspace,
+        &roles,
     )
     .with_context(|| format!("step '{}': failed to resolve connection inputs", step_name))
     .map(|_| ())
@@ -905,6 +1429,15 @@ mod tests {
             vec![("owner".to_string(), Arc::new(owner))],
             vec![],
         );
+        let roles = RoleScope {
+            caller: RoleConfig {
+                workspace: "caller",
+                config: &caller,
+            },
+            action_owner: None,
+            task_owner: None,
+            others: &set,
+        };
 
         let mut action: ActionDef = serde_yaml::from_str("type: script\nscript: echo").unwrap();
         action.input.insert(
@@ -920,29 +1453,14 @@ mod tests {
         };
 
         // Literal, unshared → error mentioning "is not shared"
-        let err = precheck_literal_connection_inputs(
-            "s",
-            &step("owner.private"),
-            &action,
-            &set,
-            "caller",
-            None,
-        )
-        .unwrap_err();
+        let err = precheck_literal_connection_inputs("s", &step("owner.private"), &action, &roles)
+            .unwrap_err();
         assert!(format!("{err:#}").contains("is not shared"), "{err:#}");
         // Literal, shared → ok
-        precheck_literal_connection_inputs("s", &step("owner.open"), &action, &set, "caller", None)
-            .unwrap();
+        precheck_literal_connection_inputs("s", &step("owner.open"), &action, &roles).unwrap();
         // Templated → skipped (no error even though it would not resolve)
-        precheck_literal_connection_inputs(
-            "s",
-            &step("{{ input.pick }}"),
-            &action,
-            &set,
-            "caller",
-            None,
-        )
-        .unwrap();
+        precheck_literal_connection_inputs("s", &step("{{ input.pick }}"), &action, &roles)
+            .unwrap();
     }
 
     #[test]
@@ -975,6 +1493,15 @@ mod tests {
             vec![("owner".to_string(), Arc::new(owner))],
             vec![],
         );
+        let roles = RoleScope {
+            caller: RoleConfig {
+                workspace: "caller",
+                config: &caller,
+            },
+            action_owner: None,
+            task_owner: None,
+            others: &set,
+        };
 
         let mut action: ActionDef = serde_yaml::from_str("type: script\nscript: echo").unwrap();
         action.input.insert(
@@ -992,7 +1519,7 @@ mod tests {
             serde_yaml::from_str("action: a\ninput:\n  conn: \"owner.private\"").unwrap();
         step.when = Some("input.flag".to_string());
 
-        precheck_literal_connection_inputs("s", &step, &action, &set, "caller", None).unwrap();
+        precheck_literal_connection_inputs("s", &step, &action, &roles).unwrap();
     }
 
     fn cfg_with_task(task: &str) -> WorkspaceConfig {
@@ -1205,9 +1732,19 @@ mod tests {
         let mut step = deploy_step("  db: {}");
         step.when = Some("input.flag".to_string());
 
-        precheck_task_step_literals("s", &step, &resolved, &mgr, "A", &a_cfg)
-            .await
-            .unwrap();
+        precheck_task_step_literals(
+            "s",
+            &step,
+            &resolved,
+            &mgr,
+            RoleConfig {
+                workspace: "A",
+                config: &a_cfg,
+            },
+            &a_cfg,
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -1221,9 +1758,19 @@ mod tests {
         };
         let step = deploy_step("  db: \"pg-local\"");
 
-        precheck_task_step_literals("s", &step, &resolved, &mgr, "A", &a_cfg)
-            .await
-            .unwrap();
+        precheck_task_step_literals(
+            "s",
+            &step,
+            &resolved,
+            &mgr,
+            RoleConfig {
+                workspace: "A",
+                config: &a_cfg,
+            },
+            &a_cfg,
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -1237,14 +1784,34 @@ mod tests {
         };
 
         let shared_step = deploy_step("  db: \"pg-prod\"");
-        precheck_task_step_literals("s", &shared_step, &resolved, &mgr, "A", &a_cfg)
-            .await
-            .unwrap();
+        precheck_task_step_literals(
+            "s",
+            &shared_step,
+            &resolved,
+            &mgr,
+            RoleConfig {
+                workspace: "A",
+                config: &a_cfg,
+            },
+            &a_cfg,
+        )
+        .await
+        .unwrap();
 
         let unshared_step = deploy_step("  db: \"pg-private\"");
-        let err = precheck_task_step_literals("s", &unshared_step, &resolved, &mgr, "A", &a_cfg)
-            .await
-            .unwrap_err();
+        let err = precheck_task_step_literals(
+            "s",
+            &unshared_step,
+            &resolved,
+            &mgr,
+            RoleConfig {
+                workspace: "A",
+                config: &a_cfg,
+            },
+            &a_cfg,
+        )
+        .await
+        .unwrap_err();
         assert!(
             format!("{err:#}").contains("is not shared"),
             "chain was: {err:#}"
@@ -1265,9 +1832,19 @@ mod tests {
         };
 
         let object_step = deploy_step("  db: {}");
-        let err = precheck_task_step_literals("s", &object_step, &resolved, &mgr, "A", &a_cfg)
-            .await
-            .unwrap_err();
+        let err = precheck_task_step_literals(
+            "s",
+            &object_step,
+            &resolved,
+            &mgr,
+            RoleConfig {
+                workspace: "A",
+                config: &a_cfg,
+            },
+            &a_cfg,
+        )
+        .await
+        .unwrap_err();
         assert!(
             format!("{err:#}")
                 .contains("a connection passed across workspaces must be a connection name"),
@@ -1278,9 +1855,19 @@ mod tests {
             .contains("failed to resolve connection inputs"));
 
         let null_step = deploy_step("  db: null");
-        let err = precheck_task_step_literals("s", &null_step, &resolved, &mgr, "A", &a_cfg)
-            .await
-            .unwrap_err();
+        let err = precheck_task_step_literals(
+            "s",
+            &null_step,
+            &resolved,
+            &mgr,
+            RoleConfig {
+                workspace: "A",
+                config: &a_cfg,
+            },
+            &a_cfg,
+        )
+        .await
+        .unwrap_err();
         assert!(
             format!("{err:#}")
                 .contains("a connection passed across workspaces must be a connection name"),
@@ -1305,9 +1892,19 @@ mod tests {
         };
         let step = deploy_step("  db: {}");
 
-        precheck_task_step_literals("s", &step, &resolved, &mgr, "T", &t_cfg)
-            .await
-            .unwrap();
+        precheck_task_step_literals(
+            "s",
+            &step,
+            &resolved,
+            &mgr,
+            RoleConfig {
+                workspace: "T",
+                config: &t_cfg,
+            },
+            &t_cfg,
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -1321,9 +1918,19 @@ mod tests {
         };
         let step = deploy_step("  db: \"{{ prev.output.db }}\"");
 
-        precheck_task_step_literals("s", &step, &resolved, &mgr, "A", &a_cfg)
-            .await
-            .unwrap();
+        precheck_task_step_literals(
+            "s",
+            &step,
+            &resolved,
+            &mgr,
+            RoleConfig {
+                workspace: "A",
+                config: &a_cfg,
+            },
+            &a_cfg,
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -1339,8 +1946,81 @@ mod tests {
         // considered, regardless of the cross-workspace boundary rule.
         let step = deploy_step("  name: {}");
 
-        precheck_task_step_literals("s", &step, &resolved, &mgr, "A", &a_cfg)
+        precheck_task_step_literals(
+            "s",
+            &step,
+            &resolved,
+            &mgr,
+            RoleConfig {
+                workspace: "A",
+                config: &a_cfg,
+            },
+            &a_cfg,
+        )
+        .await
+        .unwrap();
+    }
+
+    /// Spec § 7.4: the caller and the task owner are ONE workspace at two
+    /// commits. A caller literal resolves in the caller's commit first, then
+    /// falls back UNGATED to the task owner's commit. The name-keyed set
+    /// answered both roles with the task owner's commit.
+    #[tokio::test]
+    async fn precheck_task_step_literals_same_workspace_two_commits_reads_both() {
+        use stroem_common::models::workflow::{ConnectionDef, ConnectionTypeDef};
+
+        let (mgr, _a_cfg, t_cfg) = precheck_task_manager();
+        // T at the job's own commit: only `pg-x`.
+        let mut t_at_x = WorkspaceConfig::default();
+        t_at_x.connection_types.insert(
+            "pg".to_string(),
+            ConnectionTypeDef {
+                properties: Default::default(),
+            },
+        );
+        t_at_x.connections.insert(
+            "pg-x".to_string(),
+            ConnectionDef {
+                connection_type: Some("pg".into()),
+                shared: false,
+                values: Default::default(),
+            },
+        );
+        // The task is read at another commit of T (`t_cfg`: `pg-prod`,
+        // unshared `pg-private`).
+        let resolved = ResolvedTask {
+            workspace: "T".to_string(),
+            task_name: "deploy".to_string(),
+            task: t_cfg.tasks.get("deploy").unwrap().clone(),
+            config: OwnerConfig::Foreign(Arc::new(t_cfg.clone())),
+        };
+        let caller = RoleConfig {
+            workspace: "T",
+            config: &t_at_x,
+        };
+
+        for ok in ["pg-x", "pg-private"] {
+            precheck_task_step_literals(
+                "s",
+                &deploy_step(&format!("  db: \"{ok}\"")),
+                &resolved,
+                &mgr,
+                caller,
+                &t_at_x,
+            )
             .await
-            .unwrap();
+            .unwrap_or_else(|e| panic!("{ok}: {e:#}"));
+        }
+        let err = precheck_task_step_literals(
+            "s",
+            &deploy_step("  db: \"nope\""),
+            &resolved,
+            &mgr,
+            caller,
+            &t_at_x,
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("does not exist"), "{err:#}");
     }
 }

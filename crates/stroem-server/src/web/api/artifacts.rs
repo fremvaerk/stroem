@@ -112,7 +112,7 @@ pub async fn list_artifacts(
         .context("get job")?
         .ok_or_else(|| AppError::not_found("Job"))?;
 
-    let perm = check_job_acl(&state, &auth_user, &job.workspace, &job.task_name).await?;
+    let perm = check_job_acl(&state, &auth_user, &job).await?;
     if matches!(perm, TaskPermission::Deny) {
         return Err(AppError::not_found("Job"));
     }
@@ -150,7 +150,7 @@ pub async fn download_artifact(
         .context("get job")?
         .ok_or_else(|| AppError::not_found("Job"))?;
 
-    let perm = check_job_acl(&state, &auth_user, &job.workspace, &job.task_name).await?;
+    let perm = check_job_acl(&state, &auth_user, &job).await?;
     if matches!(perm, TaskPermission::Deny) {
         return Err(AppError::not_found("Job"));
     }

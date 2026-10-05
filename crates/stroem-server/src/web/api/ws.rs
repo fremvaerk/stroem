@@ -1,4 +1,4 @@
-use crate::acl::{load_user_acl_context, make_task_path, TaskPermission};
+use crate::acl::{load_user_acl_context, TaskPermission};
 use crate::log_broadcast::LogBroadcast;
 use crate::log_read::StepFilter;
 use crate::log_storage::JobLogMeta;
@@ -113,11 +113,7 @@ pub async fn job_log_stream(
                         .into_response();
                     }
                 };
-                let folder = state
-                    .get_workspace(&job.workspace)
-                    .await
-                    .and_then(|ws| ws.tasks.get(&job.task_name).and_then(|t| t.folder.clone()));
-                let task_path = make_task_path(folder.as_deref(), &job.task_name);
+                let task_path = crate::acl::job_task_path(&state, &job).await;
                 let perm =
                     state
                         .acl

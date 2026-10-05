@@ -376,9 +376,10 @@ When the `deploy` task's `cleanup` step becomes ready, the server creates a chil
 ### Rules for task actions
 
 - Must have a `task` field referencing an existing task — in the same workspace, or, since 0.16.5, another workspace by `workspace.task` name (see [Calling tasks in other workspaces](/guides/cross-workspace-references/#calling-tasks-in-other-workspaces))
+- May have a `ref` field — a branch, tag or commit SHA of the task's owner workspace to run the task from (see [Git Refs](/guides/git-refs/)); `ref` is valid on no other action type
 - Cannot have `script`, `source`, `image`, or `runner` fields
 - No worker tags required — task steps are server-dispatched
-- Self-referencing tasks are rejected at validation time
+- Self-referencing tasks are rejected at validation time (with `ref`, the same task at another commit is allowed)
 - Maximum nesting depth of 10 levels prevents infinite recursion
 - Input templates are rendered server-side before creating the child job
 

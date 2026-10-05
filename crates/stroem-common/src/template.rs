@@ -69,6 +69,20 @@ fn vals_filter_with(
     }
 }
 
+/// Name the `vals` filter is registered under.
+const VALS_FILTER: &str = "vals";
+
+/// True when `err` is, or wraps, a failure of the `vals` filter: the CLI is
+/// missing, `vals eval` failed, its deadline passed, or its output was bad.
+/// Typed (tera's `CallFilter` kind for this filter), never by message text.
+pub fn is_vals_failure(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause.downcast_ref::<tera::Error>().is_some_and(
+            |e| matches!(&e.kind, tera::ErrorKind::CallFilter(name) if name == VALS_FILTER),
+        )
+    })
+}
+
 /// Renders a single Tera template string against a JSON context
 pub fn render_template(template: &str, context: &serde_json::Value) -> Result<String> {
     render_template_with(template, context, &LoadBudget::unbounded())
@@ -88,7 +102,7 @@ pub fn render_template_with(
 
     let budget = *budget;
     tera.register_filter(
-        "vals",
+        VALS_FILTER,
         move |value: &tera::Value, args: &HashMap<String, tera::Value>| {
             vals_filter_with(value, args, budget)
         },
@@ -864,16 +878,13 @@ pub fn prepare_action_input(
 /// Prepare action input for a step whose action is owned by `owner_ws` while
 /// the flow step (and `rendered_input`) belong to `caller_ws`.
 ///
-/// Provenance-aware two-pass:
-/// 1. Fields present in `rendered_input` were supplied by the caller: resolve
-///    them with bare names in the caller first, falling back to the owner only
-///    for `shared` connections.
-/// 2. Merge the owner's action defaults (rendered with the owner's secrets).
-/// 3. Fields filled by defaults are the owner reading its own config: resolve
-///    ungated in the owner. Fields resolved in pass 1 are objects by now and
-///    pass through.
+/// The name-keyed form of [`prepare_action_input_roles`]: each role answers
+/// with the config `lookup` holds under its name. The owner must be loaded
+/// (an unloaded owner fails before any resolution), and so must the caller
+/// when it is a different workspace.
 ///
-/// When `caller_ws == owner_ws` the passes collapse to the local behaviour.
+/// When `caller_ws == owner_ws` this is the local behaviour
+/// ([`prepare_action_input`]).
 pub fn prepare_action_input_cross(
     rendered_input: &serde_json::Value,
     action_input_schema: &HashMap<String, InputFieldDef>,
@@ -881,43 +892,205 @@ pub fn prepare_action_input_cross(
     caller_ws: &str,
     owner_ws: &str,
 ) -> Result<serde_json::Value> {
-    let owner_cfg = found_config(lookup, owner_ws, "action owner")?;
-
-    let caller_resolved = resolve_connection_inputs_scoped(
+    let owner = RoleConfig {
+        workspace: owner_ws,
+        config: found_config(lookup, owner_ws, "action owner")?,
+    };
+    let caller = if caller_ws == owner_ws {
+        owner
+    } else {
+        RoleConfig {
+            workspace: caller_ws,
+            config: found_config(lookup, caller_ws, "caller")?,
+        }
+    };
+    prepare_action_input_roles(
         rendered_input,
         action_input_schema,
-        &ResolveScope {
-            lookup,
-            schema_ws: owner_ws,
-            value_ws: caller_ws,
-            fallback_ws: if caller_ws == owner_ws {
-                None
-            } else {
-                Some(owner_ws)
-            },
+        &RoleScope {
+            caller,
+            action_owner: Some(owner),
+            task_owner: None,
+            others: lookup,
         },
     )
+}
+
+/// One role's config in a role-scoped resolution (git-refs spec § 7.4): the
+/// workspace NAME the role belongs to, and the config — live or pinned — that
+/// answers for it in this resolution.
+#[derive(Clone, Copy)]
+pub struct RoleConfig<'a> {
+    pub workspace: &'a str,
+    pub config: &'a WorkspaceConfig,
+}
+
+/// The configs a step's connection resolution may consult, by ROLE rather than
+/// by workspace name (spec § 7.4). Two roles may be one workspace at two
+/// commits — a name-keyed lookup would let one shadow the other.
+#[derive(Clone, Copy)]
+pub struct RoleScope<'a> {
+    /// A: the job's own config (pinned or live).
+    pub caller: RoleConfig<'a>,
+    /// O: the step's action owner. `None` ⇒ the caller.
+    pub action_owner: Option<RoleConfig<'a>>,
+    /// T: a `type: task` step's task owner. `None` ⇒ the caller.
+    pub task_owner: Option<RoleConfig<'a>>,
+    /// Every other workspace, live.
+    pub others: &'a dyn WorkspaceLookup,
+}
+
+/// Answers up to two workspace names from explicit configs, the rest from `base`.
+struct RoleLookup<'a> {
+    base: &'a dyn WorkspaceLookup,
+    first: (&'a str, &'a WorkspaceConfig),
+    second: Option<(&'a str, &'a WorkspaceConfig)>,
+}
+
+impl WorkspaceLookup for RoleLookup<'_> {
+    fn local_name(&self) -> &str {
+        self.base.local_name()
+    }
+    fn get(&self, name: &str) -> Lookup<'_> {
+        if name == self.first.0 {
+            return Lookup::Found(self.first.1);
+        }
+        if let Some((n, c)) = self.second {
+            if name == n {
+                return Lookup::Found(c);
+            }
+        }
+        self.base.get(name)
+    }
+    fn offline(&self) -> bool {
+        self.base.offline()
+    }
+}
+
+/// The connection view of two commits of ONE workspace: `value`'s connections
+/// and types first, then `fallback`'s for names `value` lacks — the ungated
+/// same-workspace fallback of spec § 7.4. Resolution reads only these two maps.
+fn merged_same_workspace(value: &WorkspaceConfig, fallback: &WorkspaceConfig) -> WorkspaceConfig {
+    let mut connections = fallback.connections.clone();
+    connections.extend(value.connections.clone());
+    let mut connection_types = fallback.connection_types.clone();
+    connection_types.extend(value.connection_types.clone());
+    WorkspaceConfig {
+        connections,
+        connection_types,
+        ..Default::default()
+    }
+}
+
+/// Resolve one provenance bucket by role: bare connection names in `value`'s
+/// config first, the field types canonicalised in `schema_role`'s, and a
+/// fallback to `schema_role` — gated by `shared` across a workspace boundary,
+/// ungated between two commits of one workspace. Identical to
+/// [`resolve_connection_inputs_scoped`] with `schema_ws = schema_role`,
+/// `value_ws = value`, `fallback_ws = schema_role if different` whenever the
+/// roles' configs are the ones `others` would have returned.
+pub fn resolve_bucket_by_role(
+    input: &serde_json::Value,
+    schema: &HashMap<String, InputFieldDef>,
+    value: RoleConfig<'_>,
+    schema_role: RoleConfig<'_>,
+    others: &dyn WorkspaceLookup,
+) -> Result<serde_json::Value> {
+    if value.workspace == schema_role.workspace {
+        let merged;
+        let cfg: &WorkspaceConfig = if std::ptr::eq(value.config, schema_role.config) {
+            value.config
+        } else {
+            merged = merged_same_workspace(value.config, schema_role.config);
+            &merged
+        };
+        let lookup = RoleLookup {
+            base: others,
+            first: (value.workspace, cfg),
+            second: None,
+        };
+        resolve_connection_inputs_scoped(
+            input,
+            schema,
+            &ResolveScope {
+                lookup: &lookup,
+                schema_ws: schema_role.workspace,
+                value_ws: value.workspace,
+                fallback_ws: None,
+            },
+        )
+    } else {
+        let lookup = RoleLookup {
+            base: others,
+            first: (value.workspace, value.config),
+            second: Some((schema_role.workspace, schema_role.config)),
+        };
+        resolve_connection_inputs_scoped(
+            input,
+            schema,
+            &ResolveScope {
+                lookup: &lookup,
+                schema_ws: schema_role.workspace,
+                value_ws: value.workspace,
+                fallback_ws: Some(schema_role.workspace),
+            },
+        )
+    }
+}
+
+/// Prepare a step's action input by role (spec § 7.4).
+///
+/// Provenance-aware two-pass:
+/// 1. Fields present in `rendered_input` were supplied by the caller: resolve
+///    them with the caller as value role and the action owner as schema role
+///    (bare names in the caller first, then the owner — gated by `shared`
+///    across a workspace boundary).
+/// 2. Merge the owner's action defaults (rendered with the OWNER's secrets).
+/// 3. Fields filled by defaults are the owner reading its own config: resolve
+///    ungated in the owner. Fields resolved in pass 1 are objects by now and
+///    pass through.
+///
+/// Each phase tags its error with a [`ProvenanceError`]: pass 1 `Caller`, the
+/// merge and pass 3 `ActionDefault` (the owner's own templates and config).
+/// Claim withholds an `ActionDefault` error across a workspace boundary
+/// (git-refs spec § 7.2). The tag adds one `resolving … inputs` link to the
+/// `{:#}` chain.
+pub fn prepare_action_input_roles(
+    rendered_input: &serde_json::Value,
+    action_input_schema: &HashMap<String, InputFieldDef>,
+    roles: &RoleScope<'_>,
+) -> Result<serde_json::Value> {
+    let owner = roles.action_owner.unwrap_or(roles.caller);
+    let caller_resolved = resolve_bucket_by_role(
+        rendered_input,
+        action_input_schema,
+        roles.caller,
+        owner,
+        roles.others,
+    )
+    .context(ProvenanceError {
+        bucket: ProvenanceBucket::Caller,
+    })
     .context("Failed to resolve action connection inputs")?;
 
-    let secrets_ctx = serde_json::json!({ "secret": &owner_cfg.secrets });
+    let secrets_ctx = serde_json::json!({ "secret": &owner.config.secrets });
     let merged = merge_action_defaults(&caller_resolved, action_input_schema, &secrets_ctx)
+        .context(ProvenanceError {
+            bucket: ProvenanceBucket::ActionDefault,
+        })
         .context("Failed to merge action input defaults")?;
 
-    resolve_connection_inputs_scoped(
-        &merged,
-        action_input_schema,
-        &ResolveScope {
-            lookup,
-            schema_ws: owner_ws,
-            value_ws: owner_ws,
-            fallback_ws: None,
-        },
-    )
-    .context("Failed to resolve action connection inputs")
+    resolve_bucket_by_role(&merged, action_input_schema, owner, owner, roles.others)
+        .context(ProvenanceError {
+            bucket: ProvenanceBucket::ActionDefault,
+        })
+        .context("Failed to resolve action connection inputs")
 }
 
 /// Which bucket of a `type: task` step's input a
-/// [`resolve_task_input_by_provenance`] failure came from.
+/// [`resolve_task_input_by_provenance`] failure came from — or, for a
+/// [`prepare_action_input_roles`] failure at claim, whether the caller's
+/// value or the action owner's defaults failed.
 ///
 /// Attached to the error chain via `.context(ProvenanceError { bucket })` so
 /// a caller (`settlement/dispatch.rs::handle_task_steps_pass`) can tell
@@ -936,7 +1109,8 @@ pub enum ProvenanceBucket {
 }
 
 /// Error-chain marker recording which [`ProvenanceBucket`] a
-/// `resolve_task_input_by_provenance` failure originated in. Find it with
+/// `resolve_task_input_by_provenance` or `prepare_action_input_roles`
+/// failure originated in. Find it with
 /// `err.downcast_ref::<ProvenanceError>()` — `anyhow::Error::downcast_ref`
 /// (called on the `anyhow::Error` itself, not on a `.chain()` link) walks
 /// every `.context(...)` layer looking for a value of the given type; it
@@ -962,16 +1136,11 @@ impl std::error::Error for ProvenanceError {}
 /// schema, by provenance. `caller_input` was supplied by the caller's flow
 /// step (workspace `caller_ws`); `action_defaults` are the keys the action's
 /// own `input` defaults added (workspace `action_ws`); the task lives in
-/// `task_ws`. Each bucket resolves a bare name in the workspace whose YAML
-/// wrote it first, then in `task_ws` only if the connection is `shared`.
+/// `task_ws`.
 ///
-/// Boundary rule: a value crossing a workspace boundary into a
-/// connection-typed field must be a connection NAME. Objects are refused
-/// there because `resolve_connection_inputs_scoped` passes any object
-/// through unchecked; within one workspace that pass-through is unchanged.
-///
-/// Each bucket's error is tagged with a [`ProvenanceError`] so a caller can
-/// tell which one failed — see that type's doc comment for why this matters.
+/// The name-keyed form of [`resolve_task_input_by_provenance_roles`]: each
+/// role answers with the config `lookup` holds under its name, so all three
+/// workspaces must be loaded.
 pub fn resolve_task_input_by_provenance(
     caller_input: &serde_json::Value,
     action_defaults: &serde_json::Value,
@@ -981,12 +1150,55 @@ pub fn resolve_task_input_by_provenance(
     action_ws: &str,
     task_ws: &str,
 ) -> Result<serde_json::Value> {
-    let caller = resolve_provenance_bucket(caller_input, task_schema, lookup, caller_ws, task_ws)
-        .context(ProvenanceError {
-        bucket: ProvenanceBucket::Caller,
-    })?;
+    let role = |workspace, what| -> Result<RoleConfig<'_>> {
+        Ok(RoleConfig {
+            workspace,
+            config: found_config(lookup, workspace, what)?,
+        })
+    };
+    resolve_task_input_by_provenance_roles(
+        caller_input,
+        action_defaults,
+        task_schema,
+        &RoleScope {
+            caller: role(caller_ws, "caller")?,
+            action_owner: Some(role(action_ws, "action owner")?),
+            task_owner: Some(role(task_ws, "task owner")?),
+            others: lookup,
+        },
+    )
+}
+
+/// Resolve a `type: task` child's connection-typed inputs against the TASK
+/// owner's schema, by provenance and by role (spec § 7.4). `caller_input` was
+/// supplied by the caller's flow step (bucket C, value role `caller`);
+/// `action_defaults` are the keys the action's own `input` defaults added
+/// (bucket D, value role `action_owner`). Each bucket resolves a bare name in
+/// its value role's config first, then in the task owner's — gated by `shared`
+/// across a workspace boundary, ungated between two commits of one workspace.
+///
+/// Boundary rule (by workspace NAME): a value crossing a workspace boundary
+/// into a connection-typed field must be a connection NAME. Objects are
+/// refused there because `resolve_connection_inputs_scoped` passes any object
+/// through unchecked; within one workspace that pass-through is unchanged.
+///
+/// Each bucket's error is tagged with a [`ProvenanceError`] so a caller can
+/// tell which one failed — see that type's doc comment for why this matters.
+pub fn resolve_task_input_by_provenance_roles(
+    caller_input: &serde_json::Value,
+    action_defaults: &serde_json::Value,
+    task_schema: &HashMap<String, InputFieldDef>,
+    roles: &RoleScope<'_>,
+) -> Result<serde_json::Value> {
+    let task = roles.task_owner.unwrap_or(roles.caller);
+    let action = roles.action_owner.unwrap_or(roles.caller);
+    let caller =
+        resolve_provenance_bucket(caller_input, task_schema, roles.caller, task, roles.others)
+            .context(ProvenanceError {
+                bucket: ProvenanceBucket::Caller,
+            })?;
     let defaults =
-        resolve_provenance_bucket(action_defaults, task_schema, lookup, action_ws, task_ws)
+        resolve_provenance_bucket(action_defaults, task_schema, action, task, roles.others)
             .context(ProvenanceError {
                 bucket: ProvenanceBucket::ActionDefault,
             })?;
@@ -1002,11 +1214,11 @@ pub fn resolve_task_input_by_provenance(
 fn resolve_provenance_bucket(
     input: &serde_json::Value,
     task_schema: &HashMap<String, InputFieldDef>,
-    lookup: &dyn WorkspaceLookup,
-    value_ws: &str,
-    task_ws: &str,
+    value: RoleConfig<'_>,
+    task: RoleConfig<'_>,
+    others: &dyn WorkspaceLookup,
 ) -> Result<serde_json::Value> {
-    if value_ws != task_ws {
+    if value.workspace != task.workspace {
         if let Some(map) = input.as_object() {
             for (field, def) in task_schema {
                 if PRIMITIVE_TYPES.contains(&def.field_type.as_str()) {
@@ -1024,20 +1236,7 @@ fn resolve_provenance_bucket(
             }
         }
     }
-    resolve_connection_inputs_scoped(
-        input,
-        task_schema,
-        &ResolveScope {
-            lookup,
-            schema_ws: task_ws,
-            value_ws,
-            fallback_ws: if value_ws == task_ws {
-                None
-            } else {
-                Some(task_ws)
-            },
-        },
-    )
+    resolve_bucket_by_role(input, task_schema, value, task, others)
 }
 
 fn json_type_name(v: &serde_json::Value) -> &'static str {
@@ -2295,6 +2494,70 @@ mod tests {
         // against the owner's secrets.
         assert_eq!(out["note"], "{{ secret.TOKEN }}");
         assert_eq!(out["ch"]["host"], "ch.jobs.internal");
+    }
+
+    /// Git-refs spec § 7.2: claim decides withholding by ORIGIN. Each phase
+    /// of `prepare_action_input_roles` tags its errors with the bucket it
+    /// serves — the caller pass `Caller`, the defaults merge and the owner
+    /// pass `ActionDefault`.
+    #[test]
+    fn test_cross_prepare_errors_carry_provenance_bucket() {
+        let mut ws = three_workspaces();
+        ws.configs
+            .get_mut("jobs")
+            .unwrap()
+            .secrets
+            .insert("TOKEN".to_string(), json!("owner-secret"));
+        let bucket_of = |input: serde_json::Value, schema: &HashMap<String, InputFieldDef>| {
+            let roles = RoleScope {
+                caller: RoleConfig {
+                    workspace: "caller",
+                    config: &ws.configs["caller"],
+                },
+                action_owner: Some(RoleConfig {
+                    workspace: "jobs",
+                    config: &ws.configs["jobs"],
+                }),
+                task_owner: None,
+                others: &ws,
+            };
+            let err = prepare_action_input_roles(&input, schema, &roles).unwrap_err();
+            (
+                err.downcast_ref::<ProvenanceError>().map(|p| p.bucket),
+                format!("{err:#}"),
+            )
+        };
+
+        // Caller supplies an UNSHARED owner connection bare → Caller.
+        let schema = HashMap::from([(
+            "ch".to_string(),
+            field("clickhouse", false, Some(json!("private-ch"))),
+        )]);
+        let (bucket, msg) = bucket_of(json!({"ch": "private-ch"}), &schema);
+        assert_eq!(bucket, Some(ProvenanceBucket::Caller), "{msg}");
+        assert!(msg.contains("is not shared"), "{msg}");
+
+        // Owner default that fails to render (defaults merge) → ActionDefault.
+        let schema = HashMap::from([(
+            "note".to_string(),
+            field("string", false, Some(json!("{{ secret.TOKEN | round }}"))),
+        )]);
+        let (bucket, msg) = bucket_of(json!({}), &schema);
+        assert_eq!(bucket, Some(ProvenanceBucket::ActionDefault), "{msg}");
+        assert!(
+            msg.contains("Failed to merge action input defaults"),
+            "{msg}"
+        );
+
+        // Owner default naming a connection the owner lacks (owner pass) →
+        // ActionDefault.
+        let schema = HashMap::from([(
+            "ch".to_string(),
+            field("clickhouse", false, Some(json!("missing-ch"))),
+        )]);
+        let (bucket, msg) = bucket_of(json!({}), &schema);
+        assert_eq!(bucket, Some(ProvenanceBucket::ActionDefault), "{msg}");
+        assert!(msg.contains("missing-ch"), "{msg}");
     }
 
     #[test]
@@ -3764,11 +4027,251 @@ mod tests {
         assert!(format!("{err:#}").contains("deadline"), "{err:#}");
     }
 
+    /// The typed vals marker: tera's `CallFilter("vals")` anywhere in the
+    /// chain. Never the word "vals" in a message.
+    #[test]
+    fn is_vals_failure_recognises_the_vals_filter_and_nothing_else() {
+        let expired = crate::budget::LoadBudget::until(std::time::Instant::now());
+        let vals =
+            render_template_with("{{ 'ref+echo://x' | vals }}", &json!({}), &expired).unwrap_err();
+        assert!(is_vals_failure(&vals), "{vals:#}");
+        let wrapped = vals.context("Failed to render secret 'k'");
+        assert!(is_vals_failure(&wrapped), "{wrapped:#}");
+
+        let missing = render_template("{{ secret.vals }}", &json!({"secret": {}})).unwrap_err();
+        assert!(format!("{missing:#}").contains("vals"), "{missing:#}");
+        assert!(!is_vals_failure(&missing), "{missing:#}");
+
+        let other_filter = render_template("{{ 'vals' | round }}", &json!({})).unwrap_err();
+        assert!(!is_vals_failure(&other_filter), "{other_filter:#}");
+    }
+
     #[test]
     fn render_template_with_expired_budget_still_renders_plain_values() {
         let expired = crate::budget::LoadBudget::until(std::time::Instant::now());
         let out =
             render_template_with("{{ 'plain' | vals }}", &serde_json::json!({}), &expired).unwrap();
         assert_eq!(out, "plain");
+    }
+
+    // ── RoleScope (git-refs spec § 7.4) ─────────────────────────────────
+
+    mod roles {
+        use super::super::*;
+        use crate::models::workflow::{ConnectionDef, ConnectionTypeDef, InputFieldDef};
+        use serde_json::json;
+        use std::collections::HashMap;
+
+        /// Answers nothing: every workspace a role does not cover is unknown.
+        struct NoOthers;
+        impl WorkspaceLookup for NoOthers {
+            fn local_name(&self) -> &str {
+                ""
+            }
+            fn get(&self, _name: &str) -> Lookup<'_> {
+                Lookup::Unknown
+            }
+        }
+
+        /// (name, host, shared) → a config with type `pg` and those connections.
+        fn cfg(conns: &[(&str, &str, bool)]) -> WorkspaceConfig {
+            let mut c = WorkspaceConfig::default();
+            c.connection_types.insert(
+                "pg".to_string(),
+                ConnectionTypeDef {
+                    properties: Default::default(),
+                },
+            );
+            for (name, host, shared) in conns {
+                c.connections.insert(
+                    name.to_string(),
+                    ConnectionDef {
+                        connection_type: Some("pg".into()),
+                        shared: *shared,
+                        values: HashMap::from([("host".to_string(), json!(host))]),
+                    },
+                );
+            }
+            c
+        }
+
+        fn pg_field(default: Option<&str>) -> HashMap<String, InputFieldDef> {
+            HashMap::from([(
+                "db".to_string(),
+                InputFieldDef {
+                    field_type: "pg".to_string(),
+                    default: default.map(|d| json!(d)),
+                    ..Default::default()
+                },
+            )])
+        }
+
+        fn role<'a>(ws: &'a str, c: &'a WorkspaceConfig) -> RoleConfig<'a> {
+            RoleConfig {
+                workspace: ws,
+                config: c,
+            }
+        }
+
+        #[test]
+        fn same_workspace_two_commits_caller_value_resolves_at_caller_commit() {
+            let x = cfg(&[("db", "x-host", false)]);
+            let r2 = cfg(&[("db", "r2-host", false)]);
+            let roles = RoleScope {
+                caller: role("etl", &x),
+                action_owner: Some(role("etl", &r2)),
+                task_owner: None,
+                others: &NoOthers,
+            };
+            let out =
+                prepare_action_input_roles(&json!({"db": "db"}), &pg_field(None), &roles).unwrap();
+            assert_eq!(out["db"]["host"], json!("x-host"));
+        }
+
+        #[test]
+        fn same_workspace_two_commits_owner_default_resolves_at_owner_commit() {
+            let x = cfg(&[("db", "x-host", false)]);
+            let r2 = cfg(&[("db", "r2-host", false)]);
+            let roles = RoleScope {
+                caller: role("etl", &x),
+                action_owner: Some(role("etl", &r2)),
+                task_owner: None,
+                others: &NoOthers,
+            };
+            let out =
+                prepare_action_input_roles(&json!({}), &pg_field(Some("db")), &roles).unwrap();
+            assert_eq!(out["db"]["host"], json!("r2-host"));
+        }
+
+        #[test]
+        fn same_workspace_release_only_connection_falls_back_ungated() {
+            let x = cfg(&[]);
+            let r2 = cfg(&[("newdb", "r2-new", false)]); // NOT shared
+            let roles = RoleScope {
+                caller: role("etl", &x),
+                action_owner: Some(role("etl", &r2)),
+                task_owner: None,
+                others: &NoOthers,
+            };
+            let out = prepare_action_input_roles(&json!({"db": "newdb"}), &pg_field(None), &roles)
+                .unwrap();
+            assert_eq!(out["db"]["host"], json!("r2-new"));
+        }
+
+        #[test]
+        fn cross_workspace_fallback_is_still_gated() {
+            let app = cfg(&[]);
+            let r2 = cfg(&[("newdb", "r2-new", false)]);
+            let roles = RoleScope {
+                caller: role("app", &app),
+                action_owner: Some(role("etl", &r2)),
+                task_owner: None,
+                others: &NoOthers,
+            };
+            let err = prepare_action_input_roles(&json!({"db": "newdb"}), &pg_field(None), &roles)
+                .unwrap_err();
+            assert!(format!("{err:#}").contains("is not shared"), "{err:#}");
+        }
+
+        #[test]
+        fn provenance_action_and_task_owner_at_two_commits_of_one_workspace() {
+            let app = cfg(&[]);
+            let r2 = cfg(&[("r2only", "r2-host", false)]);
+            let r3 = cfg(&[("db", "r3-host", false)]);
+            let roles = RoleScope {
+                caller: role("app", &app),
+                action_owner: Some(role("etl", &r2)),
+                task_owner: Some(role("etl", &r3)),
+                others: &NoOthers,
+            };
+            // Bucket D: an action default naming a connection only O@R2 has.
+            let out = resolve_task_input_by_provenance_roles(
+                &json!({}),
+                &json!({"db": "r2only"}),
+                &pg_field(None),
+                &roles,
+            )
+            .unwrap();
+            assert_eq!(out["db"]["host"], json!("r2-host"));
+
+            // Bucket C: app → etl crosses a boundary; T@R3's unshared `db` is gated.
+            let err = resolve_task_input_by_provenance_roles(
+                &json!({"db": "db"}),
+                &json!({}),
+                &pg_field(None),
+                &roles,
+            )
+            .unwrap_err();
+            assert!(format!("{err:#}").contains("is not shared"), "{err:#}");
+            assert_eq!(
+                err.downcast_ref::<ProvenanceError>().map(|p| p.bucket),
+                Some(ProvenanceBucket::Caller)
+            );
+        }
+
+        /// No pins: the role functions answer exactly like the name-keyed ones.
+        #[test]
+        fn unpinned_roles_match_prepare_action_input_cross() {
+            struct Two<'a>(&'a WorkspaceConfig, &'a WorkspaceConfig);
+            impl WorkspaceLookup for Two<'_> {
+                fn local_name(&self) -> &str {
+                    "a"
+                }
+                fn get(&self, name: &str) -> Lookup<'_> {
+                    match name {
+                        "a" => Lookup::Found(self.0),
+                        "b" => Lookup::Found(self.1),
+                        _ => Lookup::Unknown,
+                    }
+                }
+            }
+            let a = cfg(&[("mine", "a-host", false)]);
+            let b = cfg(&[("open", "b-open", true), ("db", "b-host", false)]);
+            let lookup = Two(&a, &b);
+            let roles = RoleScope {
+                caller: role("a", &a),
+                action_owner: Some(role("b", &b)),
+                task_owner: None,
+                others: &lookup,
+            };
+            for input in [
+                json!({"db": "mine"}),
+                json!({"db": "open"}),
+                json!({"db": "b.open"}),
+                json!({}),
+            ] {
+                let old =
+                    prepare_action_input_cross(&input, &pg_field(Some("db")), &lookup, "a", "b")
+                        .map_err(|e| format!("{e:#}"));
+                let new = prepare_action_input_roles(&input, &pg_field(Some("db")), &roles)
+                    .map_err(|e| format!("{e:#}"));
+                assert_eq!(old, new, "input {input}");
+            }
+        }
+
+        /// The name-keyed wrapper keeps its eager owner check and message —
+        /// the claim path's unloaded-owner bail (F47) repeats this text.
+        #[test]
+        fn cross_wrapper_unavailable_owner_keeps_its_message() {
+            struct Down<'a>(&'a WorkspaceConfig);
+            impl WorkspaceLookup for Down<'_> {
+                fn local_name(&self) -> &str {
+                    "a"
+                }
+                fn get(&self, name: &str) -> Lookup<'_> {
+                    match name {
+                        "a" => Lookup::Found(self.0),
+                        _ => Lookup::Unavailable,
+                    }
+                }
+            }
+            let a = cfg(&[]);
+            let err = prepare_action_input_cross(&json!({}), &pg_field(None), &Down(&a), "a", "b")
+                .unwrap_err();
+            assert_eq!(
+                format!("{err:#}"),
+                "action owner: workspace 'b' is not available"
+            );
+        }
     }
 }

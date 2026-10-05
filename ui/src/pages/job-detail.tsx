@@ -18,6 +18,7 @@ import { useWorkerNames } from "@/hooks/use-worker-names";
 import { formatTime, formatDuration, formatDurationMs } from "@/lib/formatting";
 import { computeEta } from "@/lib/eta";
 import { isTopLevelJob, jobLineage } from "@/lib/job-status";
+import { formatPin } from "@/lib/job-ref";
 import type { JobLineage } from "@/lib/job-status";
 import type { ArtifactItem } from "@/lib/api";
 import type { JobDetail, TaskStatsResponse } from "@/lib/types";
@@ -396,7 +397,7 @@ export function JobDetailPage() {
               {cancelling ? "Cancelling..." : "Cancel Job"}
             </Button>
           )}
-          {topLevel && (
+          {topLevel && !(job.ref && taskMissing) && (
             <Button variant="outline" asChild>
               <Link
                 to={`/workspaces/${encodeURIComponent(job.workspace)}/tasks/${encodeURIComponent(job.task_name)}`}
@@ -463,6 +464,22 @@ export function JobDetailPage() {
               "\u2014"
             ),
           },
+          ...(job.ref
+            ? [
+                {
+                  label: "Ref",
+                  value: (
+                    <span
+                      data-testid="job-pin"
+                      title={job.revision ?? undefined}
+                      className="font-mono text-xs"
+                    >
+                      {formatPin(job.ref, job.revision)}
+                    </span>
+                  ),
+                },
+              ]
+            : []),
           { label: "Created", value: formatTime(job.created_at) },
           { label: "Started", value: formatTime(job.started_at) },
           {

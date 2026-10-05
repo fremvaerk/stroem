@@ -1,14 +1,18 @@
 use crate::state::AppState;
+use crate::tarball_cache::pinned_cache_key;
 use crate::web::error::AppError;
+use crate::workspace::pins::PinError;
 use anyhow::Context;
 use axum::{
     extract::{Path, Query, State},
     http::{header, HeaderMap, StatusCode},
     response::IntoResponse,
+    Json,
 };
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use serde::Deserialize;
+use serde_json::json;
 use std::sync::Arc;
 
 /// Optional query parameters for the workspace tarball download endpoint.
@@ -29,6 +33,13 @@ pub struct WorkspaceQuery {
 /// Accepts an optional `?revision=<rev>` query parameter. When present, the
 /// server attempts to serve the exact revision requested:
 ///
+/// - For a configured **git** workspace, a requested revision that is not the
+///   healthy live one is served from the cache or built from the PinStore's
+///   immutable checkout (spec § 5.4) — before the live health gate, since a
+///   pin does not depend on the live entry. It 404s only when the commit does
+///   not exist in the repository, and answers 503 + `Retry-After: 5` while
+///   the PinStore cannot reach the remote (the worker retries, 12 attempts
+///   5 s apart). Such tarballs carry no `.git` directory.
 /// - If the revision is cached on disk, the cached bytes are returned immediately
 ///   (subject to the normal `If-None-Match` 304 short-circuit).
 /// - If the revision matches the workspace's current live revision, the tarball
@@ -50,6 +61,20 @@ pub async fn download_workspace(
     // Strip .tar.gz suffix to get workspace name
     let ws_name = ws_filename.strip_suffix(".tar.gz").unwrap_or(&ws_filename);
 
+    // Spec § 5.4: a git revision other than the healthy live one comes from
+    // the cache or the PinStore, before the live health gate. Only the
+    // healthy CURRENT revision keeps the live-dir path (and its bytes).
+    if let Some(requested_rev) = query.revision.as_deref() {
+        let healthy_current = state.workspaces.get_path(ws_name).is_some()
+            && state.workspaces.get_revision(ws_name).as_deref() == Some(requested_rev);
+        if !healthy_current && state.workspaces.pins().is_git(ws_name) {
+            if etag_matches(&headers, requested_rev) {
+                return Ok(StatusCode::NOT_MODIFIED.into_response());
+            }
+            return serve_pinned_revision(&state, ws_name, requested_rev).await;
+        }
+    }
+
     // Ensure the workspace exists and is loadable before we do anything else.
     let workspace_path = state
         .workspaces
@@ -63,14 +88,8 @@ pub async fn download_workspace(
         // ── Revision-pinned path ──────────────────────────────────────────────
         //
         // Step 1: Check If-None-Match against the requested revision.
-        if let Some(etag) = headers.get(header::IF_NONE_MATCH) {
-            if etag
-                .to_str()
-                .map(|s| s.trim_matches('"') == requested_rev.as_str())
-                .unwrap_or(false)
-            {
-                return Ok(StatusCode::NOT_MODIFIED.into_response());
-            }
+        if etag_matches(&headers, &requested_rev) {
+            return Ok(StatusCode::NOT_MODIFIED.into_response());
         }
 
         // Step 2: Try the on-disk cache.
@@ -108,21 +127,7 @@ pub async fn download_workspace(
                 })?
                 .context("build workspace tarball")?;
 
-                // Store in cache (best-effort, fire-and-forget — a write failure does not abort the response).
-                let cache = Arc::clone(&state.tarball_cache);
-                let ws_name_owned = ws_name.to_owned();
-                let rev_clone = requested_rev.clone();
-                let tarball_clone = tarball.clone();
-                std::mem::drop(tokio::task::spawn_blocking(move || {
-                    if let Err(e) = cache.put(&ws_name_owned, &rev_clone, &tarball_clone) {
-                        tracing::warn!(
-                            workspace = %ws_name_owned,
-                            revision = %rev_clone,
-                            "Failed to cache tarball: {:#}",
-                            e
-                        );
-                    }
-                }));
+                cache_put_detached(&state, ws_name, &requested_rev, &tarball);
 
                 Ok(build_tarball_response(tarball, &requested_rev).into_response())
             }
@@ -142,13 +147,9 @@ pub async fn download_workspace(
         // current revision so that future pinned requests can be served cheaply.
 
         // Check If-None-Match against the current revision.
-        if let Some(etag) = headers.get(header::IF_NONE_MATCH) {
-            if let Ok(etag_str) = etag.to_str() {
-                if let Some(ref rev) = current_revision {
-                    if etag_str.trim_matches('"') == rev.as_str() {
-                        return Ok(StatusCode::NOT_MODIFIED.into_response());
-                    }
-                }
+        if let Some(ref rev) = current_revision {
+            if etag_matches(&headers, rev) {
+                return Ok(StatusCode::NOT_MODIFIED.into_response());
             }
         }
 
@@ -168,20 +169,7 @@ pub async fn download_workspace(
 
         // Opportunistically cache under the current revision (fire-and-forget).
         if let Some(ref rev) = current_revision {
-            let cache = Arc::clone(&state.tarball_cache);
-            let ws_name_owned = ws_name.to_owned();
-            let rev_clone = rev.clone();
-            let tarball_clone = tarball.clone();
-            std::mem::drop(tokio::task::spawn_blocking(move || {
-                if let Err(e) = cache.put(&ws_name_owned, &rev_clone, &tarball_clone) {
-                    tracing::warn!(
-                        workspace = %ws_name_owned,
-                        revision = %rev_clone,
-                        "Failed to cache tarball: {:#}",
-                        e
-                    );
-                }
-            }));
+            cache_put_detached(&state, ws_name, rev, &tarball);
         }
 
         let mut response_headers = HeaderMap::new();
@@ -215,6 +203,104 @@ fn build_tarball_response(tarball: Vec<u8>, revision: &str) -> impl IntoResponse
         response_headers.insert(header::ETAG, val);
     }
     (StatusCode::OK, response_headers, tarball)
+}
+
+/// `If-None-Match` names exactly `revision`.
+fn etag_matches(headers: &HeaderMap, revision: &str) -> bool {
+    headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|s| s.trim_matches('"') == revision)
+}
+
+/// Store a tarball in the replica-local cache without delaying the response
+/// (a write failure only costs a rebuild later).
+fn cache_put_detached(state: &Arc<AppState>, ws_name: &str, revision: &str, tarball: &[u8]) {
+    let cache = Arc::clone(&state.tarball_cache);
+    let (ws_owned, rev_owned, bytes) = (ws_name.to_owned(), revision.to_owned(), tarball.to_vec());
+    std::mem::drop(tokio::task::spawn_blocking(move || {
+        if let Err(e) = cache.put(&ws_owned, &rev_owned, &bytes) {
+            tracing::warn!(
+                workspace = %ws_owned,
+                revision = %rev_owned,
+                "Failed to cache tarball: {:#}",
+                e
+            );
+        }
+    }));
+}
+
+/// Spec § 5.4: serve `revision` of git workspace `ws_name` from the cache,
+/// else build it from the PinStore's immutable checkout (plus the library
+/// overlay) and cache it. Holds the checkout lease until the archive is
+/// written, so eviction cannot remove the directory mid-build. A transient
+/// PinStore failure answers 503 + `Retry-After: 5` (R7): the worker retries.
+#[tracing::instrument(skip_all, fields(workspace = %ws_name, revision = %revision))]
+async fn serve_pinned_revision(
+    state: &Arc<AppState>,
+    ws_name: &str,
+    revision: &str,
+) -> Result<axum::response::Response, AppError> {
+    // Own cache key: live tarballs for the same SHA carry `.git`, pinned ones
+    // must not (see `pinned_cache_key`).
+    let cache = Arc::clone(&state.tarball_cache);
+    let (ws_owned, key) = (ws_name.to_owned(), pinned_cache_key(revision));
+    let cached = tokio::task::spawn_blocking(move || cache.get(&ws_owned, &key))
+        .await
+        .map_err(|e| {
+            AppError::Internal(anyhow::anyhow!(e).context("tarball cache get panicked"))
+        })?;
+    if let Some(tarball) = cached {
+        return Ok(build_tarball_response(tarball, revision).into_response());
+    }
+
+    let tree = match state.workspaces.pins().ensure_tree(ws_name, revision).await {
+        Ok(tree) => tree,
+        Err(
+            e @ (PinError::CommitNotFound { .. }
+            | PinError::RefNotFound { .. }
+            | PinError::NotGit { .. }),
+        ) => {
+            return Err(AppError::NotFound(format!(
+                "Revision '{}' not found in workspace '{}': {}",
+                revision, ws_name, e
+            )));
+        }
+        Err(e @ PinError::PinUnavailable { .. }) => {
+            tracing::warn!(
+                workspace = %ws_name,
+                revision = %revision,
+                "Pinned revision temporarily unavailable: {}",
+                e
+            );
+            return Ok((
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(header::RETRY_AFTER, "5")],
+                Json(json!({"error": format!(
+                    "Revision '{}' of workspace '{}' is temporarily unavailable; retry",
+                    revision, ws_name
+                )})),
+            )
+                .into_response());
+        }
+        Err(e) => {
+            return Err(AppError::Internal(
+                anyhow::Error::new(e).context("load pinned revision for tarball"),
+            ));
+        }
+    };
+
+    let library_paths = state.workspaces.get_library_paths();
+    let tarball = tokio::task::spawn_blocking(move || {
+        // `tree` (the lease) lives until the archive is built.
+        build_tarball(&tree.dir, &library_paths)
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e).context("tarball task panicked")))?
+    .context("build pinned workspace tarball")?;
+
+    cache_put_detached(state, ws_name, &pinned_cache_key(revision), &tarball);
+    Ok(build_tarball_response(tarball, revision).into_response())
 }
 
 /// Build a gzipped tar archive of a workspace directory with library overlays

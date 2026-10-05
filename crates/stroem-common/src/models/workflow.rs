@@ -201,8 +201,16 @@ pub struct ResourceDef {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum AgentToolRef {
-    Task { task: String },
-    Mcp { mcp: String },
+    Task {
+        task: String,
+        /// Not supported yet (spec 2026-10-02 § 4.6): present only so a `ref:`
+        /// on a task tool is rejected instead of silently dropped.
+        #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
+        git_ref: Option<String>,
+    },
+    Mcp {
+        mcp: String,
+    },
 }
 
 /// MCP (Model Context Protocol) server definition.
@@ -251,6 +259,11 @@ pub struct ActionDef {
     /// For type: task — the name of the task to execute as a sub-job
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task: Option<String>,
+    /// For type: task — git ref (branch, tag or full commit SHA) of the task
+    /// owner workspace; qualifies `task` (spec 2026-10-02 § 4.1). Rejected by
+    /// validation on every other action type.
+    #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
+    pub git_ref: Option<String>,
 
     /// Container command override (for docker/pod types only; not valid on type: script)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -371,6 +384,10 @@ pub struct HookDef {
     pub action: String,
     #[serde(default)]
     pub input: HashMap<String, serde_json::Value>,
+    /// Not supported yet (spec 2026-10-02 § 4.6): present only so a `ref:` on a
+    /// hook is rejected instead of silently dropped.
+    #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
+    pub git_ref: Option<String>,
 }
 
 /// A single step in a task flow.
@@ -428,6 +445,11 @@ pub struct FlowStep {
     /// Retry configuration for this step. Overrides action-level retry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<RetryConfig>,
+    /// Git ref (branch, tag or full commit SHA) of the action owner workspace
+    /// to run this step's action from (spec 2026-10-02 § 4.1). Reference steps
+    /// only; on an inline step `ref` is an action key (see `ActionDef.git_ref`).
+    #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
+    pub git_ref: Option<String>,
     /// Temporary storage for inline action definitions during deserialization.
     /// Automatically moved to `config.actions` during `WorkspaceConfig` deserialization.
     #[serde(skip)]
@@ -490,6 +512,8 @@ impl<'de> serde::Deserialize<'de> for FlowStep {
                 sequential: bool,
                 #[serde(default)]
                 retry: Option<RetryConfig>,
+                #[serde(default, rename = "ref")]
+                git_ref: Option<String>,
             }
             let ref_step: RefStep =
                 serde_yaml::from_value(serde_yaml::Value::Mapping(mapping.clone()))
@@ -507,6 +531,7 @@ impl<'de> serde::Deserialize<'de> for FlowStep {
                 for_each: ref_step.for_each,
                 sequential: ref_step.sequential,
                 retry: ref_step.retry,
+                git_ref: ref_step.git_ref,
                 inline_action: None,
             })
         } else if has_type {
@@ -653,6 +678,7 @@ impl<'de> serde::Deserialize<'de> for FlowStep {
                 for_each,
                 sequential,
                 retry,
+                git_ref: None,
                 inline_action: Some(action_def),
             })
         } else {
@@ -788,6 +814,9 @@ pub enum TriggerDef {
         /// Force-reload the workspace from its source before creating the job.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         force_refresh: bool,
+        /// Git ref of the task owner workspace to run `task` from (spec 2026-10-02 § 4.1).
+        #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
+        git_ref: Option<String>,
     },
     #[serde(rename = "webhook")]
     Webhook {
@@ -808,6 +837,9 @@ pub enum TriggerDef {
         /// Force-reload the workspace from its source before creating the job.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         force_refresh: bool,
+        /// Git ref of the task owner workspace to run `task` from (spec 2026-10-02 § 4.1).
+        #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
+        git_ref: Option<String>,
     },
     #[serde(rename = "event_source")]
     EventSource {
@@ -831,6 +863,10 @@ pub enum TriggerDef {
         /// Max pending/running jobs before pausing stdout reading.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_in_flight: Option<u32>,
+        /// Not supported yet (spec 2026-10-02 § 4.6): present only so a `ref:`
+        /// on an event source is rejected instead of silently dropped.
+        #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
+        git_ref: Option<String>,
     },
 }
 
@@ -901,6 +937,16 @@ impl TriggerDef {
         match self {
             TriggerDef::EventSource { target_task, .. } => Some(target_task.as_str()),
             _ => None,
+        }
+    }
+
+    /// The trigger's `ref:` (spec 2026-10-02 § 4.1). On an event source it is
+    /// only ever read to reject it.
+    pub fn git_ref(&self) -> Option<&str> {
+        match self {
+            TriggerDef::Scheduler { git_ref, .. }
+            | TriggerDef::Webhook { git_ref, .. }
+            | TriggerDef::EventSource { git_ref, .. } => git_ref.as_deref(),
         }
     }
 }
@@ -1845,6 +1891,118 @@ continue_when_skipped: false
 "#;
         let step2: FlowStep = serde_yaml::from_str(yaml_inline).unwrap();
         assert_eq!(step2.legacy_continue_when_skipped, Some(false));
+    }
+
+    #[test]
+    fn test_git_ref_parses_on_every_supported_place() {
+        let yaml = r#"
+actions:
+  nightly-2-3:
+    type: task
+    task: nightly
+    ref: release/2.3
+  helper:
+    type: agent
+    provider: anthropic
+    model: m
+    prompt: hi
+    tools:
+      - task: summarize
+        ref: release/2.3
+      - mcp: github
+tasks:
+  t:
+    on_success:
+      - action: notify
+        ref: release/2.3
+    flow:
+      import:
+        action: import
+        ref: release/2.3
+      plain:
+        action: import
+triggers:
+  cron:
+    type: scheduler
+    cron: "0 2 * * *"
+    task: billing.nightly
+    ref: v4.1.0
+  hook:
+    type: webhook
+    name: on-push
+    task: nightly
+    ref: refs/tags/v1
+  consume:
+    type: event_source
+    task: consumer
+    target_task: target
+    ref: main
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            config.actions["nightly-2-3"].git_ref.as_deref(),
+            Some("release/2.3")
+        );
+        let task = &config.tasks["t"];
+        assert_eq!(task.flow["import"].git_ref.as_deref(), Some("release/2.3"));
+        assert_eq!(task.flow["plain"].git_ref, None);
+        assert_eq!(task.on_success[0].git_ref.as_deref(), Some("release/2.3"));
+        assert_eq!(config.triggers["cron"].git_ref(), Some("v4.1.0"));
+        assert_eq!(config.triggers["hook"].git_ref(), Some("refs/tags/v1"));
+        assert_eq!(config.triggers["consume"].git_ref(), Some("main"));
+        match &config.actions["helper"].tools[0] {
+            AgentToolRef::Task { task, git_ref } => {
+                assert_eq!(task, "summarize");
+                assert_eq!(git_ref.as_deref(), Some("release/2.3"));
+            }
+            other => panic!("expected a task tool, got {other:?}"),
+        }
+        assert!(matches!(
+            config.actions["helper"].tools[1],
+            AgentToolRef::Mcp { .. }
+        ));
+    }
+
+    #[test]
+    fn test_git_ref_absent_is_not_serialized() {
+        // `action_spec` is persisted as JSON on every step: an action without
+        // `ref` must serialize exactly as before (no `"ref": null`).
+        let yaml = r#"
+actions:
+  plain:
+    type: task
+    task: nightly
+  pinned:
+    type: task
+    task: nightly
+    ref: v1
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let plain = serde_json::to_value(&config.actions["plain"]).unwrap();
+        assert!(plain.get("ref").is_none(), "got {plain}");
+        let pinned = serde_json::to_value(&config.actions["pinned"]).unwrap();
+        assert_eq!(pinned["ref"], json!("v1"));
+        let back: ActionDef = serde_json::from_value(pinned).unwrap();
+        assert_eq!(back.git_ref.as_deref(), Some("v1"));
+    }
+
+    #[test]
+    fn test_git_ref_on_inline_task_step_lands_on_the_hoisted_action() {
+        let yaml = r#"
+tasks:
+  t:
+    flow:
+      child:
+        type: task
+        task: nightly
+        ref: release/2.3
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let step = &config.tasks["t"].flow["child"];
+        assert_eq!(step.git_ref, None, "inline `ref` is an action key");
+        let action = &config.actions[&step.action];
+        assert_eq!(action.action_type, "task");
+        assert_eq!(action.git_ref.as_deref(), Some("release/2.3"));
     }
 
     #[test]
@@ -4324,6 +4482,7 @@ triggers:
     #[test]
     fn test_event_source_trigger_type_str() {
         let trigger = TriggerDef::EventSource {
+            git_ref: None,
             task: "t".to_string(),
             target_task: "u".to_string(),
             enabled: true,
@@ -4433,6 +4592,7 @@ retry:
 
         // Build a minimal FlowStep with a retry override.
         let step = FlowStep {
+            git_ref: None,
             action: "test".to_string(),
             name: None,
             description: None,
@@ -4450,6 +4610,7 @@ retry:
 
         // Build a minimal ActionDef with its own retry.
         let action = ActionDef {
+            git_ref: None,
             action_type: "script".to_string(),
             name: None,
             description: None,
@@ -4503,6 +4664,7 @@ retry:
         };
 
         let step = FlowStep {
+            git_ref: None,
             action: "test".to_string(),
             name: None,
             description: None,
@@ -4519,6 +4681,7 @@ retry:
         };
 
         let action = ActionDef {
+            git_ref: None,
             action_type: "script".to_string(),
             name: None,
             description: None,
@@ -4562,6 +4725,7 @@ retry:
     #[test]
     fn test_resolve_step_retry_config_both_none() {
         let step = FlowStep {
+            git_ref: None,
             action: "test".to_string(),
             name: None,
             description: None,
@@ -4578,6 +4742,7 @@ retry:
         };
 
         let action = ActionDef {
+            git_ref: None,
             action_type: "script".to_string(),
             name: None,
             description: None,

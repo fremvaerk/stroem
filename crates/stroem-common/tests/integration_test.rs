@@ -341,6 +341,7 @@ fn test_dag_fan_out_fan_in() {
     flow.insert(
         "step1".to_string(),
         FlowStep {
+            git_ref: None,
             action: "a".to_string(),
             name: None,
             description: None,
@@ -359,6 +360,7 @@ fn test_dag_fan_out_fan_in() {
     flow.insert(
         "step2".to_string(),
         FlowStep {
+            git_ref: None,
             action: "a".to_string(),
             name: None,
             description: None,
@@ -379,6 +381,7 @@ fn test_dag_fan_out_fan_in() {
     flow.insert(
         "step3".to_string(),
         FlowStep {
+            git_ref: None,
             action: "a".to_string(),
             name: None,
             description: None,
@@ -399,6 +402,7 @@ fn test_dag_fan_out_fan_in() {
     flow.insert(
         "step4".to_string(),
         FlowStep {
+            git_ref: None,
             action: "a".to_string(),
             name: None,
             description: None,

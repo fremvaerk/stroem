@@ -49,6 +49,7 @@ fn flow_step(depends_on: Vec<DependsOnEntry>, continue_on_failure: bool) -> Flow
         for_each: None,
         sequential: false,
         retry: None,
+        git_ref: None,
         inline_action: None,
     }
 }

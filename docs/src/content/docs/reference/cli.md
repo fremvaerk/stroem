@@ -71,6 +71,7 @@ The validator checks:
 - Trigger cron expression syntax
 - Hook action references
 - Dependency shape: a leftover `continue_when_skipped` flag, or a malformed `depends_on` tree (duplicate siblings, empty `all`/`any` groups, empty or duplicate-entry `accept` lists) — a named, actionable error, not a silent warning (see the [0.18 upgrade guide](/operations/upgrade-0-18-dependency-conditions/)). `stroem run` and job creation on the server enforce the same check; loading a workspace on its own does not.
+- `ref:` values ([Git Refs](/guides/git-refs/)): the ref's syntax, and that it appears only where it is supported (flow-step actions, `type: task` actions, scheduler/webhook triggers). A reference with `ref:` is not resolved offline — it is skipped with a warning, like a library action
 
 ### `tasks`
 

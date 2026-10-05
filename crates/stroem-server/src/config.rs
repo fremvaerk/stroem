@@ -538,6 +538,38 @@ impl Default for WorkspaceReloadConfig {
     }
 }
 
+/// Pin store (spec § 5.1, § 10). Every field optional.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PinStoreSection {
+    /// Where bare repos and per-commit checkouts live. Must be private to
+    /// ONE server process (it is locked). Default `<temp>/stroem/pins`.
+    #[serde(default)]
+    pub dir: Option<String>,
+    /// Recently used pins kept per workspace beyond what active jobs
+    /// hold. Default 5.
+    #[serde(default)]
+    pub keep_recent_per_workspace: Option<usize>,
+    /// How long a worker's claim waits for the pins it needs to load
+    /// (spec § 7.2). Past it the claim is released back to `ready` and the
+    /// load goes on in the background. Keep it clearly BELOW the workers'
+    /// `request_timeout_secs` (30 s by default): a claim answered after the
+    /// worker gave up leaves its step `running` with nobody executing it.
+    /// Default [`DEFAULT_CLAIM_PIN_LOAD_BUDGET_SECS`].
+    #[serde(default)]
+    pub claim_load_budget_secs: Option<u64>,
+}
+
+/// Upper bound on `pin_store.keep_recent_per_workspace`.
+pub const MAX_PIN_KEEP_RECENT: usize = 1000;
+
+/// Default `pin_store.claim_load_budget_secs`: 20 s, against the worker's
+/// default `request_timeout_secs` of 30 s (`stroem-worker` `client.rs`),
+/// leaving 10 s for the rest of the claim and the network.
+pub const DEFAULT_CLAIM_PIN_LOAD_BUDGET_SECS: u64 = 20;
+// Below the worker's default claim request timeout (30 s).
+const _: () = assert!(DEFAULT_CLAIM_PIN_LOAD_BUDGET_SECS < 30);
+
 /// Data retention configuration for cleaning up old workers, jobs, and logs
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -639,6 +671,9 @@ pub struct ServerConfig {
     /// Workspace watcher reload tuning (spec § 4). Defaults apply when absent.
     #[serde(default)]
     pub workspace_reload: WorkspaceReloadConfig,
+    /// Pinned ref store (git refs on actions/tasks/triggers). Defaults apply when absent.
+    #[serde(default)]
+    pub pin_store: Option<PinStoreSection>,
 }
 
 /// Resolved timeout defaults passed into job creation.
@@ -793,7 +828,38 @@ impl ServerConfig {
         {
             anyhow::bail!("workspace_reload git timeouts must be between 1 and {c_int_max} ms");
         }
+        if let Some(p) = &self.pin_store {
+            if p.dir.as_deref().is_some_and(str::is_empty) {
+                anyhow::bail!("pin_store.dir must not be empty");
+            }
+            if let Some(n) = p.keep_recent_per_workspace {
+                if n > MAX_PIN_KEEP_RECENT {
+                    anyhow::bail!(
+                        "pin_store.keep_recent_per_workspace must be at most {MAX_PIN_KEEP_RECENT}, got {n}"
+                    );
+                }
+            }
+            if let Some(secs) = p.claim_load_budget_secs {
+                if secs == 0 || secs > MAX_WORKSPACE_RELOAD_SECS {
+                    anyhow::bail!(
+                        "pin_store.claim_load_budget_secs must be between 1 and \
+                         {MAX_WORKSPACE_RELOAD_SECS}, got {secs}"
+                    );
+                }
+            }
+        }
         Ok(())
+    }
+
+    /// `pin_store.claim_load_budget_secs`, or its default: how long a claim
+    /// waits for its pins to load before it releases the step (spec § 7.2).
+    pub fn claim_pin_load_budget(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(
+            self.pin_store
+                .as_ref()
+                .and_then(|p| p.claim_load_budget_secs)
+                .unwrap_or(DEFAULT_CLAIM_PIN_LOAD_BUDGET_SECS),
+        )
     }
 }
 
@@ -2747,6 +2813,7 @@ worker_token: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             default_step_timeout: None,
             default_job_timeout: None,
             workspace_reload: Default::default(),
+            pin_store: None,
         }
     }
 
@@ -2852,6 +2919,99 @@ worker_token: "0123456789abcdef0123456789abcdef"
         assert_eq!(r.max_backoff_secs, 900);
         assert_eq!(r.git_connect_timeout_ms, 10_000);
         assert_eq!(r.git_read_timeout_ms, 60_000);
+    }
+
+    #[test]
+    fn pin_store_section_parses_and_is_optional() {
+        let base = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://x"
+log_storage:
+  local_dir: /tmp/logs
+worker_token: "0123456789abcdef0123456789abcdef"
+"#;
+        let cfg: ServerConfig = serde_yaml::from_str(base).unwrap();
+        assert!(cfg.pin_store.is_none());
+        let with = format!(
+            "{base}pin_store:\n  dir: /var/lib/stroem/pins\n  keep_recent_per_workspace: 3\n"
+        );
+        let cfg: ServerConfig = serde_yaml::from_str(&with).unwrap();
+        let p = cfg.pin_store.unwrap();
+        assert_eq!(p.dir.as_deref(), Some("/var/lib/stroem/pins"));
+        assert_eq!(p.keep_recent_per_workspace, Some(3));
+        let unknown = format!("{base}pin_store:\n  bogus: 1\n");
+        assert!(serde_yaml::from_str::<ServerConfig>(&unknown).is_err());
+    }
+
+    #[test]
+    fn pin_store_validation_rejects_empty_dir_and_huge_keep_recent() {
+        let base = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://x"
+log_storage:
+  local_dir: /tmp/logs
+worker_token: "0123456789abcdef0123456789abcdef"
+"#;
+        let mut cfg: ServerConfig = serde_yaml::from_str(base).unwrap();
+        cfg.pin_store = Some(PinStoreSection {
+            dir: Some(String::new()),
+            ..Default::default()
+        });
+        assert!(cfg
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("pin_store.dir"));
+        cfg.pin_store = Some(PinStoreSection {
+            keep_recent_per_workspace: Some(MAX_PIN_KEEP_RECENT + 1),
+            ..Default::default()
+        });
+        assert!(cfg
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("keep_recent_per_workspace"));
+        cfg.pin_store = Some(PinStoreSection {
+            keep_recent_per_workspace: Some(0),
+            ..Default::default()
+        });
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn claim_pin_load_budget_defaults_parses_and_is_bounded() {
+        let base = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://x"
+log_storage:
+  local_dir: /tmp/logs
+worker_token: "0123456789abcdef0123456789abcdef"
+"#;
+        let mut cfg: ServerConfig = serde_yaml::from_str(base).unwrap();
+        assert_eq!(
+            cfg.claim_pin_load_budget(),
+            std::time::Duration::from_secs(DEFAULT_CLAIM_PIN_LOAD_BUDGET_SECS)
+        );
+
+        let with = format!("{base}pin_store:\n  claim_load_budget_secs: 5\n");
+        let parsed: ServerConfig = serde_yaml::from_str(&with).unwrap();
+        assert_eq!(
+            parsed.claim_pin_load_budget(),
+            std::time::Duration::from_secs(5)
+        );
+        parsed.validate().unwrap();
+
+        for bad in [0, MAX_WORKSPACE_RELOAD_SECS + 1] {
+            cfg.pin_store = Some(PinStoreSection {
+                claim_load_budget_secs: Some(bad),
+                ..Default::default()
+            });
+            let err = cfg.validate().unwrap_err().to_string();
+            assert!(err.contains("claim_load_budget_secs"), "{bad}: {err}");
+        }
     }
 
     #[test]

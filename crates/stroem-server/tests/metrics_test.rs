@@ -18,6 +18,8 @@ use stroem_server::events::EventBus;
 use stroem_server::log_storage::LogStorage;
 use stroem_server::state::AppState;
 use stroem_server::web::build_router;
+use stroem_server::workspace::availability::ReloadSettings;
+use stroem_server::workspace::pins::{PinSource, PinStore, PinStoreConfig};
 use stroem_server::workspace::WorkspaceManager;
 use tempfile::TempDir;
 use testcontainers::runners::AsyncRunner;
@@ -82,6 +84,7 @@ fn empty_config(url: &str, log_dir: &std::path::Path) -> ServerConfig {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     }
 }
 
@@ -350,8 +353,14 @@ async fn snapshot_resolve_histogram_is_recorded() -> Result<()> {
 
     // Exercises the real production function — no rows need to exist, it
     // still records the histogram observation on the miss path.
-    stroem_server::render_context::latest_snapshots(&h.pool, "default", "hello-world", "test")
-        .await;
+    stroem_server::render_context::latest_snapshots(
+        &h.pool,
+        "default",
+        "hello-world",
+        None,
+        "test",
+    )
+    .await;
 
     let body = scrape(&router).await?;
     assert!(
@@ -931,6 +940,100 @@ async fn workspace_watch_gauges_are_exported() -> Result<()> {
             .starts_with(stroem_server::metrics::STROEM_WORKSPACE_LOAD_PERMITS_AVAILABLE)
             && l.ends_with(" 8")),
         "permits gauge missing or not 8:\n{body}"
+    );
+    Ok(())
+}
+
+/// A bare repo with one commit on `main`; returns (dir, url, commit).
+fn pin_remote() -> (TempDir, String, String) {
+    let dir = TempDir::new().unwrap();
+    let repo = git2::Repository::init_bare(dir.path()).unwrap();
+    let mut tb = repo.treebuilder(None).unwrap();
+    let blob = repo
+        .blob(b"actions:\n  greet:\n    type: script\n    script: echo hi\n")
+        .unwrap();
+    tb.insert("wf.yaml", blob, 0o100644).unwrap();
+    let tree = repo.find_tree(tb.write().unwrap()).unwrap();
+    let sig = git2::Signature::now("t", "t@t.t").unwrap();
+    let oid = repo
+        .commit(Some("refs/heads/main"), &sig, &sig, "init", &tree, &[])
+        .unwrap();
+    let url = format!("file://{}", dir.path().display());
+    (dir, url, oid.to_string())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn pin_store_metrics_are_exported() -> Result<()> {
+    // Install the global recorder BEFORE the load records its counter.
+    let handle = global_test_handle();
+    let h = boot().await?;
+    let log_dir = h._temp.path().to_path_buf();
+    let mut config = empty_config(&h.url, &log_dir);
+    config.metrics = Some(MetricsConfig {
+        public: true,
+        ..Default::default()
+    });
+    let (_remote, url, commit) = pin_remote();
+    let store = PinStore::open(
+        PinStoreConfig {
+            dir: log_dir.join("pins"),
+            keep_recent_per_workspace: 0,
+        },
+        HashMap::from([(
+            "pinned".to_string(),
+            PinSource {
+                url,
+                auth: None,
+                poll_interval: std::time::Duration::from_secs(60),
+            },
+        )]),
+        std::sync::Arc::new(HashMap::new()),
+        ReloadSettings::default(),
+    )?;
+    let log_storage = LogStorage::new(&config.log_storage.local_dir);
+    let state = AppState::new(
+        h.pool.clone(),
+        WorkspaceManager::from_config("pinned", WorkspaceConfig::new()).with_pin_store(store),
+        config,
+        log_storage,
+        HashMap::new(),
+        None,
+    )
+    .with_event_bus(EventBus::noop());
+    let held = state.workspaces.pins().ensure("pinned", &commit).await?;
+    let router = build_router(state.clone(), CancellationToken::new()).layer(Extension(handle));
+    let body = scrape(&router).await?;
+    assert!(
+        body.lines().any(
+            |l| l.starts_with(stroem_server::metrics::STROEM_PIN_LOADS_TOTAL)
+                && l.contains(r#"workspace="pinned""#)
+                && l.contains(r#"result="ok""#)
+        ),
+        "pin load counter missing:\n{body}"
+    );
+    assert!(
+        body.lines().any(
+            |l| l.starts_with(stroem_server::metrics::STROEM_PINS_CACHED)
+                && l.contains(r#"workspace="pinned""#)
+                && l.ends_with(" 1")
+        ),
+        "pins cached gauge missing or not 1:\n{body}"
+    );
+    drop(held);
+    // After eviction nothing is cached: the gauge reads 0, not absent.
+    state
+        .workspaces
+        .pins()
+        .evict(&std::collections::HashSet::new());
+    let body = scrape(&router).await?;
+    assert!(
+        body.lines().any(
+            |l| l.starts_with(stroem_server::metrics::STROEM_PINS_CACHED)
+                && l.contains(r#"workspace="pinned""#)
+                && l.ends_with(" 0")
+        ),
+        "pins cached gauge not zeroed after eviction:\n{body}"
     );
     Ok(())
 }

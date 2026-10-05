@@ -72,6 +72,7 @@ mod tests {
         config.triggers.insert(
             "nightly".to_string(),
             TriggerDef::Scheduler {
+                git_ref: None,
                 cron: "0 2 * * *".to_string(),
                 task: "etl".to_string(),
                 input: HashMap::new(),
@@ -84,6 +85,7 @@ mod tests {
         config.triggers.insert(
             "deploy-hook".to_string(),
             TriggerDef::Webhook {
+                git_ref: None,
                 name: "deploy-hook".to_string(),
                 task: "deploy".to_string(),
                 secret: None,
@@ -103,6 +105,7 @@ mod tests {
         config.triggers.insert(
             "ci-hook".to_string(),
             TriggerDef::Webhook {
+                git_ref: None,
                 name: "ci-hook".to_string(),
                 task: "build".to_string(),
                 secret: None,
@@ -122,6 +125,7 @@ mod tests {
         config.triggers.insert(
             "nightly-cph".to_string(),
             TriggerDef::Scheduler {
+                git_ref: None,
                 cron: "0 2 * * *".to_string(),
                 task: "report".to_string(),
                 input: HashMap::new(),
@@ -140,6 +144,7 @@ mod tests {
         config.triggers.insert(
             "old-trigger".to_string(),
             TriggerDef::Scheduler {
+                git_ref: None,
                 cron: "0 6 * * 1".to_string(),
                 task: "weekly".to_string(),
                 input: HashMap::new(),
@@ -159,6 +164,7 @@ mod tests {
         config.triggers.insert(
             "queue-listener".to_string(),
             TriggerDef::EventSource {
+                git_ref: None,
                 task: "consumer-task".to_string(),
                 target_task: "process-event".to_string(),
                 enabled: true,
