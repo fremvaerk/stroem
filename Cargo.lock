@@ -5479,10 +5479,10 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "sqlx",
  "stroem-common",
- "testcontainers",
- "testcontainers-modules",
+ "stroem-test-support",
  "tokio",
  "tracing",
  "uuid",
@@ -5500,10 +5500,9 @@ dependencies = [
  "stroem-common",
  "stroem-db",
  "stroem-server",
+ "stroem-test-support",
  "stroem-worker",
  "tempfile",
- "testcontainers",
- "testcontainers-modules",
  "tokio",
  "tokio-util",
  "tracing",
@@ -5581,6 +5580,7 @@ dependencies = [
  "stroem-agent",
  "stroem-common",
  "stroem-db",
+ "stroem-test-support",
  "subtle",
  "tar",
  "tempfile",
@@ -5598,6 +5598,19 @@ dependencies = [
  "uuid",
  "walkdir",
  "yaml_serde",
+]
+
+[[package]]
+name = "stroem-test-support"
+version = "0.17.0"
+dependencies = [
+ "anyhow",
+ "sqlx",
+ "stroem-db",
+ "testcontainers",
+ "testcontainers-modules",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
