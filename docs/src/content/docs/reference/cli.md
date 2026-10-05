@@ -37,12 +37,12 @@ Supports:
 - Template rendering (`{{ input.* }}`, `{{ step.output.* }}`, `{{ secret.* }}`)
 - `when` conditions (skip steps based on expressions)
 - `for_each` loops (iterate over arrays)
-- The same dependency gate as the server: a step runs only when every dependency lets it through (completed, or not completed but carrying the matching `continue_on_failure` / `continue_when_skipped` flag on itself). An untolerated failure no longer aborts the whole run — independent branches keep going, and unreached dependents are skipped `unreachable`, matching server jobs
+- The same dependency gate as the server: a step runs only when its whole `depends_on` tree is satisfied — each edge's `accept` set (default: must `complete`) names which of the dependency's outcomes let it through, independent of any flag on the dependent itself. An untolerated failure no longer aborts the whole run — independent branches keep going, and unreached dependents are skipped `unreachable`, matching server jobs
 - A `when` or `for_each` evaluation error fails that step, same as the server, instead of aborting the run
 - Masked step context for downstream templates: a completed step's output, `null` for a skipped one, `null` plus `error` for a failed one — a failed loop's partial array is never exposed to a step that reads it
 - `Ctrl+C` graceful cancellation (still aborts the run and exits non-zero — there is no step-level cancellation locally)
 - `OUTPUT: {json}` parsing for step outputs
-- Exit code reflects the run's outcome, not a raw failure count: `0` when every failure is caught by `continue_on_failure` — on the failing step or on every path below it — `1` when at least one escaped uncaught. When every failure was caught, the run prints one extra line after the summary counts: `Every failure was caught by continue_on_failure.`
+- Exit code reflects the run's outcome, not a raw failure count: `0` when every failed step's own `continue_on_failure` catches it, `1` when at least one failed step escaped uncaught (a downstream step's `continue_on_failure`/`accept` never excuses someone else's failure). When every failure was caught, the run prints one extra line after the summary counts: `Every failure was caught by continue_on_failure.`
 
 Limitations:
 - Steps execute sequentially, even when the DAG allows parallelism
@@ -70,7 +70,7 @@ The validator checks:
 - DAG cycle detection
 - Trigger cron expression syntax
 - Hook action references
-- Warns when a merge step depends on a step with `when` or `for_each` that lacks `continue_when_skipped` — that dependency's skip would otherwise cascade-skip the merge (see [Conditionals](/guides/conditionals/))
+- Dependency shape: a leftover `continue_when_skipped` flag, or a malformed `depends_on` tree (duplicate siblings, empty `all`/`any` groups, empty `accept` lists) — a named, actionable error, not a silent warning (see the [0.18 upgrade guide](/operations/upgrade-0-18-dependency-conditions/)). `stroem run` enforces the same check before executing.
 
 ### `tasks`
 

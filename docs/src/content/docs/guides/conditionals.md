@@ -197,7 +197,7 @@ flow:
         accept: terminal         # runs whether last-step completed, failed, or was cancelled
 ```
 
-`continue_on_failure` on `last-step` means `last-step` failing doesn't fail the job — full stop. It has no effect on whether `cleanup` runs; that's `cleanup`'s own `accept: terminal`. If `cleanup` must run after a failure **without** hiding that failure from the job's outcome — so the job still ends `failed` and `on_error` fires — don't reach for `continue_on_failure` on `last-step` at all: put `cleanup` in an [`on_error` / `on_cancel` hook](/guides/hooks/) instead.
+`continue_on_failure` on `last-step` means `last-step` failing doesn't fail the job — full stop. It has no effect on whether `cleanup` runs; that's `cleanup`'s own `accept: terminal`. The example above, as written (no `continue_on_failure` on `last-step`), already does the more direct thing: `cleanup` runs after a failure **and** the job still ends `failed` (so `on_error` fires too) — `accept` and `continue_on_failure` are fully decoupled, so a cleanup step doesn't need to leave the flow just to keep the job's outcome honest. Reach for an [`on_error` / `on_cancel` hook](/guides/hooks/) instead when what needs to run isn't really part of the task's own DAG — paging on-call, tearing down infrastructure the flow itself never touched — and you want it to fire exactly once on any terminal outcome without wiring an `accept` edge to every step that might fail.
 
 A dependent's own `when` is still evaluated on its own terms once its `depends_on` tree is satisfied: the tree decides whether the dependent is even considered, not what its own condition renders to.
 

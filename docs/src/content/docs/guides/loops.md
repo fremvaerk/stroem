@@ -113,7 +113,7 @@ flow:
       all_results: "{{ process.output }}"
 ```
 
-- Failed instances contribute `null` to the output array (when `continue_on_failure` is set)
+- Failed instances always contribute `null` to the output array — visible unconditionally, with or without `continue_on_failure` on the placeholder (a dependent's own `accept` decides whether it ever sees that output at all)
 - Skipped instances also contribute `null`
 
 ## Combining with `when` Conditions
@@ -168,12 +168,11 @@ Each instance creates a full child job with its own steps, logs, and lifecycle. 
 |----------|----------|
 | Empty array | Step is skipped (not failed) |
 | Non-array result | Step fails with error |
-| Instance failure (no `continue_on_failure`) | Remaining parallel instances continue; placeholder fails when all done |
-| Instance failure (sequential, no `continue_on_failure`) | Remaining instances are skipped; placeholder fails |
-| Instance failure (`continue_on_failure: true`) | Placeholder completes; failed instance output is `null` in array |
+| Instance failure (parallel) | Remaining instances continue; placeholder rolls up `failed` once all are done — regardless of `continue_on_failure` |
+| Instance failure (sequential) | Remaining pending instances are skipped immediately; placeholder rolls up `failed` — regardless of `continue_on_failure` |
 | Template error in `for_each` expression | Step fails with error |
 
-`continue_on_failure` is read from the loop's own placeholder — not from whatever depends on it. A loop with its own flag set rolls up `completed` (not `failed`) despite the failed instance, so its dependents see a completed dependency and run normally; without the flag, the placeholder fails and its dependents are skipped `unreachable` — a dependent's own `continue_on_failure` never makes that dependent itself run, it only decides whether *its* dependents run and whether *its* own failure fails the job.
+`continue_on_failure` on the loop's own placeholder no longer changes the rollup: any failed instance makes the placeholder roll up `failed`, always. The flag only decides whether that failure fails the *job* — self-scoped, like any other step. A dependent that must still run despite a failed loop needs its own `accept: [completed, failed]` (or `accept: terminal`) on the edge to the placeholder; without it, the placeholder's `failed` status skips the dependent `unreachable` the same way any other untolerated failure would.
 
 ## Limits
 

@@ -56,7 +56,7 @@ Each entry in `hook.failed_steps` contains:
 | `action_name` | string | Action that was executed |
 | `error_message` | string/null | The step's error message |
 | `continue_on_failure` | bool | Whether this row's own flow step has `continue_on_failure` set. A loop instance row reports its placeholder's flag |
-| `tolerated` | bool | Whether this failure was caught by `continue_on_failure` — on this step or on every path below it — this failure does not contribute to failing the job; other failures or a cancellation can still decide the outcome |
+| `tolerated` | bool | Same value as `continue_on_failure` above — this failure does not by itself fail the job; other untolerated failures or a cancellation can still decide the outcome |
 | `carried_over` | bool | `true` if this failure was carried forward from the source run by a job restart rather than produced by this job |
 
 ## on_cancel hooks
@@ -254,7 +254,7 @@ tasks:
 
 ## Cleanup and notification after a failure
 
-There is no dependent-side "run even if upstream failed" — a step's own flags never make it run (see [Conditionals](/guides/conditionals/)). A step that must run after a failure while the job still fails — cleanup, notifying on-call, tearing down partial resources — belongs in an `on_error` (or `on_cancel`) hook, not in the flow:
+A dependent's own `accept: [completed, failed]` (or `accept: terminal`) does let it run after an upstream failure, and that's fully decoupled from whether the job still fails (`continue_on_failure`, self-scoped on the upstream step — see [Conditionals](/guides/conditionals/)). But a step that isn't really part of the flow's own DAG — cleanup, notifying on-call, tearing down partial resources — still belongs in an `on_error` (or `on_cancel`) hook, so it fires exactly once on any terminal outcome without wiring an `accept` edge to every step that might fail:
 
 ```yaml
 tasks:

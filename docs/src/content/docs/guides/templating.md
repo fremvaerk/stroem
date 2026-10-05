@@ -157,13 +157,15 @@ tasks:
       check:
         action: validate
         when: "{{ input.run_checks }}"
-        continue_when_skipped: true
 
       process:
         action: process-data
-        depends_on: [check]
-        # Runs whether check ran or was skipped — the flag that lets it
-        # through lives on `check`, the dependency, not on `process`.
+        depends_on:
+          - step: check
+            accept: [completed, skipped]
+        # Runs whether check ran or was skipped — the accept set that lets
+        # it through lives on `process`'s own edge, the dependent, not on
+        # `check`.
 ```
 
 See [Conditional Flow Steps](/guides/conditionals/) for the full feature documentation.

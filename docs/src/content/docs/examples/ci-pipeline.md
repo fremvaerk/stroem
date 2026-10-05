@@ -84,7 +84,7 @@ triggers:
 
 1. **`lint`** and **`test`** run in parallel (no dependency between them)
 2. **`build`** waits for both lint and test to complete
-3. An `on_success` hook notifies when the whole pipeline passes; an `on_error` hook notifies when any step fails — there is no dependent-side "run even if upstream failed" step; that belongs in a hook (see [Hooks](/guides/hooks/))
+3. An `on_success` hook notifies when the whole pipeline passes; an `on_error` hook notifies when any step fails — a hook always fires exactly once on the real terminal outcome, which a flow step reaching past a failure (via its own `accept` set) can't guarantee (see [Hooks](/guides/hooks/))
 
 The DAG looks like:
 
@@ -98,7 +98,7 @@ test  ──┘
 
 - **Parallel steps**: `lint` and `test` have no mutual dependencies, so they run concurrently
 - **Docker runner**: `runner: docker` runs steps inside containers with workspace at `/workspace`
-- **Hooks, not a dependent step**: notifying after success or failure is an `on_success` / `on_error` hook, not a flow step with `continue_on_failure`. That flag decides whether a step's *own* dependents run, and it catches every failure reaching it — its own, and any upstream failure whose only path runs through it — so the job no longer fails; it never decides whether the flagged step itself runs. A 0.16-style `notify` step depending on `build` with `continue_on_failure` would, under 0.17's rule, catch a failed `build` and turn the whole pipeline **green** — the opposite of a CI notification's job. That is why this page puts notification in hooks instead.
+- **Hooks, not a dependent step**: notifying after success or failure is an `on_success` / `on_error` hook, not a flow step. `continue_on_failure` is self-scoped — it only decides whether a step's own failure fails the job, never whether anything downstream runs (that's a dependent's own `accept` set, see [Conditionals](/guides/conditionals/)). A flow-step `notify` depending on `build` would need `accept: [completed, failed]` (or `terminal`) just to run after a failed build — and if `build` also carried its own `continue_on_failure: true` so the job doesn't fail either, you've quietly turned a failed pipeline **green**, the opposite of a CI notification's job. A hook sidesteps both problems: it always fires exactly once on the real terminal outcome, and firing it never changes what that outcome is. That is why this page puts notification in hooks instead.
 - **Webhook trigger**: External systems (GitHub) can trigger the pipeline via `POST /hooks/github-ci`
 - **Webhook input**: `input.body.*` (e.g. `{{ input.body.ref }}`) accesses the parsed JSON body from the webhook request inside flow step templates — hook templates don't see it, only `hook.*` / `secret.*` (see [Hooks](/guides/hooks/))
 

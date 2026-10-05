@@ -233,7 +233,7 @@ If the deployment fails, the entire task retries — all steps run again with th
 
 ### Retry + `continue_on_failure`
 
-Step retry exhausts before `continue_on_failure` applies:
+Step retry exhausts before anything else is decided — `continue_on_failure` and a dependent's `accept` are two separate questions about what happens once it has:
 
 ```yaml
 flow:
@@ -241,15 +241,16 @@ flow:
     action: might-fail
     retry:
       max_attempts: 3
-    continue_on_failure: true
+    continue_on_failure: true   # unstable's own failure doesn't fail the job
 
   next:
     action: next-step
-    depends_on: [unstable]
-    # Runs even if all 3 retry attempts fail
+    depends_on:
+      - step: unstable
+        accept: [completed, failed]   # runs even if all 3 retry attempts fail
 ```
 
-If `unstable` exhausts retries and fails, `next` still runs because of `continue_on_failure`.
+If `unstable` exhausts retries and fails, `next` still runs because its own `depends_on` edge accepts `failed` — that's `next`'s decision, not `unstable`'s. `continue_on_failure` on `unstable` is unrelated to whether `next` runs; it only decides whether the exhausted failure fails the *job*.
 
 ### Retry + `for_each` loops
 
@@ -527,18 +528,20 @@ tasks:
           max_attempts: 3
           delay: "10s"
           backoff: exponential
-        continue_on_failure: true
+        continue_on_failure: true   # an exhausted item doesn't fail the job
         input:
           item: "{{ each.item }}"
 
       aggregate:
         action: combine-results
-        depends_on: [process]
+        depends_on:
+          - step: process
+            accept: [completed, failed]
         input:
           results: "{{ process.output }}"
 ```
 
-Each item is processed with step retry. `continue_on_failure` on `process` itself means an item that exhausts retries doesn't fail the loop's rollup — the loop still completes, with `null` for any exhausted item — so `aggregate` runs and sees the partial array. The flag is read from `process`, the dependency; putting it on `aggregate` would have no effect.
+Each item is processed with step retry. If any item exhausts its retries, the loop's placeholder rolls up `failed` regardless — `continue_on_failure` on `process` itself only decides whether that failure fails the *job*, not the rollup status. `aggregate`'s own `accept: [completed, failed]` is what lets it run and see the partial array, with `null` for any exhausted item; without it, an exhausted item would skip `aggregate` `unreachable` even with `continue_on_failure` set.
 
 ## Troubleshooting
 

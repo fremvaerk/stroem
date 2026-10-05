@@ -228,7 +228,7 @@ flow:
     depends_on: [build]
 ```
 
-When a step times out, it is marked as `failed` with the error "Step timed out". Downstream steps that depend on it are skipped `unreachable` unless the timed-out step itself has `continue_on_failure: true`. The worker also enforces the timeout client-side by cancelling the running process.
+When a step times out, it is marked as `failed` with the error "Step timed out". Its dependents run only if their own `depends_on` edge to this step accepts `failed` (e.g. `accept: [completed, failed]` or `accept: terminal`) — otherwise they're skipped `unreachable`. `continue_on_failure` on the timed-out step itself is unrelated to that: it only decides whether the timeout fails the *job* (see [Conditionals](/guides/conditionals/)). The worker also enforces the timeout client-side by cancelling the running process.
 
 **Task timeout** — cancels the entire job if it runs too long (max 7d):
 
@@ -265,28 +265,31 @@ To opt one task out of the global default — i.e., to make it genuinely unbound
 
 ### Handling step failures
 
-By default, when a step fails, all downstream steps that depend on it are automatically skipped `unreachable`. The job is marked as `failed` once all steps reach a terminal state.
+By default, when a step fails, all downstream steps that depend on it are automatically skipped `unreachable` unless they explicitly tolerate the failure. The job is marked as `failed` once all steps reach a terminal state, unless every failure is caught.
 
-A step runs only when **every** dependency lets it through — completed, or not completed but carrying the matching flag **on itself**:
+A step runs only when its whole `depends_on` tree is satisfied. Each entry names which of the dependency's outcomes — `completed`, `failed`, `cancelled`, `skipped`, `omitted` — satisfy that edge:
 
-- **`continue_on_failure`** on a step: if this step fails, is cancelled, or is skipped because something above it failed, the steps that depend on it still run, and the failure does not fail the job. It never makes the step itself run.
-- **`continue_when_skipped`** on a step: if this step is skipped by its own `when`, an empty `for_each`, or because a step above it was skipped the same way, the steps that depend on it still run.
+- A plain `depends_on: [a]` is sugar for `accept: [completed]` — today's default: the dependency must complete cleanly.
+- `{step: a, accept: [completed, failed]}` also tolerates `a` failing.
+- `{step: a, accept: terminal}` runs regardless of how `a` ends.
 
-Both flags are read from the dependency, never from the dependent — a step's own flags never make *it* run. There is no automatic convergence either: a skipped dependency without `continue_when_skipped` blocks its dependents even when a sibling dependency completed. See the [Conditionals guide](/guides/conditionals/) for branching patterns, the merge/if-else pattern, and skip reasons.
+There is no automatic convergence: every edge of a merge needs its own `accept` — tolerating one dependency's failure doesn't automatically tolerate a sibling's skip. See the [Conditionals guide](/guides/conditionals/) for branching patterns, the merge/if-else pattern, and skip reasons.
 
-A failure fails the job unless a `continue_on_failure` catches it — on the failing step itself, or on every path below it:
+Separately, `continue_on_failure` on a step is self-scoped: it only controls whether *that step's own* failure fails the job, with no effect on whether anything downstream runs:
 
 ```yaml
 flow:
   deploy:
     action: deploy-app
-    continue_on_failure: true   # deploy's dependents run even if deploy fails; the job still completes
+    continue_on_failure: true   # deploy failing doesn't fail the job
   verify:
     action: verify-deploy
-    depends_on: [deploy]
+    depends_on:
+      - step: deploy
+        accept: [completed, failed]   # verify runs even if deploy failed
 ```
 
-There is no dependent-side "run even if upstream failed" field. A step that must run after a failure while the job still fails — cleanup, paging on-call, tearing down partial resources — belongs in an `on_error` (or `on_cancel`) hook, not in the flow:
+`accept` and `continue_on_failure` are fully decoupled: a dependent can run after an upstream failure (`accept`) independently of whether that failure still fails the job (`continue_on_failure`, on the upstream step). A step that isn't really part of the flow's own DAG — paging on-call, tearing down infrastructure the flow itself never touched — still belongs in an `on_error` (or `on_cancel`) hook instead, so it fires exactly once on any terminal outcome without wiring an `accept` edge to every step that might fail:
 
 ```yaml
 tasks:
