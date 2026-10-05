@@ -401,10 +401,9 @@ Each entry in a task's `flow` map defines a step. Steps can reference a named ac
 | `action` | string | **required** | Action name to execute. Omit when using inline action |
 | `name` | string | — | Human-readable step display name |
 | `description` | string | — | What this step does |
-| `depends_on` | list | `[]` | Steps that must complete before this one starts |
+| `depends_on` | list | `[]` | Dependencies that must reach a terminal state before this one is decided (see [Dependencies](#dependencies) for the full `{step, accept}` / `all` / `any` shape) |
 | `input` | map | `{}` | Input values passed to the action. Values support Tera templates |
-| `continue_on_failure` | bool | `false` | On a step: if this step fails, is cancelled, or is skipped because something above it failed, the steps that depend on it still run, and the failure does not fail the job. It never makes the step itself run |
-| `continue_when_skipped` | bool | `false` | On a step: if this step is skipped by its own `when`, an empty `for_each`, or because a step above it was skipped the same way, the steps that depend on it still run |
+| `continue_on_failure` | bool | `false` | Self-scoped only: if this step fails, its failure does not fail the job. Has no effect on whether anything downstream runs — that's `depends_on`'s `accept` sets on each dependent (see [Dependencies](#dependencies)) |
 | `timeout` | duration | — | Step execution timeout. Max `24h` (86400s) |
 | `when` | string | — | Tera condition. Falsy values: empty string, `"false"`, `"0"`, `"null"`, `"none"` (case-insensitive) |
 | `for_each` | string or list | — | Tera expression or literal JSON array. Creates one instance per item |
@@ -436,12 +435,36 @@ flow:
     action: step-b
   c:
     action: step-c
-    depends_on: [a, b]    # waits for both a and b
+    depends_on: [a, b]    # waits for both a and b to complete
 ```
 
-Steps without `depends_on` start immediately. A step runs only when **every** dependency lets it through (completed, or not completed but carrying the matching flag). A failed or cancelled dependency lets its dependents through only if that dependency itself has `continue_on_failure: true` — otherwise they are skipped `unreachable`.
+Steps without `depends_on` start immediately. Each entry in a `depends_on` list is one of four shapes; the list itself is an implicit `all` group:
 
-A dependency skipped by choice (its own `when`, an empty `for_each`) lets its dependents through only if that dependency itself sets `continue_when_skipped: true`. There is no automatic convergence: a completed sibling does not make up for an unflagged skipped one, so an if/else merge needs `continue_when_skipped` on **each** branch step, not just one. Every skipped step records a `skip_reason` (`condition`, `empty`, `cascade`, `unreachable`); see the [Conditionals guide](/guides/conditionals/#skip-reasons).
+| Shape | Meaning |
+|---|---|
+| `plain-name` | Sugar for `{step: plain-name, accept: [completed]}` — today's default: the dependency must complete |
+| `{step: name, accept: [...]}` | Satisfied iff `name`'s outcome is in the `accept` list |
+| `{step: name, accept: terminal}` | Sugar for all five outcomes below — "wait for it, don't care how it ends" |
+| `{all: [...]}` | Satisfied iff every nested entry is satisfied (an explicit, nestable AND) |
+| `{any: [...]}` | Satisfied iff at least one nested entry is satisfied (OR) |
+
+`accept` is a non-empty list drawn from five **outcomes**, or the literal string `terminal`:
+
+| Outcome | Meaning |
+|---|---|
+| `completed` | The dependency's status is `completed` |
+| `failed` | The dependency's status is `failed` |
+| `cancelled` | The dependency's status is `cancelled` |
+| `skipped` | The dependency was skipped by its **own** choice — its own `when` was false, or its own `for_each` was empty |
+| `omitted` | The dependency was itself blocked by **its own** `depends_on` tree — not its own choice |
+
+**Readiness is uniform**: the gate waits until every step named anywhere in the tree — including nested inside `all`/`any` — has reached a terminal state, then evaluates the whole tree exactly once. This holds even when the tree is already conclusively satisfied or unsatisfiable by one child — there's no fail-fast, and no short-circuiting an `any` ahead of a still-running sibling. A step whose tree is not satisfied is skipped with `skip_reason: unreachable`.
+
+`all`/`any` nest arbitrarily (an `any` may contain an `all`, a `step` entry, or a bare name). The same step name may appear more than once across *different* branches with different `accept` sets — that's a legitimate way to express an OR over different outcomes of the same dependency, and is accepted. It's rejected only when the same name is a **direct sibling** of the same `all`/`any` node (including the implicit top-level group): `depends_on: [a, a]`-style duplicates must be deduplicated.
+
+`continue_on_failure` is unrelated to any of this — it only controls whether a step's own failure fails the *job* (see the `continue_on_failure` row above), never whether anything downstream runs. See the [Conditionals guide](/guides/conditionals/) for worked examples, and the [0.18 upgrade guide](/operations/upgrade-0-18-dependency-conditions/) if migrating from `continue_on_failure`/`continue_when_skipped`-based gating.
+
+Every skipped step records a `skip_reason` (`condition`, `empty`, or `unreachable`; a legacy `cascade` reason can still appear on rows written before 0.18.0 and is read identically to `unreachable`); see the [Conditionals guide](/guides/conditionals/#outcomes-and-skip-reasons).
 
 ### Conditional steps (`when`)
 
@@ -529,7 +552,7 @@ tasks:
 - Attempt 1 fails
 - Wait 10s, then retry (Attempt 2)
 - If Attempt 2 fails, wait 20s, then retry (Attempt 3)
-- If Attempt 3 fails, the step fails; its dependents run only if this step itself has `continue_on_failure: true` — otherwise they're skipped `unreachable`
+- If Attempt 3 fails, the step fails; its dependents run only if their own `depends_on` edge to this step accepts `failed` — otherwise they're skipped `unreachable`
 - All data from previous attempts is discarded; output is only captured from the final attempt
 
 **Step-level vs. action-level:** If both action and step define retry, the step's configuration takes precedence:
@@ -666,7 +689,7 @@ Jitter reduces synchronized retries across many workers (thundering herd problem
 
 #### Retry with `continue_on_failure`
 
-Step retry exhausts first, then `continue_on_failure` takes effect:
+Step retry exhausts first; `continue_on_failure` then decides whether the job still counts as succeeded, independent of whether `next` runs (which is `next`'s own `accept` set):
 
 ```yaml
 flow:
@@ -674,11 +697,13 @@ flow:
     action: flaky-operation
     retry:
       max_attempts: 3
-    continue_on_failure: true
+    continue_on_failure: true   # job still completes even if all retries fail
 
   next:
     action: next-step
-    depends_on: [unstable]
+    depends_on:
+      - step: unstable
+        accept: [completed, failed]
     # Runs even if all 3 retry attempts fail
 ```
 
@@ -792,7 +817,7 @@ Each entry in `hook.failed_steps`:
 | `action_name` | string | Action that was executed |
 | `error_message` | string/null | The step's error message |
 | `continue_on_failure` | bool | Whether this row's own flow step has `continue_on_failure` set. A loop instance row reports its placeholder's flag |
-| `tolerated` | bool | Whether this failure was caught by `continue_on_failure` — on this step or on every path below it — this failure does not contribute to failing the job; other failures or a cancellation can still decide the outcome |
+| `tolerated` | bool | Same value as `continue_on_failure` above — this failure does not by itself fail the job; other untolerated failures or a cancellation can still decide the outcome |
 
 ```yaml
 tasks:
