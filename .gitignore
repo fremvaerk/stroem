@@ -28,3 +28,6 @@ graphify-out
 
 # Local git worktrees (feature-branch isolation)
 .worktrees/
+
+# e2e git-refs fixture (built by tests/e2e.sh)
+tests/.e2e-refs/

@@ -1,0 +1,617 @@
+//! § 7.9 read-path audit (spec 2026-10-02-git-refs-design.md): tests for the
+//! job-scoped data the audit found untested elsewhere. Every job-scoped route
+//! and MCP tool is already covered in `git_refs_read_paths_test.rs` (deny +
+//! mask), `pinned_rerun_restart_test.rs` (re-run / restart source) and the
+//! stroem-db stats test; see the audit table in spec § 7.9. What is left:
+//! - the `child_jobs[]` summary embedded in job detail, which the audit
+//!   classifies as the PARENT's data: no per-child ACL filter;
+//! - content COPIED into a job from another job (a hook payload, a child's
+//!   output settling into its parent step), which the job's redaction set must
+//!   cover through its redaction closure (§ 7.4).
+
+mod common;
+use common::pinned::*;
+
+use std::collections::BTreeSet;
+
+use anyhow::Result;
+use axum::http::StatusCode;
+use serde_json::json;
+use stroem_server::config::{AclAction, AclConfig, AclRule};
+use uuid::Uuid;
+
+const VIEWER: &str = "viewer@audit.test";
+const ADMIN: &str = "admin@audit.test";
+
+/// `manifest` (folder `public`, View for VIEWER) calls `nightly` at
+/// release/2.3 from a ROOT step, so the child exists at creation. The
+/// fixture's release/2.3 declares `nightly` in folder `nightlies`, which no
+/// rule allows.
+const AUDIT_ETL_MAIN: &str = r#"
+actions:
+  call-nightly:
+    type: task
+    task: nightly
+    ref: release/2.3
+tasks:
+  manifest:
+    folder: public
+    flow:
+      call:
+        action: call-nightly
+"#;
+
+/// Every key of one `child_jobs[]` entry: identifiers, a status and a
+/// timestamp. Redaction skips `child_jobs` whole (`STEP_IDENTIFIER_KEYS`), so a
+/// content field added here would leak unredacted.
+const CHILD_SUMMARY_KEYS: [&str; 7] = [
+    "created_at",
+    "id",
+    "ref",
+    "revision",
+    "status",
+    "task_name",
+    "workspace",
+];
+
+fn audit_opts() -> PinnedFixtureOpts {
+    PinnedFixtureOpts {
+        acl: Some(AclConfig {
+            default: AclAction::Deny,
+            rules: vec![AclRule {
+                workspace: "etl".to_string(),
+                tasks: vec!["public/*".to_string()],
+                action: AclAction::View,
+                groups: vec![],
+                users: vec![VIEWER.to_string()],
+            }],
+        }),
+        users: vec![
+            FixtureUser {
+                email: VIEWER,
+                groups: vec![],
+                admin: false,
+            },
+            FixtureUser {
+                email: ADMIN,
+                groups: vec![],
+                admin: true,
+            },
+        ],
+        etl_main: Some(AUDIT_ETL_MAIN.to_string()),
+        ..Default::default()
+    }
+}
+
+/// A viewer of the parent sees the summary of a child it may not open. The
+/// summary carries identifiers only, all of which the parent already exposes
+/// (its step stamps the child's workspace, ref and commit; the child's result
+/// settles into that step). The child's own paths stay behind the child's
+/// own ACL (§ 7.8).
+#[tokio::test(flavor = "multi_thread")]
+async fn child_job_summary_in_job_detail_is_identifiers_only_and_the_child_stays_job_scoped(
+) -> Result<()> {
+    bounded(async {
+        let fx = pinned_workspace_fixture(audit_opts()).await?;
+        let admin = fx.login(ADMIN).await;
+        let viewer = fx.login(VIEWER).await;
+
+        let (st, body) = execute_task(&fx.router, "etl", "manifest", json!({}), Some(&admin)).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        let parent = body["job_id"].as_str().expect("job_id").to_string();
+
+        // The viewer may open the parent, and its `call` step lists the child.
+        let (st, detail) = api_req(
+            &fx.router,
+            "GET",
+            &format!("/api/jobs/{parent}"),
+            Some(&viewer),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{detail}");
+        let call = detail["steps"]
+            .as_array()
+            .expect("steps")
+            .iter()
+            .find(|s| s["step_name"] == "call")
+            .unwrap_or_else(|| panic!("no call step: {detail}"))
+            .clone();
+        let summaries = call["child_jobs"].as_array().expect("child_jobs");
+        assert_eq!(summaries.len(), 1, "{call}");
+        let summary = &summaries[0];
+
+        // Identifiers only, and redaction relies on it.
+        let keys: BTreeSet<&str> = summary
+            .as_object()
+            .expect("summary object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys, BTreeSet::from(CHILD_SUMMARY_KEYS), "{summary}");
+        assert!(
+            stroem_server::redaction::STEP_IDENTIFIER_KEYS.contains(&"child_jobs"),
+            "redaction skips child_jobs whole; the key-set check above is what keeps that safe"
+        );
+
+        // Nothing beyond what the parent's own step already stamps.
+        assert_eq!(summary["task_name"], json!("nightly"), "{summary}");
+        assert_eq!(summary["workspace"], call["task_workspace"], "{call}");
+        assert_eq!(summary["ref"], call["task_ref"], "{call}");
+        assert_eq!(summary["revision"], call["task_revision"], "{call}");
+        assert_eq!(summary["ref"], json!("release/2.3"), "{summary}");
+
+        // The child is a pinned job in a folder the viewer may not read.
+        let child: Uuid = summary["id"].as_str().expect("child id").parse()?;
+        let row = stroem_db::JobRepo::get(&fx.pool, child)
+            .await?
+            .expect("child row");
+        assert_eq!(row.git_ref.as_deref(), Some("release/2.3"));
+        assert_eq!(row.task_folder.as_deref(), Some("nightlies"));
+
+        // Its own data stays job-scoped: denied to the viewer as an unknown
+        // job, readable by the admin (so the 404 is the ACL, not a missing row).
+        for uri in [
+            format!("/api/jobs/{child}"),
+            format!("/api/jobs/{child}/logs"),
+            format!("/api/jobs/{child}/artifacts"),
+        ] {
+            let (st, b) = api_req(&fx.router, "GET", &uri, Some(&viewer), None).await;
+            assert_eq!(st, StatusCode::NOT_FOUND, "{uri}: {b}");
+            assert_eq!(b["error"], json!("Job not found"), "{uri}: {b}");
+            let (st, b) = api_req(&fx.router, "GET", &uri, Some(&admin), None).await;
+            assert_eq!(st, StatusCode::OK, "admin {uri}: {b}");
+        }
+        Ok(())
+    })
+    .await
+}
+
+// ── Redaction closure: content copied between jobs (§ 7.4) ─────────────
+
+/// Exists ONLY at release/2.3 of `etl`: the live set never masks it.
+const REF_ONLY_SECRET: &str = "ref-only-audit-s3cret-23";
+const MASK: &str = "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}";
+
+/// `etl` main: every job of these tasks is UNPINNED. Only the `boom` / `emit`
+/// steps run an action at release/2.3. `down-at-ref` starts `down-parent`
+/// pinned at release/2.3.
+const CLOSURE_MAIN: &str = r#"
+triggers:
+  down-at-ref:
+    type: scheduler
+    cron: "0 0 1 1 *"
+    task: down-parent
+    ref: release/2.3
+actions:
+  notify:
+    type: script
+    runner: local
+    script: echo notify
+  call-child:
+    type: task
+    task: child
+  notify-task:
+    type: task
+    task: notify-flaky
+tasks:
+  failing:
+    on_error:
+      - action: notify
+        input:
+          msg: "{{ hook.error_message }}"
+    flow:
+      boom:
+        action: boom
+        ref: release/2.3
+  parent:
+    flow:
+      call:
+        action: call-child
+  child:
+    flow:
+      leak:
+        action: emit
+        ref: release/2.3
+  failing-task-hook:
+    on_error:
+      - action: notify-task
+        input:
+          msg: "{{ hook.error_message }}"
+    flow:
+      boom:
+        action: boom
+        ref: release/2.3
+  notify-flaky:
+    input:
+      msg:
+        type: string
+    retry:
+      max_attempts: 2
+      delay: 1s
+    flow:
+      tell:
+        action: notify
+"#;
+
+const CLOSURE_RELEASE: &str = r#"
+secrets:
+  TOKEN: "ref-only-audit-s3cret-23"
+actions:
+  boom:
+    type: script
+    runner: local
+    script: echo boom
+  emit:
+    type: script
+    runner: local
+    script: echo emit
+tasks:
+  down-parent:
+    flow:
+      produce:
+        action: emit
+      call:
+        action: billing.run-sink
+        depends_on: [produce]
+        input:
+          token: "{{ produce.output.token }}"
+"#;
+
+/// `billing` main (live): `run-sink` starts `sink-task`, which declares the
+/// input the pinned caller renders.
+const CLOSURE_BILLING_MAIN: &str = r#"
+actions:
+  sink:
+    type: script
+    runner: local
+    script: echo sink
+  run-sink:
+    type: task
+    task: sink-task
+tasks:
+  sink-task:
+    input:
+      token:
+        type: string
+    flow:
+      s:
+        action: sink
+"#;
+
+fn closure_opts() -> PinnedFixtureOpts {
+    PinnedFixtureOpts {
+        etl_main: Some(CLOSURE_MAIN.to_string()),
+        etl_release: Some(CLOSURE_RELEASE.to_string()),
+        billing_main: Some(CLOSURE_BILLING_MAIN.to_string()),
+        ..Default::default()
+    }
+}
+
+/// Job detail of `job` (auth off): 200, and the ref-only secret appears
+/// nowhere in the body, while the mask does.
+async fn assert_detail_masks_ref_only_secret(fx: &PinnedFixture, job: Uuid) -> serde_json::Value {
+    let (st, detail) = api_req(&fx.router, "GET", &format!("/api/jobs/{job}"), None, None).await;
+    assert_eq!(st, StatusCode::OK, "{detail}");
+    let text = detail.to_string();
+    assert!(
+        !text.contains(REF_ONLY_SECRET),
+        "ref-only secret leaked: {detail}"
+    );
+    assert!(text.contains(MASK), "nothing was masked: {detail}");
+    detail
+}
+
+/// Hook payload: an UNPINNED job's step runs an action at release/2.3 and
+/// fails quoting a release-only secret. The `on_error` hook copies that error
+/// into an UNPINNED hook job's input, whose own pins are none, so only its
+/// hook-source chain carries release/2.3.
+#[tokio::test(flavor = "multi_thread")]
+async fn hook_job_detail_masks_a_secret_of_its_sources_step_pin() -> Result<()> {
+    bounded(async {
+        let fx = pinned_workspace_fixture(closure_opts()).await?;
+        let worker = register_worker(&fx.router, &["script"]).await;
+        let (st, body) = execute_task(&fx.router, "etl", "failing", json!({}), None).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        let source: Uuid = body["job_id"].as_str().expect("job_id").parse()?;
+
+        claim_and_complete(
+            &fx,
+            &worker,
+            source,
+            "boom",
+            json!({"exit_code": 1, "error": format!("auth rejected token {REF_ONLY_SECRET}")}),
+        )
+        .await;
+
+        let hook: Uuid = sqlx::query_scalar(
+            "SELECT job_id FROM job WHERE source_type = 'hook' AND source_job_id = $1",
+        )
+        .bind(source)
+        .fetch_one(&fx.pool)
+        .await?;
+        let row = stroem_db::JobRepo::get(&fx.pool, hook)
+            .await?
+            .expect("hook row");
+        assert_eq!(row.git_ref, None, "the hook job is unpinned");
+        assert!(
+            row.input
+                .as_ref()
+                .map(|v| v.to_string())
+                .unwrap_or_default()
+                .contains(REF_ONLY_SECRET),
+            "precondition: the hook payload carries the secret: {:?}",
+            row.input
+        );
+
+        // The source masks it through its own step pin; the hook job must too.
+        assert_detail_masks_ref_only_secret(&fx, source).await;
+        let detail = assert_detail_masks_ref_only_secret(&fx, hook).await;
+        assert_eq!(
+            detail["input"]["msg"],
+            json!(format!("Step 'boom': auth rejected token {MASK}")),
+            "{detail}"
+        );
+        Ok(())
+    })
+    .await
+}
+
+/// Child output propagation: an UNPINNED parent's `type: task` step settles
+/// with the output of an UNPINNED child, whose own step ran at release/2.3
+/// and printed a release-only secret. The parent references no pin itself;
+/// its descendants do.
+#[tokio::test(flavor = "multi_thread")]
+async fn parent_job_detail_masks_a_secret_of_its_childs_step_pin() -> Result<()> {
+    bounded(async {
+        let fx = pinned_workspace_fixture(closure_opts()).await?;
+        let worker = register_worker(&fx.router, &["script"]).await;
+        let (st, body) = execute_task(&fx.router, "etl", "parent", json!({}), None).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        let parent: Uuid = body["job_id"].as_str().expect("job_id").parse()?;
+        let child: Uuid = sqlx::query_scalar("SELECT job_id FROM job WHERE parent_job_id = $1")
+            .bind(parent)
+            .fetch_one(&fx.pool)
+            .await?;
+
+        claim_and_complete(
+            &fx,
+            &worker,
+            child,
+            "leak",
+            json!({"exit_code": 0, "output": {"token": REF_ONLY_SECRET}}),
+        )
+        .await;
+
+        let call = stroem_db::JobStepRepo::get_steps_for_job(&fx.pool, parent)
+            .await?
+            .into_iter()
+            .find(|s| s.step_name == "call")
+            .expect("call step");
+        assert_eq!(call.status, "completed");
+        assert!(
+            call.output
+                .as_ref()
+                .map(|v| v.to_string())
+                .unwrap_or_default()
+                .contains(REF_ONLY_SECRET),
+            "precondition: the child's output settled into the parent step: {:?}",
+            call.output
+        );
+        let parent_row = stroem_db::JobRepo::get(&fx.pool, parent)
+            .await?
+            .expect("parent row");
+        assert_eq!(parent_row.git_ref, None, "the parent is unpinned");
+
+        assert_detail_masks_ref_only_secret(&fx, child).await;
+        let detail = assert_detail_masks_ref_only_secret(&fx, parent).await;
+        let step = detail["steps"]
+            .as_array()
+            .expect("steps")
+            .iter()
+            .find(|s| s["step_name"] == "call")
+            .expect("call step")
+            .clone();
+        assert_eq!(step["output"], json!({"leak": {"token": MASK}}), "{step}");
+        Ok(())
+    })
+    .await
+}
+
+/// Downward copy: a job PINNED at release/2.3 renders its own step's output,
+/// a release-only secret, into the input of a LIVE cross-workspace child
+/// (`billing`). The child references no pin and has no descendant; only its
+/// ancestor does.
+#[tokio::test(flavor = "multi_thread")]
+async fn child_job_detail_masks_a_secret_its_pinned_parent_rendered_into_its_input() -> Result<()> {
+    bounded(async {
+        let fx = pinned_workspace_fixture(closure_opts()).await?;
+        let worker = register_worker(&fx.router, &["script"]).await;
+        let parent = fire_etl_trigger(&fx, "down-at-ref").await?;
+        let row = stroem_db::JobRepo::get(&fx.pool, parent)
+            .await?
+            .expect("parent row");
+        assert_eq!(
+            row.git_ref.as_deref(),
+            Some("release/2.3"),
+            "the parent is pinned"
+        );
+
+        claim_and_complete(
+            &fx,
+            &worker,
+            parent,
+            "produce",
+            json!({"exit_code": 0, "output": {"token": REF_ONLY_SECRET}}),
+        )
+        .await;
+
+        let child: Uuid = sqlx::query_scalar("SELECT job_id FROM job WHERE parent_job_id = $1")
+            .bind(parent)
+            .fetch_one(&fx.pool)
+            .await?;
+        let child_row = stroem_db::JobRepo::get(&fx.pool, child)
+            .await?
+            .expect("child row");
+        assert_eq!(child_row.workspace, "billing");
+        assert_eq!(child_row.git_ref, None, "the child is live");
+        assert!(
+            child_row
+                .input
+                .as_ref()
+                .map(|v| v.to_string())
+                .unwrap_or_default()
+                .contains(REF_ONLY_SECRET),
+            "precondition: the rendered input carries the secret: {:?}",
+            child_row.input
+        );
+
+        assert_detail_masks_ref_only_secret(&fx, parent).await;
+        let detail = assert_detail_masks_ref_only_secret(&fx, child).await;
+        assert_eq!(detail["input"]["token"], json!(MASK), "{detail}");
+        Ok(())
+    })
+    .await
+}
+
+/// Task retry: a `type: task` hook job, whose input quotes its source's
+/// release-only secret, fails and is retried. The retry replays the hook
+/// job's input and references no pin; only its lineage (retry → hook job →
+/// source) reaches release/2.3.
+#[tokio::test(flavor = "multi_thread")]
+async fn retried_hook_job_detail_masks_a_secret_of_its_hook_source() -> Result<()> {
+    bounded(async {
+        let fx = pinned_workspace_fixture(closure_opts()).await?;
+        let worker = register_worker(&fx.router, &["script"]).await;
+        let (st, body) =
+            execute_task(&fx.router, "etl", "failing-task-hook", json!({}), None).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        let source: Uuid = body["job_id"].as_str().expect("job_id").parse()?;
+        claim_and_complete(
+            &fx,
+            &worker,
+            source,
+            "boom",
+            json!({"exit_code": 1, "error": format!("auth rejected token {REF_ONLY_SECRET}")}),
+        )
+        .await;
+
+        let hook: Uuid = sqlx::query_scalar(
+            "SELECT job_id FROM job WHERE source_type = 'hook' AND source_job_id = $1",
+        )
+        .bind(source)
+        .fetch_one(&fx.pool)
+        .await?;
+        claim_and_complete(
+            &fx,
+            &worker,
+            hook,
+            "tell",
+            json!({"exit_code": 1, "error": "notify broke"}),
+        )
+        .await;
+
+        let retry: Uuid = sqlx::query_scalar("SELECT job_id FROM job WHERE retry_of_job_id = $1")
+            .bind(hook)
+            .fetch_one(&fx.pool)
+            .await?;
+        let row = stroem_db::JobRepo::get(&fx.pool, retry)
+            .await?
+            .expect("retry row");
+        assert_eq!(row.source_type, "retry");
+        assert_eq!(row.git_ref, None, "the retry is unpinned");
+        assert!(
+            row.input
+                .as_ref()
+                .map(|v| v.to_string())
+                .unwrap_or_default()
+                .contains(REF_ONLY_SECRET),
+            "precondition: the retry replays the hook payload: {:?}",
+            row.input
+        );
+
+        assert_detail_masks_ref_only_secret(&fx, hook).await;
+        let detail = assert_detail_masks_ref_only_secret(&fx, retry).await;
+        assert_eq!(
+            detail["input"]["msg"],
+            json!(format!("Step 'boom': auth rejected token {MASK}")),
+            "{detail}"
+        );
+        Ok(())
+    })
+    .await
+}
+
+/// One job row, inserted directly: an unpinned `etl` job (a child of
+/// `parent` when given), with one completed step whose output is `output`.
+async fn seed_job_with_output(
+    pool: &sqlx::PgPool,
+    parent: Option<Uuid>,
+    output: serde_json::Value,
+) -> Result<Uuid> {
+    let job_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO job (job_id, workspace, task_name, status, source_type, \
+                          parent_job_id, parent_step_name) \
+         VALUES ($1, 'etl', 'deep', 'completed', $2, $3, $4)",
+    )
+    .bind(job_id)
+    .bind(if parent.is_some() { "task" } else { "api" })
+    .bind(parent)
+    .bind(parent.map(|_| "call"))
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO job_step (job_id, step_name, action_name, action_type, status, output) \
+         VALUES ($1, 'leaf', 'leaf', 'script', 'completed', $2)",
+    )
+    .bind(job_id)
+    .bind(output)
+    .execute(pool)
+    .await?;
+    Ok(job_id)
+}
+
+/// Fail closed at a bound (spec § 7.4). A job nested deeper than
+/// `MAX_TASK_DEPTH` (agent task-tool children skip that check) has a
+/// redaction closure the walk cannot finish. Once any pinned row exists, its
+/// detail masks every content string. Before that, the global short-circuit
+/// applies: with no pin anywhere, no pin can hide beyond the bound, and the
+/// detail is redacted with the live set alone.
+#[tokio::test(flavor = "multi_thread")]
+async fn job_detail_masks_everything_when_its_redaction_closure_is_truncated() -> Result<()> {
+    bounded(async {
+        let fx = pinned_workspace_fixture(closure_opts()).await?;
+        const PLAIN: &str = "plain-visible-value";
+        // A root and 11 nested children: the leaf has 11 ancestors, one more
+        // than `type: task` dispatch allows.
+        let mut job = seed_job_with_output(&fx.pool, None, json!({})).await?;
+        for _ in 0..11 {
+            job = seed_job_with_output(&fx.pool, Some(job), json!({"v": PLAIN})).await?;
+        }
+        let leaf = job;
+        let leaf_output = |detail: &serde_json::Value| detail["steps"][0]["output"]["v"].clone();
+
+        let (st, detail) = api_req(&fx.router, "GET", &format!("/api/jobs/{leaf}"), None, None).await;
+        assert_eq!(st, StatusCode::OK, "{detail}");
+        assert_eq!(leaf_output(&detail), json!(PLAIN), "no pin anywhere: {detail}");
+
+        // Any pinned row, unrelated to the leaf, turns the closure walk on.
+        sqlx::query(
+            "INSERT INTO job (job_id, workspace, task_name, status, source_type, git_ref, revision) \
+             VALUES ($1, 'etl', 'other', 'completed', 'api', 'release/2.3', $2)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(&fx.commits.etl_release)
+        .execute(&fx.pool)
+        .await?;
+
+        let (st, detail) = api_req(&fx.router, "GET", &format!("/api/jobs/{leaf}"), None, None).await;
+        assert_eq!(st, StatusCode::OK, "{detail}");
+        assert_eq!(leaf_output(&detail), json!(MASK), "truncated → mask all: {detail}");
+        assert_eq!(detail["job_id"], json!(leaf.to_string()), "identifiers stay: {detail}");
+        assert_eq!(detail["status"], json!("completed"), "{detail}");
+        Ok(())
+    })
+    .await
+}

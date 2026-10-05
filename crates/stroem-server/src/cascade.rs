@@ -552,6 +552,11 @@ fn phase_placeholders(
                     retry_jitter: r.retry_jitter,
                     action_workspace: r.action_workspace.clone(),
                     action_revision: r.action_revision.clone(),
+                    // git refs: an instance runs the placeholder's pins (spec § 7.3).
+                    action_ref: r.action_ref.clone(),
+                    task_workspace: r.task_workspace.clone(),
+                    task_ref: r.task_ref.clone(),
+                    task_revision: r.task_revision.clone(),
                 }
             })
             .collect();
@@ -586,6 +591,7 @@ fn condition_context(
         owner_secrets: &ws.secrets,
         snapshots,
         job_revision: job.revision.as_deref(),
+        job_ref: job.git_ref.as_deref(),
     };
     build(&job_ctx, &views(rows), None, Scope::Condition)
 }
@@ -896,6 +902,8 @@ mod tests {
 
     fn job(input: Option<Value>) -> JobRow {
         JobRow {
+            git_ref: None,
+            task_folder: None,
             job_id: Uuid::new_v4(),
             workspace: "default".to_string(),
             task_name: "t".to_string(),
@@ -976,6 +984,7 @@ mod tests {
 
     fn fs(deps: &[&str]) -> FlowStep {
         FlowStep {
+            git_ref: None,
             action: "noop".to_string(),
             name: None,
             description: None,
@@ -1631,6 +1640,50 @@ mod tests {
         assert_eq!(s["seq"], "running");
         assert_eq!(s["par[1]"], "ready");
         assert_eq!(s["seq[1]"], "pending");
+    }
+
+    /// git refs (spec § 7.3): an instance runs the placeholder's action and
+    /// task pins, not the live config.
+    #[test]
+    fn expand_instances_copy_the_placeholder_pins() {
+        let t = task(vec![("p", fs(&[]))]);
+        let mut p = placeholder("p", "pending", "[1, 2]");
+        p.action_workspace = Some("etl".into());
+        p.action_ref = Some("release/2.3".into());
+        p.action_revision = Some("c1".into());
+        p.task_workspace = Some("billing".into());
+        p.task_ref = Some("v4".into());
+        p.task_revision = Some("c2".into());
+        let plan = run(
+            &t,
+            &job(None),
+            &[p],
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
+        let instances = plan
+            .changes
+            .iter()
+            .find_map(|c| match c {
+                Change::Expand { instances, .. } => Some(instances),
+                _ => None,
+            })
+            .expect("p expands");
+        assert_eq!(instances.len(), 2);
+        for i in instances {
+            assert_eq!(
+                i.action_workspace.as_deref(),
+                Some("etl"),
+                "{}",
+                i.step_name
+            );
+            assert_eq!(i.action_ref.as_deref(), Some("release/2.3"));
+            assert_eq!(i.action_revision.as_deref(), Some("c1"));
+            assert_eq!(i.task_workspace.as_deref(), Some("billing"));
+            assert_eq!(i.task_ref.as_deref(), Some("v4"));
+            assert_eq!(i.task_revision.as_deref(), Some("c2"));
+        }
     }
 
     #[test]

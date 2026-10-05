@@ -15,7 +15,8 @@ rule, not one per field.
 | `input.*` | job input — or, in action bodies (`script`, `cmd`, `env`, `args`, `manifest`, `image`), the step's resolved input | approval `message:` sees the step's resolved input when the step has an input mapping, else job input |
 | `secret.*` | workspace secrets (the action's **owner** workspace in action bodies; the job's workspace elsewhere) | always present, `{}` when none |
 | `state.*` / `global_state.*` | the latest task / global state snapshot's `state.json` | present only when a parsed snapshot exists — `{{ not state }}` is true whenever no parsed `state.json` is available — no snapshot yet, a snapshot without a sidecar, or one whose sidecar did not parse |
-| `job.revision` | workspace revision pinned at creation | always present, `null` for pre-migration jobs |
+| `job.revision` | workspace revision pinned at creation — for a [pinned job](/guides/git-refs/), the commit its ref resolved to | always present, `null` for pre-migration jobs |
+| `job.ref` | the [git ref](/guides/git-refs/) a pinned job runs at, as written (`release/2.3`, `v4.1.0`, a commit SHA) | always present, `null` (renders as an empty string) for every job that does not run on a ref |
 | `<step>.output` | a finished step's output (`null` when a completed step produced none; `null` for skipped, failed and suspended steps — either renders as an empty string) | hyphens in step names become underscores |
 | `<step>.error` | a failed step's error message | |
 | `each.item` / `each.index` / `each.total` | loop variables inside a `for_each` instance | not available in `when:` — the condition runs before the loop expands |
@@ -90,7 +91,19 @@ actions:
     script: "echo Deployed revision {{ job.revision }}"
 ```
 
-The value is identical for every step of a job (sub-jobs and hook jobs inherit the parent's revision). For jobs created before revision tracking existed it renders as an empty string. In hooks, the same value is available as `hook.revision` — see [Hooks](/guides/hooks/).
+The value is identical for every step of a job (sub-jobs and hook jobs inherit the parent's revision — except a child that runs another workspace's task, or its own [`ref:`](/guides/git-refs/)). For jobs created before revision tracking existed it renders as an empty string. In hooks, the same value is available as `hook.revision` — see [Hooks](/guides/hooks/).
+
+`{{ job.ref }}` is the ref a [pinned job](/guides/git-refs/) runs at —
+`release/2.3`, `v4.1.0`, or a commit SHA as written — and an empty string
+for every other job; `{{ job.revision }}` of a pinned job is the resolved
+commit. Hooks get the same value as `hook.ref`.
+
+```yaml
+actions:
+  report:
+    type: script
+    script: "echo Running {% if job.ref %}ref {{ job.ref }}{% else %}the default branch{% endif %} at {{ job.revision }}"
+```
 
 :::note
 A flow step literally named `job` shadows the job metadata: `{{ job.output.* }}` keeps referring to that step's output, and `{{ job.revision }}` is unavailable in that task. Avoid naming a step `job` if you want the metadata.

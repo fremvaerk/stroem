@@ -38,6 +38,11 @@ async fn run_loop(state: AppState, cancel: CancellationToken) {
             }
         }
 
+        // Every replica, NOT leader-gated: the pin store is replica-local
+        // (spec § 10). One bounded query plus in-memory work per tick.
+        pin_eviction_once(&state).await;
+        state.background_tasks.recovery_beat.beat();
+
         // HA gate: only the leader sweeps. Sweep phases are NOT idempotent:
         // failure transitions are atomic, but a duplicate failure report for the
         // same step consumes another retry (fail_step with expected = [] does not
@@ -92,9 +97,18 @@ async fn sweep(state: &AppState) -> Result<()> {
                     )
                     .await;
 
+                // Spec § 7.2: fail the step only while it is still the running
+                // claim selected above — a claim completed, released (or
+                // released and reclaimed) since then must not be failed on the
+                // old attempt's behalf.
                 if let Err(e) = state
                     .settlement()
-                    .step_failed(step_info.job_id, &step_info.step_name, &error_msg, &[])
+                    .claimed_step_failed(
+                        step_info.job_id,
+                        &step_info.step_name,
+                        &error_msg,
+                        step_info.claim(),
+                    )
                     .await
                 {
                     tracing::error!(
@@ -139,9 +153,16 @@ async fn sweep(state: &AppState) -> Result<()> {
             step_info.step_name
         );
 
+        // Same claim guard as phase 1: the timeout belongs to the running
+        // claim selected above, not to a later attempt or a finished one.
         if let Err(e) = state
             .settlement()
-            .step_failed(step_info.job_id, &step_info.step_name, &error_msg, &[])
+            .claimed_step_failed(
+                step_info.job_id,
+                &step_info.step_name,
+                &error_msg,
+                step_info.claim(),
+            )
             .await
         {
             tracing::error!(
@@ -186,7 +207,7 @@ async fn sweep(state: &AppState) -> Result<()> {
 
         if let Err(e) = state
             .settlement()
-            .step_failed(step_info.job_id, &step_info.step_name, error_msg, &[])
+            .step_failed(step_info.job_id, &step_info.step_name, error_msg, &[], None)
             .await
         {
             tracing::error!(
@@ -247,7 +268,7 @@ async fn sweep(state: &AppState) -> Result<()> {
 
         if let Err(e) = state
             .settlement()
-            .step_failed(step_info.job_id, &step_info.step_name, error_msg, &[])
+            .step_failed(step_info.job_id, &step_info.step_name, error_msg, &[], None)
             .await
         {
             tracing::error!(
@@ -268,6 +289,9 @@ async fn sweep(state: &AppState) -> Result<()> {
         }
     }
 
+    // Phase 4.5 (git refs, R7): re-advance pinned jobs with no live step.
+    readvance_stalled_pinned_jobs(state, StalledSweepBounds::default()).await;
+
     // Phase 5: Data retention (rate-limited — runs at most once per retention_interval_secs)
     //
     // Note: with the HA leader gate above, only one replica runs this loop at
@@ -283,6 +307,112 @@ async fn sweep(state: &AppState) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Phase 4.5 (git-refs spec § 7.3, R7): `advance` every non-terminal pinned
+/// job with no live step (a `pending` one only once it has a terminal step:
+/// a step that failed at claim leaves a job that never started `pending`).
+/// An `advance` that could not load the job's pin on its replica (cold
+/// store + git outage) returns without effect, and the event that triggered
+/// it is gone — nothing else would re-enter the job. Idempotent: `advance`
+/// on a job with nothing to do changes nothing. A PERMANENT pin error
+/// settles the job `failed` inside `advance`, so it is not listed again
+/// (unless that write failed: the next sweep retries it). One beat per job
+/// (CLAUDE.md § Health Check, "Beat = progress"); a unit is bounded by the
+/// pin-load budget.
+///
+/// The phase is BOUNDED so it cannot hold up the next sweep's stale-worker
+/// and timeout phases during a git outage, when each `advance` may spend up
+/// to the pin-load budget: at most [`StalledSweepBounds::max_jobs`] jobs,
+/// and no new `advance` starts once [`StalledSweepBounds::budget`] has
+/// elapsed (the first one always runs, so every sweep makes progress). The
+/// last ADVANCED job is kept in `AppState::stalled_pinned_cursor`; the next
+/// sweep resumes after it and wraps around, so every stalled job is reached
+/// in turn. Within one sweep, a job whose own pin (`workspace`, `revision`)
+/// was just seen unavailable — the job is still non-terminal and the commit
+/// is not in the PinStore after its `advance` — makes the sweep skip the
+/// other jobs on that commit instead of paying the same failing load again.
+///
+/// A failed listing query is logged and skipped: it must not cost the rest
+/// of the sweep (retention) its tick.
+pub async fn readvance_stalled_pinned_jobs(state: &AppState, bounds: StalledSweepBounds) {
+    let after = *state
+        .stalled_pinned_cursor
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let stalled = match JobRepo::get_stalled_pinned_jobs(&state.pool, after, bounds.max_jobs).await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::error!("Failed to list stalled pinned jobs: {:#}", e);
+            return;
+        }
+    };
+    let started = std::time::Instant::now();
+    let mut unavailable: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
+    for (i, job) in stalled.iter().enumerate() {
+        if i > 0 && started.elapsed() >= bounds.budget {
+            break;
+        }
+        let pin = job
+            .revision
+            .as_ref()
+            .map(|commit| (job.workspace.clone(), commit.clone()));
+        if pin.as_ref().is_some_and(|p| unavailable.contains(p)) {
+            continue;
+        }
+        // Only an advanced job moves the cursor: a job skipped above must
+        // come first next time, or it would be skipped behind the same
+        // failing job on every sweep.
+        *state
+            .stalled_pinned_cursor
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(job.job_id);
+        state.background_tasks.recovery_beat.beat();
+        if let Err(e) = state.settlement().advance(job.job_id).await {
+            tracing::error!(
+                "Failed to re-advance stalled pinned job {}: {:#}",
+                job.job_id,
+                e
+            );
+        }
+        if let Some((ws, commit)) = pin {
+            let still_live = matches!(
+                JobRepo::get(&state.pool, job.job_id).await,
+                Ok(Some(row)) if matches!(row.status.as_str(), "pending" | "running")
+            );
+            if still_live
+                && !state
+                    .workspaces
+                    .pins()
+                    .cached_commits(&ws)
+                    .contains(&commit)
+            {
+                unavailable.insert((ws, commit));
+            }
+        }
+    }
+}
+
+/// How much of the stalled pinned-job backlog one recovery sweep handles
+/// (Phase 4.5, see [`readvance_stalled_pinned_jobs`]).
+#[derive(Debug, Clone, Copy)]
+pub struct StalledSweepBounds {
+    /// At most this many jobs are listed per sweep.
+    pub max_jobs: i64,
+    /// No new `advance` starts after this much time in the phase (the first
+    /// always runs).
+    pub budget: Duration,
+}
+
+impl Default for StalledSweepBounds {
+    fn default() -> Self {
+        Self {
+            max_jobs: 50,
+            budget: Duration::from_secs(60),
+        }
+    }
 }
 
 /// Clean up stale workers and old log files based on retention config.
@@ -466,6 +596,16 @@ async fn tarball_cache_cleanup(state: &AppState) {
         }
     }
 
+    // A pinned tarball lives under its own key (`pinned_cache_key`); keep it
+    // for exactly the revisions whose live entry is kept.
+    for revs in keep_map.values_mut() {
+        let pinned: Vec<String> = revs
+            .iter()
+            .map(|r| crate::tarball_cache::pinned_cache_key(r))
+            .collect();
+        revs.extend(pinned);
+    }
+
     // Clean up each workspace in the cache (removes stale workspaces entirely,
     // prunes stale revisions within known workspaces)
     let tarball_cache = state.tarball_cache.clone();
@@ -478,6 +618,29 @@ async fn tarball_cache_cleanup(state: &AppState) {
     .unwrap_or_else(|e| {
         tracing::warn!("Tarball cache cleanup task panicked: {:#}", e);
     });
+}
+
+/// Evict pins no active job holds (`JobRepo::pin_keep_set`), keeping the
+/// recently used ones and any a caller still holds (`PinStore::evict`).
+/// A folder-only server has no pin sources and skips the query.
+#[tracing::instrument(skip_all)]
+pub async fn pin_eviction_once(state: &AppState) {
+    let pins = state.workspaces.pins_arc();
+    if !pins.has_sources() {
+        return;
+    }
+    let keep: std::collections::HashSet<(String, String)> =
+        match JobRepo::pin_keep_set(&state.pool).await {
+            Ok(rows) => rows.into_iter().collect(),
+            Err(e) => {
+                tracing::warn!("Pin eviction: failed to query pins to keep: {:#}", e);
+                return;
+            }
+        };
+    // `evict` removes directories: never on a runtime thread.
+    if let Err(e) = tokio::task::spawn_blocking(move || pins.evict(&keep)).await {
+        tracing::warn!("Pin eviction task panicked: {:#}", e);
+    }
 }
 
 #[cfg(test)]
@@ -534,6 +697,7 @@ mod tests {
             default_step_timeout: None,
             default_job_timeout: None,
             workspace_reload: Default::default(),
+            pin_store: None,
         };
 
         let ws_config = WorkspaceConfig::new();
@@ -617,6 +781,7 @@ mod tests {
             default_step_timeout: None,
             default_job_timeout: None,
             workspace_reload: Default::default(),
+            pin_store: None,
         };
 
         let ws_config = WorkspaceConfig::new();

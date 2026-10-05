@@ -116,6 +116,7 @@ fn mcp_test_workspace() -> WorkspaceConfig {
     workspace.actions.insert(
         "greet".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "script".to_string(),
             name: None,
             description: None,
@@ -172,6 +173,7 @@ fn mcp_test_workspace() -> WorkspaceConfig {
     workspace.actions.insert(
         "notify".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "script".to_string(),
             name: None,
             description: None,
@@ -215,6 +217,7 @@ fn mcp_test_workspace() -> WorkspaceConfig {
     hello_flow.insert(
         "greet".to_string(),
         FlowStep {
+            git_ref: None,
             action: "greet".to_string(),
             name: None,
             description: None,
@@ -269,6 +272,7 @@ fn mcp_test_workspace() -> WorkspaceConfig {
     hook_flow.insert(
         "step1".to_string(),
         FlowStep {
+            git_ref: None,
             action: "greet".to_string(),
             name: None,
             description: None,
@@ -298,6 +302,7 @@ fn mcp_test_workspace() -> WorkspaceConfig {
             timeout: None,
             retry: None,
             on_success: vec![HookDef {
+                git_ref: None,
                 action: "notify".to_string(),
                 input: hook_input,
             }],
@@ -362,6 +367,7 @@ async fn setup_with_mcp() -> Result<(
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let workspace = mcp_test_workspace();
@@ -420,6 +426,7 @@ async fn setup_mcp_disabled() -> Result<(
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let workspace = mcp_test_workspace();
@@ -505,6 +512,7 @@ async fn setup_with_auth_and_mcp_cfg(
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     // Seed initial user
@@ -1770,6 +1778,7 @@ async fn test_mcp_created_jobs_fire_hooks() -> Result<()> {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
     let mgr = WorkspaceManager::from_config("default", workspace.clone());
     let log_storage = LogStorage::new(&config.log_storage.local_dir);

@@ -1,4 +1,4 @@
-use crate::acl::{load_user_acl_context, make_task_path, AllowedScope, TaskPermission};
+use crate::acl::{load_user_acl_context, narrow_job_scope, TaskPermission};
 use crate::state::AppState;
 use crate::web::api::middleware::AuthUser;
 use crate::web::api::{default_limit, parse_uuid_param};
@@ -17,6 +17,7 @@ use sqlx;
 use std::collections::HashMap;
 use std::sync::Arc;
 use stroem_common::models::job::StepStatus;
+use stroem_db::JobAclScope;
 use stroem_db::{JobRepo, JobStepRepo};
 use uuid::Uuid;
 
@@ -75,10 +76,10 @@ pub async fn get_stats(
     auth_user: Option<AuthUser>,
 ) -> Result<impl IntoResponse, AppError> {
     // Resolve ACL scope when auth is present and ACL is configured
-    let acl_pairs = resolve_acl_scope(&state, &auth_user).await?;
+    let acl_scope = resolve_acl_scope(&state, &auth_user).await?;
 
-    let counts = match acl_pairs {
-        Some(ref pairs) => JobRepo::get_status_counts_with_acl(&state.pool, pairs)
+    let counts = match acl_scope {
+        Some(ref scope) => JobRepo::get_status_counts_with_acl(&state.pool, scope)
             .await
             .context("get status counts with ACL")?,
         None => JobRepo::get_status_counts(&state.pool)
@@ -152,32 +153,23 @@ pub async fn list_jobs(
     }
 
     // Resolve ACL scope
-    let acl_pairs = resolve_acl_scope(&state, &auth_user).await?;
+    let acl_scope = resolve_acl_scope(&state, &auth_user).await?;
 
     let status = query.status.as_deref();
     let source_type = query.source_type.as_deref();
 
-    let (result, total) = match acl_pairs {
+    let (result, total) = match acl_scope {
         // ACL filtering is active — use ACL-aware queries
-        Some(ref pairs) => {
-            // If the query has a workspace/task filter, intersect with allowed pairs
-            let effective_pairs: Vec<(String, String)> =
-                match (query.workspace.as_deref(), query.task_name.as_deref()) {
-                    (Some(ws), Some(task)) => pairs
-                        .iter()
-                        .filter(|(p_ws, p_task)| p_ws == ws && p_task == task)
-                        .cloned()
-                        .collect(),
-                    (Some(ws), None) => pairs
-                        .iter()
-                        .filter(|(p_ws, _)| p_ws == ws)
-                        .cloned()
-                        .collect(),
-                    _ => pairs.clone(),
-                };
+        Some(ref scope) => {
+            // Intersect the scope with the query's workspace / task filter.
+            let effective = narrow_job_scope(
+                scope,
+                query.workspace.as_deref(),
+                query.task_name.as_deref(),
+            );
             let jobs = JobRepo::list_with_acl(
                 &state.pool,
-                &effective_pairs,
+                &effective,
                 status,
                 source_type,
                 search,
@@ -186,8 +178,7 @@ pub async fn list_jobs(
             )
             .await;
             let count =
-                JobRepo::count_with_acl(&state.pool, &effective_pairs, status, source_type, search)
-                    .await;
+                JobRepo::count_with_acl(&state.pool, &effective, status, source_type, search).await;
             (jobs, count)
         }
         // No ACL filtering — use existing queries
@@ -240,6 +231,7 @@ pub async fn list_jobs(
                 "source_type": job.source_type,
                 "source_id": job.source_id,
                 "revision": job.revision,
+                "ref": job.git_ref,
                 "created_at": job.created_at,
                 "started_at": job.started_at,
                 "completed_at": job.completed_at,
@@ -274,6 +266,9 @@ pub struct JobDetailResponse {
     /// The parent's step that created this child; `None` for top-level runs.
     pub parent_step_name: Option<String>,
     pub revision: Option<String>,
+    /// Ref a pinned job runs at (spec § 6); `None` for unpinned jobs.
+    #[serde(rename = "ref")]
+    pub git_ref: Option<String>,
     pub worker_id: Option<Uuid>,
     pub created_at: String,
     pub started_at: Option<String>,
@@ -301,7 +296,7 @@ pub async fn get_job(
         .ok_or_else(|| AppError::not_found("Job"))?;
 
     // ACL check
-    let perm = check_job_acl(&state, &auth_user, &job.workspace, &job.task_name).await?;
+    let perm = check_job_acl(&state, &auth_user, &job).await?;
     if matches!(perm, TaskPermission::Deny) {
         return Err(AppError::not_found("Job"));
     }
@@ -344,6 +339,12 @@ pub async fn get_job(
                 "retry_at": step.retry_at,
                 "carried_over": step.carried_over,
                 "skip_reason": step.skip_reason,
+                "action_workspace": step.action_workspace,
+                "action_revision": step.action_revision,
+                "action_ref": step.action_ref,
+                "task_workspace": step.task_workspace,
+                "task_ref": step.task_ref,
+                "task_revision": step.task_revision,
             });
             // For approval and agent steps, always surface approval-specific fields so
             // the UI can show the message and input schema after the step leaves the
@@ -371,6 +372,8 @@ pub async fn get_job(
                             "task_name": c.task_name,
                             "status": c.status,
                             "created_at": c.created_at,
+                            "ref": c.git_ref,
+                            "revision": c.revision,
                         })
                     })
                     .collect();
@@ -380,8 +383,37 @@ pub async fn get_job(
         })
         .collect();
 
-    // Look up workspace once — used for topo-sort and secret redaction
-    let workspace = state.get_workspace(&job.workspace).await;
+    // Live set + every referenced pin's secrets (spec § 7.4). Computed while
+    // `job` and `steps` are still whole; never answer with a partial set. A
+    // transient pin failure fails closed (503, retry); a permanent one masks
+    // every content string (a retry would fail the same way). Before
+    // `config_for` below: a pin that cannot load is tried once, and one that
+    // loads is cached for `config_for`.
+    let redaction = crate::redaction::job_redaction(&state, &job, &steps)
+        .await
+        .map_err(|e| {
+            tracing::warn!(job_id = %job.job_id, "job detail fails closed: {e}");
+            AppError::ServiceUnavailable("redaction set unavailable, retry".into())
+        })?;
+
+    // The job's own config (spec § 7.4): a pinned job sorts by the flow of its
+    // commit. `None` (pin not loadable, workspace unavailable) leaves the
+    // steps unsorted. Skipped after a permanent pin failure: no second fetch
+    // of a pin that cannot load.
+    let workspace = if redaction.masks_all() {
+        None
+    } else {
+        state
+            .workspaces
+            .config_for(
+                &job.workspace,
+                crate::workspace::pins::PinRef::of_job(&job).as_ref(),
+            )
+            .await
+            .ok()
+            .flatten()
+            .map(|h| h.arc())
+    };
 
     // Sort steps by topological order (dependency-first) using the task flow
     if let Some(ref ws) = workspace {
@@ -461,7 +493,7 @@ pub async fn get_job(
         }
     }
 
-    let mut response = JobDetailResponse {
+    let response = JobDetailResponse {
         job_id: job.job_id,
         workspace: job.workspace,
         task_name: job.task_name,
@@ -477,6 +509,7 @@ pub async fn get_job(
         parent_job_id: job.parent_job_id,
         parent_step_name: job.parent_step_name,
         revision: job.revision,
+        git_ref: job.git_ref,
         worker_id: job.worker_id,
         created_at: job.created_at.to_rfc3339(),
         started_at: job.started_at.map(|dt| dt.to_rfc3339()),
@@ -488,74 +521,13 @@ pub async fn get_job(
         max_retries: job.max_retries,
     };
 
-    // Redact secrets from EVERY loaded workspace plus values of connection
-    // properties marked `secret: true` — a cross-workspace connection's values
-    // are persisted in this job's input and provenance is not recoverable.
-    let ws_set = crate::workspace_set::WorkspaceSet::load(
-        &state.workspaces,
-        &response.workspace,
-        workspace.as_deref(),
-    )
-    .await;
-    let secret_values = crate::workspace_set::collect_redaction_values(&ws_set);
-    redact_response(&mut response, &secret_values);
-
-    Ok(Json(response))
-}
-
-use crate::workspace_set::{redact_secrets_in_str, REDACTED};
-
-/// Replace secret values and `ref+` references in a JSON tree with REDACTED.
-fn redact_json(value: &mut serde_json::Value, secret_values: &[String]) {
-    match value {
-        serde_json::Value::String(s) => {
-            if s.starts_with("ref+") {
-                *s = REDACTED.to_string();
-                return;
-            }
-            *s = redact_secrets_in_str(s, secret_values);
-        }
-        serde_json::Value::Object(map) => {
-            for v in map.values_mut() {
-                redact_json(v, secret_values);
-            }
-        }
-        serde_json::Value::Array(arr) => {
-            for v in arr.iter_mut() {
-                redact_json(v, secret_values);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Redact secrets from a JobDetailResponse (job input/output + step input/output).
-fn redact_response(response: &mut JobDetailResponse, secret_values: &[String]) {
-    if let Some(ref mut input) = response.input {
-        redact_json(input, secret_values);
-    }
-    if let Some(ref mut raw_input) = response.raw_input {
-        redact_json(raw_input, secret_values);
-    }
-    if let Some(ref mut output) = response.output {
-        redact_json(output, secret_values);
-    }
-    for step in &mut response.steps {
-        if let Some(input) = step.get_mut("input") {
-            redact_json(input, secret_values);
-        }
-        if let Some(output) = step.get_mut("output") {
-            redact_json(output, secret_values);
-        }
-        if let Some(error_message) = step.get_mut("error_message") {
-            redact_json(error_message, secret_values);
-        }
-        // Every previous attempt's error, including claim-time render errors
-        // that quote a secret value.
-        if let Some(retry_history) = step.get_mut("retry_history") {
-            redact_json(retry_history, secret_values);
-        }
-    }
+    // Whole-response redaction (spec § 7.4): every content string of the job
+    // and of each step entry, including fields copied out of step output
+    // such as `approval_message` (or all of them masked whole, after a
+    // permanent pin failure).
+    let mut value = serde_json::to_value(&response).context("serialise job detail")?;
+    redaction.apply_job_response(&mut value);
+    Ok(Json(value))
 }
 
 /// POST /api/jobs/:id/cancel - Cancel a running or pending job
@@ -574,7 +546,7 @@ pub async fn cancel_job(
         .ok_or_else(|| AppError::not_found("Job"))?;
 
     // ACL check — cancel requires Run permission
-    let perm = check_job_acl(&state, &auth_user, &job.workspace, &job.task_name).await?;
+    let perm = check_job_acl(&state, &auth_user, &job).await?;
     match perm {
         TaskPermission::Deny => {
             return Err(AppError::not_found("Job"));
@@ -640,7 +612,18 @@ pub(crate) fn is_top_level_job(job: &stroem_db::JobRow) -> bool {
 ///
 /// Checks run in the spec's order: 401 (auth configured, no user) → 404 (job
 /// missing or ACL `Deny`) → 403 (ACL `View`) → 409 (source not terminal) → 400
-/// (legacy source, workspace/task gone, bad `from_step`).
+/// (not top-level, legacy source, workspace/task gone, bad `from_step`).
+///
+/// A pinned source (git-refs spec § 7.3) is authorised by its own
+/// `task_folder` (§ 7.8) and re-resolves its ref BEFORE the task lookup, so
+/// the plan uses the flow at the commit the restart will run; `Run` is then
+/// also required on the folder the task declares at that commit (404 "Task
+/// not found" / 403 "View-only access", like the execute route), `dry_run`
+/// included. That adds: 400
+/// when the ref no longer resolves (`RefNotFound`) or its config does not
+/// load (`PinLoadFailed`, withheld), 400 when the task does not exist at the
+/// re-resolved commit, and 500 when the git remote is unavailable
+/// (`PinUnavailable`).
 #[tracing::instrument(skip(state, auth_user, req))]
 pub async fn restart_job(
     State(state): State<Arc<AppState>>,
@@ -664,7 +647,7 @@ pub async fn restart_job(
         .ok_or_else(|| AppError::not_found("Job"))?;
 
     // Restart creates a job, so it needs Run — like execute and cancel.
-    match check_job_acl(&state, &auth_user, &source.workspace, &source.task_name).await? {
+    match check_job_acl(&state, &auth_user, &source).await? {
         TaskPermission::Deny => return Err(AppError::not_found("Job")),
         TaskPermission::View => {
             return Err(AppError::Forbidden(
@@ -697,18 +680,43 @@ pub async fn restart_job(
         ));
     }
 
-    let workspace = state
-        .get_workspace(&source.workspace)
-        .await
-        .ok_or_else(|| {
-            AppError::BadRequest(format!("Workspace '{}' is not loaded", source.workspace))
-        })?;
-    let task = workspace.tasks.get(&source.task_name).ok_or_else(|| {
-        AppError::BadRequest(format!(
-            "Task '{}' no longer exists in workspace '{}'",
-            source.task_name, source.workspace
-        ))
-    })?;
+    // Spec § 7.3: a pinned source re-resolves its ref BEFORE the task lookup —
+    // the task may exist only at the ref, and the plan must be computed
+    // against the flow of the commit the restart will run.
+    let source_pin = super::pinned_source::resolve_source_pin(&state, &source).await?;
+    let live_workspace;
+    let (workspace, task) = match &source_pin {
+        Some(sp) => {
+            let task = sp.task(&source.task_name)?;
+            // Final review I3: the new job is stamped with the folder the task
+            // declares at the re-resolved commit, so `Run` is required there
+            // too (the source check above covers only the source's folder).
+            super::tasks::require_task_run(
+                &state,
+                &auth_user,
+                &source.workspace,
+                &source.task_name,
+                task.folder.as_deref(),
+            )
+            .await?;
+            (sp.handle.config(), task)
+        }
+        None => {
+            live_workspace = state
+                .get_workspace(&source.workspace)
+                .await
+                .ok_or_else(|| {
+                    AppError::BadRequest(format!("Workspace '{}' is not loaded", source.workspace))
+                })?;
+            let task = live_workspace.tasks.get(&source.task_name).ok_or_else(|| {
+                AppError::BadRequest(format!(
+                    "Task '{}' no longer exists in workspace '{}'",
+                    source.task_name, source.workspace
+                ))
+            })?;
+            (live_workspace.as_ref(), task)
+        }
+    };
 
     let source_steps = JobStepRepo::get_steps_for_job(&state.pool, job_id)
         .await
@@ -735,11 +743,14 @@ pub async fn restart_job(
         .into_response());
     }
 
-    let revision = state.workspaces.get_revision(&source.workspace);
+    let revision = match &source_pin {
+        Some(sp) => Some(sp.pin.commit.clone()),
+        None => state.workspaces.get_revision(&source.workspace),
+    };
     let created = crate::job_creator::create_restart_job(
         &state.workspaces,
         &state.pool,
-        &workspace,
+        workspace,
         &source.workspace,
         &source,
         &plan,
@@ -747,20 +758,14 @@ pub async fn restart_job(
         source_id.as_deref(),
         revision.as_deref(),
         crate::config::JobDefaults::from(state.config.as_ref()),
+        source_pin.as_ref().map(|sp| sp.pin.git_ref.as_str()),
     )
     .await
     .map_err(super::classify_execute_error)?;
 
     // Root approval steps suspended during creation, then terminal handling for
     // a restart whose set cascade-skipped and settled on the spot.
-    crate::settlement::dispatch::fire_initial_suspended_hooks(
-        &state,
-        &workspace,
-        &source.workspace,
-        &source.task_name,
-        created.job_id,
-    )
-    .await;
+    crate::settlement::dispatch::fire_initial_suspended_hooks(&state, created.job_id).await;
     let new_job_id = created.job_id;
     state.settlement().job_created(created).await;
 
@@ -827,7 +832,7 @@ pub async fn approve_step(
         .ok_or_else(|| AppError::not_found("Job"))?;
 
     // ACL check — approve/reject requires Run permission
-    let perm = check_job_acl(&state, &auth_user, &job.workspace, &job.task_name).await?;
+    let perm = check_job_acl(&state, &auth_user, &job).await?;
     match perm {
         TaskPermission::Deny => return Err(AppError::not_found("Job")),
         TaskPermission::View => {
@@ -1039,6 +1044,7 @@ pub async fn approve_step(
             &reason,
             &[StepStatus::Suspended],
             crate::settlement::retry::compute_retry_delay,
+            None,
         )
         .await
         .context("reject suspended step")?;
@@ -1084,15 +1090,15 @@ pub async fn approve_step(
     }
 }
 
-/// Check ACL permission for a specific job's workspace/task.
+/// Check ACL permission for a specific job.
 ///
-/// Returns the user's permission level, or an `AppError` on failure.
+/// The task path comes from [`crate::acl::job_task_path`] (spec § 7.8): a
+/// pinned job is authorised by the folder its own commit declared.
 /// Returns `Ok(TaskPermission::Run)` when ACL is not configured or auth is absent.
 pub(crate) async fn check_job_acl(
     state: &AppState,
     auth_user: &Option<AuthUser>,
-    workspace: &str,
-    task_name: &str,
+    job: &stroem_db::JobRow,
 ) -> Result<TaskPermission, AppError> {
     let auth = match auth_user {
         Some(a) => a,
@@ -1105,26 +1111,22 @@ pub(crate) async fn check_job_acl(
     let (is_admin, groups) = load_user_acl_context(&state.pool, user_id, auth.is_admin())
         .await
         .context("load ACL context")?;
-    let folder = state
-        .get_workspace(workspace)
-        .await
-        .and_then(|ws| ws.tasks.get(task_name).and_then(|t| t.folder.clone()));
-    let task_path = make_task_path(folder.as_deref(), task_name);
-    Ok(state
-        .acl
-        .evaluate(workspace, &task_path, &auth.claims.email, &groups, is_admin))
+    let task_path = crate::acl::job_task_path(state, job).await;
+    Ok(state.acl.evaluate(
+        &job.workspace,
+        &task_path,
+        &auth.claims.email,
+        &groups,
+        is_admin,
+    ))
 }
 
-/// Build the ACL-filtered list of (workspace, task_name) pairs allowed for this user.
-///
-/// Returns:
-/// - `Ok(None)` when no ACL filtering is needed (no auth user, ACL not configured, or admin)
-/// - `Ok(Some(pairs))` when filtering is active
-/// - `Err(AppError)` on failure (user_id parse error or DB error)
+/// The job-list scope for this user (spec § 7.8). `Ok(None)` = no filtering
+/// (no auth user, ACL not configured, or admin).
 async fn resolve_acl_scope(
     state: &AppState,
     auth_user: &Option<AuthUser>,
-) -> Result<Option<Vec<(String, String)>>, AppError> {
+) -> Result<Option<JobAclScope>, AppError> {
     let auth = match auth_user {
         Some(a) => a,
         None => return Ok(None),
@@ -1132,118 +1134,39 @@ async fn resolve_acl_scope(
     if !state.acl.is_configured() {
         return Ok(None);
     }
-
     let user_id = auth.user_id()?;
     let (is_admin, groups) = load_user_acl_context(&state.pool, user_id, auth.is_admin())
         .await
         .context("load ACL context")?;
-
-    // Collect all workspace tasks
-    let mut all_tasks = Vec::new();
-    for (ws_name, ws_config) in state.workspaces.get_all_configs().await {
-        for (task_name, task_def) in &ws_config.tasks {
-            all_tasks.push((ws_name.clone(), task_name.clone(), task_def.folder.clone()));
-        }
-    }
-
-    match state
-        .acl
-        .allowed_scope(&all_tasks, &auth.claims.email, &groups, is_admin)
-    {
-        AllowedScope::All => Ok(None),
-        AllowedScope::Filtered(items) => {
-            let pairs = items
-                .into_iter()
-                .map(|(ws, task, _perm)| (ws, task))
-                .collect();
-            Ok(Some(pairs))
-        }
-    }
+    Ok(
+        crate::acl::build_job_acl_scope(state, &auth.claims.email, &groups, is_admin)
+            .await
+            .context("build job ACL scope")?,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workspace_set::REDACTED;
     use serde_json::json;
 
-    #[test]
-    fn test_redact_json_exact_match() {
-        let secrets = vec!["s3cr3t-value".to_string()];
-        let mut value = json!("s3cr3t-value");
-        redact_json(&mut value, &secrets);
-        assert_eq!(value, json!(REDACTED));
+    /// Serialise + redact the way `get_job` does.
+    fn redacted(response: &JobDetailResponse, secrets: &[String]) -> serde_json::Value {
+        let mut v = serde_json::to_value(response).unwrap();
+        crate::redaction::redact_job_response(&mut v, secrets);
+        v
     }
 
     #[test]
-    fn test_redact_json_substring_match() {
-        let secrets = vec!["tok_abc123".to_string()];
-        let mut value = json!("Bearer tok_abc123");
-        redact_json(&mut value, &secrets);
-        assert_eq!(value, json!(format!("Bearer {REDACTED}")));
-    }
-
-    #[test]
-    fn test_redact_json_nested() {
-        let secrets = vec!["s3cr3t".to_string()];
-        let mut value = json!({
-            "url": "https://hooks.slack.com/s3cr3t/path",
-            "nested": {
-                "key": "s3cr3t"
-            },
-            "list": ["safe", "s3cr3t", "also-safe"]
-        });
-        redact_json(&mut value, &secrets);
-        assert_eq!(
-            value["url"],
-            json!(format!("https://hooks.slack.com/{REDACTED}/path"))
-        );
-        assert_eq!(value["nested"]["key"], json!(REDACTED));
-        assert_eq!(value["list"][0], json!("safe"));
-        assert_eq!(value["list"][1], json!(REDACTED));
-        assert_eq!(value["list"][2], json!("also-safe"));
-    }
-
-    #[test]
-    fn test_redact_json_no_match() {
-        let secrets = vec!["s3cr3t".to_string()];
-        let mut value = json!({"safe": "no-secrets-here", "number": 42});
-        let original = value.clone();
-        redact_json(&mut value, &secrets);
-        assert_eq!(value, original);
-    }
-
-    #[test]
-    fn test_redact_json_vals_reference() {
-        let secrets = vec![];
-        let mut value = json!({
-            "password": "ref+awsssm:///prod/db/password",
-            "vault": "ref+vault://secret/data/key",
-            "safe": "not-a-ref"
-        });
-        redact_json(&mut value, &secrets);
-        assert_eq!(value["password"], json!(REDACTED));
-        assert_eq!(value["vault"], json!(REDACTED));
-        assert_eq!(value["safe"], json!("not-a-ref"));
-    }
-
-    #[test]
-    fn test_redact_json_multiple_secrets_in_one_string() {
-        let secrets = vec!["user123".to_string(), "pass456".to_string()];
-        let mut value = json!("postgres://user123:pass456@db.host/mydb");
-        redact_json(&mut value, &secrets);
-        assert_eq!(
-            value,
-            json!(format!("postgres://{REDACTED}:{REDACTED}@db.host/mydb"))
-        );
-    }
-
-    #[test]
-    fn test_redact_json_ref_plus_no_secret_values() {
-        // ref+ patterns must be redacted even when secret_values is empty
-        let secrets: Vec<String> = vec![];
-        let mut value = json!({"key": "ref+gcpsecrets://project/secret"});
-        redact_json(&mut value, &secrets);
-        assert_eq!(value["key"], json!(REDACTED));
+    fn job_detail_serialises_git_ref_as_ref() {
+        let mut resp = job_detail_fixture();
+        resp.revision = Some("3f2a9c0e".into());
+        resp.git_ref = Some("release/2.3".into());
+        let v = serde_json::to_value(&resp).unwrap();
+        assert_eq!(v["ref"], "release/2.3");
+        assert_eq!(v["revision"], "3f2a9c0e");
+        assert!(v.get("git_ref").is_none(), "the wire name is `ref`");
     }
 
     fn job_detail_fixture() -> JobDetailResponse {
@@ -1263,6 +1186,7 @@ mod tests {
             parent_job_id: None,
             parent_step_name: None,
             revision: None,
+            git_ref: None,
             worker_id: None,
             created_at: "2025-01-01T00:00:00Z".to_string(),
             started_at: None,
@@ -1278,7 +1202,7 @@ mod tests {
     #[test]
     fn test_redact_response() {
         let secrets = vec!["my-secret-token".to_string()];
-        let mut response = JobDetailResponse {
+        let response = JobDetailResponse {
             job_id: Uuid::nil(),
             workspace: "default".to_string(),
             task_name: "test".to_string(),
@@ -1294,6 +1218,7 @@ mod tests {
             parent_job_id: None,
             parent_step_name: None,
             revision: None,
+            git_ref: None,
             worker_id: None,
             created_at: "2025-01-01T00:00:00Z".to_string(),
             started_at: None,
@@ -1309,36 +1234,38 @@ mod tests {
             retry_attempt: 0,
             max_retries: None,
         };
-        redact_response(&mut response, &secrets);
-        assert_eq!(response.input.unwrap()["token"], json!(REDACTED));
-        assert_eq!(response.output.unwrap()["result"], json!("ok"));
+        let v = redacted(&response, &secrets);
+        assert_eq!(v["input"]["token"], json!(REDACTED));
+        assert_eq!(v["output"]["result"], json!("ok"));
         assert_eq!(
-            response.steps[0]["input"]["webhook"],
+            v["steps"][0]["input"]["webhook"],
             json!(format!("https://hooks.example.com/{REDACTED}"))
         );
         assert_eq!(
-            response.steps[0]["error_message"],
+            v["steps"][0]["error_message"],
             json!(format!("failed to connect: {REDACTED} rejected"))
         );
     }
 
     /// Security regression (2026-09-11): `retry_history` carries the error from
     /// every previous attempt, including claim-time render errors that quote a
-    /// secret value. `redact_response` masked `error_message` but not
-    /// `retry_history`, so `GET /api/jobs/{id}` returned it unredacted.
+    /// secret value. The old per-field redaction masked `error_message` but
+    /// not `retry_history`, so `GET /api/jobs/{id}` returned it unredacted.
     #[test]
     fn test_redact_response_redacts_retry_history() {
         let secrets = vec!["my-secret-token".to_string()];
-        let mut response = job_detail_fixture();
-        response.steps = vec![json!({
-            "step_name": "deploy",
-            "retry_history": [
-                {"attempt": 1, "error": "boom: my-secret-token rejected"},
-                {"attempt": 2, "error": "still my-secret-token"}
-            ]
-        })];
-        redact_response(&mut response, &secrets);
-        let history = &response.steps[0]["retry_history"];
+        let response = JobDetailResponse {
+            steps: vec![json!({
+                "step_name": "deploy",
+                "retry_history": [
+                    {"attempt": 1, "error": "boom: my-secret-token rejected"},
+                    {"attempt": 2, "error": "still my-secret-token"}
+                ]
+            })],
+            ..job_detail_fixture()
+        };
+        let v = redacted(&response, &secrets);
+        let history = &v["steps"][0]["retry_history"];
         assert_eq!(
             history[0]["error"],
             json!(format!("boom: {REDACTED} rejected"))
@@ -1349,7 +1276,7 @@ mod tests {
     #[test]
     fn test_redact_response_redacts_raw_input() {
         let secrets = vec!["my-secret-token".to_string()];
-        let mut response = JobDetailResponse {
+        let response = JobDetailResponse {
             job_id: Uuid::nil(),
             workspace: "default".to_string(),
             task_name: "t".to_string(),
@@ -1365,6 +1292,7 @@ mod tests {
             parent_job_id: None,
             parent_step_name: None,
             revision: None,
+            git_ref: None,
             worker_id: None,
             created_at: "".to_string(),
             started_at: None,
@@ -1375,8 +1303,8 @@ mod tests {
             retry_attempt: 0,
             max_retries: None,
         };
-        redact_response(&mut response, &secrets);
-        let raw = response.raw_input.unwrap();
+        let v = redacted(&response, &secrets);
+        let raw = &v["raw_input"];
         assert_eq!(raw["token"], json!(REDACTED));
         assert_eq!(raw["name"], json!("alice")); // non-secret untouched
     }
@@ -1390,6 +1318,7 @@ mod tests {
         flow.insert(
             "build".to_string(),
             FlowStep {
+                git_ref: None,
                 action: "shell/bash".to_string(),
                 name: None,
                 description: None,
@@ -1408,6 +1337,7 @@ mod tests {
         flow.insert(
             "test".to_string(),
             FlowStep {
+                git_ref: None,
                 action: "shell/bash".to_string(),
                 name: None,
                 description: None,
@@ -1426,6 +1356,7 @@ mod tests {
         flow.insert(
             "deploy".to_string(),
             FlowStep {
+                git_ref: None,
                 action: "shell/bash".to_string(),
                 name: None,
                 description: None,

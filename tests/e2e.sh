@@ -5,7 +5,7 @@
 # Usage: ./tests/e2e.sh
 #
 # Starts docker-compose, triggers a workflow, verifies execution, and tears down.
-# Requires: docker compose, curl, jq
+# Requires: docker compose, curl, jq, git
 #
 set -euo pipefail
 
@@ -31,15 +31,90 @@ info() { echo -e "${YELLOW}----${NC}: $1"; }
 cleanup() {
     info "Tearing down containers..."
     $COMPOSE down -v --remove-orphans 2>/dev/null || true
+    rm -rf "$PROJECT_DIR/tests/.e2e-refs"
 }
 
 # Always clean up on exit
 trap cleanup EXIT
 
 # --- 0. Pre-flight checks ---
-for cmd in docker curl jq; do
+for cmd in docker curl jq git; do
     command -v "$cmd" >/dev/null 2>&1 || fail "Required command '$cmd' not found"
 done
+
+# --- 0b. Git workspace for the `ref:` tests (spec 2026-10-02) ---
+# A bare repo with main, a `release/1` branch and a `v1.0.0` tag. Each ref
+# carries its own data/version.txt, so the outputs prove which commit ran.
+REFS_DIR="$PROJECT_DIR/tests/.e2e-refs"
+rm -rf "$REFS_DIR"
+mkdir -p "$REFS_DIR"
+REFS_WORK="$REFS_DIR/work"
+git init -q -b main "$REFS_WORK"
+git -C "$REFS_WORK" config user.email e2e@stroem.local
+git -C "$REFS_WORK" config user.name e2e
+mkdir -p "$REFS_WORK/.workflows" "$REFS_WORK/data"
+cat > "$REFS_WORK/.workflows/refs.yaml" <<'YAML'
+actions:
+  which-version:
+    type: script
+    runner: local
+    script: |
+      echo "VERSION=$(cat data/version.txt)"
+      echo "OUTPUT: {\"version\": \"$(cat data/version.txt)\"}"
+  run-version-task:
+    type: task
+    task: version-task
+    ref: release/1
+
+tasks:
+  version-task:
+    mode: distributed
+    flow:
+      v:
+        action: which-version
+  release-matrix:
+    mode: distributed
+    flow:
+      from-main:
+        action: which-version
+      from-branch:
+        action: which-version
+        ref: release/1
+      from-tag:
+        action: which-version
+        ref: v1.0.0
+      child:
+        action: run-version-task
+YAML
+echo "main" > "$REFS_WORK/data/version.txt"
+git -C "$REFS_WORK" add -A && git -C "$REFS_WORK" commit -q -m "main"
+git -C "$REFS_WORK" checkout -q -b release/1
+echo "tag-v1" > "$REFS_WORK/data/version.txt"
+git -C "$REFS_WORK" commit -qam "v1.0.0" && git -C "$REFS_WORK" tag v1.0.0
+echo "branch-r1" > "$REFS_WORK/data/version.txt"
+git -C "$REFS_WORK" commit -qam "release/1 hotfix"
+REFS_R1_SHA=$(git -C "$REFS_WORK" rev-parse release/1)
+REFS_TAG_SHA=$(git -C "$REFS_WORK" rev-parse 'v1.0.0^{commit}')
+git -C "$REFS_WORK" checkout -q main
+git clone -q --bare "$REFS_WORK" "$REFS_DIR/refs-ws.git"
+
+# libgit2 rejects a repo owned by another uid ("dubious ownership"); the bind
+# mount keeps the host owner, so trust it via the container's system gitconfig.
+printf '[safe]\n\tdirectory = *\n' > "$REFS_DIR/gitconfig"
+
+REFS_OVERRIDE="$REFS_DIR/compose.override.yml"
+cat > "$REFS_OVERRIDE" <<YAML
+services:
+  server:
+    volumes:
+      - $REFS_DIR/refs-ws.git:/git/refs-ws.git
+      - $REFS_DIR/gitconfig:/etc/gitconfig:ro
+    environment:
+      STROEM__WORKSPACES__REFS__TYPE: git
+      STROEM__WORKSPACES__REFS__URL: file:///git/refs-ws.git
+      STROEM__WORKSPACES__REFS__REF: main
+YAML
+COMPOSE="$COMPOSE -f $REFS_OVERRIDE"
 
 # --- 1. Build and start services ---
 info "Building images (this may take a few minutes on first run)..."
@@ -761,6 +836,42 @@ echo "$XT_CHILD_LOGS" | grep -q "XTASK_SECRET=only-in-test-ws" || fail "child di
 XT_LOGS=$(acurl "$BASE_URL/api/jobs/$XT_JOB_ID/logs" | jq -r '.logs')
 echo "$XT_LOGS" | grep -qi "child said yes" || fail "child output did not reach the parent's next step"
 pass "cross-workspace task: owner files, owner secret and output propagation verified"
+
+# --- 20. Git refs: action + branch ref, action + tag ref, type: task + ref ---
+info "Triggering release-matrix (git workspace 'refs', ref: on steps and a task action)..."
+EXEC_RESP_RM=$(acurl -X POST "$BASE_URL/api/workspaces/refs/tasks/release-matrix/execute" \
+    -H "Content-Type: application/json" -d '{"input": {}}')
+RM_JOB_ID=$(echo "$EXEC_RESP_RM" | jq -r '.job_id')
+[ -n "$RM_JOB_ID" ] && [ "$RM_JOB_ID" != "null" ] || fail "release-matrix execute failed: $EXEC_RESP_RM"
+RM_POLLED=0; RM_STATUS="pending"
+while [ "$RM_STATUS" != "completed" ] && [ "$RM_STATUS" != "failed" ]; do
+    sleep 2; RM_POLLED=$((RM_POLLED + 2))
+    [ "$RM_POLLED" -lt "$MAX_POLL" ] || { acurl "$BASE_URL/api/jobs/$RM_JOB_ID" | jq .; fail "release-matrix did not finish"; }
+    RM_DETAIL=$(acurl "$BASE_URL/api/jobs/$RM_JOB_ID"); RM_STATUS=$(echo "$RM_DETAIL" | jq -r '.status'); printf "."
+done; echo ""
+[ "$RM_STATUS" = "completed" ] || { echo "$RM_DETAIL" | jq .; fail "release-matrix failed"; }
+pass "release-matrix completed"
+
+rm_out() { echo "$RM_DETAIL" | jq -r --arg s "$1" '.steps[] | select(.step_name==$s) | .output.version'; }
+[ "$(rm_out from-main)" = "main" ] || fail "from-main ran '$(rm_out from-main)', expected main"
+[ "$(rm_out from-branch)" = "branch-r1" ] || fail "from-branch ran '$(rm_out from-branch)', expected branch-r1"
+[ "$(rm_out from-tag)" = "tag-v1" ] || fail "from-tag ran '$(rm_out from-tag)', expected tag-v1"
+pass "each step ran its own ref's files (main / release/1 / v1.0.0)"
+
+RM_BRANCH_REF=$(echo "$RM_DETAIL" | jq -r '.steps[] | select(.step_name=="from-branch") | .action_ref')
+RM_BRANCH_REV=$(echo "$RM_DETAIL" | jq -r '.steps[] | select(.step_name=="from-branch") | .action_revision')
+RM_TAG_REV=$(echo "$RM_DETAIL" | jq -r '.steps[] | select(.step_name=="from-tag") | .action_revision')
+[ "$RM_BRANCH_REF" = "release/1" ] || fail "from-branch action_ref is '$RM_BRANCH_REF'"
+[ "$RM_BRANCH_REV" = "$REFS_R1_SHA" ] || fail "from-branch pinned $RM_BRANCH_REV, expected $REFS_R1_SHA"
+[ "$RM_TAG_REV" = "$REFS_TAG_SHA" ] || fail "from-tag pinned $RM_TAG_REV, expected $REFS_TAG_SHA (peeled tag)"
+pass "steps are stamped with the resolved commits"
+
+RM_CHILD_ID=$(echo "$RM_DETAIL" | jq -r '.steps[] | select(.step_name=="child") | .child_jobs[0].id')
+RM_CHILD=$(acurl "$BASE_URL/api/jobs/$RM_CHILD_ID")
+[ "$(echo "$RM_CHILD" | jq -r '.ref')" = "release/1" ] || { echo "$RM_CHILD" | jq .; fail "child job.ref is not release/1"; }
+[ "$(echo "$RM_CHILD" | jq -r '.revision')" = "$REFS_R1_SHA" ] || fail "child revision is not release/1's tip"
+[ "$(echo "$RM_CHILD" | jq -r '.steps[0].output.version')" = "branch-r1" ] || fail "child did not run release/1's files"
+pass "type: task + ref: child job pinned to release/1 ($REFS_R1_SHA)"
 
 # --- Summary ---
 echo ""

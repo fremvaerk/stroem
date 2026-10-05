@@ -7,12 +7,17 @@ If a worker dies mid-step (crash, OOM, network partition), or a step sits in `re
 
 ## How it works
 
-The recovery sweeper runs on a configurable interval (default: 60s) and performs four phases:
+The recovery sweeper runs on a configurable interval (default: 60s) and performs these phases:
 
 1. **Stale worker detection**: Workers whose last heartbeat exceeds the timeout are marked `inactive`. Running steps assigned to inactive workers are failed.
 2. **Step timeout enforcement**: Running steps that have exceeded their configured `timeout` are failed.
 3. **Job timeout enforcement**: Running jobs that have exceeded their configured `timeout` are cancelled.
 4. **Unmatched step detection**: Steps stuck in `ready` state beyond `unmatched_step_timeout_secs` are checked against active workers. If no active worker has the required capability *and* tags to claim the step, it is failed with a clear error message.
+5. **Stalled pinned jobs**: A running job on a [git ref](/guides/git-refs/) with no step `ready`, claimed, `running` or `suspended` is moved forward again. This picks up a job that could not continue because its commit was briefly unavailable (for example, a step finished on a replica that had not loaded the commit, during a git outage). If the commit can never load again, the job is failed. A job log line is written on every attempt while the commit stays unavailable.
+
+Phases 1 and 2 fail a running step only while it is still the run they
+observed (the same worker and start time). A step that finished, or that was
+released and claimed again in the meantime, is left alone.
 
 After each failure, the orchestrator cascades: dependent steps are skipped, the job is marked failed, and parent jobs are notified.
 
@@ -28,6 +33,11 @@ recovery:
 ```
 
 When the `recovery` section is omitted, recovery runs with defaults. There is no way to disable it — it's always active.
+
+In a multi-replica deployment the phases above run on the leader only. Each
+tick also evicts pinned commits that no active job needs from the replica's
+own [pin store](/getting-started/configuration/#pin_store); that runs on every
+replica, because the store is local.
 
 The default heartbeat timeout of 120 seconds means a worker must miss 4 consecutive heartbeats (sent every 30s) before being considered stale.
 

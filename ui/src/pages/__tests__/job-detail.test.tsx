@@ -61,6 +61,12 @@ function step(overrides: Partial<JobStep> = {}): JobStep {
     approval_fields: null,
     carried_over: false,
     skip_reason: null,
+    action_workspace: null,
+    action_revision: null,
+    action_ref: null,
+    task_workspace: null,
+    task_ref: null,
+    task_revision: null,
     ...overrides,
   };
 }
@@ -87,6 +93,7 @@ function job(overrides: Partial<JobDetail> = {}): JobDetail {
     parent_job_id: null,
     parent_step_name: null,
     revision: null,
+    ref: null,
     worker_id: null,
     created_at: "2026-09-01T10:00:00Z",
     started_at: "2026-09-01T10:00:00Z",
@@ -244,6 +251,46 @@ describe("JobDetailPage — navigation to the task and the source job", () => {
     expect(taskLink.getAttribute("href")).toBe(
       "/workspaces/my%20ws/tasks/nightly%2Fsync",
     );
+  });
+
+  it("shows the ref and short commit of a pinned job", async () => {
+    mockGetJob.mockResolvedValue(
+      job({ ref: "release/2.3", revision: "3f2a9c0e1b2c3d4e5f60718293a4b5c6d7e8f901" }),
+    );
+    renderPage();
+
+    const pin = await screen.findByTestId("job-pin");
+    expect(pin.textContent).toBe("@ release/2.3 · 3f2a9c0");
+  });
+
+  it("shows no pin badge for an unpinned job", async () => {
+    mockGetJob.mockResolvedValue(job());
+    renderPage();
+
+    await screen.findByText("pipeline");
+    expect(screen.queryByTestId("job-pin")).toBeNull();
+  });
+
+  it("hides Re-run on a pinned job whose task is gone from the live config", async () => {
+    mockGetTask.mockRejectedValue(new ApiError(404, "Task not found"));
+    mockGetJob.mockResolvedValue(job({ ref: "release/2.3", revision: "3f2a9c0e" }));
+    renderPage();
+
+    await screen.findByTestId("job-pin");
+    await waitFor(() => expect(mockGetTask).toHaveBeenCalled());
+    await mockGetTask.mock.results[0].value.catch(() => {});
+    await waitFor(() => expect(rerunLink()).toBeNull());
+  });
+
+  it("keeps Re-run on an unpinned job whose task is gone", async () => {
+    mockGetTask.mockRejectedValue(new ApiError(404, "Task not found"));
+    mockGetJob.mockResolvedValue(job());
+    renderPage();
+
+    await screen.findByText("pipeline");
+    await waitFor(() => expect(mockGetTask).toHaveBeenCalled());
+    await mockGetTask.mock.results[0].value.catch(() => {});
+    expect(rerunLink()).toBeTruthy();
   });
 
   it("shows the task name as text when the task does not exist", async () => {

@@ -428,6 +428,7 @@ tasks:
 - **Single-turn only**: Agents cannot have multi-turn conversations. Each step is an independent LLM call. Multi-turn support with tools is planned for Phase 7B.
 - **No streaming**: Responses are fully buffered before being captured. Streaming output is not yet supported.
 - **No request/response logging**: Full LLM conversation history is not logged (only metadata like token count and latency).
+- **No `ref:` with agents**: a flow step may not name an agent action with [`ref:`](/guides/git-refs/) (`400` at job creation), and a `tools: [{task: …}]` entry may not carry `ref` (a validation error; a call naming it is rejected). Agent steps *inside* a job that runs on a git ref use that commit's definitions, and their task-tool child jobs run at the same commit.
 
 ## Common Patterns
 

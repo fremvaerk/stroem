@@ -1,6 +1,6 @@
 use crate::acl::{load_user_acl_context, make_task_path, TaskPermission};
 use crate::config::JobDefaults;
-use crate::job_creator::create_job_for_task_detailed;
+use crate::job_creator::{create_job_for_task_detailed, create_job_for_task_pinned, CreationMode};
 use crate::state::AppState;
 use crate::web::api::middleware::AuthUser;
 use crate::web::api::triggers::TriggerInfo;
@@ -447,6 +447,29 @@ pub async fn execute_task(
         }
     };
 
+    // 1b. Re-run of a PINNED source (spec § 7.3): its task may exist only at
+    //     the source's ref, so it takes its own path before any live lookup.
+    //     An unknown or unpinned source falls through to today's checks below
+    //     (an unknown one keeps today's status), reusing this one read.
+    let source_row = match req.source_job_id {
+        Some(src_id) => stroem_db::JobRepo::get(&state.pool, src_id)
+            .await
+            .context("load source job for re-run")?,
+        None => None,
+    };
+    if let Some(source_job) = source_row.as_ref().filter(|j| j.git_ref.is_some()) {
+        return execute_pinned_rerun(
+            &state,
+            &auth_user,
+            &ws,
+            &name,
+            source_id.as_deref(),
+            &req,
+            source_job,
+        )
+        .await;
+    }
+
     let workspace = get_workspace_or_error(&state, &ws).await?;
 
     // 2. Verify task exists in workspace
@@ -456,61 +479,17 @@ pub async fn execute_task(
         .ok_or_else(|| AppError::not_found("Task"))?;
 
     // 3. ACL check: Deny -> 404, View -> 403, Run -> proceed
-    if let Some(ref auth) = auth_user {
-        if state.acl.is_configured() {
-            let user_id = auth.user_id()?;
-            let (is_admin, groups) = load_user_acl_context(&state.pool, user_id, auth.is_admin())
-                .await
-                .context("load ACL context")?;
-            let task_path = make_task_path(task.folder.as_deref(), &name);
-            let perm = state
-                .acl
-                .evaluate(&ws, &task_path, &auth.claims.email, &groups, is_admin);
-            match perm {
-                TaskPermission::Deny => return Err(AppError::not_found("Task")),
-                TaskPermission::View => {
-                    return Err(AppError::Forbidden("View-only access".into()));
-                }
-                TaskPermission::Run => {} // allowed
-            }
-        }
-    }
+    require_task_run(&state, &auth_user, &ws, &name, task.folder.as_deref()).await?;
 
     // 4. Re-run validation: source_job_id must reference a job in this workspace
     //    that the user is allowed to view. Authorization mirrors GET /api/jobs/{id}.
     let mut effective_source_type = source_type;
     if let Some(src_id) = req.source_job_id {
-        let source_job = stroem_db::JobRepo::get(&state.pool, src_id)
-            .await
-            .context("load source job for re-run")?
+        let source_job = source_row
             .ok_or_else(|| AppError::BadRequest(format!("Source job {} not found", src_id)))?;
-        if source_job.workspace != ws {
-            return Err(AppError::BadRequest(
-                "Source job belongs to a different workspace".into(),
-            ));
-        }
-        // Same top-level-only rule as Restart: a re-run always creates a
-        // parentless job, so re-running a `type: task` child or a hook job
-        // detaches it from its parent and (for `hook`) escapes the hook
-        // recursion guard by relabelling the source type `rerun`.
-        if !crate::web::api::jobs::is_top_level_job(&source_job) {
-            return Err(AppError::BadRequest(
-                "Only top-level jobs can be re-run".into(),
-            ));
-        }
-        if source_job.raw_input.is_none() {
-            return Err(AppError::BadRequest(
-                "Source job predates Re-run prefill (no raw_input)".into(),
-            ));
-        }
+        check_rerun_source(&source_job, &ws)?;
         // Authorization: user must have at least View on the source job's task path.
-        let perm = crate::web::api::jobs::check_job_acl(
-            &state,
-            &auth_user,
-            &source_job.workspace,
-            &source_job.task_name,
-        )
-        .await?;
+        let perm = crate::web::api::jobs::check_job_acl(&state, &auth_user, &source_job).await?;
         if matches!(perm, TaskPermission::Deny) {
             return Err(AppError::Forbidden(
                 "Not authorized to read source job".into(),
@@ -543,13 +522,141 @@ pub async fn execute_task(
 
     // 6. Fire on_suspended hooks for any root-level approval steps that were
     //    suspended during job creation (FIX 2).
-    crate::settlement::dispatch::fire_initial_suspended_hooks(
-        &state, &workspace, &ws, &name, job_id,
-    )
-    .await;
+    crate::settlement::dispatch::fire_initial_suspended_hooks(&state, job_id).await;
     state.settlement().job_created(created).await;
 
     // 7. Return job_id
+    Ok(Json(ExecuteTaskResponse {
+        job_id: job_id.to_string(),
+    }))
+}
+
+/// `Run` on the task path `{folder}/{name}` of workspace `ws`, for the
+/// execute route and for a pinned Re-run / Restart at the folder the task
+/// declares at the re-resolved commit (the new job's `task_folder`). Deny →
+/// 404 "Task", View → 403 "View-only access". No user, or no ACL → allowed.
+pub(crate) async fn require_task_run(
+    state: &AppState,
+    auth_user: &Option<AuthUser>,
+    ws: &str,
+    name: &str,
+    folder: Option<&str>,
+) -> Result<(), AppError> {
+    let Some(auth) = auth_user else {
+        return Ok(());
+    };
+    if !state.acl.is_configured() {
+        return Ok(());
+    }
+    let user_id = auth.user_id()?;
+    let (is_admin, groups) = load_user_acl_context(&state.pool, user_id, auth.is_admin())
+        .await
+        .context("load ACL context")?;
+    let task_path = make_task_path(folder, name);
+    match state
+        .acl
+        .evaluate(ws, &task_path, &auth.claims.email, &groups, is_admin)
+    {
+        TaskPermission::Deny => Err(AppError::not_found("Task")),
+        TaskPermission::View => Err(AppError::Forbidden("View-only access".into())),
+        TaskPermission::Run => Ok(()),
+    }
+}
+
+/// The source checks every re-run makes, pinned or not: same workspace, a
+/// top-level job, and a `raw_input` to replay.
+fn check_rerun_source(source_job: &stroem_db::JobRow, ws: &str) -> Result<(), AppError> {
+    if source_job.workspace != ws {
+        return Err(AppError::BadRequest(
+            "Source job belongs to a different workspace".into(),
+        ));
+    }
+    // Same top-level-only rule as Restart: a re-run always creates a
+    // parentless job, so re-running a `type: task` child or a hook job
+    // detaches it from its parent and (for `hook`) escapes the hook
+    // recursion guard by relabelling the source type `rerun`.
+    if !crate::web::api::jobs::is_top_level_job(source_job) {
+        return Err(AppError::BadRequest(
+            "Only top-level jobs can be re-run".into(),
+        ));
+    }
+    if source_job.raw_input.is_none() {
+        return Err(AppError::BadRequest(
+            "Source job predates Re-run prefill (no raw_input)".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Re-run of a pinned source (spec § 7.3). The ACL check comes FIRST, so a
+/// denied caller learns nothing about the source: `Run` on the SOURCE's path,
+/// `{task_folder}/{task}` (§ 7.8), because the task may not exist in the live
+/// config at all. Then the source checks of the unpinned path and the task
+/// name; then the ref is re-resolved (a branch to its current tip), the task
+/// looked up at that commit, and `Run` required on the folder it declares
+/// there — the new job's `task_folder` — as the unpinned path requires it on
+/// the live task's folder.
+///
+/// Deny → 404, View → 403 (either check), a bad source or a task missing at
+/// the commit → 400, `RefNotFound` → 400, `PinUnavailable` → 500.
+async fn execute_pinned_rerun(
+    state: &AppState,
+    auth_user: &Option<AuthUser>,
+    ws: &str,
+    name: &str,
+    source_id: Option<&str>,
+    req: &ExecuteTaskRequest,
+    source_job: &stroem_db::JobRow,
+) -> Result<Json<ExecuteTaskResponse>, AppError> {
+    match crate::web::api::jobs::check_job_acl(state, auth_user, source_job).await? {
+        TaskPermission::Deny => return Err(AppError::not_found("Task")),
+        TaskPermission::View => return Err(AppError::Forbidden("View-only access".into())),
+        TaskPermission::Run => {}
+    }
+    check_rerun_source(source_job, ws)?;
+    if source_job.task_name != name {
+        return Err(AppError::BadRequest(format!(
+            "Source job {} is a run of task '{}', not '{}'",
+            source_job.job_id, source_job.task_name, name
+        )));
+    }
+
+    let source_pin = super::pinned_source::resolve_source_pin(state, source_job)
+        .await?
+        .ok_or_else(|| {
+            AppError::Internal(anyhow::anyhow!(
+                "re-run source {} has no ref to re-resolve",
+                source_job.job_id
+            ))
+        })?;
+    let task = source_pin.task(name)?;
+    require_task_run(state, auth_user, ws, name, task.folder.as_deref()).await?;
+    let input_value = serde_json::to_value(&req.input).unwrap_or_default();
+
+    let created = create_job_for_task_pinned(
+        &state.workspaces,
+        &state.pool,
+        source_pin.handle.config(),
+        ws,
+        name,
+        input_value,
+        "rerun",
+        source_id,
+        &source_pin.pin.commit,
+        &source_pin.pin.git_ref,
+        CreationMode::Rerun {
+            source_job_id: source_job.job_id,
+        },
+        state.config.agents.as_ref(),
+        JobDefaults::from(state.config.as_ref()),
+    )
+    .await
+    .map_err(classify_execute_error)?;
+    let job_id = created.job_id;
+
+    crate::settlement::dispatch::fire_initial_suspended_hooks(state, job_id).await;
+    state.settlement().job_created(created).await;
+
     Ok(Json(ExecuteTaskResponse {
         job_id: job_id.to_string(),
     }))

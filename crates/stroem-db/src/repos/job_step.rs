@@ -5,7 +5,7 @@ use sqlx::PgPool;
 use stroem_common::models::job::StepStatus;
 use uuid::Uuid;
 
-const STEP_COLUMNS: &str = "job_id, step_name, action_name, action_type, action_image, action_spec, input, output, status, worker_id, started_at, completed_at, error_message, required_ability, required_tags, runner, timeout_secs, when_condition, for_each_expr, loop_source, loop_index, loop_total, loop_item, agent_state, suspended_at, retry_attempt, max_retries, retry_backoff_secs, retry_strategy, retry_jitter, retry_history, retry_at, action_workspace, action_revision, carried_over, skip_reason";
+const STEP_COLUMNS: &str = "job_id, step_name, action_name, action_type, action_image, action_spec, input, output, status, worker_id, started_at, completed_at, error_message, required_ability, required_tags, runner, timeout_secs, when_condition, for_each_expr, loop_source, loop_index, loop_total, loop_item, agent_state, suspended_at, retry_attempt, max_retries, retry_backoff_secs, retry_strategy, retry_jitter, retry_history, retry_at, action_workspace, action_revision, carried_over, skip_reason, action_ref, task_workspace, task_ref, task_revision, pin_releases";
 
 /// Job step row from database
 #[derive(Debug, Clone, Default, sqlx::FromRow)]
@@ -62,6 +62,17 @@ pub struct JobStepRow {
     /// `cascade` | `unreachable`. `None` before migration 046 or on rows an older
     /// replica wrote; the cascade treats `None` as `unreachable`.
     pub skip_reason: Option<String>,
+    /// The step's action was resolved through `ref:` (spec 2026-10-02 § 6);
+    /// `action_workspace` / `action_revision` then describe the pin.
+    pub action_ref: Option<String>,
+    /// For a `type: task` step whose task resolves to a pin: the TASK owner,
+    /// its ref string and commit, stamped at parent creation. Dispatch reads
+    /// only these and never infers a pin from the parent job.
+    pub task_workspace: Option<String>,
+    pub task_ref: Option<String>,
+    pub task_revision: Option<String>,
+    /// Claims released because the pin was unavailable (§ 7.2).
+    pub pin_releases: i32,
 }
 
 impl JobStepRow {
@@ -106,6 +117,11 @@ impl JobStepRow {
             action_revision: None,
             carried_over: false,
             skip_reason: None,
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
+            pin_releases: 0,
         }
     }
 }
@@ -141,6 +157,14 @@ pub struct NewJobStep {
     pub action_workspace: Option<String>,
     /// See [`JobStepRow::action_revision`].
     pub action_revision: Option<String>,
+    /// See [`JobStepRow::action_ref`].
+    pub action_ref: Option<String>,
+    /// See [`JobStepRow::task_workspace`].
+    pub task_workspace: Option<String>,
+    /// See [`JobStepRow::task_ref`].
+    pub task_ref: Option<String>,
+    /// See [`JobStepRow::task_revision`].
+    pub task_revision: Option<String>,
 }
 
 /// Bind parameters for a single row in the batch INSERT inside [`JobStepRepo::create_steps_tx`].
@@ -173,6 +197,10 @@ struct StepInsertRow {
     retry_jitter: bool,
     action_workspace: Option<String>,
     action_revision: Option<String>,
+    action_ref: Option<String>,
+    task_workspace: Option<String>,
+    task_ref: Option<String>,
+    task_revision: Option<String>,
 }
 
 /// A stale running step with its job info for recovery.
@@ -181,6 +209,22 @@ pub struct StaleStepInfo {
     pub job_id: Uuid,
     pub step_name: String,
     pub worker_id: Option<Uuid>,
+    /// The claim's start time. With `worker_id` it identifies the claim a
+    /// recovery phase selected (`ClaimIdentity`, spec § 7.2). `None` for
+    /// rows that are not running (suspended, ready).
+    pub started_at: Option<DateTime<Utc>>,
+}
+
+impl StaleStepInfo {
+    /// The claim this selection observed, for `fail_or_retry`'s
+    /// `expected_claim`: a failure decided on it applies only while the row
+    /// is still that claim (spec § 7.2). `None` for a row with no claim.
+    pub fn claim(&self) -> Option<ClaimIdentity> {
+        Some(ClaimIdentity {
+            worker_id: self.worker_id?,
+            started_at: self.started_at?,
+        })
+    }
 }
 
 /// Step with joined job metadata, for worker detail views.
@@ -196,6 +240,10 @@ pub struct WorkerStepRow {
     pub workspace: String,
     pub task_name: String,
     pub job_status: String,
+    /// The job's ref (pinned job) — decides its ACL folder (spec § 7.8).
+    pub git_ref: Option<String>,
+    /// The pinned job's own task folder.
+    pub task_folder: Option<String>,
 }
 
 /// Per-step duration aggregates over a window of completed runs of a task.
@@ -245,6 +293,30 @@ pub enum FailOutcome {
     },
 }
 
+/// Who holds a claim: the worker and the `started_at` the claim SQL wrote.
+/// Equal only for the very claim that produced it — a release and a reclaim,
+/// even by the same worker, stamp a new `started_at` (spec 2026-10-02 § 7.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClaimIdentity {
+    pub worker_id: Uuid,
+    pub started_at: DateTime<Utc>,
+}
+
+/// Result of [`JobStepRepo::release_claim`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReleaseOutcome {
+    /// The step is `ready` again with `retry_at`; not a failure.
+    Released,
+    /// The job was already terminal: the step (and every pending/ready/
+    /// suspended sibling) is now `cancelled`. The caller must advance the job.
+    Cancelled,
+    /// `pin_releases` would exceed the cap. Nothing written; the step is still
+    /// `running` under this claim and the caller fails it with the same claim.
+    CapReached,
+    /// The row is no longer this claim (or the job/step is gone). Nothing written.
+    NotApplied,
+}
+
 impl JobStepRepo {
     /// Create steps for a job (batch insert)
     pub async fn create_steps(pool: &PgPool, steps: &[NewJobStep]) -> Result<()> {
@@ -266,13 +338,13 @@ impl JobStepRepo {
         // Build a batch insert query
         let mut query = String::from(
             r#"
-            INSERT INTO job_step (job_id, step_name, action_name, action_type, action_image, action_spec, input, status, required_ability, required_tags, runner, timeout_secs, ready_at, when_condition, for_each_expr, loop_source, loop_index, loop_total, loop_item, max_retries, retry_backoff_secs, retry_strategy, retry_jitter, action_workspace, action_revision)
+            INSERT INTO job_step (job_id, step_name, action_name, action_type, action_image, action_spec, input, status, required_ability, required_tags, runner, timeout_secs, ready_at, when_condition, for_each_expr, loop_source, loop_index, loop_total, loop_item, max_retries, retry_backoff_secs, retry_strategy, retry_jitter, action_workspace, action_revision, action_ref, task_workspace, task_ref, task_revision)
             VALUES
             "#,
         );
 
         let mut rows: Vec<StepInsertRow> = Vec::new();
-        let cols_per_row = 25;
+        let cols_per_row = 29;
         for (i, step) in steps.iter().enumerate() {
             if i > 0 {
                 query.push_str(", ");
@@ -318,6 +390,10 @@ impl JobStepRepo {
                 retry_jitter: step.retry_jitter,
                 action_workspace: step.action_workspace.clone(),
                 action_revision: step.action_revision.clone(),
+                action_ref: step.action_ref.clone(),
+                task_workspace: step.task_workspace.clone(),
+                task_ref: step.task_ref.clone(),
+                task_revision: step.task_revision.clone(),
             });
         }
 
@@ -348,7 +424,11 @@ impl JobStepRepo {
                 .bind(row.retry_strategy)
                 .bind(row.retry_jitter)
                 .bind(row.action_workspace)
-                .bind(row.action_revision);
+                .bind(row.action_revision)
+                .bind(row.action_ref)
+                .bind(row.task_workspace)
+                .bind(row.task_ref)
+                .bind(row.task_revision);
         }
 
         q.execute(executor)
@@ -717,6 +797,14 @@ impl JobStepRepo {
     ///   `[Suspended]`; every other caller passes `[]`.
     /// * `delay_for` — computes the retry delay in seconds from the locked row
     ///   (the server passes `compute_retry_delay`).
+    /// * `expected_claim` — when `Some`, the row must still be that claim
+    ///   (`worker_id` and `started_at` equal) or nothing is written
+    ///   (`NotApplied`). Recovery and `fail_claimed_step` pass the claim they
+    ///   observed so a released or reclaimed step is never failed on the
+    ///   strength of an earlier attempt (spec 2026-10-02 § 7.2). Everyone else
+    ///   passes `None`. It compares the identity only: a completed or
+    ///   cancelled row keeps both columns, so pair it with
+    ///   `expected = [Running]` (`Settlement::claimed_step_failed`).
     pub async fn fail_or_retry(
         pool: &PgPool,
         job_id: Uuid,
@@ -724,6 +812,7 @@ impl JobStepRepo {
         error: &str,
         expected: &[StepStatus],
         delay_for: impl FnOnce(&JobStepRow) -> u64,
+        expected_claim: Option<ClaimIdentity>,
     ) -> Result<FailOutcome> {
         let mut tx = pool.begin().await.context("begin fail_or_retry")?;
 
@@ -749,6 +838,15 @@ impl JobStepRepo {
                 tracing::debug!("fail_or_retry rollback after NotApplied: {e:#}");
             }
             return Ok(FailOutcome::NotApplied);
+        }
+
+        if let Some(claim) = expected_claim {
+            if row.worker_id != Some(claim.worker_id) || row.started_at != Some(claim.started_at) {
+                if let Err(e) = tx.rollback().await {
+                    tracing::debug!("fail_or_retry rollback after NotApplied: {e:#}");
+                }
+                return Ok(FailOutcome::NotApplied);
+            }
         }
 
         let outcome = match row.max_retries {
@@ -814,6 +912,101 @@ impl JobStepRepo {
         };
 
         tx.commit().await.context("commit fail_or_retry")?;
+        Ok(outcome)
+    }
+
+    /// Put a claimed step whose pin is unavailable back to `ready` (spec
+    /// 2026-10-02 § 7.2), in ONE transaction:
+    ///
+    /// 1. `job` row `FOR SHARE` — serialises with `JobRepo::cancel`, whose
+    ///    `UPDATE` needs the row lock.
+    /// 2. The step `FOR UPDATE`, only while it is still `claim` (`running`,
+    ///    same `worker_id` and `started_at`); otherwise `NotApplied`.
+    /// 3. Decide under both locks: a terminal job -> `Cancelled` (this step and
+    ///    every pending/ready/suspended sibling are cancelled here, because
+    ///    cancellation's own sibling sweep is a separate call);
+    ///    `pin_releases + 1 > max_releases` -> `CapReached` (nothing written);
+    ///    else `Released` (`ready`, worker/started_at cleared, `ready_at = now`
+    ///    so the unmatched-step sweep does not count the claimed time,
+    ///    `retry_at = now + retry_after`, `pin_releases + 1`; `now` is the DB
+    ///    clock for both).
+    ///
+    /// A release is not a failure: `retry_attempt` and `retry_history` are
+    /// untouched.
+    pub async fn release_claim(
+        pool: &PgPool,
+        job_id: Uuid,
+        step_name: &str,
+        claim: ClaimIdentity,
+        retry_after: chrono::Duration,
+        max_releases: i32,
+    ) -> Result<ReleaseOutcome> {
+        let mut tx = pool.begin().await.context("begin release_claim")?;
+
+        let job_status: Option<String> =
+            sqlx::query_scalar("SELECT status FROM job WHERE job_id = $1 FOR SHARE")
+                .bind(job_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .context("lock job row for release_claim")?;
+        let Some(job_status) = job_status else {
+            tx.rollback().await.ok();
+            return Ok(ReleaseOutcome::NotApplied);
+        };
+
+        let pin_releases: Option<i32> = sqlx::query_scalar(
+            "SELECT pin_releases FROM job_step \
+             WHERE job_id = $1 AND step_name = $2 AND status = 'running' \
+               AND worker_id = $3 AND started_at = $4 \
+             FOR UPDATE",
+        )
+        .bind(job_id)
+        .bind(step_name)
+        .bind(claim.worker_id)
+        .bind(claim.started_at)
+        .fetch_optional(&mut *tx)
+        .await
+        .context("lock claimed step for release_claim")?;
+        let Some(pin_releases) = pin_releases else {
+            tx.rollback().await.ok();
+            return Ok(ReleaseOutcome::NotApplied);
+        };
+
+        let outcome = if job_status != "pending" && job_status != "running" {
+            sqlx::query(
+                "UPDATE job_step SET status = 'cancelled', completed_at = NOW() \
+                 WHERE job_id = $1 AND step_name = $2",
+            )
+            .bind(job_id)
+            .bind(step_name)
+            .execute(&mut *tx)
+            .await
+            .context("cancel released step")?;
+            Self::cancel_pending_steps_tx(&mut *tx, job_id).await?;
+            ReleaseOutcome::Cancelled
+        } else if pin_releases + 1 > max_releases {
+            ReleaseOutcome::CapReached
+        } else {
+            sqlx::query(
+                "UPDATE job_step \
+                 SET status = 'ready', worker_id = NULL, started_at = NULL, \
+                     ready_at = NOW(), \
+                     retry_at = NOW() + make_interval(secs => $3::double precision), \
+                     pin_releases = pin_releases + 1 \
+                 WHERE job_id = $1 AND step_name = $2",
+            )
+            .bind(job_id)
+            .bind(step_name)
+            // The DB clock, like `ready_at` and the claim SQL's `retry_at`
+            // check: a host clock skewed against Postgres would shift it.
+            .bind(retry_after.num_milliseconds() as f64 / 1000.0)
+            .execute(&mut *tx)
+            .await
+            .context("release claimed step")?;
+            ReleaseOutcome::Released
+        };
+
+        tx.commit().await.context("commit release_claim")?;
         Ok(outcome)
     }
 
@@ -948,6 +1141,15 @@ impl JobStepRepo {
 
     /// Cancel all pending/ready/suspended steps for a job. Returns the number of steps cancelled.
     pub async fn cancel_pending_steps(pool: &PgPool, job_id: Uuid) -> Result<u64> {
+        Self::cancel_pending_steps_tx(pool, job_id).await
+    }
+
+    /// [`Self::cancel_pending_steps`] against any executor (used inside
+    /// [`Self::release_claim`]'s transaction).
+    pub async fn cancel_pending_steps_tx<'e, E>(executor: E, job_id: Uuid) -> Result<u64>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
         let result = sqlx::query(
             r#"
             UPDATE job_step
@@ -956,7 +1158,7 @@ impl JobStepRepo {
             "#,
         )
         .bind(job_id)
-        .execute(pool)
+        .execute(executor)
         .await
         .context("Failed to cancel pending steps")?;
 
@@ -1066,7 +1268,7 @@ impl JobStepRepo {
         }
         let rows = sqlx::query_as::<_, StaleStepInfo>(
             r#"
-            SELECT job_id, step_name, worker_id
+            SELECT job_id, step_name, worker_id, started_at
             FROM job_step
             WHERE status = 'running'
               AND worker_id = ANY($1)
@@ -1082,7 +1284,7 @@ impl JobStepRepo {
     /// Return running steps whose `timeout_secs` deadline has elapsed.
     pub async fn get_timed_out_steps(pool: &PgPool) -> Result<Vec<StaleStepInfo>> {
         let rows = sqlx::query_as::<_, StaleStepInfo>(
-            "SELECT job_id, step_name, worker_id FROM job_step \
+            "SELECT job_id, step_name, worker_id, started_at FROM job_step \
              WHERE status = 'running' AND timeout_secs IS NOT NULL \
                AND started_at + make_interval(secs => timeout_secs::double precision) < NOW()",
         )
@@ -1106,7 +1308,8 @@ impl JobStepRepo {
     ) -> Result<Vec<StaleStepInfo>> {
         let rows = sqlx::query_as::<_, StaleStepInfo>(
             r#"
-            SELECT js.job_id, js.step_name, NULL::uuid AS worker_id
+            SELECT js.job_id, js.step_name, NULL::uuid AS worker_id,
+                   NULL::timestamptz AS started_at
             FROM job_step js
             WHERE js.status = 'ready'
               -- Must match the claim SQL's exclusion set exactly. Missing
@@ -1211,7 +1414,8 @@ impl JobStepRepo {
     /// since `suspended_at`.
     pub async fn get_timed_out_suspended_steps(pool: &PgPool) -> Result<Vec<StaleStepInfo>> {
         let rows = sqlx::query_as::<_, StaleStepInfo>(
-            "SELECT job_id, step_name, NULL::uuid AS worker_id FROM job_step \
+            "SELECT job_id, step_name, NULL::uuid AS worker_id, \
+                    NULL::timestamptz AS started_at FROM job_step \
              WHERE status = 'suspended' AND timeout_secs IS NOT NULL \
                AND suspended_at + make_interval(secs => timeout_secs::double precision) < NOW()",
         )
@@ -1232,7 +1436,8 @@ impl JobStepRepo {
             r#"
             SELECT js.job_id, js.step_name, js.action_type, js.status,
                    js.started_at, js.completed_at, js.error_message,
-                   j.workspace, j.task_name, j.status AS job_status
+                   j.workspace, j.task_name, j.status AS job_status,
+                   j.git_ref, j.task_folder
             FROM job_step js
             JOIN job j ON j.job_id = js.job_id
             WHERE js.worker_id = $1
@@ -1264,7 +1469,8 @@ impl JobStepRepo {
     /// completed runs of a task. Ordered by the step's average start-time within
     /// the job (best-effort flow order). Excludes `for_each` instance rows and
     /// jobs with `source_type = 'restart'` (spec §6.4) — see
-    /// [`super::job::JobRepo::get_task_duration_stats`] for why.
+    /// [`super::job::JobRepo::get_task_duration_stats`] for why. Also excludes pinned
+    /// jobs (`git_ref IS NOT NULL`, spec 2026-10-02 § 7.8), as the job stats do.
     pub async fn get_step_duration_stats_for_task(
         pool: &PgPool,
         workspace: &str,
@@ -1281,6 +1487,7 @@ impl JobStepRepo {
                SELECT job_id, started_at AS job_started_at FROM job \
                WHERE workspace = $1 AND task_name = $2 AND status = 'completed' \
                  AND source_type <> 'restart' \
+                 AND git_ref IS NULL \
                  AND started_at IS NOT NULL \
                ORDER BY completed_at DESC, job_id \
                LIMIT $3 \

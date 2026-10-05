@@ -861,6 +861,8 @@ When a task runs in distributed mode, its steps may execute on different workers
 - Runners: shell, `script:docker`, `type:docker`. Kube modes deferred (same gap as state file-mount; see TODO).
 - Cross-worker sharing between steps of the same job (6b shared-storage goal) is **not** addressed — artifacts are per-job outputs, surfaced after completion.
 
+**6d. Git refs on references** — DONE (spec `docs/superpowers/specs/2026-10-02-git-refs-design.md`). `ref:` (branch | tag | SHA) on flow-step actions, `type: task` actions and scheduler/webhook triggers (which may now also name another workspace's task); jobs on a ref are pinned to one commit; replica-local PinStore; state partitioned per ref; per-job redaction closure; pinned jobs authorised by their own `task_folder`. Migrations 049 + 050; upgrade note `docs/src/content/docs/operations/migration-049-050.md`. Follow-ups in TODO.md § Git refs follow-ups.
+
 ---
 
 ## 9. Verification

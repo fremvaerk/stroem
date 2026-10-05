@@ -18,6 +18,7 @@ import type { RestartPlanResponse } from "@/lib/api";
 import { statusIcons } from "@/lib/status-icons";
 import type { JobStep, StepDurationStats } from "@/lib/types";
 import { skipBadgeLabel } from "@/lib/skip-reason";
+import { formatPin, stepPin } from "@/lib/job-ref";
 import { cn, formatActionName } from "@/lib/utils";
 
 /** Shared props threaded from the job page down to every restartable row. */
@@ -94,6 +95,7 @@ function StepRow({
   // Determine whether a retry-at badge should appear. When `now` is provided
   // (the normal path — ticker-driven), compare against it. When absent (SSR /
   // tests without a ticker), skip the comparison to stay render-pure.
+  const pin = stepPin(step);
   const isRetryPending =
     step.status === "ready" &&
     step.retry_at != null &&
@@ -165,6 +167,15 @@ function StepRow({
                 when
               </span>
             )}
+            {pin && (
+              <span
+                data-testid={`step-pin-${step.step_name}`}
+                title={pin.commit ?? undefined}
+                className="rounded bg-sky-100 px-1.5 py-0.5 font-mono text-[10px] font-medium text-sky-700 dark:bg-sky-900/30 dark:text-sky-400"
+              >
+                {formatPin(pin.ref, pin.commit)}
+              </span>
+            )}
             {step.max_retries != null && step.max_retries > 0 && (
               // One format for every execution: "attempt 1/3" on the first run,
               // "attempt 2/3" after a retry. Muted until a retry has happened.
@@ -204,6 +215,7 @@ function StepRow({
                     title={`${c.workspace}/${c.task_name} (${c.status})`}
                   >
                     {c.workspace}/{c.task_name}
+                    {c.ref ? ` ${formatPin(c.ref, c.revision)}` : ""}
                   </Link>
                 ))}
               </span>

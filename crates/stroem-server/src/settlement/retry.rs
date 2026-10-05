@@ -137,60 +137,77 @@ pub(super) async fn create_retry_job(
     };
 
     let input = failed_job.input.clone().unwrap_or_default();
-    let created = crate::job_creator::create_job_for_task_detailed(
-        &s.workspaces,
-        &s.pool,
-        workspace,
-        &failed_job.workspace,
-        &failed_job.task_name,
-        input,
-        "retry",
-        Some(&failed_job.job_id.to_string()),
+    let source_id = failed_job.job_id.to_string();
+    // The chain is linked inside the creation transaction: the retry row
+    // carries a copy of the failed job's resolved input, so it must never be
+    // visible without the `retry_of_job_id` the redaction closure follows.
+    let mode = crate::job_creator::CreationMode::Retry {
+        failed_job_id: failed_job.job_id,
+        root_job_id,
+        retry_attempt: failed_job.retry_attempt + 1,
+    };
+    // A pinned job retries at the same ref AND commit (git-refs spec § 7.3);
+    // `workspace` is then that commit's config (`Settlement::resolve`).
+    let created = match (
+        failed_job.git_ref.as_deref(),
         failed_job.revision.as_deref(),
-        None, // source_job_id: automatic retries don't prefill from source
-        None,
-        s.defaults,
-    )
-    .await
+    ) {
+        (Some(git_ref), Some(commit)) => {
+            crate::job_creator::create_job_for_task_pinned(
+                &s.workspaces,
+                &s.pool,
+                workspace,
+                &failed_job.workspace,
+                &failed_job.task_name,
+                input,
+                "retry",
+                Some(&source_id),
+                commit,
+                git_ref,
+                mode,
+                None,
+                s.defaults,
+            )
+            .await
+        }
+        (Some(git_ref), None) => Err(anyhow::anyhow!(
+            "job {} carries ref '{}' without its commit",
+            failed_job.job_id,
+            git_ref
+        )),
+        (None, revision) => {
+            crate::job_creator::create_job_for_task_inner(
+                &s.workspaces,
+                &s.pool,
+                workspace,
+                &failed_job.workspace,
+                &failed_job.task_name,
+                input,
+                "retry",
+                Some(&source_id),
+                None,
+                None,
+                revision,
+                mode,
+                None,
+                s.defaults,
+                None,
+            )
+            .await
+        }
+    }
     .context("Failed to create retry job")?;
     let retry_job_id = created.job_id;
-
-    // Set retry tracking fields, link original → retry, and optionally set retry_at
-    // in a single transaction so the retry job is never visible in a partial state.
-    let mut tx = s
-        .pool
-        .begin()
-        .await
-        .context("Failed to begin retry transaction")?;
-
-    sqlx::query("UPDATE job SET retry_of_job_id = $1, retry_attempt = $2 WHERE job_id = $3")
-        .bind(root_job_id)
-        .bind(failed_job.retry_attempt + 1)
-        .bind(retry_job_id)
-        .execute(&mut *tx)
-        .await
-        .context("Failed to set retry fields on new job")?;
-
-    sqlx::query("UPDATE job SET retry_job_id = $1 WHERE job_id = $2")
-        .bind(retry_job_id)
-        .bind(failed_job.job_id)
-        .execute(&mut *tx)
-        .await
-        .context("Failed to link original to retry job")?;
 
     if delay_secs > 0 {
         let retry_at = chrono::Utc::now() + chrono::Duration::seconds(delay_secs as i64);
         sqlx::query("UPDATE job_step SET retry_at = $1 WHERE job_id = $2 AND status = 'ready'")
             .bind(retry_at)
             .bind(retry_job_id)
-            .execute(&mut *tx)
+            .execute(&s.pool)
             .await
             .context("Failed to set retry_at on retry job steps")?;
     }
-
-    tx.commit()
-        .await
-        .context("Failed to commit retry transaction")?;
 
     s.server_log(
         failed_job.job_id,

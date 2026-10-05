@@ -149,6 +149,7 @@ fn test_workspace() -> WorkspaceConfig {
     workspace.actions.insert(
         "greet".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "script".to_string(),
             name: None,
             description: None,
@@ -189,6 +190,7 @@ fn test_workspace() -> WorkspaceConfig {
     workspace.actions.insert(
         "shout".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "script".to_string(),
             name: None,
             description: None,
@@ -229,6 +231,7 @@ fn test_workspace() -> WorkspaceConfig {
     workspace.actions.insert(
         "docker-build".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "docker".to_string(),
             name: None,
             description: None,
@@ -276,6 +279,7 @@ fn test_workspace() -> WorkspaceConfig {
     hello_flow.insert(
         "greet".to_string(),
         FlowStep {
+            git_ref: None,
             action: "greet".to_string(),
             name: None,
             description: None,
@@ -333,6 +337,7 @@ fn test_workspace() -> WorkspaceConfig {
     gs_flow.insert(
         "greet".to_string(),
         FlowStep {
+            git_ref: None,
             action: "greet".to_string(),
             name: None,
             description: None,
@@ -353,6 +358,7 @@ fn test_workspace() -> WorkspaceConfig {
     gs_flow.insert(
         "shout".to_string(),
         FlowStep {
+            git_ref: None,
             action: "shout".to_string(),
             name: None,
             description: None,
@@ -408,6 +414,7 @@ fn test_workspace() -> WorkspaceConfig {
     l3_flow.insert(
         "step1".to_string(),
         FlowStep {
+            git_ref: None,
             action: "greet".to_string(),
             name: None,
             description: None,
@@ -426,6 +433,7 @@ fn test_workspace() -> WorkspaceConfig {
     l3_flow.insert(
         "step2".to_string(),
         FlowStep {
+            git_ref: None,
             action: "greet".to_string(),
             name: None,
             description: None,
@@ -444,6 +452,7 @@ fn test_workspace() -> WorkspaceConfig {
     l3_flow.insert(
         "step3".to_string(),
         FlowStep {
+            git_ref: None,
             action: "greet".to_string(),
             name: None,
             description: None,
@@ -483,6 +492,7 @@ fn test_workspace() -> WorkspaceConfig {
     d_flow.insert(
         "step1".to_string(),
         FlowStep {
+            git_ref: None,
             action: "greet".to_string(),
             name: None,
             description: None,
@@ -501,6 +511,7 @@ fn test_workspace() -> WorkspaceConfig {
     d_flow.insert(
         "step2".to_string(),
         FlowStep {
+            git_ref: None,
             action: "greet".to_string(),
             name: None,
             description: None,
@@ -519,6 +530,7 @@ fn test_workspace() -> WorkspaceConfig {
     d_flow.insert(
         "step3".to_string(),
         FlowStep {
+            git_ref: None,
             action: "greet".to_string(),
             name: None,
             description: None,
@@ -537,6 +549,7 @@ fn test_workspace() -> WorkspaceConfig {
     d_flow.insert(
         "step4".to_string(),
         FlowStep {
+            git_ref: None,
             action: "greet".to_string(),
             name: None,
             description: None,
@@ -576,6 +589,7 @@ fn test_workspace() -> WorkspaceConfig {
     dbt_flow.insert(
         "build".to_string(),
         FlowStep {
+            git_ref: None,
             action: "docker-build".to_string(),
             name: None,
             description: None,
@@ -617,6 +631,7 @@ fn test_workspace() -> WorkspaceConfig {
     mi_flow.insert(
         "greet".to_string(),
         FlowStep {
+            git_ref: None,
             action: "greet".to_string(),
             name: None,
             description: None,
@@ -639,6 +654,7 @@ fn test_workspace() -> WorkspaceConfig {
     mi_flow.insert(
         "process".to_string(),
         FlowStep {
+            git_ref: None,
             action: "shout".to_string(),
             name: None,
             description: None,
@@ -694,6 +710,7 @@ fn test_workspace() -> WorkspaceConfig {
     wfi_flow.insert(
         "step1".to_string(),
         FlowStep {
+            git_ref: None,
             action: "greet".to_string(),
             name: None,
             description: None,
@@ -712,6 +729,7 @@ fn test_workspace() -> WorkspaceConfig {
     wfi_flow.insert(
         "step2".to_string(),
         FlowStep {
+            git_ref: None,
             action: "greet".to_string(),
             name: None,
             description: None,
@@ -730,6 +748,7 @@ fn test_workspace() -> WorkspaceConfig {
     wfi_flow.insert(
         "step3".to_string(),
         FlowStep {
+            git_ref: None,
             action: "greet".to_string(),
             name: None,
             description: None,
@@ -748,6 +767,7 @@ fn test_workspace() -> WorkspaceConfig {
     wfi_flow.insert(
         "step4".to_string(),
         FlowStep {
+            git_ref: None,
             action: "greet".to_string(),
             name: None,
             description: None,
@@ -818,6 +838,7 @@ fn test_workspace() -> WorkspaceConfig {
     workspace.actions.insert(
         "db-backup".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "script".to_string(),
             name: None,
             description: None,
@@ -861,6 +882,7 @@ fn test_workspace() -> WorkspaceConfig {
     bt_flow.insert(
         "backup".to_string(),
         FlowStep {
+            git_ref: None,
             action: "db-backup".to_string(),
             name: None,
             description: None,
@@ -943,6 +965,7 @@ fn test_workspace() -> WorkspaceConfig {
     workspace.actions.insert(
         "transform".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "script".to_string(),
             name: None,
             description: None,
@@ -1002,6 +1025,7 @@ fn test_workspace() -> WorkspaceConfig {
     workspace.actions.insert(
         "summarize".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "script".to_string(),
             name: None,
             description: None,
@@ -1048,6 +1072,7 @@ fn test_workspace() -> WorkspaceConfig {
     dp_flow.insert(
         "transform".to_string(),
         FlowStep {
+            git_ref: None,
             action: "transform".to_string(),
             name: None,
             description: None,
@@ -1068,6 +1093,7 @@ fn test_workspace() -> WorkspaceConfig {
     dp_flow.insert(
         "summarize".to_string(),
         FlowStep {
+            git_ref: None,
             action: "summarize".to_string(),
             name: None,
             description: None,
@@ -1123,6 +1149,7 @@ fn test_workspace() -> WorkspaceConfig {
     ds_flow.insert(
         "run".to_string(),
         FlowStep {
+            git_ref: None,
             action: "greet".to_string(),
             name: None,
             description: None,
@@ -1161,6 +1188,7 @@ fn test_workspace() -> WorkspaceConfig {
     workspace.triggers.insert(
         "nightly".to_string(),
         TriggerDef::Scheduler {
+            git_ref: None,
             cron: "0 2 * * *".to_string(),
             task: "hello-world".to_string(),
             input: HashMap::from([("name".to_string(), json!("nightly"))]),
@@ -1175,6 +1203,7 @@ fn test_workspace() -> WorkspaceConfig {
     workspace.triggers.insert(
         "weekly-backup".to_string(),
         TriggerDef::Scheduler {
+            git_ref: None,
             cron: "0 3 * * 0".to_string(),
             task: "backup-task".to_string(),
             input: HashMap::from([("host".to_string(), json!("db.prod"))]),
@@ -1189,6 +1218,7 @@ fn test_workspace() -> WorkspaceConfig {
     workspace.triggers.insert(
         "on-push".to_string(),
         TriggerDef::Webhook {
+            git_ref: None,
             name: "github-push".to_string(),
             task: "hello-world".to_string(),
             secret: Some("whsec_test123".to_string()),
@@ -1204,6 +1234,7 @@ fn test_workspace() -> WorkspaceConfig {
     workspace.triggers.insert(
         "on-deploy".to_string(),
         TriggerDef::Webhook {
+            git_ref: None,
             name: "public-hook".to_string(),
             task: "hello-world".to_string(),
             secret: None,
@@ -1219,6 +1250,7 @@ fn test_workspace() -> WorkspaceConfig {
     workspace.triggers.insert(
         "disabled-wh".to_string(),
         TriggerDef::Webhook {
+            git_ref: None,
             name: "disabled-hook".to_string(),
             task: "hello-world".to_string(),
             secret: None,
@@ -1280,6 +1312,7 @@ async fn setup() -> Result<(
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let workspace = test_workspace();
@@ -1295,6 +1328,7 @@ async fn setup() -> Result<(
 /// defaulted — used by the cross-workspace resolution test.
 fn trivial_script_action(script: &str) -> ActionDef {
     ActionDef {
+        git_ref: None,
         action_type: "script".to_string(),
         name: None,
         description: None,
@@ -1382,6 +1416,7 @@ async fn setup_two_workspaces() -> Result<(
     caller_flow.insert(
         "run".to_string(),
         FlowStep {
+            git_ref: None,
             action: "B.remote".to_string(),
             name: None,
             description: None,
@@ -1421,6 +1456,7 @@ async fn setup_two_workspaces() -> Result<(
     caller_bad_flow.insert(
         "run".to_string(),
         FlowStep {
+            git_ref: None,
             action: "B.nonexistent".to_string(),
             name: None,
             description: None,
@@ -1494,6 +1530,7 @@ async fn setup_two_workspaces() -> Result<(
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let mgr = WorkspaceManager::from_configs(vec![
@@ -1592,6 +1629,7 @@ async fn setup_shared_connections() -> Result<(
         f
     };
     let flow_step = |action: &str, conn_value: &str| FlowStep {
+        git_ref: None,
         action: action.to_string(),
         name: None,
         description: None,
@@ -1728,6 +1766,7 @@ async fn setup_shared_connections() -> Result<(
     caller.actions.insert(
         "child-task".into(),
         ActionDef {
+            git_ref: None,
             action_type: "task".to_string(),
             name: None,
             description: None,
@@ -1774,6 +1813,7 @@ async fn setup_shared_connections() -> Result<(
             flow: HashMap::from([(
                 "run".to_string(),
                 FlowStep {
+                    git_ref: None,
                     action: "child-task".to_string(),
                     name: None,
                     description: None,
@@ -1848,6 +1888,7 @@ async fn setup_shared_connections() -> Result<(
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
     let mgr = WorkspaceManager::from_configs(vec![
         ("caller".to_string(), caller, None),
@@ -2311,6 +2352,7 @@ fn test_workspace_with_missing_connection() -> WorkspaceConfig {
     workspace.actions.insert(
         "noop".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "script".to_string(),
             name: None,
             description: None,
@@ -2351,6 +2393,7 @@ fn test_workspace_with_missing_connection() -> WorkspaceConfig {
     flow.insert(
         "step1".to_string(),
         FlowStep {
+            git_ref: None,
             action: "noop".to_string(),
             name: None,
             description: None,
@@ -2455,6 +2498,7 @@ async fn setup_with_task_needing_missing_connection() -> Result<(
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let workspace = test_workspace_with_missing_connection();
@@ -2800,6 +2844,7 @@ async fn setup_with_library_dotted_action() -> Result<(
     flow.insert(
         "run".to_string(),
         FlowStep {
+            git_ref: None,
             action: "common.pg-query".to_string(),
             name: None,
             description: None,
@@ -2864,6 +2909,7 @@ async fn setup_with_library_dotted_action() -> Result<(
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let mgr = WorkspaceManager::from_config("default", workspace);
@@ -3008,6 +3054,7 @@ async fn test_execute_task_cross_workspace_unknown_action_returns_400() -> Resul
 
 fn xws_flow_step(action: &str) -> FlowStep {
     FlowStep {
+        git_ref: None,
         action: action.to_string(),
         name: None,
         description: None,
@@ -3292,6 +3339,7 @@ fn xws_build_ws_b() -> WorkspaceConfig {
         },
     );
     deploy_task.on_error.push(HookDef {
+        git_ref: None,
         action: "notify-b".to_string(),
         input: HashMap::new(),
     });
@@ -3596,6 +3644,7 @@ fn xws_build_ws_a() -> WorkspaceConfig {
 
     let mut hook_source = xws_task_def(vec![("run", xws_flow_step("hook-echo"))]);
     hook_source.on_error.push(HookDef {
+        git_ref: None,
         action: "hook-call-b-notify".to_string(),
         input: HashMap::new(),
     });
@@ -3627,6 +3676,7 @@ fn xws_build_ws_a() -> WorkspaceConfig {
     // (B's own config and hook selection governs them). Sanity target for
     // `test_xws_task_hooks`.
     ws.on_error.push(HookDef {
+        git_ref: None,
         action: "notify-a".to_string(),
         input: HashMap::new(),
     });
@@ -3729,6 +3779,7 @@ async fn setup_cross_task_workspaces(
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     if opts.auth {
@@ -5236,6 +5287,10 @@ async fn test_worker_register_and_claim() -> Result<()> {
     .await?;
 
     let steps = vec![NewJobStep {
+        action_ref: None,
+        task_workspace: None,
+        task_ref: None,
+        task_revision: None,
         job_id,
         step_name: "greet".to_string(),
         action_name: "greet".to_string(),
@@ -5316,6 +5371,10 @@ async fn test_claim_renders_job_revision_in_action_spec_and_image() -> Result<()
     .await?;
 
     let steps = vec![NewJobStep {
+        action_ref: None,
+        task_workspace: None,
+        task_ref: None,
+        task_revision: None,
         job_id,
         step_name: "greet".to_string(),
         action_name: "greet".to_string(),
@@ -5927,6 +5986,7 @@ async fn test_orchestrator_with_failure_db() -> Result<()> {
     flow.insert(
         "step1".to_string(),
         FlowStep {
+            git_ref: None,
             action: "greet".to_string(),
             name: None,
             description: None,
@@ -5973,6 +6033,10 @@ async fn test_orchestrator_with_failure_db() -> Result<()> {
     .await?;
 
     let steps = vec![NewJobStep {
+        action_ref: None,
+        task_workspace: None,
+        task_ref: None,
+        task_revision: None,
         job_id,
         step_name: "step1".to_string(),
         action_name: "greet".to_string(),
@@ -6019,6 +6083,7 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
     flow.insert(
         "step1".to_string(),
         FlowStep {
+            git_ref: None,
             action: "greet".to_string(),
             name: None,
             description: None,
@@ -6037,6 +6102,7 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
     flow.insert(
         "step2".to_string(),
         FlowStep {
+            git_ref: None,
             action: "greet".to_string(),
             name: None,
             description: None,
@@ -6055,6 +6121,7 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
     flow.insert(
         "step3".to_string(),
         FlowStep {
+            git_ref: None,
             action: "greet".to_string(),
             name: None,
             description: None,
@@ -6102,6 +6169,10 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
 
     let steps = vec![
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "step1".to_string(),
             action_name: "greet".to_string(),
@@ -6128,6 +6199,10 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             action_revision: None,
         },
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "step2".to_string(),
             action_name: "greet".to_string(),
@@ -6154,6 +6229,10 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             action_revision: None,
         },
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "step3".to_string(),
             action_name: "greet".to_string(),
@@ -6301,6 +6380,7 @@ async fn test_task_detail_connections() -> Result<()> {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     // Build a workspace with connections
@@ -6351,6 +6431,7 @@ async fn test_task_detail_connections() -> Result<()> {
     workspace.actions.insert(
         "run-query".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "script".to_string(),
             name: None,
             description: None,
@@ -6453,6 +6534,7 @@ async fn test_task_detail_connections() -> Result<()> {
     conn_flow.insert(
         "query".to_string(),
         FlowStep {
+            git_ref: None,
             action: "run-query".to_string(),
             name: None,
             description: None,
@@ -6508,6 +6590,7 @@ async fn test_task_detail_connections() -> Result<()> {
     prim_flow.insert(
         "run".to_string(),
         FlowStep {
+            git_ref: None,
             action: "run-query".to_string(),
             name: None,
             description: None,
@@ -7818,6 +7901,10 @@ async fn test_script_rendering_failure_fails_step_inline() -> Result<()> {
     JobStepRepo::create_steps(
         &pool,
         &[NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "run".to_string(),
             action_name: "test-action".to_string(),
@@ -7919,6 +8006,10 @@ async fn test_env_rendering_failure_fails_step() -> Result<()> {
     JobStepRepo::create_steps(
         &pool,
         &[NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "run".to_string(),
             action_name: "test-action".to_string(),
@@ -8011,6 +8102,10 @@ async fn test_script_rendering_failure_fails_step() -> Result<()> {
     JobStepRepo::create_steps(
         &pool,
         &[NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "run".to_string(),
             action_name: "test-action".to_string(),
@@ -8104,6 +8199,10 @@ async fn test_manifest_rendering_failure_fails_step() -> Result<()> {
     JobStepRepo::create_steps(
         &pool,
         &[NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "run".to_string(),
             action_name: "test-action".to_string(),
@@ -8203,6 +8302,10 @@ async fn test_image_rendering_failure_fails_step() -> Result<()> {
     JobStepRepo::create_steps(
         &pool,
         &[NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "run".to_string(),
             action_name: "test-action".to_string(),
@@ -8379,6 +8482,7 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
     workspace.actions.insert(
         "notify".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "script".to_string(),
             name: None,
             description: None,
@@ -8419,6 +8523,7 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
     workspace.actions.insert(
         "broken".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "script".to_string(),
             name: None,
             description: None,
@@ -8462,6 +8567,7 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
     task_flow.insert(
         "run".to_string(),
         FlowStep {
+            git_ref: None,
             action: "broken".to_string(),
             name: None,
             description: None,
@@ -8492,6 +8598,7 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
 
             on_success: vec![],
             on_error: vec![HookDef {
+                git_ref: None,
                 action: "notify".to_string(),
                 input: hook_input,
             }],
@@ -8531,6 +8638,7 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let mgr = WorkspaceManager::from_config("default", workspace);
@@ -8622,6 +8730,7 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
     workspace.actions.insert(
         "broken-action".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "script".to_string(),
             name: None,
             description: None,
@@ -8663,6 +8772,7 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
     child_flow.insert(
         "broken-step".to_string(),
         FlowStep {
+            git_ref: None,
             action: "broken-action".to_string(),
             name: None,
             description: None,
@@ -8701,6 +8811,7 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
     workspace.actions.insert(
         "run-child".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "task".to_string(),
             name: None,
             description: None,
@@ -8742,6 +8853,7 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
     parent_flow.insert(
         "delegate".to_string(),
         FlowStep {
+            git_ref: None,
             action: "run-child".to_string(),
             name: None,
             description: None,
@@ -8807,6 +8919,7 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let mgr = WorkspaceManager::from_config("default", workspace);
@@ -9053,6 +9166,7 @@ async fn setup_with_auth() -> Result<(
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     // Seed initial user
@@ -9541,6 +9655,7 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
     flow.insert(
         "step1".to_string(),
         FlowStep {
+            git_ref: None,
             action: "greet".to_string(),
             name: None,
             description: None,
@@ -9559,6 +9674,7 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
     flow.insert(
         "step2".to_string(),
         FlowStep {
+            git_ref: None,
             action: "greet".to_string(),
             name: None,
             description: None,
@@ -9606,6 +9722,10 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
 
     let steps = vec![
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "step1".to_string(),
             action_name: "greet".to_string(),
@@ -9632,6 +9752,10 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
             action_revision: None,
         },
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "step2".to_string(),
             action_name: "greet".to_string(),
@@ -9687,6 +9811,7 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
     flow.insert(
         "step1".to_string(),
         FlowStep {
+            git_ref: None,
             action: "greet".to_string(),
             name: None,
             description: None,
@@ -9705,6 +9830,7 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
     flow.insert(
         "step2".to_string(),
         FlowStep {
+            git_ref: None,
             action: "greet".to_string(),
             name: None,
             description: None,
@@ -9752,6 +9878,10 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
 
     let steps = vec![
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "step1".to_string(),
             action_name: "greet".to_string(),
@@ -9778,6 +9908,10 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
             action_revision: None,
         },
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "step2".to_string(),
             action_name: "greet".to_string(),
@@ -9834,6 +9968,7 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
     flow.insert(
         "step1".to_string(),
         FlowStep {
+            git_ref: None,
             action: "greet".to_string(),
             name: None,
             description: None,
@@ -9852,6 +9987,7 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
     flow.insert(
         "step2".to_string(),
         FlowStep {
+            git_ref: None,
             action: "greet".to_string(),
             name: None,
             description: None,
@@ -9870,6 +10006,7 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
     flow.insert(
         "step3".to_string(),
         FlowStep {
+            git_ref: None,
             action: "greet".to_string(),
             name: None,
             description: None,
@@ -9917,6 +10054,10 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
 
     let steps = vec![
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "step1".to_string(),
             action_name: "greet".to_string(),
@@ -9943,6 +10084,10 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             action_revision: None,
         },
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "step2".to_string(),
             action_name: "greet".to_string(),
@@ -9969,6 +10114,10 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             action_revision: None,
         },
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "step3".to_string(),
             action_name: "greet".to_string(),
@@ -10116,6 +10265,10 @@ async fn test_failing_job_status_with_jsonl_logs() -> Result<()> {
 
     // Create a single step
     let steps = vec![NewJobStep {
+        action_ref: None,
+        task_workspace: None,
+        task_ref: None,
+        task_revision: None,
         job_id,
         step_name: "doom".to_string(),
         action_name: "greet".to_string(),
@@ -10210,6 +10363,7 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
         flow.insert(
             "step-ok".to_string(),
             FlowStep {
+                git_ref: None,
                 action: "greet".to_string(),
                 name: None,
                 description: None,
@@ -10228,6 +10382,7 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
         flow.insert(
             "step-fail".to_string(),
             FlowStep {
+                git_ref: None,
                 action: "greet".to_string(),
                 name: None,
                 description: None,
@@ -10275,6 +10430,10 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
 
     let steps = vec![
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "step-ok".to_string(),
             action_name: "greet".to_string(),
@@ -10301,6 +10460,10 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
             action_revision: None,
         },
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "step-fail".to_string(),
             action_name: "greet".to_string(),
@@ -10379,6 +10542,7 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
         flow.insert(
             "step1".to_string(),
             FlowStep {
+                git_ref: None,
                 action: "greet".to_string(),
                 name: None,
                 description: None,
@@ -10397,6 +10561,7 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
         flow.insert(
             "step2".to_string(),
             FlowStep {
+                git_ref: None,
                 action: "greet".to_string(),
                 name: None,
                 description: None,
@@ -10444,6 +10609,10 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
 
     let steps = vec![
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "step1".to_string(),
             action_name: "greet".to_string(),
@@ -10470,6 +10639,10 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
             action_revision: None,
         },
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "step2".to_string(),
             action_name: "greet".to_string(),
@@ -10527,6 +10700,7 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
         flow.insert(
             "step1".to_string(),
             FlowStep {
+                git_ref: None,
                 action: "greet".to_string(),
                 name: None,
                 description: None,
@@ -10545,6 +10719,7 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
         flow.insert(
             "step2".to_string(),
             FlowStep {
+                git_ref: None,
                 action: "greet".to_string(),
                 name: None,
                 description: None,
@@ -10592,6 +10767,10 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
 
     let steps = vec![
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "step1".to_string(),
             action_name: "greet".to_string(),
@@ -10618,6 +10797,10 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
             action_revision: None,
         },
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "step2".to_string(),
             action_name: "greet".to_string(),
@@ -10684,6 +10867,7 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
         flow.insert(
             "step1".to_string(),
             FlowStep {
+                git_ref: None,
                 action: "greet".to_string(),
                 name: None,
                 description: None,
@@ -10702,6 +10886,7 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
         flow.insert(
             "step2".to_string(),
             FlowStep {
+                git_ref: None,
                 action: "greet".to_string(),
                 name: None,
                 description: None,
@@ -10749,6 +10934,10 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
 
     let steps = vec![
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "step1".to_string(),
             action_name: "greet".to_string(),
@@ -10775,6 +10964,10 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
             action_revision: None,
         },
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "step2".to_string(),
             action_name: "greet".to_string(),
@@ -10838,6 +11031,7 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
         flow.insert(
             "step1".to_string(),
             FlowStep {
+                git_ref: None,
                 action: "greet".to_string(),
                 name: None,
                 description: None,
@@ -10856,6 +11050,7 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
         flow.insert(
             "step2".to_string(),
             FlowStep {
+                git_ref: None,
                 action: "greet".to_string(),
                 name: None,
                 description: None,
@@ -10903,6 +11098,10 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
 
     let steps = vec![
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "step1".to_string(),
             action_name: "greet".to_string(),
@@ -10929,6 +11128,10 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
             action_revision: None,
         },
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "step2".to_string(),
             action_name: "greet".to_string(),
@@ -10986,6 +11189,7 @@ async fn test_cascading_skip() -> Result<()> {
         flow.insert(
             "step1".to_string(),
             FlowStep {
+                git_ref: None,
                 action: "greet".to_string(),
                 name: None,
                 description: None,
@@ -11004,6 +11208,7 @@ async fn test_cascading_skip() -> Result<()> {
         flow.insert(
             "step2".to_string(),
             FlowStep {
+                git_ref: None,
                 action: "greet".to_string(),
                 name: None,
                 description: None,
@@ -11022,6 +11227,7 @@ async fn test_cascading_skip() -> Result<()> {
         flow.insert(
             "step3".to_string(),
             FlowStep {
+                git_ref: None,
                 action: "greet".to_string(),
                 name: None,
                 description: None,
@@ -11069,6 +11275,10 @@ async fn test_cascading_skip() -> Result<()> {
 
     let steps = vec![
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "step1".to_string(),
             action_name: "greet".to_string(),
@@ -11095,6 +11305,10 @@ async fn test_cascading_skip() -> Result<()> {
             action_revision: None,
         },
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "step2".to_string(),
             action_name: "greet".to_string(),
@@ -11121,6 +11335,10 @@ async fn test_cascading_skip() -> Result<()> {
             action_revision: None,
         },
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "step3".to_string(),
             action_name: "greet".to_string(),
@@ -11177,6 +11395,7 @@ fn test_workspace_ops() -> WorkspaceConfig {
     workspace.actions.insert(
         "deploy".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "script".to_string(),
             name: None,
             description: None,
@@ -11217,6 +11436,7 @@ fn test_workspace_ops() -> WorkspaceConfig {
     flow.insert(
         "run-deploy".to_string(),
         FlowStep {
+            git_ref: None,
             action: "deploy".to_string(),
             name: None,
             description: None,
@@ -11324,6 +11544,7 @@ async fn setup_multi_workspace_with(
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let ws_default = test_workspace();
@@ -11619,6 +11840,7 @@ async fn setup_with_auth_and_acl() -> Result<(
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     // Seed three users.
@@ -12092,6 +12314,10 @@ async fn test_worker_claim_has_workspace_field() -> Result<()> {
     .await?;
 
     let steps = vec![NewJobStep {
+        action_ref: None,
+        task_workspace: None,
+        task_ref: None,
+        task_revision: None,
         job_id,
         step_name: "run-deploy".to_string(),
         action_name: "deploy".to_string(),
@@ -12253,6 +12479,7 @@ async fn test_workspace_tarball_download() -> Result<()> {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let mgr = WorkspaceManager::new(
@@ -12331,6 +12558,27 @@ async fn test_workspace_tarball_nonexistent_404() -> Result<()> {
     let response = router.oneshot(req).await?;
     assert_eq!(response.status(), 404);
 
+    Ok(())
+}
+
+/// Spec § 5.4: folder workspaces have no history — an unknown revision keeps
+/// today's 404 (the PinStore branch is for git workspaces only).
+#[tokio::test]
+async fn test_folder_workspace_superseded_revision_still_404() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup().await?;
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!(
+            "/worker/workspace/default.tar.gz?revision={}",
+            "a".repeat(64)
+        ))
+        .header("Authorization", "Bearer test-token-secret")
+        .body(Body::empty())
+        .unwrap();
+    let response = router.oneshot(req).await?;
+    assert_eq!(response.status(), 404);
+    let body = String::from_utf8(body_bytes(response).await)?;
+    assert!(body.contains("no longer available"), "{body}");
     Ok(())
 }
 
@@ -12430,6 +12678,7 @@ async fn test_tarball_mismatched_etag_returns_200() -> Result<()> {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let mgr = WorkspaceManager::new(
@@ -12525,6 +12774,7 @@ async fn test_tarball_bare_etag_matches() -> Result<()> {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let mgr = WorkspaceManager::new(
@@ -12636,6 +12886,7 @@ async fn test_tarball_stale_etag_after_workspace_change() -> Result<()> {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let mgr = WorkspaceManager::new(
@@ -12782,6 +13033,7 @@ async fn test_tarball_etag_header_format() -> Result<()> {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let mgr = WorkspaceManager::new(
@@ -12978,6 +13230,10 @@ async fn test_worker_claim_across_workspaces() -> Result<()> {
     JobStepRepo::create_steps(
         &pool,
         &[NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id: job_id_default,
             step_name: "greet".to_string(),
             action_name: "greet".to_string(),
@@ -13023,6 +13279,10 @@ async fn test_worker_claim_across_workspaces() -> Result<()> {
     JobStepRepo::create_steps(
         &pool,
         &[NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id: job_id_ops,
             step_name: "run-deploy".to_string(),
             action_name: "deploy".to_string(),
@@ -13343,6 +13603,7 @@ async fn test_create_job_for_task_missing_action() -> Result<()> {
     flow.insert(
         "step1".to_string(),
         FlowStep {
+            git_ref: None,
             action: "action-does-not-exist".to_string(),
             name: None,
             description: None,
@@ -13693,6 +13954,7 @@ async fn test_config_returns_oidc_providers_with_auth() -> Result<()> {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let workspace = test_workspace();
@@ -13787,6 +14049,7 @@ async fn test_config_returns_has_internal_auth_true() -> Result<()> {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let workspace = test_workspace();
@@ -13865,6 +14128,7 @@ async fn test_config_returns_has_internal_auth_false_oidc_only() -> Result<()> {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let workspace = test_workspace();
@@ -13894,6 +14158,7 @@ fn hook_test_workspace() -> WorkspaceConfig {
     workspace.actions.insert(
         "deploy".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "script".to_string(),
             name: None,
             description: None,
@@ -13934,6 +14199,7 @@ fn hook_test_workspace() -> WorkspaceConfig {
     workspace.actions.insert(
         "crash".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "script".to_string(),
             name: None,
             description: None,
@@ -13990,6 +14256,7 @@ fn hook_test_workspace() -> WorkspaceConfig {
     workspace.actions.insert(
         "notify".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "script".to_string(),
             name: None,
             description: None,
@@ -14062,6 +14329,7 @@ fn hook_test_state(pool: PgPool, workspace: &WorkspaceConfig) -> AppState {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
     let mgr = WorkspaceManager::from_config("default", workspace.clone());
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
@@ -14107,6 +14375,7 @@ fn hook_test_state_with_default_step_timeout(
         default_step_timeout,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
     let mgr = WorkspaceManager::from_config("default", workspace.clone());
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
@@ -14138,6 +14407,7 @@ async fn test_hook_job_step_gets_action_retry_and_default_timeout() -> Result<()
     flow.insert(
         "step1".to_string(),
         FlowStep {
+            git_ref: None,
             action: "deploy".to_string(),
             name: None,
             description: None,
@@ -14166,6 +14436,7 @@ async fn test_hook_job_step_gets_action_retry_and_default_timeout() -> Result<()
             retry: None,
 
             on_success: vec![HookDef {
+                git_ref: None,
                 action: "notify".to_string(),
                 input: HashMap::new(),
             }],
@@ -14243,6 +14514,7 @@ async fn test_hook_fires_on_job_success() -> Result<()> {
     flow.insert(
         "step1".to_string(),
         FlowStep {
+            git_ref: None,
             action: "deploy".to_string(),
             name: None,
             description: None,
@@ -14276,6 +14548,7 @@ async fn test_hook_fires_on_job_success() -> Result<()> {
             retry: None,
 
             on_success: vec![HookDef {
+                git_ref: None,
                 action: "notify".to_string(),
                 input: hook_input,
             }],
@@ -14369,6 +14642,7 @@ async fn test_hook_fires_on_job_failure() -> Result<()> {
     flow.insert(
         "step1".to_string(),
         FlowStep {
+            git_ref: None,
             action: "crash".to_string(),
             name: None,
             description: None,
@@ -14403,6 +14677,7 @@ async fn test_hook_fires_on_job_failure() -> Result<()> {
 
             on_success: vec![],
             on_error: vec![HookDef {
+                git_ref: None,
                 action: "notify".to_string(),
                 input: hook_input,
             }],
@@ -14474,6 +14749,7 @@ async fn test_hook_not_fired_for_hook_job() -> Result<()> {
     flow.insert(
         "step1".to_string(),
         FlowStep {
+            git_ref: None,
             action: "deploy".to_string(),
             name: None,
             description: None,
@@ -14502,6 +14778,7 @@ async fn test_hook_not_fired_for_hook_job() -> Result<()> {
             retry: None,
 
             on_success: vec![HookDef {
+                git_ref: None,
                 action: "notify".to_string(),
                 input: HashMap::new(),
             }],
@@ -14559,6 +14836,7 @@ async fn test_hook_input_contains_context() -> Result<()> {
     flow.insert(
         "step1".to_string(),
         FlowStep {
+            git_ref: None,
             action: "deploy".to_string(),
             name: None,
             description: None,
@@ -14592,6 +14870,7 @@ async fn test_hook_input_contains_context() -> Result<()> {
             retry: None,
 
             on_success: vec![HookDef {
+                git_ref: None,
                 action: "notify".to_string(),
                 input: hook_input,
             }],
@@ -14661,6 +14940,7 @@ async fn test_hook_error_message_all_failures() -> Result<()> {
     flow.insert(
         "step1".to_string(),
         FlowStep {
+            git_ref: None,
             action: "crash".to_string(),
             name: None,
             description: None,
@@ -14679,6 +14959,7 @@ async fn test_hook_error_message_all_failures() -> Result<()> {
     flow.insert(
         "step2".to_string(),
         FlowStep {
+            git_ref: None,
             action: "crash".to_string(),
             name: None,
             description: None,
@@ -14710,6 +14991,7 @@ async fn test_hook_error_message_all_failures() -> Result<()> {
 
             on_success: vec![],
             on_error: vec![HookDef {
+                git_ref: None,
                 action: "notify".to_string(),
                 input: hook_input,
             }],
@@ -14806,6 +15088,7 @@ async fn test_hook_on_success_with_tolerable_failures() -> Result<()> {
     flow.insert(
         "step1".to_string(),
         FlowStep {
+            git_ref: None,
             action: "crash".to_string(),
             name: None,
             description: None,
@@ -14824,6 +15107,7 @@ async fn test_hook_on_success_with_tolerable_failures() -> Result<()> {
     flow.insert(
         "step2".to_string(),
         FlowStep {
+            git_ref: None,
             action: "deploy".to_string(),
             name: None,
             description: None,
@@ -14856,6 +15140,7 @@ async fn test_hook_on_success_with_tolerable_failures() -> Result<()> {
             retry: None,
 
             on_success: vec![HookDef {
+                git_ref: None,
                 action: "notify".to_string(),
                 input: hook_input,
             }],
@@ -14947,6 +15232,7 @@ async fn test_hook_multiline_error_message() -> Result<()> {
     flow.insert(
         "step1".to_string(),
         FlowStep {
+            git_ref: None,
             action: "crash".to_string(),
             name: None,
             description: None,
@@ -14979,6 +15265,7 @@ async fn test_hook_multiline_error_message() -> Result<()> {
 
             on_success: vec![],
             on_error: vec![HookDef {
+                git_ref: None,
                 action: "notify".to_string(),
                 input: hook_input,
             }],
@@ -15072,6 +15359,7 @@ async fn test_hook_job_completes_through_orchestrator() -> Result<()> {
     flow.insert(
         "step1".to_string(),
         FlowStep {
+            git_ref: None,
             action: "crash".to_string(),
             name: None,
             description: None,
@@ -15103,6 +15391,7 @@ async fn test_hook_job_completes_through_orchestrator() -> Result<()> {
 
             on_success: vec![],
             on_error: vec![HookDef {
+                git_ref: None,
                 action: "notify".to_string(),
                 input: hook_input,
             }],
@@ -15191,6 +15480,7 @@ async fn test_hook_job_completes_through_orchestrator() -> Result<()> {
         hook_flow.insert(
             step.step_name.clone(),
             FlowStep {
+                git_ref: None,
                 action: step.action_name.clone(),
                 name: None,
                 description: None,
@@ -15257,6 +15547,7 @@ fn task_action_test_workspace() -> WorkspaceConfig {
     workspace.actions.insert(
         "greet".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "script".to_string(),
             name: None,
             description: None,
@@ -15297,6 +15588,7 @@ fn task_action_test_workspace() -> WorkspaceConfig {
     workspace.actions.insert(
         "run-cleanup".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "task".to_string(),
             name: None,
             description: None,
@@ -15338,6 +15630,7 @@ fn task_action_test_workspace() -> WorkspaceConfig {
     cleanup_flow.insert(
         "clean".to_string(),
         FlowStep {
+            git_ref: None,
             action: "greet".to_string(),
             name: None,
             description: None,
@@ -15377,6 +15670,7 @@ fn task_action_test_workspace() -> WorkspaceConfig {
     deploy_flow.insert(
         "build".to_string(),
         FlowStep {
+            git_ref: None,
             action: "greet".to_string(),
             name: None,
             description: None,
@@ -15395,6 +15689,7 @@ fn task_action_test_workspace() -> WorkspaceConfig {
     deploy_flow.insert(
         "cleanup".to_string(),
         FlowStep {
+            git_ref: None,
             action: "run-cleanup".to_string(),
             name: None,
             description: None,
@@ -15449,6 +15744,7 @@ async fn test_task_action_creates_child_job() -> Result<()> {
     flow.insert(
         "run".to_string(),
         FlowStep {
+            git_ref: None,
             action: "run-cleanup".to_string(),
             name: None,
             description: None,
@@ -15727,6 +16023,10 @@ async fn test_task_action_not_claimed_by_worker() -> Result<()> {
     .await?;
 
     let step = NewJobStep {
+        action_ref: None,
+        task_workspace: None,
+        task_ref: None,
+        task_revision: None,
         job_id,
         step_name: "task-step".to_string(),
         action_name: "run-cleanup".to_string(),
@@ -15780,6 +16080,7 @@ async fn test_task_action_input_rendered() -> Result<()> {
     workspace.actions.insert(
         "run-with-input".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "task".to_string(),
             name: None,
             description: None,
@@ -15823,6 +16124,7 @@ async fn test_task_action_input_rendered() -> Result<()> {
     flow.insert(
         "run".to_string(),
         FlowStep {
+            git_ref: None,
             action: "run-with-input".to_string(),
             name: None,
             description: None,
@@ -15917,6 +16219,7 @@ async fn test_task_action_in_hook() -> Result<()> {
     flow.insert(
         "step1".to_string(),
         FlowStep {
+            git_ref: None,
             action: "greet".to_string(),
             name: None,
             description: None,
@@ -15946,6 +16249,7 @@ async fn test_task_action_in_hook() -> Result<()> {
 
             on_success: vec![],
             on_error: vec![HookDef {
+                git_ref: None,
                 action: "run-cleanup".to_string(),
                 input: HashMap::new(),
             }],
@@ -16057,6 +16361,7 @@ async fn test_task_action_child_failure_fails_parent_step() -> Result<()> {
     fail_flow.insert(
         "crash".to_string(),
         FlowStep {
+            git_ref: None,
             action: "greet".to_string(),
             name: None,
             description: None,
@@ -16095,6 +16400,7 @@ async fn test_task_action_child_failure_fails_parent_step() -> Result<()> {
     workspace.actions.insert(
         "run-failing".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "task".to_string(),
             name: None,
             description: None,
@@ -16136,6 +16442,7 @@ async fn test_task_action_child_failure_fails_parent_step() -> Result<()> {
     parent_flow.insert(
         "run".to_string(),
         FlowStep {
+            git_ref: None,
             action: "run-failing".to_string(),
             name: None,
             description: None,
@@ -16285,6 +16592,7 @@ async fn setup_recovery() -> Result<(
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let workspace = test_workspace();
@@ -16408,6 +16716,7 @@ async fn test_trigger_fire_on_unavailable_workspace_has_no_side_effects() -> Res
         remembered.triggers.insert(
             trigger.to_string(),
             TriggerDef::Scheduler {
+                git_ref: None,
                 cron: "0 1 * * *".to_string(),
                 task: "hello-world".to_string(),
                 input: HashMap::new(),
@@ -16454,6 +16763,7 @@ async fn test_force_refresh_while_busy_fires_only_from_a_healthy_snapshot() -> R
     cfg.triggers.insert(
         "refresh-busy".to_string(),
         TriggerDef::Scheduler {
+            git_ref: None,
             cron: "0 1 * * *".to_string(),
             task: "hello-world".to_string(),
             input: HashMap::new(),
@@ -16505,6 +16815,7 @@ async fn test_trigger_fire_revalidates_against_current_config() -> Result<()> {
     let (state, pool, _tmp, _container) = setup_recovery().await?;
     let workspace_config = state.get_workspace("default").await.unwrap();
     let trigger = |enabled: bool, task: &str| TriggerDef::Scheduler {
+        git_ref: None,
         cron: "0 1 * * *".to_string(),
         task: task.to_string(),
         input: HashMap::new(),
@@ -16536,6 +16847,7 @@ async fn test_trigger_fire_revalidates_against_current_config() -> Result<()> {
     changed_policy.triggers.insert(
         "nightly".to_string(),
         TriggerDef::Scheduler {
+            git_ref: None,
             cron: "0 1 * * *".to_string(),
             task: "hello-world".to_string(),
             input: HashMap::from([("name".to_string(), json!("new"))]),
@@ -16791,6 +17103,7 @@ async fn test_recovery_propagates_to_parent() -> Result<()> {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let workspace = task_action_test_workspace();
@@ -17236,6 +17549,10 @@ async fn test_get_worker_with_steps() -> Result<()> {
 
     // Create a step and assign it to the worker
     let steps = vec![NewJobStep {
+        action_ref: None,
+        task_workspace: None,
+        task_ref: None,
+        task_revision: None,
         job_id,
         step_name: "say-hello".to_string(),
         action_name: "say-hello".to_string(),
@@ -18567,6 +18884,7 @@ async fn test_connection_input_passthrough_at_claim() -> Result<()> {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let mut workspace = WorkspaceConfig::default();
@@ -18620,6 +18938,7 @@ async fn test_connection_input_passthrough_at_claim() -> Result<()> {
     workspace.actions.insert(
         "execute-query".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "script".to_string(),
             name: None,
             description: None,
@@ -18694,6 +19013,7 @@ async fn test_connection_input_passthrough_at_claim() -> Result<()> {
     flow.insert(
         "query".to_string(),
         FlowStep {
+            git_ref: None,
             action: "execute-query".to_string(),
             name: None,
             description: None,
@@ -18815,6 +19135,7 @@ async fn setup_sync_webhook() -> Result<(
     workspace.actions.insert(
         "noop".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "script".to_string(),
             name: None,
             description: None,
@@ -18855,6 +19176,7 @@ async fn setup_sync_webhook() -> Result<(
     flow.insert(
         "run".to_string(),
         FlowStep {
+            git_ref: None,
             action: "noop".to_string(),
             name: None,
             description: None,
@@ -18893,6 +19215,7 @@ async fn setup_sync_webhook() -> Result<(
     workspace.triggers.insert(
         "on-sync".to_string(),
         TriggerDef::Webhook {
+            git_ref: None,
             name: "sync-hook".to_string(),
             task: "sync-task".to_string(),
             secret: None,
@@ -18935,6 +19258,7 @@ async fn setup_sync_webhook() -> Result<(
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let mgr = WorkspaceManager::from_config("default", workspace);
@@ -19364,6 +19688,7 @@ async fn setup_scheduler_workspace(
     workspace.actions.insert(
         "echo-action".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "script".to_string(),
             name: None,
             description: None,
@@ -19404,6 +19729,7 @@ async fn setup_scheduler_workspace(
     flow.insert(
         "step1".to_string(),
         FlowStep {
+            git_ref: None,
             action: "echo-action".to_string(),
             name: None,
             description: None,
@@ -19441,6 +19767,7 @@ async fn setup_scheduler_workspace(
     workspace.triggers.insert(
         trigger_name.to_string(),
         TriggerDef::Scheduler {
+            git_ref: None,
             cron: cron.to_string(),
             task: task_name.to_string(),
             input: trigger_input,
@@ -19498,6 +19825,7 @@ async fn test_scheduler_fires_cron_trigger() -> Result<()> {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
     let sched_log_storage = LogStorage::new(&sched_config.log_storage.local_dir);
     let sched_state = AppState::new(
@@ -19517,7 +19845,7 @@ async fn test_scheduler_fires_cron_trigger() -> Result<()> {
     let jobs = sqlx::query_as::<_, stroem_db::JobRow>(
         "SELECT job_id, workspace, task_name, mode, input, output, status, source_type, \
          source_id, worker_id, revision, created_at, started_at, completed_at, log_path, \
-         parent_job_id, parent_step_name, timeout_secs, retry_of_job_id, retry_job_id, retry_attempt, max_retries, raw_input, source_job_id, restart_from_step FROM job WHERE source_type = $1",
+         parent_job_id, parent_step_name, timeout_secs, retry_of_job_id, retry_job_id, retry_attempt, max_retries, raw_input, source_job_id, restart_from_step, git_ref, task_folder FROM job WHERE source_type = $1",
     )
     .bind("trigger")
     .fetch_all(&pool)
@@ -19590,6 +19918,7 @@ async fn test_scheduler_disabled_trigger_does_not_fire() -> Result<()> {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
     let sched_log_storage = LogStorage::new(&sched_config.log_storage.local_dir);
     let sched_state = AppState::new(
@@ -19664,6 +19993,7 @@ async fn test_scheduler_passes_trigger_input_to_job() -> Result<()> {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
     let sched_log_storage = LogStorage::new(&sched_config.log_storage.local_dir);
     let sched_state = AppState::new(
@@ -19683,7 +20013,7 @@ async fn test_scheduler_passes_trigger_input_to_job() -> Result<()> {
     let jobs = sqlx::query_as::<_, stroem_db::JobRow>(
         "SELECT job_id, workspace, task_name, mode, input, output, status, source_type, \
          source_id, worker_id, revision, created_at, started_at, completed_at, log_path, \
-         parent_job_id, parent_step_name, timeout_secs, retry_of_job_id, retry_job_id, retry_attempt, max_retries, raw_input, source_job_id, restart_from_step FROM job WHERE source_type = $1 LIMIT 1",
+         parent_job_id, parent_step_name, timeout_secs, retry_of_job_id, retry_job_id, retry_attempt, max_retries, raw_input, source_job_id, restart_from_step, git_ref, task_folder FROM job WHERE source_type = $1 LIMIT 1",
     )
     .bind("trigger")
     .fetch_all(&pool)
@@ -19744,6 +20074,7 @@ async fn test_scheduler_clean_shutdown() -> Result<()> {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
     let sched_log_storage = LogStorage::new(&sched_config.log_storage.local_dir);
     let sched_state = AppState::new(
@@ -19856,6 +20187,10 @@ async fn test_multi_workspace_worker_claims_from_correct_workspace() -> Result<(
     JobStepRepo::create_steps(
         &pool,
         &[NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id: job_id_default,
             step_name: "say-hello".to_string(),
             action_name: "greet".to_string(),
@@ -19900,6 +20235,10 @@ async fn test_multi_workspace_worker_claims_from_correct_workspace() -> Result<(
     JobStepRepo::create_steps(
         &pool,
         &[NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id: job_id_ops,
             step_name: "run-deploy".to_string(),
             action_name: "deploy".to_string(),
@@ -20150,6 +20489,7 @@ async fn test_multi_workspace_tarball_download() -> Result<()> {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let mgr =
@@ -20401,6 +20741,7 @@ async fn setup_recovery_with_unmatched_timeout(
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let workspace = test_workspace();
@@ -20765,6 +21106,7 @@ fn when_test_workspace_with_flow(
     workspace.actions.insert(
         "noop".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "script".to_string(),
             name: None,
             description: None,
@@ -20832,6 +21174,7 @@ async fn test_create_job_for_task_root_when_false_skips_at_creation() -> Result<
     flow.insert(
         "root".to_string(),
         FlowStep {
+            git_ref: None,
             action: "noop".to_string(),
             name: None,
             description: None,
@@ -20850,6 +21193,7 @@ async fn test_create_job_for_task_root_when_false_skips_at_creation() -> Result<
     flow.insert(
         "child".to_string(),
         FlowStep {
+            git_ref: None,
             action: "noop".to_string(),
             name: None,
             description: None,
@@ -20914,6 +21258,7 @@ async fn test_create_job_for_task_root_when_true_becomes_ready() -> Result<()> {
     flow.insert(
         "root".to_string(),
         FlowStep {
+            git_ref: None,
             action: "noop".to_string(),
             name: None,
             description: None,
@@ -20968,6 +21313,7 @@ async fn test_create_job_for_task_step_type_task_with_when_false_is_skipped() ->
     workspace.actions.insert(
         "noop".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "script".to_string(),
             name: None,
             description: None,
@@ -21007,6 +21353,7 @@ async fn test_create_job_for_task_step_type_task_with_when_false_is_skipped() ->
     workspace.actions.insert(
         "run-child".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "task".to_string(),
             name: None,
             description: None,
@@ -21047,6 +21394,7 @@ async fn test_create_job_for_task_step_type_task_with_when_false_is_skipped() ->
     child_flow.insert(
         "work".to_string(),
         FlowStep {
+            git_ref: None,
             action: "noop".to_string(),
             name: None,
             description: None,
@@ -21084,6 +21432,7 @@ async fn test_create_job_for_task_step_type_task_with_when_false_is_skipped() ->
     parent_flow.insert(
         "conditional-task-step".to_string(),
         FlowStep {
+            git_ref: None,
             action: "run-child".to_string(),
             name: None,
             description: None,
@@ -21172,6 +21521,7 @@ async fn test_job_detail_api_exposes_when_condition() -> Result<()> {
     flow.insert(
         "build".to_string(),
         FlowStep {
+            git_ref: None,
             action: "noop".to_string(),
             name: None,
             description: None,
@@ -21190,6 +21540,7 @@ async fn test_job_detail_api_exposes_when_condition() -> Result<()> {
     flow.insert(
         "deploy".to_string(),
         FlowStep {
+            git_ref: None,
             action: "noop".to_string(),
             name: None,
             description: None,
@@ -21773,6 +22124,7 @@ async fn test_scheduler_triggered_job_stores_revision() -> Result<()> {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
     let sched_log_storage = LogStorage::new(&sched_config.log_storage.local_dir);
     let sched_state = AppState::new(
@@ -21792,7 +22144,7 @@ async fn test_scheduler_triggered_job_stores_revision() -> Result<()> {
     let jobs = sqlx::query_as::<_, stroem_db::JobRow>(
         "SELECT job_id, workspace, task_name, mode, input, output, status, source_type, \
          source_id, worker_id, revision, created_at, started_at, completed_at, log_path, \
-         parent_job_id, parent_step_name, timeout_secs, retry_of_job_id, retry_job_id, retry_attempt, max_retries, raw_input, source_job_id, restart_from_step FROM job WHERE source_type = $1",
+         parent_job_id, parent_step_name, timeout_secs, retry_of_job_id, retry_job_id, retry_attempt, max_retries, raw_input, source_job_id, restart_from_step, git_ref, task_folder FROM job WHERE source_type = $1",
     )
     .bind("trigger")
     .fetch_all(&pool)
@@ -21982,6 +22334,7 @@ fn revision_test_state(pool: PgPool, workspace: WorkspaceConfig) -> AppState {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let src: Arc<dyn stroem_server::workspace::WorkspaceSource> =
@@ -22023,6 +22376,7 @@ async fn test_hook_job_inherits_revision() -> Result<()> {
     flow.insert(
         "step1".to_string(),
         FlowStep {
+            git_ref: None,
             action: "deploy".to_string(),
             name: None,
             description: None,
@@ -22050,6 +22404,7 @@ async fn test_hook_job_inherits_revision() -> Result<()> {
             timeout: None,
             retry: None,
             on_success: vec![HookDef {
+                git_ref: None,
                 action: "notify".to_string(),
                 input: HashMap::new(),
             }],
@@ -22140,6 +22495,7 @@ async fn test_sub_job_inherits_revision_via_orchestration() -> Result<()> {
     flow.insert(
         "run".to_string(),
         FlowStep {
+            git_ref: None,
             action: "run-cleanup".to_string(),
             name: None,
             description: None,
@@ -22345,6 +22701,7 @@ fn test_workspace_with_approval() -> WorkspaceConfig {
     workspace.actions.insert(
         "greet".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "script".to_string(),
             name: None,
             description: None,
@@ -22385,6 +22742,7 @@ fn test_workspace_with_approval() -> WorkspaceConfig {
     workspace.actions.insert(
         "review".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "approval".to_string(),
             name: None,
             description: None,
@@ -22428,6 +22786,7 @@ fn test_workspace_with_approval() -> WorkspaceConfig {
     flow.insert(
         "greet".to_string(),
         FlowStep {
+            git_ref: None,
             action: "greet".to_string(),
             name: None,
             description: None,
@@ -22446,6 +22805,7 @@ fn test_workspace_with_approval() -> WorkspaceConfig {
     flow.insert(
         "review".to_string(),
         FlowStep {
+            git_ref: None,
             action: "review".to_string(),
             name: None,
             description: None,
@@ -22464,6 +22824,7 @@ fn test_workspace_with_approval() -> WorkspaceConfig {
     flow.insert(
         "deploy".to_string(),
         FlowStep {
+            git_ref: None,
             action: "greet".to_string(), // reuse greet action
             name: None,
             description: None,
@@ -22510,6 +22871,7 @@ fn test_workspace_with_root_approval() -> WorkspaceConfig {
     workspace.actions.insert(
         "gate".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "approval".to_string(),
             name: None,
             description: None,
@@ -22550,6 +22912,7 @@ fn test_workspace_with_root_approval() -> WorkspaceConfig {
     flow.insert(
         "gate".to_string(),
         FlowStep {
+            git_ref: None,
             action: "gate".to_string(),
             name: None,
             description: None,
@@ -22637,6 +23000,7 @@ async fn setup_with_workspace(
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let mgr = WorkspaceManager::from_config("default", workspace);
@@ -22699,6 +23063,7 @@ async fn setup_state_with_workspace(
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let mgr = WorkspaceManager::from_config("default", workspace);
@@ -23471,6 +23836,7 @@ fn event_source_workspace() -> WorkspaceConfig {
     workspace.actions.insert(
         "process".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "script".to_string(),
             name: None,
             description: None,
@@ -23512,6 +23878,7 @@ fn event_source_workspace() -> WorkspaceConfig {
     flow.insert(
         "run".to_string(),
         FlowStep {
+            git_ref: None,
             action: "process".to_string(),
             name: None,
             description: None,
@@ -23550,6 +23917,7 @@ fn event_source_workspace() -> WorkspaceConfig {
     consumer_flow.insert(
         "poll".to_string(),
         FlowStep {
+            git_ref: None,
             action: "process".to_string(),
             name: None,
             description: None,
@@ -23587,6 +23955,7 @@ fn event_source_workspace() -> WorkspaceConfig {
     workspace.triggers.insert(
         "my-source".to_string(),
         TriggerDef::EventSource {
+            git_ref: None,
             task: "consumer-task".to_string(),
             target_task: "process-event".to_string(),
             enabled: true,
@@ -23650,6 +24019,7 @@ async fn setup_event_source() -> Result<(
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let workspace = event_source_workspace();
@@ -23946,6 +24316,7 @@ async fn test_reconcile_replaces_job_when_config_changes() -> Result<()> {
     changed_workspace.triggers.insert(
         "my-source".to_string(),
         TriggerDef::EventSource {
+            git_ref: None,
             task: "consumer-task".to_string(),
             target_task: "process-event".to_string(),
             enabled: true,
@@ -24111,6 +24482,7 @@ fn disabled_event_source_workspace() -> WorkspaceConfig {
     workspace.triggers.insert(
         "my-source".to_string(),
         TriggerDef::EventSource {
+            git_ref: None,
             task: "consumer-task".to_string(),
             target_task: "process-event".to_string(),
             enabled: false,
@@ -24167,6 +24539,7 @@ async fn test_emit_endpoint_disabled_trigger() -> Result<()> {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let workspace = disabled_event_source_workspace();
@@ -24236,6 +24609,7 @@ fn event_source_workspace_with_policy(
     workspace.triggers.insert(
         "my-source".to_string(),
         TriggerDef::EventSource {
+            git_ref: None,
             task: "consumer-task".to_string(),
             target_task: "process-event".to_string(),
             enabled: true,
@@ -24304,6 +24678,7 @@ async fn setup_event_source_with_workspace(
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let mgr = WorkspaceManager::from_config("default", workspace);
@@ -24513,6 +24888,7 @@ fn retry_workspace(retry: stroem_common::models::workflow::RetryConfig) -> Works
     workspace.actions.insert(
         "flaky".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "script".to_string(),
             name: None,
             description: None,
@@ -24553,6 +24929,7 @@ fn retry_workspace(retry: stroem_common::models::workflow::RetryConfig) -> Works
     flow.insert(
         "step1".to_string(),
         FlowStep {
+            git_ref: None,
             action: "flaky".to_string(),
             name: None,
             description: None,
@@ -24734,6 +25111,7 @@ async fn test_step_retry_window_never_skips_dependents() -> Result<()> {
     task_with_dep.flow.insert(
         "dependent".to_string(),
         FlowStep {
+            git_ref: None,
             action: "noop".to_string(),
             name: None,
             description: None,
@@ -24752,6 +25130,7 @@ async fn test_step_retry_window_never_skips_dependents() -> Result<()> {
     task_with_dep.flow.insert(
         "sibling".to_string(),
         FlowStep {
+            git_ref: None,
             action: "noop".to_string(),
             name: None,
             description: None,
@@ -24868,6 +25247,10 @@ fn make_loop_step(
     loop_item: Option<Value>,
 ) -> NewJobStep {
     NewJobStep {
+        action_ref: None,
+        task_workspace: None,
+        task_ref: None,
+        task_revision: None,
         job_id,
         step_name: name.to_string(),
         action_name: "noop".to_string(),
@@ -24955,6 +25338,7 @@ async fn test_step_retry_window_closed_under_concurrent_cascade() -> Result<()> 
     task_with_dep.flow.insert(
         "dependent".to_string(),
         FlowStep {
+            git_ref: None,
             action: "noop".to_string(),
             name: None,
             description: None,
@@ -24973,6 +25357,7 @@ async fn test_step_retry_window_closed_under_concurrent_cascade() -> Result<()> 
     task_with_dep.flow.insert(
         "sibling".to_string(),
         FlowStep {
+            git_ref: None,
             action: "noop".to_string(),
             name: None,
             description: None,
@@ -25141,6 +25526,7 @@ async fn test_step_retry_window_closed_for_loop_rollup() -> Result<()> {
     task.flow.insert(
         "x".to_string(),
         FlowStep {
+            git_ref: None,
             action: "flaky".to_string(),
             name: None,
             description: None,
@@ -25235,6 +25621,7 @@ fn loop_rollup_workspace() -> WorkspaceConfig {
     flow.insert(
         "x".to_string(),
         FlowStep {
+            git_ref: None,
             action: "flaky".to_string(),
             name: None,
             description: None,
@@ -25740,6 +26127,7 @@ async fn test_step_retry_with_continue_on_failure() -> Result<()> {
     workspace.actions.insert(
         "flaky".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "script".to_string(),
             name: None,
             description: None,
@@ -25778,6 +26166,7 @@ async fn test_step_retry_with_continue_on_failure() -> Result<()> {
     workspace.actions.insert(
         "noop".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "script".to_string(),
             name: None,
             description: None,
@@ -25818,6 +26207,7 @@ async fn test_step_retry_with_continue_on_failure() -> Result<()> {
     flow.insert(
         "step-a".to_string(),
         FlowStep {
+            git_ref: None,
             action: "flaky".to_string(),
             name: None,
             description: None,
@@ -25841,6 +26231,7 @@ async fn test_step_retry_with_continue_on_failure() -> Result<()> {
     flow.insert(
         "step-b".to_string(),
         FlowStep {
+            git_ref: None,
             action: "noop".to_string(),
             name: None,
             description: None,
@@ -25978,6 +26369,7 @@ fn task_retry_workspace(max_attempts: u32, with_error_hook: bool) -> WorkspaceCo
     workspace.actions.insert(
         "flaky".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "script".to_string(),
             name: None,
             description: None,
@@ -26019,6 +26411,7 @@ fn task_retry_workspace(max_attempts: u32, with_error_hook: bool) -> WorkspaceCo
         workspace.actions.insert(
             "notify".to_string(),
             ActionDef {
+                git_ref: None,
                 action_type: "script".to_string(),
                 name: None,
                 description: None,
@@ -26060,6 +26453,7 @@ fn task_retry_workspace(max_attempts: u32, with_error_hook: bool) -> WorkspaceCo
     flow.insert(
         "step1".to_string(),
         FlowStep {
+            git_ref: None,
             action: "flaky".to_string(),
             name: None,
             description: None,
@@ -26079,6 +26473,7 @@ fn task_retry_workspace(max_attempts: u32, with_error_hook: bool) -> WorkspaceCo
 
     let on_error = if with_error_hook {
         vec![HookDef {
+            git_ref: None,
             action: "notify".to_string(),
             input: HashMap::new(),
         }]
@@ -26550,6 +26945,7 @@ async fn test_task_retry_child_job_no_retry() -> Result<()> {
     workspace.actions.insert(
         "child-action".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "script".to_string(),
             name: None,
             description: None,
@@ -26590,6 +26986,7 @@ async fn test_task_retry_child_job_no_retry() -> Result<()> {
     workspace.actions.insert(
         "run-child".to_string(),
         ActionDef {
+            git_ref: None,
             action_type: "task".to_string(),
             name: None,
             description: None,
@@ -26631,6 +27028,7 @@ async fn test_task_retry_child_job_no_retry() -> Result<()> {
     child_flow.insert(
         "child-step".to_string(),
         FlowStep {
+            git_ref: None,
             action: "child-action".to_string(),
             name: None,
             description: None,
@@ -26674,6 +27072,7 @@ async fn test_task_retry_child_job_no_retry() -> Result<()> {
     parent_flow.insert(
         "run-child-step".to_string(),
         FlowStep {
+            git_ref: None,
             action: "run-child".to_string(),
             name: None,
             description: None,
@@ -27821,6 +28220,7 @@ async fn test_all_skipped_job_at_creation_fires_workspace_hook() -> Result<()> {
         .tasks
         .insert("all-skipped".to_string(), TaskDef { flow, ..base_task });
     workspace.on_success.push(HookDef {
+        git_ref: None,
         action: "greet".to_string(),
         input: HashMap::new(),
     });
@@ -28101,6 +28501,7 @@ async fn test_agent_task_tool_rejects_child_born_terminal() -> Result<()> {
             model: Some("claude-sonnet-5".to_string()),
             prompt: Some("do the thing".to_string()),
             tools: vec![AgentToolRef::Task {
+                git_ref: None,
                 task: "instant-child".to_string(),
             }],
             ..greet_action
@@ -28247,6 +28648,7 @@ async fn test_agent_task_tool_rejects_nested_settled_child() -> Result<()> {
             model: Some("claude-sonnet-5".to_string()),
             prompt: Some("do the thing".to_string()),
             tools: vec![AgentToolRef::Task {
+                git_ref: None,
                 task: "nested-tool".to_string(),
             }],
             ..greet_action
@@ -28341,6 +28743,7 @@ fn agent_tool_test_workspace() -> WorkspaceConfig {
             model: Some("claude-sonnet-5".to_string()),
             prompt: Some("do the thing".to_string()),
             tools: vec![AgentToolRef::Task {
+                git_ref: None,
                 task: "noop-tool".to_string(),
             }],
             ..greet_action
@@ -28563,6 +28966,7 @@ async fn test_cancel_cascade_fires_parent_on_cancel_hook_exactly_once() -> Resul
     );
     // Workspace-level on_cancel: fires for the top-level parent job only.
     workspace.on_cancel.push(HookDef {
+        git_ref: None,
         action: "greet".to_string(),
         input: HashMap::new(),
     });
@@ -28709,6 +29113,7 @@ async fn test_cancel_cascade_discriminates_exactly_once_claim_with_unclaimed_chi
     );
     // Workspace-level on_cancel: fires for the top-level parent job only.
     workspace.on_cancel.push(HookDef {
+        git_ref: None,
         action: "greet".to_string(),
         input: HashMap::new(),
     });
@@ -28816,6 +29221,7 @@ async fn test_reconcile_settled_children_is_idempotent() -> Result<()> {
             flow: child_flow,
             // Task-level on_success hook — fires once when the child settles.
             on_success: vec![HookDef {
+                git_ref: None,
                 action: "greet".to_string(),
                 input: HashMap::new(),
             }],
@@ -28935,6 +29341,7 @@ async fn test_hook_of_hook_does_not_recurse() -> Result<()> {
         TaskDef {
             flow: target_flow,
             on_success: vec![HookDef {
+                git_ref: None,
                 action: "greet".to_string(),
                 input: HashMap::new(),
             }],
@@ -28973,6 +29380,7 @@ async fn test_hook_of_hook_does_not_recurse() -> Result<()> {
         },
     );
     workspace.on_success.push(HookDef {
+        git_ref: None,
         action: "run-instant-hook-target".to_string(),
         input: HashMap::new(),
     });
@@ -29034,6 +29442,7 @@ async fn test_terminal_handling_waits_for_live_steps_to_drain() -> Result<()> {
         .tasks
         .insert("two-steps".to_string(), TaskDef { flow, ..base_task });
     workspace.on_cancel.push(HookDef {
+        git_ref: None,
         action: "greet".to_string(),
         input: HashMap::new(),
     });
@@ -29298,6 +29707,7 @@ async fn test_indirect_hook_cycle_is_bounded() -> Result<()> {
         TaskDef {
             flow: cycle_flow,
             on_success: vec![HookDef {
+                git_ref: None,
                 action: "run-hook-target".to_string(),
                 input: HashMap::new(),
             }],
@@ -29454,6 +29864,7 @@ async fn test_parent_dispatch_failure_after_child_settles_still_runs_terminal_ac
         TaskDef {
             flow,
             on_error: vec![HookDef {
+                git_ref: None,
                 action: "record".to_string(),
                 input: HashMap::new(),
             }],
@@ -29760,6 +30171,10 @@ async fn test_claim_fails_agent_step_with_real_prompt_render_error() -> Result<(
 
     let steps = vec![
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "think".to_string(),
             action_name: "assistant".to_string(),
@@ -29794,6 +30209,10 @@ async fn test_claim_fails_agent_step_with_real_prompt_render_error() -> Result<(
         // the same job: the collision must be flushed to the job log even
         // though the claim ultimately fails on the "think" step's prompt.
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "secret".to_string(),
             action_name: "greet".to_string(),
@@ -29931,6 +30350,10 @@ async fn test_claim_renders_each_item_in_agent_prompt_for_loop_instance() -> Res
     .await?;
 
     let steps = vec![NewJobStep {
+        action_ref: None,
+        task_workspace: None,
+        task_ref: None,
+        task_revision: None,
         job_id,
         step_name: "think[0]".to_string(),
         action_name: "assistant".to_string(),
@@ -30029,6 +30452,10 @@ async fn test_claim_render_error_does_not_leak_secret_values() -> Result<()> {
     .await?;
 
     let steps = vec![NewJobStep {
+        action_ref: None,
+        task_workspace: None,
+        task_ref: None,
+        task_revision: None,
         job_id,
         step_name: "leaky".to_string(),
         action_name: "greet".to_string(),
@@ -30269,7 +30696,7 @@ async fn test_latest_snapshots_reads_persisted_sidecar_without_archive() -> Resu
     let (_router, pool, _tmp, _container) = setup().await?;
 
     // No rows at all.
-    let none = latest_snapshots(&pool, "default", "hello-world", "test").await;
+    let none = latest_snapshots(&pool, "default", "hello-world", None, "test").await;
     assert!(none.task.is_none() && none.global.is_none());
 
     let job_id = JobRepo::create(
@@ -30296,7 +30723,7 @@ async fn test_latest_snapshots_reads_persisted_sidecar_without_archive() -> Resu
         None,
     )
     .await?;
-    let s = latest_snapshots(&pool, "default", "hello-world", "test").await;
+    let s = latest_snapshots(&pool, "default", "hello-world", None, "test").await;
     let t = s.task.expect("task row");
     assert_eq!(t.storage_key, "k/a.tar.gz");
     assert!(t.has_json && t.json.is_none());
@@ -30336,7 +30763,7 @@ async fn test_latest_snapshots_reads_persisted_sidecar_without_archive() -> Resu
         Some(&json!({"g": true})),
     )
     .await?;
-    let s = latest_snapshots(&pool, "default", "hello-world", "test").await;
+    let s = latest_snapshots(&pool, "default", "hello-world", None, "test").await;
     assert_eq!(s.task.unwrap().json, Some(json!({"n": 2})));
     assert_eq!(s.global.unwrap().json, Some(json!({"g": true})));
     Ok(())
@@ -30353,7 +30780,7 @@ async fn test_latest_snapshots_lookup_error_yields_none() -> Result<()> {
     let bad_pool = sqlx::postgres::PgPoolOptions::new()
         .connect_lazy("postgres://nobody:nothing@127.0.0.1:1/nope")?;
 
-    let s = latest_snapshots(&bad_pool, "default", "hello-world", "test").await;
+    let s = latest_snapshots(&bad_pool, "default", "hello-world", None, "test").await;
     assert!(s.task.is_none() && s.global.is_none());
     Ok(())
 }
@@ -30412,6 +30839,7 @@ async fn setup_with_state_storage() -> Result<(
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let workspace = test_workspace();
@@ -30747,6 +31175,10 @@ async fn test_claim_renders_state_in_image_and_agent_prompt() -> Result<()> {
     .await?;
     let steps = vec![
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "img".to_string(),
             action_name: "greet".to_string(),
@@ -30773,6 +31205,10 @@ async fn test_claim_renders_state_in_image_and_agent_prompt() -> Result<()> {
             action_revision: None,
         },
         NewJobStep {
+            action_ref: None,
+            task_workspace: None,
+            task_ref: None,
+            task_revision: None,
             job_id,
             step_name: "think".to_string(),
             action_name: "assistant".to_string(),
@@ -30884,6 +31320,10 @@ async fn test_claim_omits_state_keys_when_state_storage_unconfigured() -> Result
     )
     .await?;
     let steps = vec![NewJobStep {
+        action_ref: None,
+        task_workspace: None,
+        task_ref: None,
+        task_revision: None,
         job_id,
         step_name: "greet".to_string(),
         action_name: "greet".to_string(),
@@ -31017,6 +31457,10 @@ async fn test_claim_renders_state_from_archive_for_pre_047_row() -> Result<()> {
     )
     .await?;
     let steps = vec![NewJobStep {
+        action_ref: None,
+        task_workspace: None,
+        task_ref: None,
+        task_revision: None,
         job_id,
         step_name: "legacy".to_string(),
         action_name: "greet".to_string(),
@@ -31108,6 +31552,7 @@ async fn test_claim_renders_state_from_archive_for_pre_047_row() -> Result<()> {
 /// optional `when`, optional `continue_on_failure`.
 fn guarded_flow_step(deps: &[&str], when: Option<&str>, continue_on_failure: bool) -> FlowStep {
     FlowStep {
+        git_ref: None,
         action: "greet".to_string(),
         name: None,
         description: None,
@@ -31152,6 +31597,10 @@ fn pending_step(
     when_condition: Option<&str>,
 ) -> NewJobStep {
     NewJobStep {
+        action_ref: None,
+        task_workspace: None,
+        task_ref: None,
+        task_revision: None,
         job_id,
         step_name: step_name.to_string(),
         action_name: "greet".to_string(),
@@ -31595,6 +32044,7 @@ async fn setup_with_log_archive() -> Result<(
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let workspace = test_workspace();

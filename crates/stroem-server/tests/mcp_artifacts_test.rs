@@ -90,6 +90,7 @@ async fn build_test_app() -> Result<TestApp> {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        pin_store: None,
     };
 
     let workspace = WorkspaceConfig::new();
@@ -644,6 +645,7 @@ mod acl_deny {
             default_step_timeout: None,
             default_job_timeout: None,
             workspace_reload: Default::default(),
+            pin_store: None,
         };
 
         // Seed the initial non-admin user so login can succeed.

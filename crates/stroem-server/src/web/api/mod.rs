@@ -7,6 +7,7 @@ pub mod middleware;
 #[cfg(feature = "mcp")]
 pub mod oauth_consent;
 pub mod oidc;
+mod pinned_source;
 pub mod state_upload;
 pub mod tasks;
 pub mod triggers;
@@ -390,7 +391,32 @@ pub fn build_api_routes(state: Arc<AppState>) -> Router {
 /// condition, not an author mistake, and always stays a 500 (checked first,
 /// anywhere in the chain) even though its message also contains substrings
 /// like "workspace" that could otherwise look user-facing.
+///
+/// Typed [`PinError`](crate::workspace::pins::PinError) /
+/// [`RefResolveError`](crate::refs::RefResolveError) / `GitRefError` are
+/// classified first, by their own permanence (git-refs spec § 8).
 pub(crate) fn classify_execute_error(e: anyhow::Error) -> AppError {
+    use crate::workspace::pins::{PinError, PinLoadWithheld};
+    // Typed first (spec § 8): pin and ref-syntax errors carry their own
+    // permanence; never infer it from message text.
+    if let Some(p) = e.downcast_ref::<PinError>() {
+        return match p {
+            p if p.is_transient() => AppError::Internal(e),
+            // The loader chain can quote secret values (T6 review #9): even
+            // one that reached here unwithheld never goes into the body.
+            PinError::PinLoadFailed {
+                workspace, commit, ..
+            } => AppError::BadRequest(PinLoadWithheld::for_commit(workspace, commit).to_string()),
+            _ => AppError::BadRequest(format!("{:#}", e)),
+        };
+    }
+    if e.downcast_ref::<PinLoadWithheld>().is_some()
+        || e.downcast_ref::<crate::refs::RefResolveError>().is_some()
+        || e.downcast_ref::<stroem_common::git_ref::GitRefError>()
+            .is_some()
+    {
+        return AppError::BadRequest(format!("{:#}", e));
+    }
     let chain = format!("{:#}", e);
     if chain.contains("is not available") {
         return AppError::Internal(e);
@@ -581,5 +607,115 @@ mod classify_execute_error_tests {
         let e = anyhow::anyhow!("connection 'x': workspace 'B' is not available")
             .context("step 'run': failed to resolve connection inputs");
         assert!(matches!(classify_execute_error(e), AppError::Internal(_)));
+    }
+
+    #[test]
+    fn transient_pin_error_is_internal() {
+        let e = anyhow::Error::from(crate::workspace::pins::PinError::PinUnavailable {
+            workspace: "etl".into(),
+            message: "connect timed out".into(),
+        })
+        .context("resolve ref");
+        assert!(matches!(classify_execute_error(e), AppError::Internal(_)));
+    }
+
+    #[test]
+    fn permanent_pin_errors_are_bad_request() {
+        use crate::workspace::pins::PinError;
+        for err in [
+            PinError::RefNotFound {
+                workspace: "etl".into(),
+                git_ref: "release/9".into(),
+            },
+            PinError::CommitNotFound {
+                workspace: "etl".into(),
+                commit: "a".repeat(40),
+            },
+            PinError::PinLoadFailed {
+                workspace: "etl".into(),
+                commit: "a".repeat(40),
+                message: "bad yaml".into(),
+            },
+            PinError::NotGit {
+                workspace: "docs".into(),
+            },
+        ] {
+            let e = anyhow::Error::from(err).context("Failed to create job");
+            assert!(matches!(classify_execute_error(e), AppError::BadRequest(_)));
+        }
+    }
+
+    /// T6 review #9: a `PinLoadFailed` message is the raw loader chain and can
+    /// quote secret values; even one that reaches the classifier unwithheld
+    /// never puts it in the body.
+    #[test]
+    fn pin_load_failed_body_never_carries_the_loader_message() {
+        let e = anyhow::Error::from(crate::workspace::pins::PinError::PinLoadFailed {
+            workspace: "etl".into(),
+            commit: "abcdef0".repeat(5) + "abcde",
+            message: "Variable `secret.token` = s3cr3t".into(),
+        })
+        .context("Failed to create job");
+        match classify_execute_error(e) {
+            AppError::BadRequest(msg) => {
+                assert_eq!(
+                    msg,
+                    "[pin] etl (abcdef0) cannot be loaded: its configuration does not load"
+                );
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn withheld_pin_load_is_bad_request_with_the_fixed_sentence() {
+        use crate::workspace::pins::{PinLoadWithheld, PinRef};
+        let pin = PinRef {
+            git_ref: "release/2.3".into(),
+            commit: "0123456".repeat(5) + "01234",
+        };
+        let e = anyhow::Error::from(PinLoadWithheld::new("etl", &pin));
+        match classify_execute_error(e) {
+            AppError::BadRequest(msg) => assert_eq!(
+                msg,
+                "[pin] etl@release/2.3 (0123456) cannot be loaded: its configuration does not load"
+            ),
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ref_resolve_errors_are_bad_request() {
+        use crate::refs::RefResolveError;
+        for err in [
+            RefResolveError::LibraryItem("common.x".into()),
+            RefResolveError::UnknownWorkspace("nope".into()),
+            RefResolveError::NotGit("docs".into()),
+            RefResolveError::AgentAction("ask".into()),
+        ] {
+            let not_git = matches!(err, RefResolveError::NotGit(_));
+            let e = anyhow::Error::from(err).context("Failed to create job");
+            match classify_execute_error(e) {
+                // The NotGit sentence is user-facing: pin its wording.
+                AppError::BadRequest(msg) if not_git => assert!(
+                    msg.contains("workspace 'docs' is not a git workspace"),
+                    "{msg}"
+                ),
+                AppError::BadRequest(_) => {}
+                other => panic!("expected BadRequest, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_ref_is_bad_request() {
+        let e = anyhow::Error::from(stroem_common::git_ref::GitRefError::InvalidName(
+            " v1".into(),
+        ))
+        .context("step 'run': invalid ref name");
+        match classify_execute_error(e) {
+            AppError::BadRequest(msg) => assert!(msg.contains("invalid ref name"), "{msg}"),
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
     }
 }

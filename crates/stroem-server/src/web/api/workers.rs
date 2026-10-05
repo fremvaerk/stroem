@@ -11,8 +11,9 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::json;
+use std::collections::HashMap;
 use std::sync::Arc;
-use stroem_db::{JobStepRepo, WorkerRepo};
+use stroem_db::{JobRepo, JobStepRepo, WorkerRepo};
 
 #[derive(Debug, Deserialize)]
 pub struct ListWorkersQuery {
@@ -99,12 +100,18 @@ pub async fn get_worker(
                     steps
                         .into_iter()
                         .filter(|s| {
-                            let folder = all_configs
+                            let live_folder = all_configs
                                 .iter()
                                 .find(|(ws_name, _)| ws_name == &s.workspace)
                                 .and_then(|(_, ws)| {
                                     ws.tasks.get(&s.task_name).and_then(|t| t.folder.clone())
                                 });
+                            // Spec § 7.8: a pinned job's own folder, never the live one.
+                            let folder = crate::acl::acl_folder(
+                                s.git_ref.as_deref(),
+                                s.task_folder.as_deref(),
+                                live_folder.as_deref(),
+                            );
                             let task_path = make_task_path(folder.as_deref(), &s.task_name);
                             let perm = state.acl.evaluate(
                                 &s.workspace,
@@ -131,9 +138,43 @@ pub async fn get_worker(
 
     let total = steps.len() as i64;
 
+    // Per-job redaction of `error_message` (spec § 7.4): one per distinct job
+    // that has an error to show. A job whose set cannot be built (a pin not
+    // loadable, transiently or for good, or the row gone) has its rows' error
+    // masked whole — fail closed per row, not per page. One memo for the
+    // request: the short-circuit probe, each closure (by job id) and each
+    // pin's values are computed once, however many rows share them.
+    let mut redactions: HashMap<uuid::Uuid, Option<crate::redaction::JobRedaction>> =
+        HashMap::new();
+    let mut memo = crate::redaction::RedactionMemo::default();
+    for s in &steps {
+        if s.error_message.is_none() || redactions.contains_key(&s.job_id) {
+            continue;
+        }
+        let set = match (
+            JobRepo::get(&state.pool, s.job_id).await,
+            JobStepRepo::get_steps_for_job(&state.pool, s.job_id).await,
+        ) {
+            (Ok(Some(job)), Ok(job_steps)) => {
+                crate::redaction::job_redaction_memo(&state, &job, &job_steps, &mut memo)
+                    .await
+                    .ok()
+            }
+            _ => None,
+        };
+        redactions.insert(s.job_id, set);
+    }
+
     let steps_json: Vec<serde_json::Value> = steps
         .iter()
         .map(|s| {
+            let error_message =
+                s.error_message
+                    .as_deref()
+                    .map(|m| match redactions.get(&s.job_id) {
+                        Some(Some(redaction)) => redaction.apply_str(m),
+                        _ => crate::workspace_set::REDACTED.to_string(),
+                    });
             json!({
                 "job_id": s.job_id,
                 "workspace": s.workspace,
@@ -144,7 +185,7 @@ pub async fn get_worker(
                 "status": s.status,
                 "started_at": s.started_at,
                 "completed_at": s.completed_at,
-                "error_message": s.error_message,
+                "error_message": error_message,
             })
         })
         .collect();

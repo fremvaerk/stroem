@@ -1,4 +1,3 @@
-use crate::job_creator::create_job_for_task_detailed;
 use crate::state::{AliveGuard, AppState};
 use crate::workspace::WorkspaceManager;
 use chrono::{DateTime, Utc};
@@ -22,6 +21,8 @@ pub(crate) struct TriggerState {
     pub(crate) cron_expr: String,
     pub(crate) workspace: String,
     pub(crate) task: String,
+    /// The trigger's `ref:` — the task runs pinned to it (spec § 7.5).
+    pub(crate) git_ref: Option<String>,
     pub(crate) input: HashMap<String, serde_json::Value>,
     pub(crate) trigger_name: String,
     pub(crate) concurrency: ConcurrencyPolicy,
@@ -189,8 +190,10 @@ async fn load_triggers(
 
         for (trigger_name, trigger_def) in &config.triggers {
             // Only process enabled scheduler triggers
-            let (cron_expr, task, input, concurrency, tz_str, refresh) = match trigger_def {
+            let (cron_expr, task, git_ref, input, concurrency, tz_str, refresh) = match trigger_def
+            {
                 stroem_common::models::workflow::TriggerDef::Scheduler {
+                    git_ref,
                     cron,
                     task,
                     input,
@@ -201,6 +204,7 @@ async fn load_triggers(
                 } if *enabled => (
                     cron.clone(),
                     task.clone(),
+                    git_ref.clone(),
                     input.clone(),
                     *concurrency,
                     timezone.clone(),
@@ -261,6 +265,7 @@ async fn load_triggers(
                     cron_expr,
                     workspace: ws_name.to_string(),
                     task,
+                    git_ref,
                     input,
                     trigger_name: trigger_name.clone(),
                     concurrency,
@@ -409,7 +414,24 @@ async fn fire_trigger(app_state: &AppState, workspaces: &WorkspaceManager, tstat
         return;
     }
 
-    let revision = app_state.workspaces.get_revision(&tstate.workspace);
+    // Spec § 7.5: resolve the target — cross-workspace `ws.task` and/or
+    // `ref:` — BEFORE the concurrency policy. A fire that cannot create its
+    // job must not cancel the previous run or record a skipped row.
+    let target = match crate::trigger_target::resolve_trigger_target(
+        workspaces,
+        &tstate.workspace,
+        &config,
+        &tstate.task,
+        tstate.git_ref.as_deref(),
+    )
+    .await
+    {
+        Ok(target) => target,
+        Err(e) => {
+            tracing::error!("Trigger '{}' MISSED: {:#}", source_id, e);
+            return;
+        }
+    };
 
     // Apply concurrency policy
     match tstate.concurrency {
@@ -424,12 +446,13 @@ async fn fire_trigger(app_state: &AppState, workspaces: &WorkspaceManager, tstat
                     // Record the skipped trigger fire for visibility
                     match JobRepo::create_skipped(
                         &app_state.pool,
-                        &tstate.workspace,
-                        &tstate.task,
+                        &target.workspace,
+                        &target.task_name,
                         Some(input.clone()),
                         "trigger",
                         Some(&source_id),
-                        revision.as_deref(),
+                        target.revision(&app_state.workspaces).as_deref(),
+                        target.pin_cols().as_ref(),
                     )
                     .await
                     {
@@ -495,40 +518,26 @@ async fn fire_trigger(app_state: &AppState, workspaces: &WorkspaceManager, tstat
     }
 
     tracing::info!(
-        "Scheduler firing trigger '{}' -> task '{}'",
+        "Scheduler firing trigger '{}' -> task '{}/{}'{}",
         source_id,
-        tstate.task
+        target.workspace,
+        target.task_name,
+        target
+            .pin
+            .as_ref()
+            .map(|p| format!(" @ {} ({})", p.git_ref, p.commit))
+            .unwrap_or_default()
     );
 
-    match create_job_for_task_detailed(
-        workspaces,
-        &app_state.pool,
-        &config,
-        &tstate.workspace,
-        &tstate.task,
-        input,
-        "trigger",
-        Some(&source_id),
-        revision.as_deref(),
-        None,
-        app_state.config.agents.as_ref(),
-        crate::config::JobDefaults::from(app_state.config.as_ref()),
-    )
-    .await
+    match crate::trigger_target::create_target_job(app_state, &target, input, "trigger", &source_id)
+        .await
     {
         Ok(created) => {
             let job_id = created.job_id;
             tracing::info!("Trigger '{}' created job {}", source_id, job_id);
             // Fire on_suspended hooks for any root-level approval steps that were
             // suspended during job creation (FIX 2).
-            crate::settlement::dispatch::fire_initial_suspended_hooks(
-                app_state,
-                &config,
-                &tstate.workspace,
-                &tstate.task,
-                job_id,
-            )
-            .await;
+            crate::settlement::dispatch::fire_initial_suspended_hooks(app_state, job_id).await;
             app_state.settlement().job_created(created).await;
         }
         Err(e) => {
@@ -557,6 +566,7 @@ mod tests {
             cron_expr: cron_expr.to_string(),
             workspace: "default".to_string(),
             task: "noop".to_string(),
+            git_ref: None,
             input: HashMap::new(),
             trigger_name: "test".to_string(),
             concurrency: ConcurrencyPolicy::Allow,
@@ -615,6 +625,7 @@ mod tests {
         config.triggers.insert(
             name.to_string(),
             TriggerDef::Scheduler {
+                git_ref: None,
                 cron: cron.to_string(),
                 task: "t".to_string(),
                 input: HashMap::new(),
@@ -751,6 +762,7 @@ mod tests {
             config.triggers.insert(
                 "every-minute".to_string(),
                 TriggerDef::Scheduler {
+                    git_ref: None,
                     cron: "* * * * *".to_string(),
                     task: task.to_string(),
                     input: HashMap::new(),
@@ -785,6 +797,7 @@ mod tests {
         config.actions.insert(
             "greet".to_string(),
             ActionDef {
+                git_ref: None,
                 action_type: "script".to_string(),
                 name: None,
                 description: None,
@@ -825,6 +838,7 @@ mod tests {
         flow.insert(
             "step1".to_string(),
             FlowStep {
+                git_ref: None,
                 action: "greet".to_string(),
                 name: None,
                 description: None,
@@ -860,6 +874,7 @@ mod tests {
         config.triggers.insert(
             "every-minute".to_string(),
             TriggerDef::Scheduler {
+                git_ref: None,
                 cron: "* * * * *".to_string(),
                 task: "hello".to_string(),
                 input: HashMap::new(),
@@ -891,6 +906,7 @@ mod tests {
         config.triggers.insert(
             "disabled-trigger".to_string(),
             TriggerDef::Scheduler {
+                git_ref: None,
                 cron: "* * * * *".to_string(),
                 task: "test".to_string(),
                 input: HashMap::new(),
@@ -914,6 +930,7 @@ mod tests {
         config.triggers.insert(
             "on-push".to_string(),
             TriggerDef::Webhook {
+                git_ref: None,
                 name: "on-push".to_string(),
                 task: "test".to_string(),
                 secret: None,
@@ -938,6 +955,7 @@ mod tests {
         config.triggers.insert(
             "nightly".to_string(),
             TriggerDef::Scheduler {
+                git_ref: None,
                 cron: "0 0 2 * * *".to_string(),
                 task: "test".to_string(),
                 input: HashMap::new(),
@@ -984,6 +1002,7 @@ mod tests {
         config.triggers.insert(
             "bad-cron".to_string(),
             TriggerDef::Scheduler {
+                git_ref: None,
                 cron: "not valid cron".to_string(),
                 task: "test".to_string(),
                 input: HashMap::new(),
@@ -1008,6 +1027,7 @@ mod tests {
         config1.triggers.insert(
             "my-trigger".to_string(),
             TriggerDef::Scheduler {
+                git_ref: None,
                 cron: "* * * * *".to_string(),
                 task: "test".to_string(),
                 input: HashMap::new(),
@@ -1033,6 +1053,7 @@ mod tests {
         config2.triggers.insert(
             "my-trigger".to_string(),
             TriggerDef::Scheduler {
+                git_ref: None,
                 cron: "0 * * * *".to_string(), // changed from * to 0
                 task: "test".to_string(),
                 input: HashMap::new(),
@@ -1060,6 +1081,7 @@ mod tests {
         config.triggers.insert(
             "every-minute".to_string(),
             TriggerDef::Scheduler {
+                git_ref: None,
                 cron: "* * * * *".to_string(),
                 task: "task-a".to_string(),
                 input: HashMap::new(),
@@ -1072,6 +1094,7 @@ mod tests {
         config.triggers.insert(
             "nightly".to_string(),
             TriggerDef::Scheduler {
+                git_ref: None,
                 cron: "0 0 2 * * *".to_string(),
                 task: "task-b".to_string(),
                 input: HashMap::new(),
@@ -1085,6 +1108,7 @@ mod tests {
         config.triggers.insert(
             "disabled-one".to_string(),
             TriggerDef::Scheduler {
+                git_ref: None,
                 cron: "0 0 * * *".to_string(),
                 task: "task-c".to_string(),
                 input: HashMap::new(),
@@ -1119,6 +1143,7 @@ mod tests {
         config.triggers.insert(
             "deploy".to_string(),
             TriggerDef::Scheduler {
+                git_ref: None,
                 cron: "0 0 * * *".to_string(),
                 task: "deploy-task".to_string(),
                 input: input.clone(),
@@ -1185,6 +1210,7 @@ mod tests {
             default_step_timeout: None,
             default_job_timeout: None,
             workspace_reload: Default::default(),
+            pin_store: None,
         };
         let log_storage = LogStorage::new(&config.log_storage.local_dir);
         let pool = sqlx::PgPool::connect_lazy("postgres://invalid:5432/db").unwrap();
@@ -1272,6 +1298,7 @@ mod tests {
         config1.triggers.insert(
             "tz-trigger".to_string(),
             TriggerDef::Scheduler {
+                git_ref: None,
                 cron: "0 2 * * *".to_string(),
                 task: "test".to_string(),
                 input: HashMap::new(),
@@ -1297,6 +1324,7 @@ mod tests {
         config2.triggers.insert(
             "tz-trigger".to_string(),
             TriggerDef::Scheduler {
+                git_ref: None,
                 cron: "0 2 * * *".to_string(), // same cron
                 task: "test".to_string(),
                 input: HashMap::new(),
@@ -1325,6 +1353,7 @@ mod tests {
         config1.triggers.insert(
             "tz-trigger".to_string(),
             TriggerDef::Scheduler {
+                git_ref: None,
                 cron: "0 2 * * *".to_string(),
                 task: "test".to_string(),
                 input: HashMap::new(),
@@ -1352,6 +1381,7 @@ mod tests {
         config2.triggers.insert(
             "tz-trigger".to_string(),
             TriggerDef::Scheduler {
+                git_ref: None,
                 cron: "0 2 * * *".to_string(), // same cron
                 task: "test".to_string(),
                 input: HashMap::new(),
@@ -1391,6 +1421,7 @@ mod tests {
         config.triggers.insert(
             "bad-tz".to_string(),
             TriggerDef::Scheduler {
+                git_ref: None,
                 cron: "0 2 * * *".to_string(),
                 task: "test".to_string(),
                 input: HashMap::new(),

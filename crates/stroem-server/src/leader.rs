@@ -63,6 +63,14 @@ impl LeaderElection {
         })
     }
 
+    /// A handle that always reports `false` (tests of replica-local work
+    /// that must also run on followers).
+    pub fn never() -> Arc<Self> {
+        Arc::new(Self {
+            is_leader: Arc::new(AtomicBool::new(false)),
+        })
+    }
+
     /// Spawn the leader-election loop. Returns a shared handle plus the task
     /// `JoinHandle` so the caller can await shutdown.
     ///

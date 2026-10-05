@@ -20,6 +20,9 @@ pub struct SuspendedHookContext {
     pub source_id: Option<String>,
     /// Workspace revision pinned on the job (git SHA or folder hash).
     pub revision: Option<String>,
+    /// The ref a pinned job runs at (`job.git_ref`); `None` for unpinned jobs.
+    #[serde(rename = "ref")]
+    pub git_ref: Option<String>,
 }
 
 /// Context available to hook templates as `hook.*`
@@ -40,6 +43,9 @@ pub struct HookContext {
     pub artifacts: Vec<HookArtifactMeta>,
     /// Workspace revision pinned on the job (git SHA or folder hash).
     pub revision: Option<String>,
+    /// The ref a pinned job runs at (`job.git_ref`); `None` for unpinned jobs.
+    #[serde(rename = "ref")]
+    pub git_ref: Option<String>,
 }
 
 /// Info about a single failed step, available in `hook.failed_steps`
@@ -304,6 +310,7 @@ pub async fn fire_hooks_of_kind(
             &ctx_value,
             job.job_id,
             job.revision.as_deref(),
+            job.git_ref.as_deref(),
             defaults,
         )
         .await
@@ -391,6 +398,7 @@ pub async fn fire_suspended_hooks(
         source_type: job.source_type.clone(),
         source_id: job.source_id.clone(),
         revision: job.revision.clone(),
+        git_ref: job.git_ref.clone(),
     };
 
     let ctx_value = match serde_json::to_value(&ctx) {
@@ -416,6 +424,7 @@ pub async fn fire_suspended_hooks(
             &ctx_value,
             job.job_id,
             job.revision.as_deref(),
+            job.git_ref.as_deref(),
             defaults,
         )
         .await
@@ -544,12 +553,17 @@ async fn build_hook_context(
         failed_steps,
         artifacts,
         revision: job.revision.clone(),
+        git_ref: job.git_ref.clone(),
     })
 }
 
 /// `source_job_id` is the job whose terminal state (or suspended step) fired
 /// the hook. It is persisted as the hook job's `source_job_id` — the link
 /// [`hook_chain_depth`] walks — and, as a string, its `source_id`.
+///
+/// `source_git_ref` + `revision` are the source job's pin: a hook job of a
+/// pinned job runs the same commit (git-refs spec § 7.3), and
+/// `workspace_config` is then that commit's config.
 #[allow(clippy::too_many_arguments)]
 async fn fire_single_hook(
     s: &Settlement,
@@ -559,11 +573,29 @@ async fn fire_single_hook(
     ctx_value: &serde_json::Value,
     source_job_id: uuid::Uuid,
     revision: Option<&str>,
+    source_git_ref: Option<&str>,
     defaults: crate::config::JobDefaults,
 ) -> anyhow::Result<()> {
     let workspaces = &s.workspaces;
     let pool = &s.pool;
     let source_id = source_job_id.to_string();
+    // `ref` on hooks is out of v1 (git-refs spec § 4.6); serde would otherwise
+    // drop it silently and run the default branch. The caller logs this to the
+    // source job and fires nothing.
+    if hook.git_ref.is_some() {
+        anyhow::bail!(
+            "`ref` is not supported on hooks yet (hook action '{}')",
+            hook.action
+        );
+    }
+    // A pin needs both halves: never persist a ref without its commit.
+    if source_git_ref.is_some() && revision.is_none() {
+        anyhow::bail!(
+            "source job {} carries ref '{}' without its commit",
+            source_job_id,
+            source_git_ref.unwrap_or_default()
+        );
+    }
     // Resolve action
     let action = workspace_config
         .actions
@@ -599,6 +631,16 @@ async fn fire_single_hook(
             .as_ref()
             .context("type: task action missing task field")?;
 
+        // Same rule for a `type: task` hook action carrying `ref` (spec §
+        // 4.6): this branch reads `action.task` directly, so the `ref` would
+        // otherwise be dropped.
+        if action.git_ref.is_some() {
+            anyhow::bail!(
+                "hook action '{}' is a `type: task` action with `ref`; `ref` is not supported on hooks yet",
+                hook.action
+            );
+        }
+
         if let Some(msg) = foreign_hook_task_error(
             &hook.action,
             task_ref,
@@ -622,6 +664,7 @@ async fn fire_single_hook(
             crate::job_creator::CreationMode::Hook { source_job_id },
             None, // agents_config not available in hook context; orchestrator dispatches agents
             defaults,
+            source_git_ref,
         )
         .await
         .context("Failed to create hook task job")?;
@@ -644,6 +687,7 @@ async fn fire_single_hook(
     let task_name = format!("_hook:{}", hook.action);
 
     let flow_step = FlowStep {
+        git_ref: None,
         action: hook.action.clone(),
         name: None,
         description: None,
@@ -658,6 +702,12 @@ async fn fire_single_hook(
         retry: None,
         inline_action: None,
     };
+
+    // A hook job of a pinned job runs the same commit (spec § 7.3).
+    let pin_cols = source_git_ref.map(|r| stroem_db::JobPinCols {
+        git_ref: r.to_string(),
+        task_folder: None,
+    });
 
     let mut tx = pool
         .begin()
@@ -680,6 +730,7 @@ async fn fire_single_hook(
         Some(source_job_id),
         None,
         None, // max_retries: hook jobs have no task-level retry
+        pin_cols.as_ref(),
     )
     .await
     .context("Failed to create hook job")?;
@@ -693,6 +744,8 @@ async fn fire_single_hook(
         Some(rendered_input),
         StepStatus::Ready,
         defaults,
+        None,
+        None,
         None,
         None,
     );
@@ -830,6 +883,7 @@ mod tests {
             }],
             artifacts: vec![],
             revision: None,
+            git_ref: None,
         };
 
         let value = serde_json::to_value(&ctx).unwrap();
@@ -856,6 +910,7 @@ mod tests {
             failed_steps: vec![],
             artifacts: vec![],
             revision: None,
+            git_ref: None,
         };
 
         let ctx_value = serde_json::to_value(&ctx).unwrap();
@@ -888,6 +943,7 @@ mod tests {
             failed_steps: vec![],
             artifacts: vec![],
             revision: Some("abc123def".to_string()),
+            git_ref: None,
         };
 
         let ctx_value = serde_json::to_value(&ctx).unwrap();
@@ -901,6 +957,50 @@ mod tests {
 
         let result = render_input_map(&input, &template_context).unwrap();
         assert_eq!(result["message"], "Deployed revision abc123def");
+    }
+
+    #[test]
+    fn test_hook_ref_available_in_template() {
+        let ctx = HookContext {
+            workspace: "prod".to_string(),
+            task_name: "deploy".to_string(),
+            job_id: "abc-123".to_string(),
+            status: "completed".to_string(),
+            is_success: true,
+            error_message: None,
+            source_type: "trigger".to_string(),
+            source_id: None,
+            started_at: None,
+            completed_at: None,
+            duration_secs: None,
+            failed_steps: vec![],
+            artifacts: vec![],
+            revision: Some("abc123def".to_string()),
+            git_ref: Some("release/2.3".to_string()),
+        };
+        let ctx_value = serde_json::to_value(&ctx).unwrap();
+        assert_eq!(ctx_value["ref"], "release/2.3", "serialised as `ref`");
+        let template_context = json!({ "hook": ctx_value });
+        let mut input = std::collections::HashMap::new();
+        input.insert(
+            "message".to_string(),
+            json!("{{ hook.task_name }} ran {{ hook.ref }}"),
+        );
+        let result = render_input_map(&input, &template_context).unwrap();
+        assert_eq!(result["message"], "deploy ran release/2.3");
+
+        let suspended = SuspendedHookContext {
+            workspace: "prod".to_string(),
+            task_name: "deploy".to_string(),
+            job_id: "abc-123".to_string(),
+            step_name: "gate".to_string(),
+            message: "ok?".to_string(),
+            source_type: "trigger".to_string(),
+            source_id: None,
+            revision: None,
+            git_ref: Some("v4.1.0".to_string()),
+        };
+        assert_eq!(serde_json::to_value(&suspended).unwrap()["ref"], "v4.1.0");
     }
 
     #[test]
@@ -929,6 +1029,7 @@ mod tests {
             }],
             artifacts: vec![],
             revision: None,
+            git_ref: None,
         };
 
         let ctx_value = serde_json::to_value(&ctx).unwrap();
@@ -963,6 +1064,7 @@ mod tests {
             failed_steps: vec![],
             artifacts: vec![],
             revision: None,
+            git_ref: None,
         };
 
         let ctx_value = serde_json::to_value(&ctx).unwrap();
@@ -1010,6 +1112,7 @@ mod tests {
             failed_steps: vec![],
             artifacts: vec![],
             revision: None,
+            git_ref: None,
         };
 
         let ctx_value = serde_json::to_value(&ctx).unwrap();
@@ -1067,6 +1170,7 @@ mod tests {
                 },
             ],
             revision: None,
+            git_ref: None,
         };
 
         let ctx_value = serde_json::to_value(&ctx).unwrap();
@@ -1123,6 +1227,7 @@ mod tests {
                     .to_string(),
             }],
             revision: None,
+            git_ref: None,
         };
 
         let ctx_value = serde_json::to_value(&ctx).unwrap();
@@ -1142,6 +1247,7 @@ mod tests {
 
     fn make_hook(action: &str) -> HookDef {
         HookDef {
+            git_ref: None,
             action: action.to_string(),
             input: HashMap::new(),
         }
@@ -1472,6 +1578,7 @@ mod tests {
             source_type: "api".to_string(),
             source_id: Some("user@example.com".to_string()),
             revision: None,
+            git_ref: None,
         };
 
         let value = serde_json::to_value(&ctx).unwrap();
@@ -1498,6 +1605,7 @@ mod tests {
             source_type: "trigger".to_string(),
             source_id: None,
             revision: None,
+            git_ref: None,
         };
 
         let value = serde_json::to_value(&ctx).unwrap();
@@ -1515,6 +1623,7 @@ mod tests {
             source_type: "api".to_string(),
             source_id: None,
             revision: Some("abc123def".to_string()),
+            git_ref: None,
         };
 
         let ctx_value = serde_json::to_value(&ctx).unwrap();

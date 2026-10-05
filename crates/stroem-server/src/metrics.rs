@@ -51,6 +51,13 @@ pub const STROEM_WORKSPACE_LOAD_PERMITS_AVAILABLE: &str = "stroem_workspace_load
 /// rendering (seconds). Label: entry (`claim`, `advance`, `init`).
 pub const STROEM_SNAPSHOT_RESOLVE_SECONDS: &str = "stroem_snapshot_resolve_seconds";
 
+/// `counter` — pinned-config loads (cache misses of `PinStore::ensure`).
+/// Labels: workspace, result (`ok`, `not_git`, `ref_not_found`,
+/// `commit_not_found`, `load_failed`, `unavailable`).
+pub const STROEM_PIN_LOADS_TOTAL: &str = "stroem_pin_loads_total";
+/// `gauge` — pinned configs held in memory on THIS replica. Label: workspace.
+pub const STROEM_PINS_CACHED: &str = "stroem_pins_cached";
+
 use anyhow::{Context, Result};
 use axum::extract::{MatchedPath, Request};
 use axum::middleware::Next;
@@ -139,6 +146,18 @@ pub async fn gather_gauges(state: &AppState) {
             gauge!(STROEM_WORKSPACE_LAST_SUCCESSFUL_LOAD_AGE_SECONDS, "workspace" => status.name)
                 .set(age.as_secs_f64());
         }
+    }
+    // Zero for a pin-source workspace with nothing cached, so the series does
+    // not go stale-absent after an eviction.
+    let cached: std::collections::HashMap<String, usize> = state
+        .workspaces
+        .pins()
+        .cached_counts()
+        .into_iter()
+        .collect();
+    for workspace in state.workspaces.pins().source_names() {
+        let count = cached.get(&workspace).copied().unwrap_or(0);
+        gauge!(STROEM_PINS_CACHED, "workspace" => workspace).set(count as f64);
     }
     gauge!(STROEM_WORKSPACE_LOAD_PERMITS_AVAILABLE)
         .set(state.workspaces.load_permits_available() as f64);
@@ -288,6 +307,8 @@ mod tests {
             STROEM_WORKSPACE_LAST_SUCCESSFUL_LOAD_AGE_SECONDS,
             STROEM_WORKSPACE_LOAD_OVERDUE,
             STROEM_WORKSPACE_LOAD_PERMITS_AVAILABLE,
+            STROEM_PIN_LOADS_TOTAL,
+            STROEM_PINS_CACHED,
         ];
         let unique: std::collections::HashSet<_> = names.iter().collect();
         assert_eq!(unique.len(), names.len(), "metric names must be unique");

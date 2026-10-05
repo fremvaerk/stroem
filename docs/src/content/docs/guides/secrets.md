@@ -115,7 +115,15 @@ Any backend supported by vals works:
 
 ### API redaction
 
-Secret values are automatically redacted from API responses. When you view a job via `GET /api/jobs/:id`, any field (job input/output, step input/output) that contains a known secret value will have it replaced with `••••••`. Substring matches are also redacted. Additionally, unresolved `ref+` references are redacted to avoid leaking secret-manager paths.
+Secret values are automatically redacted from API responses. When you view a job via `GET /api/jobs/:id`, every field except identifiers (ids, names, statuses, revisions, timestamps) — job input/output, step input/output, approval messages, conditions — that contains a known secret value will have it replaced with `••••••`. Substring matches are also redacted. Additionally, unresolved `ref+` references are redacted to avoid leaking secret-manager paths.
+
+The same masking applies to a sync webhook's response and the webhook
+job-status poll, to MCP `get_job_status`, and to the step errors listed on a
+worker's detail page. A job that runs on a [git ref](/guides/git-refs/) is
+also masked with the secrets of its commit (and of every commit it is
+connected to); see [Git Refs → Secrets and redaction](/guides/git-refs/#secrets-and-redaction).
+Job **logs** are not masked: a script that prints a secret shows it in the
+log.
 
 Step `error_message` and `retry_history` are redacted the same way. This matters
 because a template error can quote the value that caused it — for example

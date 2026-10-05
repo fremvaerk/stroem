@@ -122,6 +122,7 @@ mod tests {
 
     fn make_step(action: &str, depends_on: Vec<&str>) -> FlowStep {
         FlowStep {
+            git_ref: None,
             action: action.to_string(),
             name: None,
             description: None,
@@ -205,10 +206,12 @@ mod tests {
             timeout: None,
             retry: None,
             on_success: vec![HookDef {
+                git_ref: None,
                 action: "slack-notify".to_string(),
                 input: HashMap::new(),
             }],
             on_error: vec![HookDef {
+                git_ref: None,
                 action: "pagerduty".to_string(),
                 input: HashMap::new(),
             }],
@@ -430,6 +433,7 @@ mod tests {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![HookDef {
+                git_ref: None,
                 action: "notify".to_string(),
                 input: HashMap::new(),
             }],

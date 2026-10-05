@@ -227,6 +227,7 @@ Removes every artifact uploaded for `step` on this job — both the `job_artifac
 
 ```
 GET /worker/workspace/{ws}.tar.gz
+GET /worker/workspace/{ws}.tar.gz?revision={revision}
 ```
 
 Downloads a workspace as a gzipped tar archive.
@@ -234,6 +235,7 @@ Downloads a workspace as a gzipped tar archive.
 | Parameter | Description |
 |-----------|-------------|
 | `ws` | Workspace name |
+| `revision` | Optional. The revision the claim response named (`revision`); the worker always sends it for a claimed step. Without it, the current revision is served |
 
 **Headers:**
 - `If-None-Match` — Revision ETag for conditional fetch
@@ -243,11 +245,58 @@ Downloads a workspace as a gzipped tar archive.
 - `X-Revision: {revision}`
 - `ETag: "{revision}"`
 
+How a requested `revision` is served:
+
+- **The current revision of a healthy workspace**: built from the server's
+  working copy, as without `revision`. For a git workspace this includes
+  its `.git` directory.
+- **Any other revision of a git workspace** — an older commit, a commit a
+  [git ref](/guides/git-refs/) pinned, or any commit while the workspace's
+  default branch fails to load: built from a clean checkout of that commit,
+  which has **no `.git` directory**, and cached. This does not depend on the
+  workspace's live load being healthy.
+- **A folder workspace**: only revisions still in the server's tarball cache,
+  or the current one, can be served; any other is `404`.
+
 | Status | Description |
 |--------|-------------|
 | `200` | Tarball returned |
 | `304` | Not Modified (workspace unchanged) |
-| `404` | Workspace not found |
+| `404` | Workspace not found, the commit does not exist in the git repository, or a folder workspace's revision is no longer available |
+| `503` | The commit exists but cannot be fetched right now (the git server is unreachable from this replica). Carries `Retry-After: 5`. The worker tries again every 5 seconds, up to 12 attempts in all (about a minute), then fails the step |
+
+## Download State Snapshot
+
+```
+GET /worker/state/{ws}/{task}?job_id={job_id}
+GET /worker/global-state/{ws}?job_id={job_id}
+```
+
+Downloads the latest task-state (or global-state) snapshot as a gzipped tar
+archive, with an `X-Snapshot-Id` header. `204` when there is no snapshot yet,
+`404` when state storage is not configured.
+
+| Parameter | Description |
+|-----------|-------------|
+| `job_id` | Optional. The claimed job. With it, the server reads the **job's own** state coordinates — its workspace, its task and, for a job on a [git ref](/guides/git-refs/), its ref — and ignores `{ws}` / `{task}`. `404` if the job does not exist |
+
+Without `job_id` (a worker older than the server), the path's `{ws}` /
+`{task}` and the default (unpinned) partition are used. A cross-workspace
+step then reads the action owner's coordinates instead of its own job's, and
+a pinned job reads the unpinned partition — upgrade workers together with
+the server.
+
+## Upload State Snapshot
+
+```
+POST /worker/state/{ws}/{task}/{job_id}?has_json={bool}
+POST /worker/global-state/{ws}/{job_id}?has_json={bool}
+```
+
+Stores a new snapshot (gzipped tarball body, at most 50 MB) and prunes old
+ones. The server writes it to the **job's** workspace, task and ref; the
+`{ws}` / `{task}` path segments are not used. `has_json` tells the server
+the tarball contains a `state.json` sidecar.
 
 ## Complete Job (Local Mode)
 

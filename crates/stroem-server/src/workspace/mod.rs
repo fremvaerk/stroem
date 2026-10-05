@@ -2,8 +2,11 @@ pub mod availability;
 pub mod entry;
 pub mod folder;
 pub mod git;
+#[cfg(test)]
+pub(crate) mod git_test_support;
 pub mod library;
 pub mod lifecycle;
+pub mod pins;
 pub mod source;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -27,6 +30,8 @@ use stroem_common::models::workflow::WorkspaceConfig;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
+
+use pins::{PinError, PinRef, PinStore, Pinned};
 
 use crate::config::{GitAuthConfig, LibraryDef, WorkspaceSourceDef};
 
@@ -87,6 +92,70 @@ impl WorkspaceSource for InMemorySource {
     }
 }
 
+/// A healthy entry over an in-memory source (tests): it serves `config` at
+/// `revision`, and every reload returns the same. Integration tests mix it
+/// with real sources through [`WorkspaceManager::from_entries`].
+#[doc(hidden)]
+pub fn in_memory_entry(
+    name: &str,
+    config: WorkspaceConfig,
+    revision: Option<String>,
+) -> WorkspaceEntry {
+    let source = Arc::new(InMemorySource {
+        config: config.clone(),
+        revision: revision.clone(),
+    });
+    WorkspaceEntry::new(name, source as Arc<dyn WorkspaceSource>, config, revision)
+}
+
+/// A workspace config: the live published one, or a pinned commit's.
+#[derive(Clone)]
+pub enum ConfigHandle {
+    Live(Arc<WorkspaceConfig>),
+    Pinned(Arc<Pinned>),
+}
+
+impl std::fmt::Debug for ConfigHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Live(_) => f.write_str("ConfigHandle::Live"),
+            Self::Pinned(p) => write!(f, "ConfigHandle::Pinned({p:?})"),
+        }
+    }
+}
+
+impl ConfigHandle {
+    pub fn config(&self) -> &WorkspaceConfig {
+        match self {
+            Self::Live(c) => c,
+            Self::Pinned(p) => &p.config,
+        }
+    }
+
+    pub fn arc(&self) -> Arc<WorkspaceConfig> {
+        match self {
+            Self::Live(c) => Arc::clone(c),
+            Self::Pinned(p) => Arc::clone(&p.config),
+        }
+    }
+
+    /// The pin's OWN-workspace secret values (`Pinned::secret_values`);
+    /// empty for the live config. NOT sufficient for redaction on its
+    /// own: it misses `secret: true` properties of connections typed in
+    /// another workspace. Every redaction outlet uses
+    /// `WorkspaceManager::pin_redaction_values` instead (spec § 9).
+    pub fn pinned_own_secret_values(&self) -> &[String] {
+        match self {
+            Self::Live(_) => &[],
+            Self::Pinned(p) => &p.secret_values,
+        }
+    }
+
+    pub fn is_pinned(&self) -> bool {
+        matches!(self, Self::Pinned(_))
+    }
+}
+
 /// Manages multiple workspaces
 #[derive(Debug)]
 pub struct WorkspaceManager {
@@ -102,6 +171,9 @@ pub struct WorkspaceManager {
     settings: ReloadSettings,
     /// Shared across startup loads and every watcher load (spec § 4.5).
     load_permits: Arc<Semaphore>,
+    /// Pinned refs (spec § 5). `PinStore::disabled()` until `main`
+    /// installs the real store with `with_pin_store`.
+    pins: Arc<PinStore>,
 }
 
 impl WorkspaceManager {
@@ -267,6 +339,7 @@ impl WorkspaceManager {
             triggers_disabled,
             settings,
             load_permits,
+            pins: Arc::new(PinStore::disabled()),
         }
     }
 
@@ -288,64 +361,28 @@ impl WorkspaceManager {
             triggers_disabled: HashSet::new(),
             settings: ReloadSettings::default(),
             load_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_WORKSPACE_LOADS)),
+            pins: Arc::new(PinStore::disabled()),
         }
     }
 
     /// Create a WorkspaceManager from an in-memory WorkspaceConfig (for testing).
     /// The workspace is registered under the given name with a temp path.
     pub fn from_config(name: &str, config: WorkspaceConfig) -> Self {
-        let source = Arc::new(InMemorySource {
-            config: config.clone(),
-            revision: None,
-        });
-        let mut entries = HashMap::new();
-        entries.insert(
-            name.to_string(),
-            Arc::new(WorkspaceEntry::new(
-                name.to_string(),
-                source as Arc<dyn WorkspaceSource>,
-                config,
-                None,
-            )),
-        );
-        Self {
-            entries,
-            load_errors: HashMap::new(),
-            resolved_libraries: Arc::new(HashMap::new()),
-            triggers_disabled: HashSet::new(),
-            settings: ReloadSettings::default(),
-            load_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_WORKSPACE_LOADS)),
-        }
+        Self::from_configs(vec![(name.to_string(), config, None)])
     }
 
     /// Create a WorkspaceManager from several in-memory configs, each with an
     /// optional explicit revision (for testing multi-workspace behaviour such
     /// as cross-workspace action resolution).
     pub fn from_configs(configs: Vec<(String, WorkspaceConfig, Option<String>)>) -> Self {
-        let mut entries = HashMap::new();
-        for (name, config, revision) in configs {
-            let source = Arc::new(InMemorySource {
-                config: config.clone(),
-                revision: revision.clone(),
-            });
-            entries.insert(
-                name.clone(),
-                Arc::new(WorkspaceEntry::new(
-                    name,
-                    source as Arc<dyn WorkspaceSource>,
-                    config,
-                    revision,
-                )),
-            );
-        }
-        Self {
-            entries,
-            load_errors: HashMap::new(),
-            resolved_libraries: Arc::new(HashMap::new()),
-            triggers_disabled: HashSet::new(),
-            settings: ReloadSettings::default(),
-            load_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_WORKSPACE_LOADS)),
-        }
+        let entries = configs
+            .into_iter()
+            .map(|(name, config, revision)| {
+                let entry = in_memory_entry(&name, config, revision);
+                (name, entry)
+            })
+            .collect();
+        Self::from_entries(entries)
     }
 
     /// Test-only: register a source-construction failure for `name` with no
@@ -464,6 +501,119 @@ impl WorkspaceManager {
     pub fn with_triggers_disabled(mut self, name: &str) -> Self {
         self.triggers_disabled.insert(name.to_string());
         self
+    }
+
+    /// Builder: install the pin store (main, after loading workspaces;
+    /// tests with a `file://` remote).
+    pub fn with_pin_store(mut self, store: PinStore) -> Self {
+        self.pins = Arc::new(store);
+        self
+    }
+
+    pub fn pins(&self) -> &PinStore {
+        &self.pins
+    }
+
+    pub fn pins_arc(&self) -> Arc<PinStore> {
+        Arc::clone(&self.pins)
+    }
+
+    pub fn resolved_libraries(&self) -> Arc<HashMap<String, ResolvedLibrary>> {
+        Arc::clone(&self.resolved_libraries)
+    }
+
+    /// The config to read for a job or step. No pin → today's live
+    /// config (`Ok(None)` when it is unavailable). A pin →
+    /// `PinStore::ensure`. Its errors are `PinError`s wrapped in
+    /// `anyhow`; classify them with `downcast_ref::<PinError>()`.
+    #[tracing::instrument(skip(self, pin), fields(workspace = %ws))]
+    pub async fn config_for(&self, ws: &str, pin: Option<&PinRef>) -> Result<Option<ConfigHandle>> {
+        match pin {
+            None => Ok(self.get_config(ws).await.map(ConfigHandle::Live)),
+            Some(p) => {
+                let pinned = self
+                    .pins
+                    .ensure(ws, &p.commit)
+                    .await
+                    .map_err(anyhow::Error::new)?;
+                Ok(Some(ConfigHandle::Pinned(pinned)))
+            }
+        }
+    }
+
+    /// THE complete redaction set for one pin of `ws`, and the one every
+    /// outlet must use (canonical, spec § 9; reconcile R5). It holds:
+    /// - the pinned config's `secrets`;
+    /// - `secret: true` properties of its connections typed in ANY
+    ///   workspace (foreign types resolved against the LIVE configs of
+    ///   the other workspaces);
+    /// - every other live workspace's values.
+    ///
+    /// Never redact with `Pinned::secret_values` or
+    /// `ConfigHandle::pinned_own_secret_values()` alone. The per-job
+    /// redaction set and `ClaimFailure.pin_secrets` union this over
+    /// every pin the job touches.
+    pub async fn pin_redaction_values(&self, ws: &str, pinned: &Pinned) -> Vec<String> {
+        let others: Vec<(String, Arc<WorkspaceConfig>)> = self
+            .get_all_configs()
+            .await
+            .into_iter()
+            .filter(|(name, _)| name != ws)
+            .collect();
+        let set = crate::workspace_set::WorkspaceSet::from_parts(
+            ws,
+            Some(pinned.config.as_ref()),
+            others,
+            self.configured_names(),
+        );
+        crate::workspace_set::collect_redaction_values(&set)
+    }
+
+    /// `err`, from loading `ws` at `pin`, in the form a user may see
+    /// (T6 review #9). A `PinLoadFailed` carries the raw loader chain, which
+    /// can quote secret values: it is logged in full — scrubbed with the live
+    /// redaction values — through `tracing::error!` only, and replaced by the
+    /// fixed [`PinLoadWithheld`](pins::PinLoadWithheld) sentence. Every other
+    /// variant carries no config text and passes through unchanged.
+    #[tracing::instrument(skip_all, fields(workspace = %ws, commit = %pin.commit))]
+    pub async fn pin_error_for_user(&self, ws: &str, pin: &PinRef, err: PinError) -> anyhow::Error {
+        if !matches!(err, PinError::PinLoadFailed { .. }) {
+            return err.into();
+        }
+        let withheld = pins::PinLoadWithheld::new(ws, pin);
+        let detail = self.scrub_live(ws, &err.to_string()).await;
+        tracing::error!("{withheld}: {detail}");
+        withheld.into()
+    }
+
+    /// [`config_for`](Self::config_for) for a path whose error a user may see
+    /// (job log, `job_step.error_message`, an HTTP body): a `PinLoadFailed`
+    /// becomes its fixed sentence through
+    /// [`pin_error_for_user`](Self::pin_error_for_user); every other error is
+    /// unchanged, so a `PinError` still downcasts.
+    #[tracing::instrument(skip_all, fields(workspace = %ws))]
+    pub async fn config_for_user(
+        &self,
+        ws: &str,
+        pin: Option<&PinRef>,
+    ) -> Result<Option<ConfigHandle>> {
+        match (self.config_for(ws, pin).await, pin) {
+            (Err(e), Some(pin)) => match e.downcast::<PinError>() {
+                Ok(pe) => Err(self.pin_error_for_user(ws, pin, pe).await),
+                Err(e) => Err(e),
+            },
+            (result, _) => result,
+        }
+    }
+
+    /// `text` with every LIVE redaction value of `ws` and the other loaded
+    /// workspaces masked (`redact_secrets_in_str`). For pin error text, which
+    /// has no pinned redaction set to use: the pin is what failed to load.
+    #[tracing::instrument(skip_all, fields(workspace = %ws))]
+    pub async fn scrub_live(&self, ws: &str, text: &str) -> String {
+        let set = crate::workspace_set::WorkspaceSet::load(self, ws, None).await;
+        let values = crate::workspace_set::collect_redaction_values(&set);
+        crate::workspace_set::redact_secrets_in_str(text, &values)
     }
 
     /// Every workspace name the server was CONFIGURED with, whether or not it
@@ -741,8 +891,137 @@ pub struct WorkspaceInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workspace::git_test_support::{bare_remote, workflow};
+    use crate::workspace::pins::*;
     use std::fs;
     use tempfile::TempDir;
+
+    fn pin_manager(
+        name: &str,
+        live: WorkspaceConfig,
+        url: &str,
+    ) -> (tempfile::TempDir, WorkspaceManager) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = PinStore::open(
+            PinStoreConfig {
+                dir: dir.path().join("pins"),
+                keep_recent_per_workspace: 0,
+            },
+            HashMap::from([(
+                name.to_string(),
+                PinSource {
+                    url: url.to_string(),
+                    auth: None,
+                    poll_interval: Duration::from_secs(60),
+                },
+            )]),
+            Arc::new(HashMap::new()),
+            ReloadSettings::default(),
+        )
+        .unwrap();
+        (
+            dir,
+            WorkspaceManager::from_config(name, live).with_pin_store(store),
+        )
+    }
+
+    #[tokio::test]
+    async fn config_for_without_a_pin_is_the_live_config() {
+        let live = crate::workspace::test_support::config_with("live_action");
+        let mgr = WorkspaceManager::from_config("w", live);
+        let handle = mgr.config_for("w", None).await.unwrap().unwrap();
+        assert!(!handle.is_pinned());
+        assert!(handle.config().actions.contains_key("live_action"));
+        assert!(handle.pinned_own_secret_values().is_empty());
+        assert!(mgr.config_for("missing", None).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn config_for_with_a_pin_loads_that_commit() {
+        let (_r, url, c1) = bare_remote(&[("wf.yaml", &workflow("v1"))]);
+        let (_d, mgr) = pin_manager(
+            "w",
+            crate::workspace::test_support::config_with("live_action"),
+            &url,
+        );
+        let pin = PinRef {
+            git_ref: "main".into(),
+            commit: c1,
+        };
+        let handle = mgr.config_for("w", Some(&pin)).await.unwrap().unwrap();
+        assert!(handle.is_pinned());
+        assert!(handle.config().actions.contains_key("greet"));
+        assert!(!handle.config().actions.contains_key("live_action"));
+    }
+
+    #[tokio::test]
+    async fn config_for_with_a_pin_on_a_non_git_workspace_is_not_git() {
+        let mgr = WorkspaceManager::from_config("w", WorkspaceConfig::new());
+        let pin = PinRef {
+            git_ref: "main".into(),
+            commit: "a".repeat(40),
+        };
+        let err = mgr.config_for("w", Some(&pin)).await.unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<PinError>(),
+            Some(&PinError::NotGit {
+                workspace: "w".into()
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn pin_redaction_values_cover_foreign_typed_connections_of_the_pin() {
+        let pinned_yaml = format!(
+            "{}secrets:\n  k: pinned-secret-value\n\
+             connections:\n  svc:\n    type: other.api\n    token: pinned-token-value\n",
+            workflow("v1")
+        );
+        let (_r, url, c1) = bare_remote(&[("wf.yaml", &pinned_yaml)]);
+        let other: WorkspaceConfig = serde_yaml::from_str(
+            "secrets:\n  o: other-live-secret\n\
+             connection_types:\n  api:\n    token:\n      type: string\n      secret: true\n",
+        )
+        .unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = PinStore::open(
+            PinStoreConfig {
+                dir: dir.path().join("pins"),
+                keep_recent_per_workspace: 0,
+            },
+            HashMap::from([(
+                "w".to_string(),
+                PinSource {
+                    url,
+                    auth: None,
+                    poll_interval: Duration::from_secs(60),
+                },
+            )]),
+            Arc::new(HashMap::new()),
+            ReloadSettings::default(),
+        )
+        .unwrap();
+        let mgr = WorkspaceManager::from_configs(vec![
+            ("w".into(), WorkspaceConfig::new(), None),
+            ("other".into(), other, None),
+        ])
+        .with_pin_store(store);
+        let pinned = mgr.pins().ensure("w", &c1).await.unwrap();
+        assert!(
+            !pinned
+                .secret_values
+                .contains(&"pinned-token-value".to_string()),
+            "local-only set cannot see a foreign type"
+        );
+        let values = mgr.pin_redaction_values("w", &pinned).await;
+        for v in [
+            "pinned-secret-value",
+            "pinned-token-value",
+            "other-live-secret",
+        ] {
+            assert!(values.contains(&v.to_string()), "missing {v}: {values:?}");
+        }
+    }
 
     fn create_test_workspace_dir() -> TempDir {
         let temp = TempDir::new().unwrap();
@@ -994,6 +1273,7 @@ tasks:
         config.actions.insert(
             "test-action".to_string(),
             ActionDef {
+                git_ref: None,
                 action_type: "script".to_string(),
                 name: None,
                 description: None,
@@ -1034,6 +1314,7 @@ tasks:
         flow.insert(
             "step1".to_string(),
             FlowStep {
+                git_ref: None,
                 action: "test-action".to_string(),
                 name: None,
                 description: None,
@@ -1087,6 +1368,7 @@ tasks:
         config1.actions.insert(
             "action1".to_string(),
             ActionDef {
+                git_ref: None,
                 action_type: "script".to_string(),
                 name: None,
                 description: None,
@@ -1127,6 +1409,7 @@ tasks:
         flow1.insert(
             "step1".to_string(),
             FlowStep {
+                git_ref: None,
                 action: "action1".to_string(),
                 name: None,
                 description: None,
@@ -1164,6 +1447,7 @@ tasks:
         config2.actions.insert(
             "action2".to_string(),
             ActionDef {
+                git_ref: None,
                 action_type: "script".to_string(),
                 name: None,
                 description: None,
@@ -1204,6 +1488,7 @@ tasks:
         flow2.insert(
             "step1".to_string(),
             FlowStep {
+                git_ref: None,
                 action: "action2".to_string(),
                 name: None,
                 description: None,
@@ -2477,46 +2762,17 @@ tasks:
 
     // ─── concurrent startup loading ────────────────────────────────────
 
-    /// Minimal copy of `git::tests::create_bare_repo` (private to that
-    /// module) — creates a bare git repo with an initial commit on `main`
-    /// containing the given files, returning (TempDir, file:// URL).
-    fn create_bare_repo_for_test(files: &[(&str, &str)]) -> (TempDir, String) {
-        let bare_dir = TempDir::new().unwrap();
-        let bare_repo = git2::Repository::init_bare(bare_dir.path()).unwrap();
-
-        let mut tb = bare_repo.treebuilder(None).unwrap();
-        for &(name, content) in files {
-            let oid = bare_repo.blob(content.as_bytes()).unwrap();
-            tb.insert(name, oid, 0o100644).unwrap();
-        }
-        let tree_oid = tb.write().unwrap();
-        let tree = bare_repo.find_tree(tree_oid).unwrap();
-
-        let sig = git2::Signature::now("test", "test@test.com").unwrap();
-        let commit_oid = bare_repo
-            .commit(Some("refs/heads/main"), &sig, &sig, "initial", &tree, &[])
-            .unwrap();
-
-        bare_repo
-            .reference("HEAD", commit_oid, true, "set HEAD")
-            .ok();
-        bare_repo.set_head("refs/heads/main").unwrap();
-
-        let url = format!("file://{}", bare_dir.path().display());
-        (bare_dir, url)
-    }
-
     /// `WorkspaceManager::new` must load workspaces concurrently: two git
     /// sources (backed by local bare repos, exercising the real blocking
     /// clone path) plus a folder source pointing at a non-existent path all
     /// load correctly, and none blocks the others.
     #[tokio::test(flavor = "multi_thread")]
     async fn test_new_loads_git_and_folder_workspaces_concurrently() {
-        let (_bare1, url1) = create_bare_repo_for_test(&[(
+        let (_bare1, url1, _) = crate::workspace::git_test_support::bare_remote(&[(
             "deploy.yaml",
             "actions:\n  a:\n    type: script\n    script: echo hi\n",
         )]);
-        let (_bare2, url2) = create_bare_repo_for_test(&[(
+        let (_bare2, url2, _) = crate::workspace::git_test_support::bare_remote(&[(
             "deploy.yaml",
             "actions:\n  b:\n    type: script\n    script: echo hi\n",
         )]);

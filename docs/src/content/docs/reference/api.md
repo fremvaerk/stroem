@@ -267,6 +267,7 @@ GET /api/jobs
       "source_type": "api",
       "source_id": null,
       "revision": "abc123def456",
+      "ref": null,
       "created_at": "2025-02-10T12:00:00Z",
       "started_at": "2025-02-10T12:00:01Z",
       "completed_at": "2025-02-10T12:00:03Z"
@@ -275,6 +276,12 @@ GET /api/jobs
   "total": 1
 }
 ```
+
+`ref` is set on a job that runs on a [git ref](/guides/git-refs/) — the ref
+as written; `revision` is then its commit. With ACL configured, the list and
+`total` contain only the jobs you may view, filtered before `limit` /
+`offset`: a pinned job is authorised by the folder its own commit declares
+for its task.
 
 **Source types:** `"api"`, `"user"`, `"trigger"`, `"webhook"`, `"hook"`, `"task"`
 
@@ -301,6 +308,7 @@ Returns job metadata and all steps with statuses.
   "task_name": "hello-world",
   "status": "completed",
   "revision": "abc123def456",
+  "ref": null,
   "input": { "name": "World" },
   "steps": [
     {
@@ -315,13 +323,44 @@ Returns job metadata and all steps with statuses.
       "started_at": "2025-02-10T12:00:01Z",
       "completed_at": "2025-02-10T12:00:02Z",
       "error_message": null,
-      "skip_reason": null
+      "skip_reason": null,
+      "action_workspace": null,
+      "action_revision": null,
+      "action_ref": null,
+      "task_workspace": null,
+      "task_ref": null,
+      "task_revision": null
     }
   ]
 }
 ```
 
 `skip_reason` is `null` unless `status` is `skipped`; then one of `condition`, `empty`, `cascade`, `unreachable` (see the [Conditionals guide](/guides/conditionals/#skip-reasons)).
+
+`ref` is set on a [pinned job](/guides/git-refs/) — the ref as written;
+`revision` is then the resolved commit. On a step, `action_workspace` /
+`action_revision` name the workspace and commit its action came from (set
+for a [cross-workspace](/guides/cross-workspace-references/) or ref'd
+action), `action_ref` the ref it was resolved through, and
+`task_workspace` / `task_ref` / `task_revision` the commit a `type: task`
+step's task runs at. A `type: task` step also lists its `child_jobs[]`
+(`id`, `workspace`, `task_name`, `status`, `created_at`, `ref`,
+`revision`).
+
+Secret values are masked as `••••••` everywhere in the response except
+identifiers (ids, names, statuses, revisions, refs, timestamps): workspace
+secrets, connection properties marked `secret: true`, `ref+…` vals
+references, and the secrets of every pinned commit the job is connected to
+(see [Git Refs](/guides/git-refs/#secrets-and-redaction)).
+
+| Status | Description |
+|--------|-------------|
+| `404` | Job not found, or not visible to you under the ACL |
+| `503` | `{"error": "redaction set unavailable, retry"}` — the secrets needed to mask this job cannot be loaded right now (a pinned commit is unreachable); retry later |
+
+When a pinned commit the job is connected to can never be loaded again (it
+was force-pushed away, or its YAML is broken), the answer is `200` with every
+content string masked; ids, statuses and timestamps stay readable.
 
 **Step statuses:** `pending`, `ready`, `running`, `completed`, `failed`, `skipped`, `cancelled`
 
@@ -386,7 +425,7 @@ permission on the task. The source job must be terminal, must be a **top-level**
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `from_step` | string | Step name to restart from. Must be a step in the task's *current* flow, and not a `for_each` instance name (e.g. `step[0]`). |
+| `from_step` | string | Step name to restart from. Must be a step in the task's *current* flow, and not a `for_each` instance name (e.g. `step[0]`). For a [pinned](/guides/git-refs/) source job, "current" means the flow at the source's ref re-resolved now. |
 | `dry_run` | bool | When `true`, returns the plan without creating a job. |
 
 **Response — `dry_run: true` (200):**

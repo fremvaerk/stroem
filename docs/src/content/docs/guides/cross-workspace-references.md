@@ -47,6 +47,10 @@ This means the caller passes only plain input values; it does not need any of th
 
 The owner workspace's revision is pinned when the job is created (the same discipline as `job.revision`), so a mid-run change to the owner workspace's config cannot shift the action under an in-flight job. The worker fetches the owner workspace's tarball at that pinned revision for the step — a cross-workspace step downloads exactly one workspace tarball (its owner), never two.
 
+A step can also pin the owner to a **branch, tag or commit** with `ref:` —
+see [Git Refs](/guides/git-refs/). Without `ref` the owner's live config is
+used, as described here.
+
 ## Connections
 
 A connection-typed input may name another workspace's connection directly,
@@ -150,16 +154,43 @@ credentials `secret: true` in the connection type.
   unhealthy (fails to reload, Git source unreachable, etc.), its secret-marked
   values are **not** masked in already-created jobs until that workspace loads
   successfully again.
+- A job that touches a [git ref](/guides/git-refs/#secrets-and-redaction) is
+  also masked with the secrets of every pinned commit it is connected to.
+  Those are loaded from the commit itself, and if one cannot be loaded these
+  responses never fall back to a partial mask (`503`, or every value masked).
+  Job logs and artifacts are not masked.
+- The same masking now also applies to the sync webhook response, the
+  webhook job-status poll, MCP `get_job_status` and the recent steps on worker
+  detail, not only to job detail.
 
 ### Trust model for owner-side rendering errors
 
-If a `type: task` step's action defaults or the task's own defaults render
-against an OWNER workspace's config (a different workspace than the caller's)
-and that rendering fails — for example a default like `{{ secret.TOKEN |
+If a template of an OWNER workspace (a different workspace than the
+caller's) fails to render — for example a default like `{{ secret.TOKEN |
 round }}` where `TOKEN` isn't numeric — the caller's job never sees the
-details. The persisted step error is a fixed message naming the workspace
-whose rendering failed and pointing at the server log; it never contains any
-representation of the value that caused the failure, however that value was
+details. This applies in two places:
+
+- **Dispatching a `type: task` step**: the action's own defaults, or the
+  task's own defaults, rendered against the action owner's or the task
+  owner's config.
+- **Claiming a step of a cross-workspace action** (`owner.action`): the
+  action's own `input` defaults and the owner connections they resolve, and
+  the action body (`script`, `cmd`, `env`, `args`, `image`, `manifest`),
+  which renders with the owner's secrets. The step fails with
+  `rendering action '<action>' of workspace '<owner>' failed; details
+  withheld` — in its error, in the job log and in the claim response. The
+  action body is withheld whichever value failed in it, including one that
+  came from the caller's input. Agent prompts are not withheld: they render
+  in the caller's context.
+
+The persisted step error is a fixed message naming the workspace whose
+rendering failed. At dispatch it reads `Failed to prepare input for task step
+'<step>': rendering in workspace '<owner>' failed (details withheld from this
+job; see the server log or validate the owner workspace)`; at claim it is the
+shorter `rendering action '<action>' of workspace '<owner>' failed; details
+withheld`, which does not mention the server log (the full error is logged
+there all the same). Neither ever contains any representation of the value
+that caused the failure, however that value was
 encoded (raw, JSON-escaped, or otherwise — a filter chain can produce
 arbitrarily many encodings, which is exactly why this is withheld outright
 rather than scrubbed).
@@ -173,10 +204,15 @@ value in the log text. The server log is an operator-trusted surface, so
 this is an acceptable tradeoff there — it is precisely why the caller-facing
 job record gets the stronger guarantee (withholding, not scrubbing) instead.
 
-This only applies to a value that actually came from the OWNER's own
-config. A value the CALLER supplied itself — even a bad one, even on a step
-that crosses into another workspace — is always shown as before; it's the
-caller's own data. Likewise, a structural problem (the referenced task
+What is withheld is decided by where the failing template comes from, not by
+whose value broke it. An error in the caller's own step `input:` (rendered in
+the caller's context) and an error about a connection name the caller
+supplied (for example, an unshared owner connection) are the caller's own
+data and are always shown as before, scrubbed of known secret values — at
+dispatch and at claim alike. The other way round, an error rendering a
+foreign owner's action body or `image` at claim is withheld even when the
+value that broke it came from the caller's input, because the template is
+the owner's. Likewise, a structural problem (the referenced task
 doesn't exist, a required field is missing, a database error) is never
 withheld either, whichever workspace it's reported against — with one
 exception: a structural problem INSIDE the owner's own task default (for
@@ -335,6 +371,10 @@ created — the value the owner's own triggers would use — unlike
 cross-workspace *actions*, whose owner revision is pinned when the parent
 job is created.
 
+With `ref:` on the `type: task` action, the child runs the task owner's
+commit at that ref, resolved when the parent job is created (see
+[Git Refs](/guides/git-refs/)).
+
 ### Trust model
 
 **Calling a task is delegation to its author.** Any workspace can call any
@@ -427,4 +467,5 @@ A step guarded by a `when` condition still has its `type: task` action's target 
 The following are deliberately out of scope for this release:
 
 - **Cross-workspace agent actions.** An `agent` step that is a cross-workspace reference still renders its prompt, system prompt, and MCP/task tools against the *caller's* workspace config, not the owner's — only script/docker/pod action bodies (and their connection-typed inputs) render in the owner context.
+- **`ref` on agent actions** — rejected with `400`, for the same reason as above.
 - **Cross-workspace hook actions.** `on_success`/`on_error`/`on_cancel`/`on_suspended` hook actions are not resolved cross-workspace — only flow-step `action:` references are. A `type: task` hook action naming another workspace's task is rejected at runtime, before any hook job is created: no hook job is created at all, and the error is logged to the *source* job (the job whose completion fired the hook), not to a hook job. (A config-load-time validator that would catch this when the workspace is loaded exists in `stroem-common` but is not yet wired into any server load/reload path — this is a pre-existing gap tracked in `docs/internal/TODO.md`, not something this release added.)
