@@ -404,7 +404,11 @@ pub struct FlowStep {
     /// behavior — the flag itself is retired. `None` when the key was
     /// absent; `Some(_)` (even `Some(false)`) means the workspace still has
     /// it and hasn't migrated.
-    #[serde(default, rename = "continue_when_skipped")]
+    #[serde(
+        default,
+        rename = "continue_when_skipped",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub legacy_continue_when_skipped: Option<bool>,
     /// Step-level timeout: kill this step after the specified duration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
