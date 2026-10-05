@@ -122,7 +122,10 @@ pub fn compute_restart_set(
             // structural "caught somewhere downstream" walk. `name` here is
             // always a placeholder (loop instances are excluded from
             // `source_by_name` above), so a direct lookup is correct.
-            if flow.get(name.as_str()).is_some_and(|fs| fs.continue_on_failure) {
+            if flow
+                .get(name.as_str())
+                .is_some_and(|fs| fs.continue_on_failure)
+            {
                 carried_failed_tolerated.push(name.clone());
             } else {
                 carried_failed.push(name.clone());

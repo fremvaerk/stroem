@@ -266,7 +266,9 @@ mod tests {
     #[test]
     fn accept_set_deserializes_both_shapes() {
         let list: AcceptSet = serde_json::from_str("[\"completed\",\"failed\"]").unwrap();
-        assert!(matches!(list, AcceptSet::Outcomes(v) if v == vec![Outcome::Completed, Outcome::Failed]));
+        assert!(
+            matches!(list, AcceptSet::Outcomes(v) if v == vec![Outcome::Completed, Outcome::Failed])
+        );
         let term: AcceptSet = serde_json::from_str("\"terminal\"").unwrap();
         assert!(matches!(term, AcceptSet::Terminal(_)));
     }
@@ -294,7 +296,9 @@ mod tests {
     fn step_entry_without_accept_defaults_to_completed_only() {
         let e: DependsOnEntry = serde_json::from_str("{\"step\":\"a\"}").unwrap();
         match e {
-            DependsOnEntry::Step(s) => assert!(s.accept.contains(Outcome::Completed) && !s.accept.contains(Outcome::Failed)),
+            DependsOnEntry::Step(s) => assert!(
+                s.accept.contains(Outcome::Completed) && !s.accept.contains(Outcome::Failed)
+            ),
             other => panic!("expected Step, got {other:?}"),
         }
     }
@@ -302,7 +306,8 @@ mod tests {
     #[test]
     fn all_and_any_groups_parse_and_nest() {
         let e: DependsOnEntry =
-            serde_json::from_str("{\"any\":[\"mirror-a\",{\"all\":[\"audit\",\"source\"]}]}").unwrap();
+            serde_json::from_str("{\"any\":[\"mirror-a\",{\"all\":[\"audit\",\"source\"]}]}")
+                .unwrap();
         match e {
             DependsOnEntry::Any(a) => assert_eq!(a.any.len(), 2),
             other => panic!("expected Any, got {other:?}"),
@@ -311,15 +316,17 @@ mod tests {
 
     #[test]
     fn typo_d_key_is_a_hard_error_not_silently_dropped() {
-        let err = serde_json::from_str::<DependsOnEntry>("{\"step\":\"a\",\"accpet\":[\"completed\"]}");
-        assert!(err.is_err(), "typo'd key must fail to parse, not silently default accept");
+        let err =
+            serde_json::from_str::<DependsOnEntry>("{\"step\":\"a\",\"accpet\":[\"completed\"]}");
+        assert!(
+            err.is_err(),
+            "typo'd key must fail to parse, not silently default accept"
+        );
     }
 
     #[test]
     fn two_discriminating_keys_at_once_is_a_hard_error() {
-        let err = serde_json::from_str::<DependsOnEntry>(
-            "{\"step\":\"a\",\"any\":[\"b\"]}",
-        );
+        let err = serde_json::from_str::<DependsOnEntry>("{\"step\":\"a\",\"any\":[\"b\"]}");
         assert!(
             err.is_err(),
             "a mapping with both 'step' and 'any' must not silently resolve to whichever variant matches first"
@@ -336,8 +343,12 @@ mod tests {
             step("a"),
             DependsOnEntry::Any(AnyEntry {
                 any: vec![
-                    DependsOnEntry::All(AllEntry { all: vec![step("a"), step("b")] }),
-                    DependsOnEntry::All(AllEntry { all: vec![step("a"), step("c")] }),
+                    DependsOnEntry::All(AllEntry {
+                        all: vec![step("a"), step("b")],
+                    }),
+                    DependsOnEntry::All(AllEntry {
+                        all: vec![step("a"), step("c")],
+                    }),
                 ],
             }),
         ];
@@ -351,7 +362,9 @@ mod tests {
     fn validate_tree_rejects_duplicate_siblings_in_the_same_group() {
         let tree = vec![step("a"), step("a")];
         let err = validate_tree(&tree).unwrap_err();
-        assert!(err.iter().any(|e| e.contains("duplicate") && e.contains('a')));
+        assert!(err
+            .iter()
+            .any(|e| e.contains("duplicate") && e.contains('a')));
     }
 
     #[test]
@@ -363,7 +376,10 @@ mod tests {
             any: vec![
                 DependsOnEntry::All(AllEntry {
                     all: vec![
-                        DependsOnEntry::Step(StepEntry { step: "a".into(), accept: AcceptSet::default_completed_only() }),
+                        DependsOnEntry::Step(StepEntry {
+                            step: "a".into(),
+                            accept: AcceptSet::default_completed_only(),
+                        }),
                         step("b"),
                     ],
                 }),
@@ -383,7 +399,10 @@ mod tests {
 
     #[test]
     fn validate_tree_rejects_nested_empty_groups_but_allows_empty_root() {
-        assert!(validate_tree(&[]).is_ok(), "an empty root depends_on is unchanged from today");
+        assert!(
+            validate_tree(&[]).is_ok(),
+            "an empty root depends_on is unchanged from today"
+        );
         let nested_empty = vec![DependsOnEntry::All(AllEntry { all: vec![] })];
         let err = validate_tree(&nested_empty).unwrap_err();
         assert!(err.iter().any(|e| e.contains("empty")));
@@ -407,7 +426,9 @@ mod tests {
         let tree = vec![DependsOnEntry::Any(AnyEntry {
             any: vec![
                 step("a"),
-                DependsOnEntry::All(AllEntry { all: vec![step("a")] }),
+                DependsOnEntry::All(AllEntry {
+                    all: vec![step("a")],
+                }),
             ],
         })];
         // "a" appears once as a direct child of the `any`, and once nested
