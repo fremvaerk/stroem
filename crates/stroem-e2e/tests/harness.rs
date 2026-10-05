@@ -4,7 +4,6 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::Duration;
-use stroem_db::{create_pool, run_migrations};
 use stroem_server::config::{
     DbConfig, LogStorageConfig, RecoveryConfig, RetentionConfig, ServerConfig, WorkspaceSourceDef,
 };
@@ -16,8 +15,6 @@ use stroem_worker::config::WorkerConfig;
 use stroem_worker::executor::StepExecutor;
 use stroem_worker::poller::run_worker;
 use tempfile::TempDir;
-use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::postgres::Postgres;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -31,7 +28,6 @@ pub struct TestEnv {
     worker_handle: Option<JoinHandle<Result<()>>>,
     http: reqwest::Client,
     _temp_dir: TempDir,
-    _container: testcontainers::ContainerAsync<Postgres>,
 }
 
 /// Ensure cancel signal is sent even if a test panics before calling shutdown().
@@ -177,12 +173,10 @@ impl TestEnv {
             .with_env_filter("warn")
             .try_init();
 
-        // 1. Start Postgres container
-        let container = Postgres::default().start().await?;
-        let port = container.get_host_port_ipv4(5432).await?;
-        let db_url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-        let pool = create_pool(&db_url).await?;
-        run_migrations(&pool).await?;
+        // 1. Get an isolated, migrated Postgres database
+        let test_db = stroem_test_support::test_db().await;
+        let pool = test_db.pool.clone();
+        let db_url = test_db.url;
 
         // 2. Create temp dir with workflow YAML
         let temp_dir = TempDir::new()?;
@@ -295,7 +289,6 @@ impl TestEnv {
             request_timeout_secs: None,
             connect_timeout_secs: None,
             max_retained_revisions: None,
-            agents: None,
         };
 
         let worker_cancel = cancel_token.clone();
@@ -316,7 +309,6 @@ impl TestEnv {
             worker_handle: Some(worker_handle),
             http,
             _temp_dir: temp_dir,
-            _container: container,
         };
 
         // 10. Wait for server to be ready (health check)
