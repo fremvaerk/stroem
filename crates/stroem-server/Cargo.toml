@@ -74,6 +74,7 @@ http = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3"
+stroem-test-support.workspace = true
 # NOTE: the "watchdog" feature is intentionally NOT enabled. Its
 # `conquer_once::Lazy` signal-cleanup thread races on concurrent init and panics
 # ("entered unreachable code", conquer-once cell.rs) under parallel testcontainer

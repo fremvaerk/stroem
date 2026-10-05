@@ -82,7 +82,11 @@ pub async fn test_db() -> TestDb {
 
     let url = format!("{admin_url}/{db_name}");
     let pool = PgPoolOptions::new()
-        .max_connections(2)
+        // Matches the per-test pool size every pre-migration setup_db()
+        // helper in this codebase already used — a test that deliberately
+        // holds one connection open while exercising concurrent cascade
+        // behavior through others can need more than a couple at once.
+        .max_connections(5)
         .connect(&url)
         .await
         .expect("connect to isolated test database");
