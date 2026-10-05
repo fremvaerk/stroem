@@ -6,7 +6,7 @@ describe("skipBadgeLabel", () => {
     expect(skipBadgeLabel("condition", false)).toBe("condition");
     expect(skipBadgeLabel("empty", false)).toBe("empty loop");
     expect(skipBadgeLabel("cascade", false)).toBe("upstream skipped");
-    expect(skipBadgeLabel("unreachable", false)).toBe("upstream failed");
+    expect(skipBadgeLabel("unreachable", false)).toBe("not satisfied");
   });
 
   it("falls back to the when heuristic for rows without a reason", () => {
@@ -19,9 +19,9 @@ describe("skipExplanation", () => {
   it("explains each reason in one sentence", () => {
     expect(skipExplanation("condition")).toContain("when condition was false");
     expect(skipExplanation("empty")).toContain("no items");
-    expect(skipExplanation("cascade")).toContain("a dependency was skipped");
-    expect(skipExplanation("unreachable")).toContain("upstream step failed");
-    expect(skipExplanation("unreachable")).toContain("did not let its dependents run");
+    expect(skipExplanation("cascade")).toContain("pre-0.18 only");
+    expect(skipExplanation("cascade")).toContain("a dependency was itself skipped");
+    expect(skipExplanation("unreachable")).toContain("did not satisfy this step's own depends_on condition");
     expect(skipExplanation(null)).toBe("Skipped.");
   });
 });

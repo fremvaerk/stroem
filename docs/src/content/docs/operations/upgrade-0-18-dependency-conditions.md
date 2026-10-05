@@ -194,12 +194,19 @@ still count as succeeded." The origin step still needs its own
   among the **direct siblings** of the same `all`/`any` node (the same name
   recurring across *different* branches with different `accept` sets is
   fine and unaffected).
-- [ ] If your dashboards or alerting read the `unreachable` skip-reason label
-  as "upstream failed": a step can now be `omitted` for reasons that have
-  nothing to do with an upstream step *failing* — e.g. `{step: x, accept:
-  [failed]}` is unsatisfied, and the dependent omitted, precisely when `x`
-  *succeeds*. Treat `unreachable` as "a dependency condition was not
-  satisfied," not "something upstream broke."
+- [ ] If your dashboards or alerting read the `unreachable` skip-reason by its
+  UI label: the badge changes from "upstream failed" to the outcome-neutral
+  "not satisfied" (and the step-detail explanation drops the
+  `continue_on_failure` wording) in 0.18.0, because a step can now be
+  `omitted` for reasons that have nothing to do with an upstream step
+  *failing* — e.g. `{step: x, accept: [failed]}` is unsatisfied, and the
+  dependent omitted, precisely when `x` *succeeds*. This label change is
+  **retroactive**: it applies to every `unreachable` row the UI renders,
+  including rows on jobs that ran well before the upgrade, not just newly
+  skipped steps — expect old jobs in your job list to show the new wording
+  too once you're running 0.18.0. The `cascade` badge ("upstream skipped")
+  is unchanged, but its explanation text is now framed as describing
+  pre-0.18 rows specifically, since `cascade` is never written by new code.
 - [ ] Existing jobs in flight at upgrade time: a row already past the gate
   (`ready`, `claimed`, `running`, or terminal) is never re-gated. Only rows
   still `pending` are evaluated under the new tree/`accept` model on their

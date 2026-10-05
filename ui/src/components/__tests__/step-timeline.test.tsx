@@ -350,7 +350,7 @@ describe("StepTimeline", () => {
       ["condition", "condition"],
       ["empty", "empty loop"],
       ["cascade", "upstream skipped"],
-      ["unreachable", "upstream failed"],
+      ["unreachable", "not satisfied"],
     ];
     it.each(cases)("shows '%s' as '%s'", (reason, label) => {
       renderTimeline([makeStep({ status: "skipped", skip_reason: reason })]);

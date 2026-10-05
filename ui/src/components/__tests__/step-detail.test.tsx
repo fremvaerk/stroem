@@ -156,7 +156,7 @@ describe("StepDetail skipped steps", () => {
   it("explains why the step was skipped instead of showing logs", async () => {
     renderDetail(makeStep({ status: "skipped", skip_reason: "unreachable" }));
     const notice = await screen.findByTestId("skipped-notice");
-    expect(notice.textContent).toContain("upstream step failed");
+    expect(notice.textContent).toContain("did not satisfy this step's own depends_on condition");
     expect(getStepLogs).not.toHaveBeenCalled();
   });
 });
