@@ -10,8 +10,12 @@ fn run(yaml: &str) -> std::process::ExitStatus {
 }
 
 #[test]
-fn caught_failure_exits_zero() {
-    assert!(run(r#"
+fn downstream_continue_on_failure_no_longer_catches_an_upstream_failure() {
+    // Under 0.17.0's structural catch, b's own continue_on_failure used to
+    // excuse a's failure for job-status purposes even though a itself had
+    // no flag. Spec 2026-10-01 §6 retires this: only a failing step's OWN
+    // flag excuses it. a has none, so the run must now exit non-zero.
+    let s = run(r#"
 actions:
   fail: { type: script, script: exit 1 }
   ok: { type: script, script: echo ok }
@@ -19,8 +23,25 @@ tasks:
   t:
     flow:
       a: { action: fail }
-      b: { action: ok, depends_on: [a], continue_on_failure: true }
+      b: { action: ok, depends_on: [{ step: a, accept: [failed] }], continue_on_failure: true }
       c: { action: ok, depends_on: [b] }
+"#);
+    assert_eq!(s.code(), Some(1));
+}
+
+#[test]
+fn own_continue_on_failure_exits_zero() {
+    // The self-scoped replacement: a's OWN flag (not a downstream step's)
+    // excuses a's failure, so the run exits 0.
+    assert!(run(r#"
+actions:
+  fail: { type: script, script: exit 1 }
+  ok: { type: script, script: echo ok }
+tasks:
+  t:
+    flow:
+      a: { action: fail, continue_on_failure: true }
+      b: { action: ok, depends_on: [{ step: a, accept: [failed] }] }
 "#)
     .success());
 }
