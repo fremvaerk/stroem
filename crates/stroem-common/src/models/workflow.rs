@@ -453,9 +453,15 @@ impl<'de> serde::Deserialize<'de> for FlowStep {
         }
 
         if has_action {
-            // Reference step — deserialize normally
+            // Reference step — deserialize normally. No `deny_unknown_fields`
+            // here: the inline path below (`step_field_keys` + the action's
+            // own schema) silently IGNORES an unrecognized top-level key —
+            // see `test_output_schema_key_silently_ignored` — so a reference
+            // step with a typo'd key (e.g. a stray `tags:`) must be tolerated
+            // the same way, not reject the WHOLE FILE with only a log
+            // warning (every task/action/trigger in it disappearing is far
+            // worse than silently ignoring one unused key).
             #[derive(Deserialize)]
-            #[serde(deny_unknown_fields)]
             struct RefStep {
                 action: String,
                 #[serde(default)]
@@ -1793,6 +1799,28 @@ depends_on:
 "#;
         let err = serde_yaml::from_str::<FlowStep>(yaml);
         assert!(err.is_err(), "a typo'd key in a reference step's depends_on must fail to parse, not silently drop the dependency");
+    }
+
+    #[test]
+    fn test_reference_step_tolerates_an_unrelated_unknown_top_level_key() {
+        // Regression: `RefStep` briefly carried `#[serde(deny_unknown_fields)]`
+        // on the premise that it "matches the inline path's allow-list
+        // approach" — false, the inline path (`step_field_keys` below)
+        // silently ignores an unrecognized key (see
+        // `test_output_schema_key_silently_ignored`), it never rejects it.
+        // With the flag, a reference step carrying ANY unrelated typo'd key
+        // (e.g. a stray `tags:`) failed to parse the WHOLE FILE — dropping
+        // every task/action/trigger in it, not just the one step. A
+        // reference step must tolerate an unknown top-level key exactly like
+        // an inline step does; only a typo'd key INSIDE `depends_on` itself
+        // is a hard error (`test_malformed_depends_on_entry_is_a_hard_error_reference_step`,
+        // via `StepEntry`'s own `deny_unknown_fields`, untouched by this).
+        let yaml = r#"
+action: a
+tags: ["oops-this-was-never-a-flow-step-field"]
+"#;
+        let step: FlowStep = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(step.action, "a");
     }
 
     #[test]
