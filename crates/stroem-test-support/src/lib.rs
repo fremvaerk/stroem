@@ -30,7 +30,12 @@ async fn default_base_url() -> Result<String> {
         .get_or_try_init(|| async {
             let container = Postgres::default()
                 .with_label("stroem.test", "true")
-                .with_cmd(["-c", "max_connections=200"])
+                // testcontainers-modules' Postgres image's own default
+                // command is `-c fsync=off`; `.with_cmd` REPLACES it rather
+                // than appending, so fsync=off must be restated here or
+                // every per-test CREATE DATABASE ... TEMPLATE pays for a
+                // real fsync'd file copy.
+                .with_cmd(["-c", "fsync=off", "-c", "max_connections=200"])
                 .start()
                 .await
                 .context("start per-binary postgres container")?;
@@ -160,6 +165,18 @@ async fn ensure_template_migrated_locked(admin_pool: &PgPool, admin_url: &str) -
         return Ok(());
     }
 
+    // Clear the marker BEFORE dropping, inside the lock: if this rebuild is
+    // interrupted (Ctrl-C, a killed container, a migration that fails on an
+    // edited older file), the marker must never be left naming a fingerprint
+    // the template no longer matches. A later caller presenting that SAME
+    // fingerprint again (e.g. switching back to the branch that originally
+    // wrote it) must see "no marker" and rebuild, never a false match
+    // against a dropped or half-migrated template.
+    sqlx::query("DELETE FROM stroem_test_marker WHERE template_name = 'stroem_template'")
+        .execute(admin_pool)
+        .await
+        .context("clear stale stroem_test_marker before rebuilding template")?;
+
     sqlx::query("DROP DATABASE IF EXISTS stroem_template")
         .execute(admin_pool)
         .await
@@ -218,6 +235,23 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("marker") || err.as_database_error().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_pool_disables_fsync_for_speed() {
+        // testcontainers-modules' Postgres image defaults to `-c fsync=off`
+        // (its own default command); `.with_cmd` in `default_base_url`
+        // REPLACES that default rather than appending to it, so without
+        // explicitly re-adding `fsync=off` here, every per-test
+        // `CREATE DATABASE ... TEMPLATE` pays for a real fsync'd file copy
+        // plus a WAL flush per test commit — exactly the cost this shared
+        // per-binary container was meant to avoid paying hundreds of times.
+        let pool = super::test_pool().await;
+        let fsync: (String,) = sqlx::query_as("SHOW fsync").fetch_one(&pool).await.unwrap();
+        assert_eq!(
+            fsync.0, "off",
+            "the shared container must run with fsync off"
+        );
     }
 
     #[tokio::test]
@@ -292,6 +326,64 @@ mod tests {
             stroem_db::migration_fingerprint(),
             "a stale fingerprint must trigger re-migration, not be served forever"
         );
+    }
+
+    #[tokio::test]
+    async fn ensure_template_migrated_clears_the_marker_before_attempting_the_drop() {
+        let container = Postgres::default().start().await.unwrap();
+        let port = container.get_host_port_ipv4(5432).await.unwrap();
+        let admin_url = format!("postgres://postgres:postgres@localhost:{port}");
+        let admin_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&format!("{admin_url}/postgres"))
+            .await
+            .unwrap();
+
+        super::ensure_template_migrated(&admin_url).await.unwrap();
+
+        // Force a fingerprint mismatch.
+        sqlx::query(
+            "UPDATE stroem_test_marker SET migration_fingerprint = 'stale-fingerprint' WHERE template_name = 'stroem_template'",
+        )
+        .execute(&admin_pool)
+        .await
+        .unwrap();
+
+        // Hold stroem_template open so the mismatch handler's DROP DATABASE
+        // fails partway through — simulating a rebuild interrupted by a
+        // Ctrl-C, a killed container, or a migration that fails on an
+        // edited older file (the exact scenario this test guards against).
+        let holder = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&format!("{admin_url}/stroem_template"))
+            .await
+            .unwrap();
+        sqlx::query("SELECT 1").execute(&holder).await.unwrap();
+
+        let result = super::ensure_template_migrated(&admin_url).await;
+        assert!(
+            result.is_err(),
+            "the held connection should make the DROP DATABASE fail"
+        );
+
+        // Whatever this interrupted attempt leaves behind, it must not be a
+        // marker row naming a fingerprint the template no longer matches —
+        // a later caller presenting that SAME fingerprint again (e.g.
+        // switching back to the branch that originally wrote it) must never
+        // see a false match against a template this attempt has already
+        // dropped or is about to drop.
+        let existing: Option<(String,)> = sqlx::query_as(
+            "SELECT migration_fingerprint FROM stroem_test_marker WHERE template_name = 'stroem_template'",
+        )
+        .fetch_optional(&admin_pool)
+        .await
+        .unwrap();
+        assert!(
+            existing.is_none(),
+            "an interrupted rebuild must leave no marker row, not a stale one: {existing:?}"
+        );
+
+        holder.close().await;
     }
 
     #[tokio::test]

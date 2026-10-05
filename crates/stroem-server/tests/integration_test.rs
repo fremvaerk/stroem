@@ -25041,20 +25041,79 @@ async fn install_retry_gate(pool: &PgPool) -> Result<()> {
 /// Block until exactly one backend is waiting on the retry gate, i.e. the
 /// failure transaction has reached (and is parked in) its retry UPDATE while
 /// still holding the step row locked with the pre-failure status committed.
+/// Counts backends waiting on the gate's advisory lock. Scoped to the
+/// CALLER's own database — `pg_locks` is server-wide, and every test now
+/// shares one physical Postgres server (one container per test binary), so
+/// an unscoped count can see a neighbouring test's advisory-lock waiter in a
+/// different database as if it were this test's own.
+async fn retry_gate_waiting_count(pool: &PgPool) -> Result<i64> {
+    let waiting: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' \
+         AND classid = 4242 AND objid = 1 AND NOT granted \
+         AND database = (SELECT oid FROM pg_database WHERE datname = current_database())",
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(waiting)
+}
+
 async fn await_retry_gate_blocked(pool: &PgPool) -> Result<()> {
     for _ in 0..200 {
-        let waiting: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' \
-             AND classid = 4242 AND objid = 1 AND NOT granted",
-        )
-        .fetch_one(pool)
-        .await?;
-        if waiting == 1 {
+        if retry_gate_waiting_count(pool).await? == 1 {
             return Ok(());
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     anyhow::bail!("failure transaction never reached the gated retry UPDATE");
+}
+
+/// `retry_gate_waiting_count` backs the gate `await_retry_gate_blocked` uses to
+/// detect the in-flight retry transaction. Every test binary now shares one
+/// physical Postgres server (one container per binary, per-test databases via
+/// `CREATE DATABASE ... TEMPLATE`), so `pg_locks` — a server-wide view — must
+/// not let a neighbouring test's advisory-lock waiter in a DIFFERENT database
+/// count as "waiting here"; that would make the gate return early before this
+/// test's own retry transaction has actually reached it.
+#[tokio::test(flavor = "multi_thread")]
+async fn retry_gate_waiting_count_ignores_other_database_waiters() -> Result<()> {
+    let db_a = stroem_test_support::test_db().await;
+    let db_b = stroem_test_support::test_db().await;
+
+    let mut holder = db_b.pool.acquire().await?;
+    sqlx::query("SELECT pg_advisory_lock(4242, 1)")
+        .execute(&mut *holder)
+        .await?;
+
+    let waiter_pool = db_b.pool.clone();
+    let waiter = tokio::spawn(async move {
+        let mut conn = waiter_pool.acquire().await.unwrap();
+        sqlx::query("SELECT pg_advisory_lock(4242, 1)")
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+    });
+
+    let mut waiting_in_b = 0;
+    for _ in 0..200 {
+        waiting_in_b = retry_gate_waiting_count(&db_b.pool).await?;
+        if waiting_in_b == 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert_eq!(waiting_in_b, 1, "waiter never parked in database B");
+
+    let waiting_in_a = retry_gate_waiting_count(&db_a.pool).await?;
+    assert_eq!(
+        waiting_in_a, 0,
+        "retry_gate_waiting_count leaked a waiter from a different database"
+    );
+
+    sqlx::query("SELECT pg_advisory_unlock(4242, 1)")
+        .execute(&mut *holder)
+        .await?;
+    waiter.await?;
+    Ok(())
 }
 
 /// A `NewJobStep` with the loop columns spelled out; `make_loop_step` covers the

@@ -83,6 +83,21 @@ fn instance(job_id: Uuid, source: &str, i: i32, status: &str) -> NewJobStep {
     }
 }
 
+/// Counts backends blocked on a `job_step` UPDATE. Scoped to the CALLER's own
+/// database — `pg_stat_activity` is server-wide, and every test now shares one
+/// physical Postgres server (one container per test binary), so an unscoped
+/// count can see a neighbouring test's lock contention in a different database.
+async fn job_step_lock_waiters(pool: &PgPool) -> Result<i64> {
+    let blocked: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_stat_activity \
+         WHERE wait_event_type = 'Lock' AND query ILIKE '%job_step%' \
+         AND datname = current_database()",
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(blocked)
+}
+
 async fn step_statuses(pool: &PgPool, job_id: Uuid) -> HashMap<String, String> {
     JobStepRepo::get_steps_for_job(pool, job_id)
         .await
@@ -586,13 +601,7 @@ async fn execute_retries_after_a_real_guard_miss() -> Result<()> {
     // bounded so a regression that never blocks fails fast instead of hanging.
     let mut waited = 0;
     loop {
-        let blocked: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM pg_stat_activity \
-             WHERE wait_event_type = 'Lock' AND query ILIKE '%job_step%'",
-        )
-        .fetch_one(&pool)
-        .await?;
-        if blocked >= 1 {
+        if job_step_lock_waiters(&pool).await? >= 1 {
             break;
         }
         waited += 1;
@@ -612,6 +621,59 @@ async fn execute_retries_after_a_real_guard_miss() -> Result<()> {
         "the re-run after the guard miss sees join already ready and plans nothing"
     );
     assert_eq!(step_statuses(&pool, job_id).await["join"], "ready");
+    Ok(())
+}
+
+/// `job_step_lock_waiters` backs the gate `execute_retries_after_a_real_guard_miss`
+/// uses to detect its own blocked UPDATE. Every test binary now shares one
+/// physical Postgres server (one container per binary, per-test databases via
+/// `CREATE DATABASE ... TEMPLATE`), so `pg_stat_activity` — a server-wide view —
+/// must not let a neighbouring test's lock contention in a DIFFERENT database
+/// count as "blocked here"; that would make the gate succeed without the
+/// production `execute()` call under test ever having actually blocked.
+#[tokio::test]
+async fn job_step_lock_waiters_ignores_other_database_activity() -> Result<()> {
+    let db_a = stroem_test_support::test_db().await;
+    let db_b = stroem_test_support::test_db().await;
+
+    let job_id = create_job(&db_b.pool).await;
+    JobStepRepo::create_steps(&db_b.pool, &[step(job_id, "l", "pending")]).await?;
+
+    let mut holder = db_b.pool.acquire().await?;
+    sqlx::query("BEGIN").execute(&mut *holder).await?;
+    sqlx::query("UPDATE job_step SET status = 'ready' WHERE job_id = $1 AND step_name = 'l'")
+        .bind(job_id)
+        .execute(&mut *holder)
+        .await?;
+
+    let waiter_pool = db_b.pool.clone();
+    let waiter = tokio::spawn(async move {
+        let mut conn = waiter_pool.acquire().await.unwrap();
+        sqlx::query("UPDATE job_step SET status = 'ready' WHERE job_id = $1 AND step_name = 'l'")
+            .bind(job_id)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+    });
+
+    let mut blocked_in_b = 0;
+    for _ in 0..200 {
+        blocked_in_b = job_step_lock_waiters(&db_b.pool).await?;
+        if blocked_in_b >= 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(blocked_in_b >= 1, "waiter never blocked in database B");
+
+    let blocked_in_a = job_step_lock_waiters(&db_a.pool).await?;
+    assert_eq!(
+        blocked_in_a, 0,
+        "job_step_lock_waiters leaked blocked activity from a different database"
+    );
+
+    sqlx::query("COMMIT").execute(&mut *holder).await?;
+    waiter.await?;
     Ok(())
 }
 
