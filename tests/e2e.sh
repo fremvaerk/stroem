@@ -732,6 +732,51 @@ CWS_CMERGE=$(echo "$CWS_DETAIL" | jq -r '.steps[] | select(.step_name == "cws-me
 [ "$CWS_CMERGE" = "completed/null" ] || { echo "$CWS_DETAIL" | jq .steps; fail "cws-merge expected completed/null, got $CWS_CMERGE"; }
 pass "strict AND: merge with an unflagged skipped branch skipped, flagged branch ran"
 
+# --- dependency-conditions `any`/`all` grouping, end to end ---
+# fanin-demo: `ranked` depends on `audit` (accept: terminal, ordering only)
+# and an `any: [mirror-a, mirror-b]` group. mirror-a always fails (with its
+# own continue_on_failure so that failure alone doesn't fail the job) and
+# mirror-b always completes — the any group is satisfied by mirror-b alone,
+# so ranked still runs and the job still completes.
+info "Triggering fanin-demo task (any/all dependency grouping)..."
+EXEC_RESP_FANIN=$(acurl -X POST "$BASE_URL/api/workspaces/test/tasks/fanin-demo/execute" \
+    -H "Content-Type: application/json" \
+    -d '{"input": {}}')
+FANIN_JOB_ID=$(echo "$EXEC_RESP_FANIN" | jq -r '.job_id')
+if [ -z "$FANIN_JOB_ID" ] || [ "$FANIN_JOB_ID" = "null" ]; then
+    fail "fanin-demo execute failed: $EXEC_RESP_FANIN"
+fi
+pass "fanin-demo job created: $FANIN_JOB_ID"
+
+info "Waiting for fanin-demo job to complete..."
+FANIN_POLLED=0
+FANIN_STATUS="pending"
+while [ "$FANIN_STATUS" != "completed" ] && [ "$FANIN_STATUS" != "failed" ]; do
+    sleep 2
+    FANIN_POLLED=$((FANIN_POLLED + 2))
+    if [ "$FANIN_POLLED" -ge "$MAX_POLL" ]; then
+        acurl "$BASE_URL/api/jobs/$FANIN_JOB_ID" | jq .
+        fail "fanin-demo did not reach terminal state within ${MAX_POLL}s (status: $FANIN_STATUS)"
+    fi
+    FANIN_DETAIL=$(acurl "$BASE_URL/api/jobs/$FANIN_JOB_ID")
+    FANIN_STATUS=$(echo "$FANIN_DETAIL" | jq -r '.status')
+    printf "."
+done
+echo ""
+if [ "$FANIN_STATUS" != "completed" ]; then
+    echo "$FANIN_DETAIL" | jq .
+    fail "fanin-demo job failed (status: $FANIN_STATUS)"
+fi
+pass "fanin-demo job completed (${FANIN_POLLED}s)"
+
+FANIN_MIRROR_A=$(echo "$FANIN_DETAIL" | jq -r '.steps[] | select(.step_name == "mirror-a") | .status')
+FANIN_MIRROR_B=$(echo "$FANIN_DETAIL" | jq -r '.steps[] | select(.step_name == "mirror-b") | .status')
+FANIN_RANKED=$(echo "$FANIN_DETAIL" | jq -r '.steps[] | select(.step_name == "ranked") | .status')
+[ "$FANIN_MIRROR_A" = "failed" ] || { echo "$FANIN_DETAIL" | jq .steps; fail "mirror-a expected failed, got $FANIN_MIRROR_A"; }
+[ "$FANIN_MIRROR_B" = "completed" ] || { echo "$FANIN_DETAIL" | jq .steps; fail "mirror-b expected completed, got $FANIN_MIRROR_B"; }
+[ "$FANIN_RANKED" = "completed" ] || { echo "$FANIN_DETAIL" | jq .steps; fail "ranked expected completed, got $FANIN_RANKED"; }
+pass "any-group fan-in: ranked ran off mirror-b alone, job completed despite mirror-a's failure"
+
 # --- 19. Cross-workspace type: task action ---
 # xtask (in "default") calls test.xtask-target; the child must run as a
 # "test" job (its files and its secret), and its output must reach the

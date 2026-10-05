@@ -1,0 +1,35 @@
+actions:
+  noop:
+    type: script
+    runner: local
+    language: shell
+    script: echo "ran"
+  fail-always:
+    type: script
+    runner: local
+    language: shell
+    script: exit 1
+
+tasks:
+  fanin-demo:
+    mode: distributed
+    flow:
+      # Terminal-accept: ordering only, its own outcome never gates `ranked`.
+      audit:
+        action: noop
+      # Its own continue_on_failure keeps this failure from failing the
+      # job (spec §6) — an independent decision from whether `ranked`
+      # accepts it via the `any` group below.
+      mirror-a:
+        action: fail-always
+        continue_on_failure: true
+      mirror-b:
+        action: noop
+      # Satisfied once ANY one of the mirrors completes, even though
+      # mirror-a fails — mirror-b's success alone is enough.
+      ranked:
+        action: noop
+        depends_on:
+          - step: audit
+            accept: terminal
+          - any: [mirror-a, mirror-b]
