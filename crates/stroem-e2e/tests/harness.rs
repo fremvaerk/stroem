@@ -273,23 +273,34 @@ impl TestEnv {
         });
 
         // 9. Build worker config and spawn worker
-        let worker_config = WorkerConfig {
-            server_url: server_url.clone(),
-            worker_token: "e2e-test-token".to_string(),
-            worker_name: "e2e-worker".to_string(),
-            max_concurrent: 4,
-            poll_interval_secs: 1,
-            workspace_cache_dir: workspace_cache_dir.to_string_lossy().to_string(),
-            capabilities: vec!["script".to_string()],
-            tags: vec![],
-            exclusive: false,
-            runner_image: None,
-            docker: None,
-            kubernetes: None,
-            request_timeout_secs: None,
-            connect_timeout_secs: None,
-            max_retained_revisions: None,
-        };
+        //
+        // Built via JSON deserialization, not a struct literal: `agents` is
+        // `#[cfg(feature = "agent")]` on `WorkerConfig` itself, present or
+        // absent depending on workspace-wide feature unification (this
+        // crate's own `stroem-worker` dependency sets
+        // `default-features = false`, but a `cargo test --workspace` build
+        // can still turn it on via another crate) — a literal naming every
+        // field can only compile under one of the two configurations.
+        // `#[serde(default)]` on that field means omitting the key here
+        // works correctly whether or not it exists in this build.
+        let worker_config: WorkerConfig = serde_json::from_value(serde_json::json!({
+            "server_url": server_url.clone(),
+            "worker_token": "e2e-test-token",
+            "worker_name": "e2e-worker",
+            "max_concurrent": 4,
+            "poll_interval_secs": 1,
+            "workspace_cache_dir": workspace_cache_dir.to_string_lossy().to_string(),
+            "capabilities": ["script"],
+            "tags": [],
+            "exclusive": false,
+            "runner_image": null,
+            "docker": null,
+            "kubernetes": null,
+            "request_timeout_secs": null,
+            "connect_timeout_secs": null,
+            "max_retained_revisions": null,
+        }))
+        .context("build worker config")?;
 
         let worker_cancel = cancel_token.clone();
         let worker_handle = tokio::spawn(async move {
