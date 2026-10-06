@@ -1102,6 +1102,24 @@ fn parse_k8s_timestamp(ts: &str) -> Option<k8s_openapi::jiff::Timestamp> {
     ts.parse::<k8s_openapi::jiff::Timestamp>().ok()
 }
 
+/// kube 3's per-read timeout on API responses, which kube 4 no longer sets.
+const KUBE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(295);
+
+/// `Client::try_default()` with the client defaults of kube 3, which this runner
+/// was written against. kube 4 dropped the 295 s read timeout (without it a
+/// stalled `pods.get` in the status poll hangs the step instead of failing it,
+/// and a follow log stream quiet for 295 s is no longer dropped and reconnected)
+/// and retries every request, the pod `create` included, up to 15 times with
+/// exponential backoff on 429/503/504.
+async fn kube_client() -> Result<Client, kube::Error> {
+    let mut config = kube::Config::infer()
+        .await
+        .map_err(kube::Error::InferConfig)?;
+    config.read_timeout = Some(KUBE_READ_TIMEOUT);
+    config.default_retry = false;
+    Client::try_from(config)
+}
+
 #[async_trait]
 impl Runner for KubeRunner {
     async fn execute(
@@ -1110,7 +1128,7 @@ impl Runner for KubeRunner {
         log_callback: Option<LogCallback>,
         cancel_token: CancellationToken,
     ) -> Result<RunResult> {
-        let client = Client::try_default()
+        let client = kube_client()
             .await
             .context("Failed to create Kubernetes client")?;
 
