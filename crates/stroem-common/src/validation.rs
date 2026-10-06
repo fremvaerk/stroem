@@ -478,12 +478,7 @@ fn validate_workflow_config_inner(
         match trigger {
             crate::models::workflow::TriggerDef::Scheduler { cron, timezone, .. } => {
                 // Validate cron expression syntax
-                if croner::parser::CronParser::builder()
-                    .seconds(croner::parser::Seconds::Optional)
-                    .build()
-                    .parse(cron)
-                    .is_err()
-                {
+                if crate::cron::parse(cron).is_err() {
                     bail!(
                         "Trigger '{}' has invalid cron expression '{}'",
                         trigger_name,

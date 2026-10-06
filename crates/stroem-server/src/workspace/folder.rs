@@ -597,6 +597,19 @@ actions:
         assert_eq!(rev.len(), 64, "Blake2s256 should produce 64 hex chars");
     }
 
+    /// A folder revision is a Blake2s256 digest; a `blake2` upgrade that
+    /// changed its output would make every folder workspace look changed.
+    /// RFC 7693 Appendix B test vector.
+    #[test]
+    fn test_blake2s256_matches_rfc7693_vector() {
+        let digest = Blake2s256::digest(b"abc");
+        let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex,
+            "508c5e8c327c14e2e1a72ba34eeb452f37458b209ed63a294d999b4c86675982"
+        );
+    }
+
     #[tokio::test]
     async fn test_sops_file_triggers_decryption() {
         // A *.sops.yaml file should trigger SOPS decryption, which fails
