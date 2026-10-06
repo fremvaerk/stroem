@@ -2053,6 +2053,83 @@ mod tests {
         assert!(!text.contains("hook-raw-canary"), "{text}");
     }
 
+    /// Spec 2026-10-06 § 3.4 (Codex review, Low): a REAL hook-input render
+    /// failure, driven through `fire_single_hook`'s error path for both
+    /// callers (`fire_hooks_of_kind` → `on_error`, `fire_suspended_hooks` →
+    /// `on_suspended`), lands in the SOURCE job's `_server` log without the
+    /// secret or its upper-cased form — Tera's raw text carries the latter
+    /// (asserted first), so the absence is not vacuous.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn failing_hook_input_render_logs_a_value_free_line_to_the_source_job() {
+        const SECRET: &str = "hook-input-canary";
+        const TPL: &str = "{{ secret.X | upper | int }}";
+        let upper = SECRET.to_uppercase();
+        assert!(
+            crate::test_support::tera_raw_detail_contains(
+                TPL,
+                &json!({"secret": {"X": SECRET}}),
+                &upper
+            ),
+            "fixture must leak through Tera's raw text, else this test is vacuous"
+        );
+
+        let cfg: WorkspaceConfig = serde_yaml::from_str(
+            r#"
+secrets:
+  X: hook-input-canary
+actions:
+  notify:
+    type: script
+    script: echo hi
+"#,
+        )
+        .unwrap();
+        let hook = HookDef {
+            git_ref: None,
+            action: "notify".to_string(),
+            input: HashMap::from([("msg".to_string(), json!(TPL))]),
+        };
+        let mut task = make_task_def(vec![], vec![hook.clone()], vec![]);
+        task.on_suspended = vec![hook];
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let pool = stroem_test_support::test_pool().await;
+        let mgr = crate::workspace::WorkspaceManager::from_config("default", cfg.clone());
+        let app_state = crate::state::test_app_state_with_pool(pool, mgr, temp_dir.path());
+        let s = app_state.settlement();
+
+        let mut job = stroem_db::JobRow::test_default();
+        job.status = "failed".to_string();
+        fire_hooks_of_kind(&s, &cfg, &job, &task, HookKind::Error).await;
+        fire_suspended_hooks(&s, &cfg, &job, &task, "approve", "message").await;
+
+        let log = std::fs::read_to_string(temp_dir.path().join(format!("{}.jsonl", job.job_id)))
+            .expect("the source job has a log");
+        let lines: Vec<String> = log
+            .lines()
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+            .filter(|l| l["step"] == "_server")
+            .map(|l| l["line"].as_str().unwrap().to_string())
+            .collect();
+        for prefix in [
+            "[hooks] Failed to fire hook on_error[0] for action 'notify': ",
+            "[hooks] Failed to fire on_suspended hook[0] for action 'notify': ",
+        ] {
+            let line = lines
+                .iter()
+                .find(|l| l.starts_with(prefix))
+                .unwrap_or_else(|| panic!("no `{prefix}` line in {lines:?}"));
+            assert!(
+                line.contains("Failed to render hook input templates"),
+                "{line}"
+            );
+            assert!(line.contains("filter `int` failed"), "{line}");
+            assert!(!line.contains(SECRET), "{line}");
+            assert!(!line.contains(&upper), "{line}");
+        }
+        assert!(!log.contains(SECRET) && !log.contains(&upper), "{log}");
+    }
+
     // ─── H2 regression: instrument spans must not Debug-print the JobRow ─────
 
     /// A `tracing_subscriber::Layer` that records every field on every new
