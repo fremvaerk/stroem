@@ -40,7 +40,7 @@ auth:
 
 ### Rate limiting
 
-The auth routes are rate limited per client IP (login and refresh are the brute-force protection). The limits are fixed; the only knob is an on/off switch for test harnesses that run many logins and page loads from a single IP (for example the Playwright suite):
+The auth routes are rate limited per client IP (login and refresh are the brute-force protection). The limits are fixed. `auth.rate_limit.enabled` switches off the limits on the four auth route groups (login, refresh, logout/me/OIDC, API keys); it exists for test harnesses that run many logins and page loads from a single IP (for example the Playwright suite). It does not affect the separate per-IP limit on MCP OAuth client registration (`/oauth/register`):
 
 ```yaml
 auth:

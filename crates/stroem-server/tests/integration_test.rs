@@ -19,8 +19,8 @@ use stroem_db::{
 use stroem_server::auth::hash_password;
 use stroem_server::blob_storage::{BlobArchive, LocalBlobArchive};
 use stroem_server::config::{
-    AuthConfig, DbConfig, InitialUserConfig, JobDefaults, LogStorageConfig, RetentionConfig,
-    ServerConfig, WorkspaceSourceDef,
+    AuthConfig, AuthRateLimitConfig, DbConfig, InitialUserConfig, JobDefaults, LogStorageConfig,
+    RetentionConfig, ServerConfig, WorkspaceSourceDef,
 };
 use stroem_server::log_read::StepFilter;
 use stroem_server::log_storage::{archive_key, JobLogMeta, LogStorage};
@@ -9191,10 +9191,12 @@ const AUTH_USER_EMAIL: &str = "admin@test.com";
 const AUTH_USER_PASSWORD: &str = "test-password-123";
 
 async fn setup_with_auth() -> Result<(Router, PgPool, TempDir)> {
-    setup_with_auth_rate_limit(true).await
+    setup_with_auth_rate_limit(AuthRateLimitConfig::default()).await
 }
 
-async fn setup_with_auth_rate_limit(rate_limit_enabled: bool) -> Result<(Router, PgPool, TempDir)> {
+async fn setup_with_auth_rate_limit(
+    rate_limit: AuthRateLimitConfig,
+) -> Result<(Router, PgPool, TempDir)> {
     let test_db = stroem_test_support::test_db().await;
     let pool = test_db.pool.clone();
     let url = test_db.url;
@@ -9231,9 +9233,7 @@ async fn setup_with_auth_rate_limit(rate_limit_enabled: bool) -> Result<(Router,
                 email: AUTH_USER_EMAIL.to_string(),
                 password: AUTH_USER_PASSWORD.to_string(),
             }),
-            rate_limit: stroem_server::config::AuthRateLimitConfig {
-                enabled: rate_limit_enabled,
-            },
+            rate_limit,
         }),
         recovery: Default::default(),
         retention: RetentionConfig::default(),
@@ -9311,20 +9311,49 @@ async fn login_statuses(router: &Router, n: usize) -> Vec<u16> {
     out
 }
 
+/// The API-key routes sit behind `require_auth`, so their limiter (burst 60)
+/// is only reached with a valid token.
+async fn api_key_list_statuses(router: &Router, token: &str, n: usize) -> Vec<u16> {
+    let mut out = Vec::new();
+    for _ in 0..n {
+        let r = router
+            .clone()
+            .oneshot(authed_get("/api/auth/api-keys", token))
+            .await
+            .unwrap();
+        out.push(r.status().as_u16());
+    }
+    out
+}
+
 #[tokio::test]
 async fn test_auth_rate_limit_enabled_by_default_429s() -> Result<()> {
+    // `setup_with_auth` passes `AuthRateLimitConfig::default()`.
     let (router, _pool, _tmp) = setup_with_auth().await?;
+    let (token, _user_id) = login_and_get_token(&router).await?;
     let statuses = login_statuses(&router, 30).await;
     assert!(
         statuses.contains(&429),
         "default config must rate-limit login; got {statuses:?}"
+    );
+    let statuses = api_key_list_statuses(&router, &token, 70).await;
+    assert!(
+        statuses.contains(&429),
+        "default config must rate-limit the API-key routes; got {statuses:?}"
     );
     Ok(())
 }
 
 #[tokio::test]
 async fn test_auth_rate_limit_disabled_never_429() -> Result<()> {
-    let (router, _pool, _tmp) = setup_with_auth_rate_limit(false).await?;
+    let (router, _pool, _tmp) =
+        setup_with_auth_rate_limit(AuthRateLimitConfig { enabled: false }).await?;
+    let (token, _user_id) = login_and_get_token(&router).await?;
+    let statuses = api_key_list_statuses(&router, &token, 70).await;
+    assert!(
+        statuses.iter().all(|s| *s == 200),
+        "disabled rate limit must never 429 the API-key routes; got {statuses:?}"
+    );
     let statuses = login_statuses(&router, 30).await;
     assert!(
         statuses.iter().all(|s| *s == 401),
