@@ -1,4 +1,5 @@
 pub mod actions;
+pub mod error_report;
 pub mod inspect;
 pub mod run;
 pub mod tasks;

@@ -267,7 +267,10 @@ async fn run_dag(
                         continue;
                     }
                     Err(e) => {
-                        let msg = format!("when condition error: {:#}", e);
+                        let msg = format!(
+                            "when condition error: {}",
+                            crate::local::error_report::full_report(&e)
+                        );
                         eprintln!("Step '{}' failed: {}", step_name, msg);
                         failed_count += 1;
                         record_failure(&mut outcomes, &mut outputs, &mut errors, &step_name, msg);
@@ -280,7 +283,10 @@ async fn run_dag(
                 let items = match evaluate_for_each(for_each_expr, &ctx) {
                     Ok(items) => items,
                     Err(e) => {
-                        let msg = format!("for_each expression error: {:#}", e);
+                        let msg = format!(
+                            "for_each expression error: {}",
+                            crate::local::error_report::full_report(&e)
+                        );
                         eprintln!("Step '{}' failed: {}", step_name, msg);
                         failed_count += 1;
                         record_failure(&mut outcomes, &mut outputs, &mut errors, &step_name, msg);
@@ -351,7 +357,12 @@ async fn run_dag(
                             }
                         }
                         Err(e) => {
-                            eprintln!("  [{}] iteration {} error: {:#}", step_name, idx + 1, e);
+                            eprintln!(
+                                "  [{}] iteration {} error: {}",
+                                step_name,
+                                idx + 1,
+                                crate::local::error_report::full_report(&e)
+                            );
                             any_failed = true;
                             failed_count += 1;
                             if !step.continue_on_failure {
@@ -419,14 +430,18 @@ async fn run_dag(
                     record_failure(&mut outcomes, &mut outputs, &mut errors, &step_name, msg);
                 }
                 Err(e) => {
-                    eprintln!("Step '{}' error: {:#}", step_name, e);
+                    eprintln!(
+                        "Step '{}' error: {}",
+                        step_name,
+                        crate::local::error_report::full_report(&e)
+                    );
                     failed_count += 1;
                     record_failure(
                         &mut outcomes,
                         &mut outputs,
                         &mut errors,
                         &step_name,
-                        format!("{:#}", e),
+                        crate::local::error_report::full_report(&e),
                     );
                 }
             }
