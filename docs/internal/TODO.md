@@ -7,11 +7,11 @@ Last updated: 2026-06-03.
 
 ## Security
 
-- [ ] **`vals` deadline is classified secret-class by the PinStore** — `pins.rs` `is_vals_failure` fires before the deadline check sees a `ValsFailureKind::TimedOut`, so a `vals` timeout becomes `PinUnavailable` (secret-class) although CLAUDE.md says a deadline is never secret-class. Decide and align (spec 2026-10-06 § 3.7).
+- [ ] **`vals` deadline is classified secret-class by the PinStore** — the deadline's type is lost inside `ValsFailure` (`TimedOut` is still classified secret-class by `is_vals_failure`), so a `vals` timeout becomes `PinUnavailable` (secret-class) although CLAUDE.md says a deadline is never secret-class. Decide and align (spec 2026-10-06 § 3.7).
 - [x] **Worker logs rendered secret values at INFO/WARN** — `execute_step` is `#[tracing::instrument]`ed on the full `ClaimedStep`, whose `action_spec.env` already contains rendered secrets (DB passwords, SMTP creds, API keys). Every log line inside the span carries them in plaintext (seen in prod `stroem-worker` pod logs 2026-09-02). Fixed: sensitive fields on `ClaimedStep`/`ClaimResponse` and the worker-API request bodies are `stroem_common::secret::Secret<T>` (`redact` crate) so `Debug` is redacted by construction; `execute_step` span is `skip_all` with id fields; server handlers `skip(state, req)`. Wire format unchanged (`serialize_opt_secret`).
 - [ ] **Config secrets are plain `String`s** — `AgentProviderConfig.api_key` (stroem-agent), `WorkerConfig.worker_token`, server `jwt_secret`/`refresh_secret`/OIDC `client_secret`/`worker_token`. Nothing `Debug`-logs the config today, but a stray `{:?}` would leak them. Wrap in `stroem_common::secret::Secret<String>` (config crate deserialize is transparent) — follow-up to the worker-log fix.
 - [x] **Tera render errors can leak secret values into persisted step errors** — Tera's `try_get_value!` embeds the offending value in filter errors: `{{ secret.db.host | round }}` yielded ``Filter `round` was called on an incorrect value: got "db.internal.prod"``. Every claim-time render failure formatted that chain with `format!("{:#}", e)` and handed it to `fail_claimed_step`, which persisted it to `job_step.error_message` + `retry_history`, wrote it to the job log, and returned it in the 422 body; `redact_response` masked `error_message` but not `retry_history`. Fixed at the choke point: `fail_claimed_step` now takes the `WorkspaceSet` and scrubs known secret values (`workspace_set::redact_secrets_in_str`, sharing the primitive with `redact_json`) before anything is logged, persisted or returned, so the value never reaches the database — all five claim-time render paths covered. `redact_response` also masks `retry_history` now, for rows written before the fix. Regression tests: `test_claim_render_error_does_not_leak_secret_values` (integration, exercises the real claim endpoint), `test_redact_response_redacts_retry_history`, and three unit tests on the primitive incl. the empty-secret guard.
-- [ ] **Cascade-time render errors do not scrub connection secrets reached via `{{ input.* }}`** — residual of the 2026-09-11 render-error scrub. `cascade::run` and `fail_task_step` scrub with `collect_config_secret_values` (the workspace's own `secrets:`), because they are pure / transaction-scoped and cannot build a `WorkspaceSet`. Job input can also carry RESOLVED connection values, and a `secret: true` connection property reached through `{{ input.conn.password | round }}` in a `when:`, `for_each:`, `type: task` input or approval message would still be quoted verbatim in the persisted error. The claim-time paths do not have this gap — `fail_claimed_step` uses the full `collect_redaction_values(&ws_set)`. Fix needs the connection-property schema at cascade time; job-detail redaction (`redaction::job_redaction`, formerly `redact_response`) masks `error_message` + `retry_history` on read in the meantime, so the exposure is the job log and the DB row, not the job-detail API.
+- [x] **Cascade-time render errors do not scrub connection secrets reached via `{{ input.* }}`** — residual of the 2026-09-11 render-error scrub. `cascade::run` and `fail_task_step` scrub with `collect_config_secret_values` (the workspace's own `secrets:`), because they are pure / transaction-scoped and cannot build a `WorkspaceSet`. Job input can also carry RESOLVED connection values, and a `secret: true` connection property reached through `{{ input.conn.password | round }}` in a `when:`, `for_each:`, `type: task` input or approval message would still be quoted verbatim in the persisted error. The claim-time paths do not have this gap — `fail_claimed_step` uses the full `collect_redaction_values(&ws_set)`. Fix needs the connection-property schema at cascade time; job-detail redaction (`redaction::job_redaction`, formerly `redact_response`) masks `error_message` + `retry_history` on read in the meantime, so the exposure is the job log and the DB row, not the job-detail API. **Closed 2026-10-06 by the Tera 2 upgrade:** template errors are value-free by construction (fixed category, position, at most a type or filter name), so a cascade-time render error can no longer quote a connection secret.
 - [ ] **`fail_task_step`'s two render-error callers have no dedicated regression test** — the `type: task` step-input and approval-message paths (`settlement/dispatch.rs`) are covered by the shared primitive's unit tests and by scrubbing at the choke point, but neither was driven by its own failing test the way the claim path (`test_claim_render_error_does_not_leak_secret_values`) and the cascade path (`when_condition_error_does_not_leak_secret_values`) were. Needs a testcontainer fixture with a suspended approval step.
 - [ ] **Rendered secrets in Kube pod spec `env`** — the Kube runner passes rendered `env` (incl. secrets) as plain pod env vars, readable via `kubectl describe pod` by anyone with pod read access in the runner namespace. Consider projecting them through a per-step ephemeral `Secret` object (owner-ref'd to the pod) instead.
 - [x] Worker token exposed in K8s pod spec — moved to env var
@@ -599,6 +599,42 @@ Full analysis + the decided peek policy: `docs/superpowers/specs/2026-09-17-work
 - [ ] **OpenAI Responses API** — rig now defaults `type: openai` to Responses; we pin Chat Completions (`OpenAI::chat`) to keep the wire. Decide whether to move.
 - [ ] **Rolling deploys mixing rig 0.36 and 0.43 workers** — 0.43 workers lift 0.36-era `agent_state.messages` (`legacy_history`), but a 0.36 worker cannot read history a 0.43 worker saved and silently drops those messages. Upgrade all agent-capable workers together (or let suspended agent steps drain first).
 - [ ] **Endpoint paths rig changed upstream** — with a custom `api_endpoint`, `perplexity` now posts to `{endpoint}/chat/completions` (0.36: `{endpoint}/v1/chat/completions`; the default URL is Perplexity's documented one either way).
+
+### Tera 2 follow-ups (2026-10-06)
+- [ ] **Opt-in server-side debug log of `vals` stderr** — vals stderr is now visible only through local `stroem validate` / `stroem run` (server logs are value-free, and local runs use the operator's credentials, so a pod-only failure such as a missing IAM permission may not reproduce). An opt-in debug log would restore server-side visibility. User decision pending.
+- [ ] **Extend `stroem validate` to every template field** — it compiles only `when`, `for_each` and agent prompts (plus secrets/connections at workspace load); script/env/input/args/manifest/approval/hook templates are first compiled at claim time, so an unknown filter there fails the step, not validation.
+- [ ] **Restore `matching` / `spaceless` via tera-contrib `regex`** (ruling R23) — dropped in Tera 2 and documented in the upgrade guide; revisit if users ask.
+- [x] Task 11: json_encode "sorted keys" wording (spec says parity with Tera 1)
+- [ ] Task 11: conditionals.md note lacks pointer to `?.`/default for a null step output
+- [ ] Task 1: add `assert!(is_vals_failure(&err.context(..)))` (wrapped-context detection) — lost with the deleted is_vals_failure_recognises test
+- [ ] Task 1: assert an exact column number once (off-by-one guard for start_col + 1)
+- [ ] Task 1: validation-level tests for unknown-filter rejection in when/for_each/prompt and no expression in the message
+- [ ] Task 1: check_template_syntax catch-all also rejects Io/Utf8Conversion kinds (stricter than spec wording; harmless)
+- [ ] Task 1: tera_engine::base() dead code behind #[allow(dead_code)]
+- [ ] Task 2: forged-throw test should also assert message == "undefined variable or field"
+- [ ] Task 2: drift sub-shapes not exercised ("exists but its value is undefined", test/function hint forms, 7 of 8 constants)
+- [ ] Task 2: context-conversion case checks only message (no canary/Display/Debug)
+- [ ] Task 2: removed-builtin hint ignores Tera 1 kind (e.g. "filter `range`" though range was a function) — per-kind lists
+- [ ] Task 2: enrich returns Tera's text slices (byte-equal) instead of &'static list entries; truncated "Invalid type" returns None instead of the generic sentence
+- [ ] Task 3: `now` match arm `(_, true) if utc` awkward
+- [ ] Task 3: tests missing slice floats/start>=end, filter without value, date naive/float, default boolean=true on undefined
+- [ ] Task 4: CLI has no no-echo test for the invalid-JSON for_each path
+- [ ] Task 4: truth table lacks "-0", "0e0", "NaN", " 0 ", "[ ]" rows
+- [ ] Task 4: stale test name test_for_each_non_json_error_without_object_hint
+- [ ] Task 5: comment that FRAMEWORK_KEYS and TERA_KEYWORDS are disjoint (log_lines branch relies on it)
+- [ ] Task 5: test that a hyphenated non-keyword step (say-hello) yields no collision
+- [x] Task 5: docs should mention `state is defined` now true without a snapshot (check T11 upgrade guide)
+- [ ] Task 6: test_resolve_unavailable_workspace_is_distinct_error lacks `!contains("broken")`
+- [ ] Task 6: typed classification (anyhow::Error::new(kind).context(label)) instead of phrase matching
+- [ ] Task 6: models/workflow.rs test placed above `use super::*;`
+- [ ] Task 7: redundant `{ }` block around scrubbed logging (~326)
+- [ ] Task 7: scrub_env_error / scrub_hook_error duplicate — one helper in workspace_set
+- [ ] Task 6: field-labelled type-ref resolution failure now matches no classifier phrase → 500 (structural, non-author condition; reviewer judged acceptable)
+- [ ] Task 8: context guard in raw_detail_guard.rs is single-line only (multi-line with_context(|| { format!(..) }) skipped) — weak regression guard
+- [ ] Task 9: proof values are hard-coded copies of fixture secrets — derive from the fixture (or assert yaml.contains(value))
+- [ ] Task 9: no positive scrub test left (fail_task_step/fail_claimed_step/cascade scrub with value-bearing text) — seam test with synthetic text or TODO.md entry
+- [ ] Task 9: test_claim_fails_agent_step_with_real_prompt_render_error lacks absence of nonexistent_var; jobs.rs `!contains("each")` → "each.item"
+- [ ] Task 10: the § 3.9 item 3 comment could say Tera 1 errored here
 
 ### OutputDef Unification Review Fixes (2026-03-20)
 

@@ -1,13 +1,24 @@
 # Tera 1 → 2 upgrade
 
-Status: revision 7, proposed (2026-10-06)
+Status: revision 8, proposed (2026-10-06)
 
 Part of the dependency refresh in PR #8 (`chore/dependabot-2026-10-06`). The
 user chose to include Tera 2 in it, knowing it changes the template language
-workflow authors write. Research notes with every file:line behind the facts
-below: `TERA2-RESEARCH.md` (untracked, worktree root).
+workflow authors write. The facts below were gathered in research notes
+(working notes, not committed) with the Tera 2 file:line behind each.
 
 ## Revision history
+
+**Revision 8 (2026-10-06, post-implementation corrections).** Rulings made
+while implementing and in the final review, folded back into the spec:
+R9 — § 3.2.1's filter-name rule is corrected to Tera 2's span semantics (a
+filter span starts at the filter name, so the leading identifier is taken);
+R19 — a YAML literal is template source text, so the literal-JSON `for_each`
+error and the validation message for an invalid literal report only the JSON
+type; R20 — `indent` (`prefix=`, also `width=`) and `unique` (Tera 1
+case-insensitive default, `case_sensitive=`, `attribute=`) are ported as C3
+compat overrides; R21 — `spaceless`, `is matching` and `get_random` are
+dropped and documented in the upgrade guide.
 
 **Revision 7 (2026-10-06, Codex spec review round 6, verdict "no").** Two
 findings, both further instances of § 3.3.2's rule, verified and fixed by
@@ -289,8 +300,10 @@ closed or value-free source:
    - For `Msg` unknown-reference errors: the name only when it is in
      `TERA1_BUILTIN_NAMES` — then ``filter `map` is not available in
      Tera 2; see the upgrade guide``.
-   - The failing filter's NAME, when Tera's span text contains `| name` and
-     `name` is in our engine's registered-filter list (a closed set in code):
+   - The failing filter's NAME: a Tera 2 filter span starts at the filter
+     name, so the span's leading identifier is taken, and accepted only when
+     it is followed by the end of the span or `(` and is in the engine's
+     registered-filter list (`REGISTERED_FILTERS`, a closed set in code):
      `filter \`int\` failed`. Best effort; may name the wrong filter in an
      odd span, can never emit anything outside the list.
    Anything not matched contributes nothing. A Tera wording change therefore
