@@ -2448,10 +2448,11 @@ mod tests {
             &crate::render_context::Snapshots::default(),
         )
         .unwrap();
+        // Tera 2: § 3.9 item 3 — comparing against a missing field is false, not an error.
         assert_eq!(
             names(&plan),
-            ["fail:b"],
-            "without the secret in the config the key is undefined"
+            ["skip:b"],
+            "without the secret in the config the key is undefined, so the comparison is false"
         );
     }
 
