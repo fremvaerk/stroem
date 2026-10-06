@@ -94,7 +94,7 @@ appears:
 - **Literal references** — task input defaults, and a flow-step value written
   as a plain string containing none of `{{`, `{%` or `{#` — are checked at job creation and fail immediately with
   `400 Bad Request` and a message ending in `is not shared`.
-- **Templated flow-step values** (anything containing `{{ ... }}`) can't be
+- **Templated flow-step values** (anything containing `{{`, `{%` or `{#`) can't be
   checked before the job runs, since the template may resolve to a different
   connection depending on prior step output. These are resolved when the step
   is claimed and fail that step instead — the job is created successfully,

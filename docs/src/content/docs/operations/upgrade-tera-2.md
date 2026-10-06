@@ -20,9 +20,14 @@ sources) and in the **CLI** (`stroem run`, `stroem validate`) — never on
 workers. A job can be claimed on one server replica and cascaded on another,
 so **upgrade all server replicas together** (a rolling deploy with mixed
 versions can evaluate the same template two different ways). The Helm chart's
-default is a rolling update, so for the upgrade either scale the server to
-1 replica first, or switch the strategy to `Recreate`; otherwise accept that
-during the rolling window a job may render on either version. Workers do not
+default is a rolling update (`maxSurge: 1`, `maxUnavailable: 0`), which
+overlaps old and new pods even when you scale to 1 replica first. For the
+upgrade switch the strategy: `--set server.strategy.type=Recreate --set
+server.strategy.rollingUpdate=null` (or keep `RollingUpdate` with
+`maxSurge: 0` and `maxUnavailable: 1`). The old pod still serves through its
+`preStop` sleep window (10 s by default) while it drains, so expect a short
+overlap at the very end; otherwise accept that during the rolling window a
+job may render on either version. Workers do not
 need to be upgraded in lockstep for templating.
 
 ## Kept from Tera 1
@@ -40,7 +45,8 @@ working unchanged. You do not need to edit anything for these.
   work on a task's first run, and `{{ not state }}` is still true. (Only
   `{{ state is defined }}` changes: it is now true even without a snapshot.)
   Only one level (`state.x`) is covered: `state.a.b` with no snapshot still
-  errors — write `state?.a?.b` or use `default`.
+  errors — write `state?.a?.b | default(value=…)` (the `default` is needed:
+  `state?.a?.b` alone renders an error when the value is missing).
 - **C3 — Tera 1 filters and functions restored**, ported from Tera 1's own
   implementation so output is byte-identical: `as_str`, `trim_start_matches`,
   `trim_end_matches`, `linebreaksbr`, `map(attribute=)`,
@@ -189,8 +195,9 @@ when: "{{ input.cfg is map }}"
 ### 7. Stricter numeric and list filters
 
 - `int` and `float` **error** on unparsable input (Tera 1 returned `0`):
-  `{{ "abc" | int }}` fails, and the `default=` kwarg is gone — it is no
-  longer accepted. Guard with `{% if x is number %}` or validate the input.
+  `{{ "abc" | int }}` fails. A `default=` kwarg on `int` / `float` is
+  silently **ignored** — the template compiles and passes `stroem validate`,
+  but unparsable input still errors. Guard with `{% if x is number %}` or validate the input.
   Note `is number` is false for numeric strings such as `"42"`.
 - `round(method="common")` is invalid — use `round` without `method`, or
   `"ceil"` / `"floor"`.
@@ -251,9 +258,9 @@ and setup errors: the CLI prints `Error: …` followed by a `Tera detail`
 section. A step's `error` that a later step reads in `stroem run` stays
 value-free, as on the server.
 
-A template inside a manifest, `env` or other nested structure is reported by
-its JSON path, not its text: ``Failed to render the template at
-`spec.containers[1].image` ``. A context that cannot be built reads
+A template inside a manifest or `args` names the field (`manifest` or `args`)
+but never object keys or the template's text. An `env` template is reported by
+its key: `Failed to render env template for key 'X'`. A context that cannot be built reads
 `template context could not be prepared`. The operator running the CLI
 already holds the secrets.
 
@@ -338,7 +345,7 @@ IAM permission) may not reproduce locally.
 
 ## Checklist
 
-1. Upgrade all server replicas together (scale to 1 or use `Recreate`).
+1. Upgrade all server replicas together (use the `Recreate` strategy override from Rollout; scaling to 1 alone still overlaps pods).
 2. Run `stroem validate` on every workspace and fix the unknown-filter and
    syntax errors (items 5, 6, 8, 11). It compiles only `when`, `for_each` and
    agent prompts (plus secrets and connections at load); the other template

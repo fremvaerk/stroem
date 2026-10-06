@@ -1,6 +1,6 @@
 # Tera 1 → 2 upgrade
 
-Status: revision 8, proposed (2026-10-06)
+Status: revision 9, proposed (2026-10-06)
 
 Part of the dependency refresh in PR #8 (`chore/dependabot-2026-10-06`). The
 user chose to include Tera 2 in it, knowing it changes the template language
@@ -9,13 +9,21 @@ workflow authors write. The facts below were gathered in research notes
 
 ## Revision history
 
+**Revision 9 (2026-10-06, fix wave 2).** R24 — the deep-render path context names only the root field our own code
+supplies (`manifest` / `args`), never object keys (author text); R26 — action defaults are rendered exactly once (a second
+render in `merge_action_defaults` let an owner secret smuggle through a
+caller-visible value; pre-existing, fixed in PR #8). Corrections: R20 also
+accepts `indentation=`; § 3.2.3 lists the real `raw_detail()` callers
+(`local/validate.rs`, the `stroem run` printers, `main`'s top-level error
+print); deep-render errors name the field (`manifest`/`args`), not object keys.
+
 **Revision 8 (2026-10-06, post-implementation corrections).** Rulings made
 while implementing and in the final review, folded back into the spec:
 R9 — § 3.2.1's filter-name rule is corrected to Tera 2's span semantics (a
 filter span starts at the filter name, so the leading identifier is taken);
 R19 — a YAML literal is template source text, so the literal-JSON `for_each`
 error and the validation message for an invalid literal report only the JSON
-type; R20 — `indent` (`prefix=`, also `width=`) and `unique` (Tera 1
+type; R20 — `indent` (`prefix=`, also `width=` and `indentation=`) and `unique` (Tera 1
 case-insensitive default, `case_sensitive=`, `attribute=`) are ported as C3
 compat overrides; R21 — `spaceless`, `is matching` and `get_random` are
 dropped and documented in the upgrade guide.
@@ -343,8 +351,8 @@ two groups of cases:
 
 `TemplateError::raw_detail()` returns Tera's original text plus, for a
 `vals` failure, its stderr. Only `stroem-cli` calls it, at two named sites:
-`local/validate.rs` (the validation error printer) and the `stroem run`
-error printer — each walks the `anyhow` chain, and for a `TemplateError`
+`local/validate.rs` (the validation error printer), the `stroem run`
+printers and `main`'s top-level error print (`stroem.rs`) — each walks the `anyhow` chain, and for a `TemplateError`
 prints `raw_detail()` under the value-free line. The operator holds every
 secret anyway. A grep-based test fails the build if any other crate calls
 it.

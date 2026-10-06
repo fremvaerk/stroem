@@ -163,7 +163,8 @@ safe in job logs, step errors and API responses. For the full Tera report run
 the same workspace locally with `stroem run` or `stroem validate`. Limits: `stroem validate` compiles only `when`, `for_each` and agent prompts (plus secrets and connections at load), and `stroem run` only runs tasks made entirely of local `type: script` steps.
 
 The Tera 1 filters `urlencode`, `urlencode_strict`, `slugify`,
-`filesizeformat`, `striptags`, `addslashes` and `get_env` are not available;
+`filesizeformat`, `striptags`, `addslashes` and `get_env`, plus the `spaceless` filter, the `is matching`
+test and `get_random()`, are not available;
 see the [upgrade guide](/operations/upgrade-tera-2/#11-filters-that-were-not-restored).
 
 ## Input defaults with templates

@@ -8,11 +8,11 @@
 
 **Tech Stack:** Rust 2021 workspace, `tera` 2.4 (`preserve_order`), `tera-contrib` 0.3 (`json`), `serde_json`, `chrono` / `chrono-tz`, `anyhow`, sqlx/Postgres testcontainers for server integration tests.
 
-**Spec:** `docs/superpowers/specs/2026-10-06-tera-2-upgrade-design.md` (revision 7). Research notes with Tera 2 source references: `TERA2-RESEARCH.md` (worktree root, untracked — read, never commit). Tera 2.4.0 source is unpacked at `/private/tmp/claude-501/-Users-ala-workspace-fremvaerk-stroem/5775a987-ac59-496a-889b-8134fccb0abe/scratchpad/tera2/tera-2.4.0`; once the dependency is fetched it is also under `~/.cargo/registry/src/*/tera-2.4.0`. Tera 1.20.1 is at `~/.cargo/registry/src/*/tera-1.20.1`.
+**Spec:** `docs/superpowers/specs/2026-10-06-tera-2-upgrade-design.md` (revision 7). Research notes with Tera 2 source references: (working notes, not committed). Tera 2.4.0 source is under `~/.cargo/registry/src/*/tera-2.4.0`. Tera 1.20.1 is at `~/.cargo/registry/src/*/tera-1.20.1`.
 
 ## Global Constraints
 
-- Worktree `/Users/ala/workspace/fremvaerk/stroem-deps`, branch `up/tera`. Never commit `TERA2-RESEARCH.md`.
+- Worktree `/Users/ala/workspace/fremvaerk/stroem-deps`, branch `up/tera`. Never commit the working notes.
 - Every cargo command is prefixed `CARGO_INCREMENTAL=0`. Never set `CARGO_TARGET_DIR` (the global target `/Users/ala/.tmp/cargo` is shared).
 - Before any cargo build/test/clippy: `df -g /Users/ala | tail -1`; if the Available column is below 10, STOP and report — do not build.
 - Never run `docker ... prune`, `docker rm`, `docker volume rm`, `docker rmi`. The coordinator runs `scripts/test-clean.sh`.
@@ -2008,7 +2008,7 @@ CARGO_INCREMENTAL=0 cargo clippy --workspace --all-targets -- -D warnings 2>&1 |
 CARGO_INCREMENTAL=0 cargo test --workspace --no-fail-fast > "$SCRATCH/tera-full.log" 2>&1; grep -E '^test .* FAILED' "$SCRATCH/tera-full.log"
 ```
 
-(`$SCRATCH` = `/private/tmp/claude-501/-Users-ala-workspace-fremvaerk-stroem/5775a987-ac59-496a-889b-8134fccb0abe/scratchpad`.)
+(`$SCRATCH` = (working notes, not committed).)
 
 - [ ] **Step 2: Classify and fix each failure**
 

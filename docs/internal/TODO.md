@@ -7,6 +7,8 @@ Last updated: 2026-06-03.
 
 ## Security
 
+- [x] **Double render of action defaults allowed owner-secret smuggling** (R26) — rendering `action_spec.input` defaults twice let a template in a rendered default re-expand an owner secret into a caller-visible value; fixed in PR #8 (defaults now rendered exactly once; regression test in the code fixer's change).
+- [ ] Verify `merge_action_defaults`-style double rendering does not exist elsewhere (audit every `render_value_deep` caller).
 - [ ] **`vals` deadline is classified secret-class by the PinStore** — the deadline's type is lost inside `ValsFailure` (`TimedOut` is still classified secret-class by `is_vals_failure`), so a `vals` timeout becomes `PinUnavailable` (secret-class) although CLAUDE.md says a deadline is never secret-class. Decide and align (spec 2026-10-06 § 3.7).
 - [x] **Worker logs rendered secret values at INFO/WARN** — `execute_step` is `#[tracing::instrument]`ed on the full `ClaimedStep`, whose `action_spec.env` already contains rendered secrets (DB passwords, SMTP creds, API keys). Every log line inside the span carries them in plaintext (seen in prod `stroem-worker` pod logs 2026-09-02). Fixed: sensitive fields on `ClaimedStep`/`ClaimResponse` and the worker-API request bodies are `stroem_common::secret::Secret<T>` (`redact` crate) so `Debug` is redacted by construction; `execute_step` span is `skip_all` with id fields; server handlers `skip(state, req)`. Wire format unchanged (`serialize_opt_secret`).
 - [ ] **Config secrets are plain `String`s** — `AgentProviderConfig.api_key` (stroem-agent), `WorkerConfig.worker_token`, server `jwt_secret`/`refresh_secret`/OIDC `client_secret`/`worker_token`. Nothing `Debug`-logs the config today, but a stray `{:?}` would leak them. Wrap in `stroem_common::secret::Secret<String>` (config crate deserialize is transparent) — follow-up to the worker-log fix.
@@ -607,6 +609,7 @@ Full analysis + the decided peek policy: `docs/superpowers/specs/2026-09-17-work
 - [x] Task 11: json_encode "sorted keys" wording (spec says parity with Tera 1)
 - [ ] Task 11: conditionals.md note lacks pointer to `?.`/default for a null step output
 - [ ] Task 1: add `assert!(is_vals_failure(&err.context(..)))` (wrapped-context detection) — lost with the deleted is_vals_failure_recognises test
+- [ ] Task 1: `run_with_deadline` `wait()`/`try_wait()` failures are also labelled "vals could not be started" (`SpawnFailed`)
 - [ ] Task 1: assert an exact column number once (off-by-one guard for start_col + 1)
 - [ ] Task 1: validation-level tests for unknown-filter rejection in when/for_each/prompt and no expression in the message
 - [ ] Task 1: check_template_syntax catch-all also rejects Io/Utf8Conversion kinds (stricter than spec wording; harmless)
