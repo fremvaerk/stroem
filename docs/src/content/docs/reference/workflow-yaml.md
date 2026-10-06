@@ -418,7 +418,7 @@ Each entry in a task's `flow` map defines a step. Steps can reference a named ac
 | `input` | map | `{}` | Input values passed to the action. Values support Tera templates |
 | `continue_on_failure` | bool | `false` | Self-scoped only: if this step fails, its failure does not fail the job. Has no effect on whether anything downstream runs — that's `depends_on`'s `accept` sets on each dependent (see [Dependencies](#dependencies)) |
 | `timeout` | duration | — | Step execution timeout. Max `24h` (86400s) |
-| `when` | string | — | Tera condition. Falsy values: empty string, `"false"`, `"0"`, `"null"`, `"none"` (case-insensitive) |
+| `when` | string | — | Tera condition. Falsy values: empty string, `"false"`, `"null"`, `"none"` (case-insensitive), `"[]"`, `"{}"` and any number equal to zero (`"0"`, `"0.0"`) |
 | `for_each` | string or list | — | Tera expression or literal JSON array. Creates one instance per item |
 | `sequential` | bool | `false` | Run `for_each` instances one at a time instead of in parallel |
 | `retry` | object | — | Retry configuration for this step (see [Retry](#retry)) |

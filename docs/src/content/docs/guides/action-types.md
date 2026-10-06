@@ -287,9 +287,10 @@ actions:
     language: python
     dependencies: [pandas]
     script: |
+      import json
       import pandas as pd
       df = pd.read_csv("/workspace/data.csv")
-      print(f"OUTPUT: {{\"rows\": {len(df)}}}")
+      print("OUTPUT: " + json.dumps({"rows": len(df)}))
 ```
 
 ### Runner image override

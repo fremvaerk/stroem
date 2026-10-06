@@ -358,8 +358,8 @@ Both `prompt` and `system_prompt` are Tera templates. They're rendered at step e
 
 :::caution[A template that cannot be rendered fails the step]
 If `prompt` or `system_prompt` references a variable that does not resolve, the
-step fails at claim time with the underlying Tera error (for example
-`Variable 'nonexistent' not found`), and that message is recorded on the step.
+step fails at claim time with a value-free template error (for example
+`undefined variable or field (line 1, column 4)`), and that message is recorded on the step.
 
 Earlier versions swallowed the render error: a failing `prompt` surfaced as the
 misleading `Agent step has no rendered prompt`, and a failing `system_prompt`

@@ -125,10 +125,20 @@ connected to); see [Git Refs → Secrets and redaction](/guides/git-refs/#secret
 Job **logs** are not masked: a script that prints a secret shows it in the
 log.
 
-Step `error_message` and `retry_history` are redacted the same way. This matters
-because a template error can quote the value that caused it — for example
-`{{ secret.db_host | round }}` fails with ``Filter `round` was called on an
-incorrect value: got "…"``, embedding the secret in the message. Errors raised
-while rendering a step at claim time are scrubbed **before** they are written,
-so the value is never stored in the database or sent to the worker, and the
-error still names the filter and field that failed.
+Step `error_message` and `retry_history` are redacted the same way. Template
+errors never contain values: they are built from a fixed category, the
+position in the template and at most a type name or the failing filter's name
+— not Tera's own message text, not the rendered value, not the template line.
+Errors about a value *after* rendering (for example a rendered connection name
+that does not resolve) name the input field, never the value. As a second
+layer, errors raised while rendering a step at claim time are also scrubbed
+against the known secret values **before** they are written. To see Tera's full
+report, run the workflow locally with `stroem run` or `stroem validate`.
+
+:::caution
+`{{ obj }}` renders a whole object. `"dsn={{ input.db }}"` with a
+connection-typed input writes every property of the connection — password
+included — into the step input (Tera 1 wrote `[object]`). The value is masked
+when the job is read if the property is `secret: true`, but it is still the
+input the step receives. Reference the fields you need (`{{ input.db.host }}`).
+:::

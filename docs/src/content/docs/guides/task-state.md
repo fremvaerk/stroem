@@ -111,7 +111,7 @@ tasks:
           domain: "{{ state.domain | default(value='example.com') }}"
 ```
 
-If no previous state exists, the `state` object is not present in the template context — use `not state` to guard operations.
+If no previous state exists, `state` is `null` in the template context — use `not state` to guard operations, or `state.key | default(value=…)`, which falls back to the default on a first run.
 
 ## Runner behavior
 
@@ -446,7 +446,7 @@ Each upload creates a synthetic job row with `source_type="upload"` and `status=
 
 ### Caveats
 
-- Values are **strings** — use `| int` / `| bool` in templates if type coercion matters.
+- Values are **strings** — use `| int` / `| float` in templates if type coercion matters. `| int` and `| float` raise an error on input that does not parse as a number (they no longer return `0`). There is no `bool` filter; compare with `== 'true'` instead.
 - Total query-string size is limited by the web server (~8 KB typical). For larger state, emit via the `STATE:` protocol from a task run.
 - Do **not** put secrets in query parameters — they land in access logs and tracing spans. Use the secret backend (see [Secrets & Encryption](/guides/secrets/)) instead.
 - To remove files or state keys, use `mode=replace`.

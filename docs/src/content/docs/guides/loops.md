@@ -54,6 +54,16 @@ When the job runs:
 2. `process` expands into `process[0]`, `process[1]`, `process[2]` — all run in parallel
 3. `aggregate` waits for all 3 instances, then sees `process.output` as `[{"result":"done-a"}, {"result":"done-b"}, {"result":"done-c"}]`
 
+### Rendering the array
+
+`for_each` must render to a JSON array. Render arrays and objects with
+`| json_encode()` — it always produces valid JSON, whereas a bare `{{ x }}`
+renders Tera's display format (`{"k": v}` for objects, floats with `.0`):
+
+```yaml
+for_each: "{{ fetch.output.items | json_encode() }}"
+```
+
 ### Literal array
 
 ```yaml
@@ -167,7 +177,7 @@ Each instance creates a full child job with its own steps, logs, and lifecycle. 
 | Scenario | Behavior |
 |----------|----------|
 | Empty array | Step is skipped (not failed) |
-| Non-array result | Step fails with error |
+| Non-array result | Step fails with error: `for_each must render a JSON array; the rendered text (N bytes) is not valid JSON …` or `… got a JSON object` (the error describes the shape only, never the rendered text) |
 | Instance failure (parallel) | All instances run regardless (nothing to sequence); placeholder rolls up `failed` once all are done — regardless of `continue_on_failure` |
 | Instance failure (sequential) | Without `continue_on_failure` on the placeholder, remaining pending instances are skipped immediately. *With* it, the loop keeps promoting instances past the failure. Either way, the placeholder rolls up `failed` once done — the flag no longer changes the rollup itself |
 | Template error in `for_each` expression | Step fails with error |
