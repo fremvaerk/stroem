@@ -333,6 +333,7 @@ Full analysis + the decided peek policy: `docs/superpowers/specs/2026-09-17-work
 - [x] Version reporting feature tests (DB round-trip, API responses, serde backward compat, /api/config version)
 - [x] Worker `execute_claimed_step` integration test (3 wiremock-based tests: happy path, workspace failure, command failure)
 - [ ] Live DockerRunner execution tests
+- [ ] The two `#[ignore]`d real-Docker tests (`docker::tests::test_docker_echo`, `test_docker_cancellation`) hang when run CONCURRENTLY (default harness threads): `test_docker_echo` never finishes, each passes alone (2 s / 12 s). Seen 2026-10-06 against Docker 29.4 / OrbStack with and without API version negotiation, so it predates bollard 0.21. Suspects: two concurrent `create_image` pulls of `alpine:latest`, or attach-before-start ordering. Run them with `--test-threads=1` until understood.
 - [ ] Live KubeRunner execution tests (use testcontainers k3s module; refactor KubeRunner to accept optional kube::Client; NoWorkspace mode first, WithWorkspace needs mock tarball endpoint)
 - [x] Runner error path tests (6 tests: shell nonexistent workdir/binary/script, docker container config unit tests)
 - [x] `render_connections()` unit test (13 tests in workflow.rs)
