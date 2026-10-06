@@ -1506,6 +1506,8 @@ mod tests {
             &roles,
         )
         .unwrap();
+        precheck_literal_connection_inputs("s", &step("{# c #}CONNCANARY"), &action, &roles)
+            .unwrap();
         let err = precheck_literal_connection_inputs("s", &step("CONNCANARY"), &action, &roles)
             .unwrap_err();
         let text = format!("{err:#}");
@@ -1972,6 +1974,11 @@ mod tests {
         };
 
         let step = deploy_step("  db: \"{% if true %}CONNCANARY{% endif %}\"");
+        precheck_task_step_literals("s", &step, &resolved, &mgr, caller(), &a_cfg)
+            .await
+            .unwrap();
+
+        let step = deploy_step("  db: \"{# c #}CONNCANARY\"");
         precheck_task_step_literals("s", &step, &resolved, &mgr, caller(), &a_cfg)
             .await
             .unwrap();

@@ -482,7 +482,12 @@ async fn ref_step_literal_precheck_runs_against_owner_commit() -> Result<()> {
     cr_create_etl(&fx, "uses-release-db").await?;
 
     let err = cr_create_etl(&fx, "uses-release-bad-db").await.unwrap_err();
-    assert!(format!("{err:#}").contains("does not exist"), "{err:#}");
+    let text = format!("{err:#}");
+    assert!(
+        text.contains("no connection with that name exists"),
+        "{text}"
+    );
+    assert!(!text.contains("bad-db-conn"), "{text}");
     Ok(())
 }
 
@@ -511,7 +516,12 @@ async fn pinned_job_literal_precheck_runs_against_job_commit() -> Result<()> {
     let err = cr_create_pinned_etl(&fx, "pinned-bad-db")
         .await
         .unwrap_err();
-    assert!(format!("{err:#}").contains("does not exist"), "{err:#}");
+    let text = format!("{err:#}");
+    assert!(
+        text.contains("no connection with that name exists"),
+        "{text}"
+    );
+    assert!(!text.contains("nope-db"), "{text}");
     Ok(())
 }
 

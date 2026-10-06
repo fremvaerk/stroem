@@ -262,7 +262,6 @@ pub struct ResolveScope<'a> {
 /// A connection located by [`resolve_connection_ref`].
 pub struct ResolvedConnection<'a> {
     pub workspace: String,
-    pub name: String,
     pub def: &'a ConnectionDef,
 }
 
@@ -316,7 +315,6 @@ pub fn resolve_connection_ref<'a>(
     if let Some(def) = value_cfg.connections.get(conn_ref) {
         return Ok(ResolvedConnection {
             workspace: scope.value_ws.to_string(),
-            name: conn_ref.to_string(),
             def,
         });
     }
@@ -327,7 +325,6 @@ pub fn resolve_connection_ref<'a>(
             Lookup::Found(cfg) => match cfg.connections.get(item) {
                 Some(def) if ws == scope.value_ws || def.shared => Ok(ResolvedConnection {
                     workspace: ws.to_string(),
-                    name: item.to_string(),
                     def,
                 }),
                 Some(_) => Err(ConnectionRefError::NotShared),
@@ -346,7 +343,6 @@ pub fn resolve_connection_ref<'a>(
                 Some(def) if def.shared => {
                     return Ok(ResolvedConnection {
                         workspace: fb.to_string(),
-                        name: conn_ref.to_string(),
                         def,
                     })
                 }
@@ -660,7 +656,11 @@ pub fn resolve_connection_inputs_scoped(
             None => resolved.def.values.clone(),
             Some(ref declared) => {
                 let conn_ct = canonical_type_ref(declared, &resolved.workspace, scope.lookup)
-                    .with_context(|| format!("{label}: its connection's type"))?;
+                    .map_err(|_| {
+                        anyhow::anyhow!(
+                            "{label}: the type of the connection it names could not be resolved"
+                        )
+                    })?;
                 if conn_ct != field_ct {
                     bail!("{label} expects type '{field_ct}' but the connection it names is type '{conn_ct}'");
                 }
@@ -2778,6 +2778,106 @@ mod tests {
         let text = format!("{err:#}");
         assert!(!text.contains("CONNCANARY"), "{text}");
         assert!(text.contains("Input field 'cache' expects type"), "{text}");
+    }
+
+    #[test]
+    fn every_connection_ref_error_kind_is_value_free_in_the_full_chain() {
+        let mut multi = three_workspaces();
+        multi.configs.get_mut("jobs").unwrap().connections.insert(
+            "CONNCANARY".to_string(),
+            conn(Some("clickhouse"), false, "x"),
+        );
+        let cases = [
+            ("jobs.CONNCANARY", "exists but is not shared"),
+            ("jobs.CONNCANARYZ", "no connection with that name exists"),
+            ("CONNCANARYWS.x", "names an unknown workspace"),
+            ("broken.CONNCANARY", "is not available"),
+        ];
+        for (reference, expected) in cases {
+            let err = resolve_connection_inputs(
+                &json!({"ch": reference}),
+                &schema_of("jobs.clickhouse"),
+                &multi,
+            )
+            .unwrap_err();
+            let text = format!("{err:#}");
+            assert!(!text.contains("CONNCANARY"), "{reference}: {text}");
+            assert!(text.contains("Input field 'ch'"), "{reference}: {text}");
+            assert!(text.contains(expected), "{reference}: {text}");
+        }
+        // Offline cross-workspace reference.
+        let ws = make_ws_with_connection();
+        let err = resolve_connection_inputs(
+            &json!({"db": "CONNCANARYWS.x"}),
+            &HashMap::from([("db".to_string(), field("postgres", false, None))]),
+            &SingleWorkspace {
+                name: "local",
+                config: &ws,
+            },
+        )
+        .unwrap_err();
+        let text = format!("{err:#}");
+        assert!(!text.contains("CONNCANARY"), "{text}");
+        assert!(text.contains("Input field 'db'"), "{text}");
+    }
+
+    #[test]
+    fn foreign_typed_connection_empty_value_and_unknown_field_use_field_label() {
+        let mut multi = three_workspaces();
+        multi
+            .configs
+            .get_mut("jobs")
+            .unwrap()
+            .connection_types
+            .insert(
+                "clickhouse".to_string(),
+                ConnectionTypeDef {
+                    properties: HashMap::from([(
+                        "host".to_string(),
+                        crate::models::workflow::ConnectionPropertyDef {
+                            property_type: "string".into(),
+                            required: false,
+                            default: None,
+                            secret: false,
+                        },
+                    )]),
+                },
+            );
+        multi.configs.get_mut("infra").unwrap().connections.insert(
+            "CONNCANARY".to_string(),
+            ConnectionDef {
+                connection_type: Some("jobs.clickhouse".into()),
+                shared: true,
+                values: HashMap::from([("host".to_string(), json!(""))]),
+            },
+        );
+        let err = resolve_connection_inputs(
+            &json!({"ch": "infra.CONNCANARY"}),
+            &schema_of("jobs.clickhouse"),
+            &multi,
+        )
+        .unwrap_err();
+        let text = format!("{err:#}");
+        assert!(!text.contains("CONNCANARY"), "{text}");
+        assert!(
+            text.contains("input field 'ch' field 'host' has an empty value"),
+            "{text}"
+        );
+
+        // Unknown field: a warning, labelled by the input field.
+        let type_def = ConnectionTypeDef {
+            properties: HashMap::new(),
+        };
+        let warnings = crate::validation::check_connection_values(
+            "input field 'ch'",
+            &HashMap::from([("extra".to_string(), json!("v"))]),
+            "jobs.clickhouse",
+            &type_def,
+        )
+        .unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("input field 'ch'"), "{warnings:?}");
+        assert!(!warnings[0].contains("CONNCANARY"), "{warnings:?}");
     }
 
     #[test]

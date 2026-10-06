@@ -370,13 +370,14 @@ pub fn build_api_routes(state: Arc<AppState>) -> Router {
 /// chain equally is unsafe once wrapped infra errors (sqlx, I/O, ...) are in
 /// the mix:
 ///
-/// - **Precise phrases** (`is not shared`, `unknown workspace`, `has no
-///   connection`) are specific enough to `stroem_common::template`'s
-///   cross-workspace error text that they are safe to match anywhere in the
-///   FULL context chain (`{:#}`) — `create_job_for_task` wraps the
+/// - **Precise phrases** (`is not shared`, `unknown workspace`, `no
+///   connection with that name exists`, plus the legacy `has no connection`)
+///   are specific enough to `stroem_common::template`'s
+///   `ConnectionRefError` sentences that they are safe to match anywhere in
+///   the FULL context chain (`{:#}`) — `create_job_for_task` wraps the
 ///   author-facing phrase several `.context()` layers deep (e.g. "step
-///   '...': failed to resolve connection inputs" -> "Input field '...'
-///   references connection '...'" -> the actual cause).
+///   '...': failed to resolve connection inputs" -> "Input field '...': the
+///   connection exists but is not shared ...").
 /// - **Legacy broad phrases** (`not found`, `does not exist`, `resolve
 ///   connection`, `has no action`, `required`, `invalid`, `validation`,
 ///   `merge input defaults`) are common enough that an inner infra-layer
@@ -457,9 +458,9 @@ mod classify_execute_error_tests {
     #[test]
     fn unshared_cross_workspace_connection_is_bad_request() {
         let e = anyhow::anyhow!(
-            "connection 'owner.private' exists in workspace 'owner' but is not shared (set `shared: true` on it in workspace 'owner')"
+            "Input field 'conn': {}",
+            stroem_common::template::ConnectionRefError::NotShared
         )
-        .context("Input field 'conn' references connection 'owner.private'")
         .context("Failed to resolve connection inputs");
 
         let err = classify_execute_error(e);
@@ -471,15 +472,21 @@ mod classify_execute_error_tests {
 
     #[test]
     fn value_free_missing_connection_inside_a_chain_is_bad_request() {
-        let e = anyhow::anyhow!("Input field 'db': no connection with that name exists")
-            .context("some outer layer without a legacy phrase");
+        let e = anyhow::anyhow!(
+            "Input field 'db': {}",
+            stroem_common::template::ConnectionRefError::NotFound
+        )
+        .context("some outer layer without a legacy phrase");
         assert!(matches!(classify_execute_error(e), AppError::BadRequest(_)));
     }
 
     #[test]
     fn unavailable_owner_workspace_is_internal() {
-        let e = anyhow::anyhow!("connection 'owner.x': workspace 'owner' is not available")
-            .context("Failed to resolve connection inputs");
+        let e = anyhow::anyhow!(
+            "Input field 'conn': {}",
+            stroem_common::template::ConnectionRefError::WorkspaceUnavailable
+        )
+        .context("Failed to resolve connection inputs");
 
         let err = classify_execute_error(e);
         assert!(
@@ -555,15 +562,18 @@ mod classify_execute_error_tests {
     /// matchable by the `"resolve connection"` legacy phrase.
     #[test]
     fn missing_bare_connection_with_owner_side_marker_is_bad_request() {
-        let e = anyhow::anyhow!("connection 'typo' does not exist in workspace 'default'")
-            .context(crate::job_creator::OwnerSideRender)
-            .context("Failed to resolve connection inputs");
+        let e = anyhow::anyhow!(
+            "Input field 'db': {}",
+            stroem_common::template::ConnectionRefError::NotFound
+        )
+        .context(crate::job_creator::OwnerSideRender)
+        .context("Failed to resolve connection inputs");
 
         let err = classify_execute_error(e);
         match err {
             AppError::BadRequest(msg) => {
                 assert!(msg.contains("Failed to resolve connection inputs"), "{msg}");
-                assert!(msg.contains("does not exist"), "{msg}");
+                assert!(msg.contains("no connection with that name exists"), "{msg}");
             }
             other => panic!("expected BadRequest, got {other:?}"),
         }

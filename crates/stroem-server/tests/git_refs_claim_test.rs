@@ -1182,10 +1182,8 @@ async fn cross_owner_caller_connection_error_stays_visible() -> anyhow::Result<(
     let fx = claim_withholding_fixture().await?;
     let (status, body, error, _log) = claim_failure(&fx, "bad-caller-connection").await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
-    assert!(
-        error.contains("'billing.private-db' exists but is not shared"),
-        "{error}"
-    );
+    assert!(error.contains("exists but is not shared"), "{error}");
+    assert!(!error.contains("private-db"), "{error}");
     assert!(!error.contains("details withheld"), "{error}");
     assert_eq!(body["error"], error.as_str());
     Ok(())
