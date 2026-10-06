@@ -17,6 +17,10 @@ use uuid::Uuid;
 /// entrypoint's temporary init server (Unix socket only) can satisfy both
 /// just before the real server starts; sqlx's pool connect retries a refused
 /// TCP connection, which covers that gap.
+///
+/// Every container is labelled `stroem.test=true` (what
+/// `scripts/test-clean.sh` removes) and named after the test binary it
+/// serves — see [`container_name`].
 fn postgres_image() -> ContainerRequest<GenericImage> {
     const READY: &str = "database system is ready to accept connections";
     GenericImage::new("postgres", "11-alpine")
@@ -27,6 +31,65 @@ fn postgres_image() -> ContainerRequest<GenericImage> {
         .with_env_var("POSTGRES_USER", "postgres")
         .with_env_var("POSTGRES_PASSWORD", "postgres")
         .with_cmd(["-c", "fsync=off"])
+        .with_label("stroem.test", "true")
+        .with_container_name(this_container_name())
+}
+
+/// [`container_name`] for a new container of the running test binary.
+/// Cargo sets `CARGO_PKG_NAME` for the test processes it runs too, not only
+/// at compile time; the executable's own name gives the target.
+fn this_container_name() -> String {
+    let package = std::env::var("CARGO_PKG_NAME").ok();
+    let exe = std::env::current_exe().ok();
+    let stem = exe
+        .as_deref()
+        .and_then(|p| p.file_stem())
+        .and_then(|s| s.to_str());
+    let nonce = Uuid::new_v4().simple().to_string();
+    container_name(package.as_deref(), stem, std::process::id(), &nonce[..6])
+}
+
+/// `{package}-{target}-{pid}-{nonce}`, e.g.
+/// `stroem-server-integration-48213-9f3a1c`; `target` is the test binary
+/// without cargo's hash, `unit` for a library's own unit tests. The pid and
+/// the nonce keep it unique: Docker refuses a name any existing container
+/// has, these containers outlive their process (until `test-clean.sh`), and
+/// one process can start several (the tests below).
+fn container_name(package: Option<&str>, exe_stem: Option<&str>, pid: u32, nonce: &str) -> String {
+    let target = exe_stem.map(|stem| match stem.rsplit_once('-') {
+        Some((name, hash)) if hash.len() == 16 && hash.bytes().all(|b| b.is_ascii_hexdigit()) => {
+            name
+        }
+        _ => stem,
+    });
+    // A library's unit-test binary is named after the crate itself.
+    let target = match (package, target) {
+        (Some(p), Some(t)) if t == p.replace('-', "_") => Some("unit"),
+        (_, t) => t,
+    };
+    let base = [package, target]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("-");
+    let base = if base.is_empty() {
+        "stroem-test"
+    } else {
+        &base
+    };
+    // Docker allows `[a-zA-Z0-9][a-zA-Z0-9_.-]*`; cargo names already fit.
+    let name: String = format!("{base}-{pid}-{nonce}")
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || "_.-".contains(c) {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    name.trim_start_matches(|c: char| !c.is_ascii_alphanumeric())
+        .to_string()
 }
 
 pub struct TestDb {
@@ -50,7 +113,6 @@ async fn default_base_url() -> Result<String> {
     let shared = SHARED
         .get_or_try_init(|| async {
             let container = postgres_image()
-                .with_label("stroem.test", "true")
                 // `postgres_image()`'s own command is `-c fsync=off`;
                 // `.with_cmd` REPLACES it rather than appending, so
                 // fsync=off must be restated here or every per-test
@@ -236,6 +298,63 @@ async fn ensure_template_migrated_locked(admin_pool: &PgPool, admin_url: &str) -
 #[cfg(test)]
 mod tests {
     use testcontainers::runners::AsyncRunner;
+
+    use super::container_name;
+
+    #[test]
+    fn container_name_is_package_target_pid_nonce() {
+        assert_eq!(
+            container_name(
+                Some("stroem-server"),
+                Some("integration-0123456789abcdef"),
+                48213,
+                "9f3a1c"
+            ),
+            "stroem-server-integration-48213-9f3a1c"
+        );
+    }
+
+    #[test]
+    fn container_name_calls_a_libs_own_test_binary_unit() {
+        assert_eq!(
+            container_name(
+                Some("stroem-test-support"),
+                Some("stroem_test_support-0123456789abcdef"),
+                7,
+                "abc123"
+            ),
+            "stroem-test-support-unit-7-abc123"
+        );
+    }
+
+    #[test]
+    fn container_name_keeps_a_stem_without_cargos_hash() {
+        // Not 16 hex digits after the last dash: part of the name.
+        assert_eq!(
+            container_name(Some("stroem-cli"), Some("stroem-api"), 1, "n"),
+            "stroem-cli-stroem-api-1-n"
+        );
+    }
+
+    #[test]
+    fn container_name_falls_back_without_cargo_or_exe() {
+        assert_eq!(
+            container_name(None, None, 42, "beef00"),
+            "stroem-test-42-beef00"
+        );
+        assert_eq!(
+            container_name(None, Some("integration-0123456789abcdef"), 42, "n"),
+            "integration-42-n"
+        );
+    }
+
+    #[test]
+    fn container_name_replaces_what_docker_rejects() {
+        assert_eq!(
+            container_name(None, Some("_my test+bin"), 3, "n"),
+            "my-test-bin-3-n"
+        );
+    }
 
     #[tokio::test]
     async fn test_db_returns_isolated_databases() {
