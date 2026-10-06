@@ -1,4 +1,9 @@
 services:
+  server:
+    environment:
+      # Playwright runs the whole suite from one client IP; the per-IP auth
+      # limits would 429 page loads. Tests only.
+      STROEM__AUTH__RATE_LIMIT__ENABLED: "false"
   playwright:
     image: mcr.microsoft.com/playwright:v1.63.0-noble
     ipc: host

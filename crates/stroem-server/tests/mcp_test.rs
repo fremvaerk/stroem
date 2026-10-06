@@ -469,6 +469,7 @@ async fn setup_with_auth_and_mcp_cfg(
                 email: AUTH_USER_EMAIL.to_string(),
                 password: AUTH_USER_PASSWORD.to_string(),
             }),
+            rate_limit: Default::default(),
         }),
         recovery: Default::default(),
         retention: RetentionConfig::default(),

@@ -584,6 +584,7 @@ pub async fn pinned_workspace_fixture(opts: PinnedFixtureOpts) -> Result<PinnedF
             base_url: None,
             providers: HashMap::new(),
             initial_user: None,
+            rate_limit: Default::default(),
         }),
         recovery: Default::default(),
         retention: RetentionConfig::default(),

@@ -241,6 +241,13 @@ async fn require_auth(
 }
 
 pub fn build_api_routes(state: Arc<AppState>) -> Router {
+    // `auth.rate_limit.enabled: false` (tests only) removes every per-IP auth limit.
+    let rate_limited = state
+        .config
+        .auth
+        .as_ref()
+        .is_none_or(|a| a.rate_limit.enabled);
+
     // Rate limit on the API-key routes. The layer covers GET (list), POST
     // (create) AND DELETE on this router, and the UI issues list+create+reload
     // per key operation — so the previous strict (12 s / burst 5 ≈ 5 req/min)
@@ -255,8 +262,12 @@ pub fn build_api_routes(state: Arc<AppState>) -> Router {
             "/auth/api-keys",
             get(api_keys::list_api_keys).post(api_keys::create_api_key),
         )
-        .route("/auth/api-keys/{prefix}", delete(api_keys::delete_api_key))
-        .layer(auth_rate_limit_layer!(1, 60));
+        .route("/auth/api-keys/{prefix}", delete(api_keys::delete_api_key));
+    let api_key_create = if rate_limited {
+        api_key_create.layer(auth_rate_limit_layer!(1, 60))
+    } else {
+        api_key_create
+    };
 
     // OAuth consent endpoint — gated on the `mcp` feature because it only
     // exists to support the OAuth flow that fronts /mcp.
@@ -332,22 +343,32 @@ pub fn build_api_routes(state: Arc<AppState>) -> Router {
     ));
 
     // Login rate limit: 20 req/min per IP (one token every 3 s, burst 10).
-    let login_routes = Router::new()
-        .route("/auth/login", post(auth::login))
-        .layer(auth_rate_limit_layer!(3, 10));
+    let login_routes = Router::new().route("/auth/login", post(auth::login));
+    let login_routes = if rate_limited {
+        login_routes.layer(auth_rate_limit_layer!(3, 10))
+    } else {
+        login_routes
+    };
 
     // Refresh rate limit: 30 req/min per IP (one token every 2 s, burst 15).
-    let refresh_routes = Router::new()
-        .route("/auth/refresh", post(auth::refresh))
-        .layer(auth_rate_limit_layer!(2, 15));
+    let refresh_routes = Router::new().route("/auth/refresh", post(auth::refresh));
+    let refresh_routes = if rate_limited {
+        refresh_routes.layer(auth_rate_limit_layer!(2, 15))
+    } else {
+        refresh_routes
+    };
 
     // Relaxed limit for logout / me / OIDC: 20 req/min per IP (one token every 3 s, burst 20).
     let general_auth_routes = Router::new()
         .route("/auth/logout", post(auth::logout))
         .route("/auth/me", get(auth::me))
         .route("/auth/oidc/{provider}", get(oidc::oidc_start))
-        .route("/auth/oidc/{provider}/callback", get(oidc::oidc_callback))
-        .layer(auth_rate_limit_layer!(3, 20));
+        .route("/auth/oidc/{provider}/callback", get(oidc::oidc_callback));
+    let general_auth_routes = if rate_limited {
+        general_auth_routes.layer(auth_rate_limit_layer!(3, 20))
+    } else {
+        general_auth_routes
+    };
 
     // Public routes (no auth required — includes WS which handles auth internally).
     let public = Router::new()

@@ -505,6 +505,7 @@ Everything a job owes after one of its steps moves (or a job was created, or can
 - **User auth**: Optional JWT (access 15min, refresh 30d with rotation). Enabled via `auth` section in config.
 - **Worker auth**: Bearer token from config (`worker_token`)
 - **API keys**: `strm_` prefix + 32 hex chars. SHA256 stored in DB. Optional expiry. Frontend: Settings page.
+- **Rate limits**: per-IP `tower_governor` limits on the auth routes (login, refresh, logout/me/OIDC, API keys) in `build_api_routes`. `auth.rate_limit.enabled: false` (env `STROEM__AUTH__RATE_LIMIT__ENABLED=false`) removes them all and logs a startup warning — tests only; the Playwright overlay `docker-compose.test.yml` sets it via env.
 - **OIDC SSO**: Authorization Code + PKCE via `openidconnect`. JIT user provisioning (auth_link → email → create). State in signed HttpOnly cookie.
 
 ### ACL (Access Control)

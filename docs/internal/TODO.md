@@ -7,6 +7,9 @@ Last updated: 2026-06-03.
 
 ## Security
 
+- [ ] **Configurable per-route auth rate limits** — limits are hard-coded in `build_api_routes` (login 3 s/burst 10, refresh 2 s/15, logout/me/OIDC 3 s/20, API keys 1 s/60); only an all-or-nothing `auth.rate_limit.enabled` switch exists (tests, 2026-10-06). `/api/auth/me` is JWT-authenticated yet limited per IP, and the UI calls refresh + me on every page load, so the limit caps page loads per IP. User deferred per-route config.
+- [ ] **`ClientIpExtractor` trusts client-supplied `X-Forwarded-For` / `X-Real-IP`** — the first value from any client is used, so a client can pick a fresh rate-limit bucket per request and bypass the login brute-force limit. Needs a trusted-proxy setting.
+- [ ] **Refresh-token rotation has no grace window** — `auth::refresh` deletes the old token before issuing the new one, so a refresh request the browser aborts after the server processed it (navigation mid-restore) logs the user out on the next page load (401). Consider a short reuse window.
 - [x] **Double render of action defaults** (R26) — `merge_action_defaults` rendered string defaults twice. Real reach: in production the defaults context is `{"secret": owner_secrets}` only, so the caller-`input` smuggling vector was latent; the reachable effect was an owner secret whose resolved value contains `{{` being evaluated a second time. Fixed in PR #8; tests `template::tests::merge_action_defaults_renders_a_string_default_exactly_once`, `template::tests::test_merge_action_defaults_renders_a_self_referencing_default_once`, integration `test_xws_task_default_is_rendered_exactly_once`.
 - [x] Verify `merge_action_defaults`-style double rendering does not exist elsewhere — `render_value_deep` has no other caller; task-input `merge_defaults` renders once.
 - [ ] Task-input OBJECT defaults' nested templates are not rendered by `merge_defaults`, while action object defaults are (pre-existing difference).

@@ -3772,6 +3772,7 @@ async fn setup_cross_task_workspaces(
             base_url: None,
             providers: HashMap::new(),
             initial_user: None,
+            rate_limit: Default::default(),
         })
     } else {
         None
@@ -9190,6 +9191,10 @@ const AUTH_USER_EMAIL: &str = "admin@test.com";
 const AUTH_USER_PASSWORD: &str = "test-password-123";
 
 async fn setup_with_auth() -> Result<(Router, PgPool, TempDir)> {
+    setup_with_auth_rate_limit(true).await
+}
+
+async fn setup_with_auth_rate_limit(rate_limit_enabled: bool) -> Result<(Router, PgPool, TempDir)> {
     let test_db = stroem_test_support::test_db().await;
     let pool = test_db.pool.clone();
     let url = test_db.url;
@@ -9226,6 +9231,9 @@ async fn setup_with_auth() -> Result<(Router, PgPool, TempDir)> {
                 email: AUTH_USER_EMAIL.to_string(),
                 password: AUTH_USER_PASSWORD.to_string(),
             }),
+            rate_limit: stroem_server::config::AuthRateLimitConfig {
+                enabled: rate_limit_enabled,
+            },
         }),
         recovery: Default::default(),
         retention: RetentionConfig::default(),
@@ -9281,6 +9289,59 @@ async fn test_auth_login_success() -> Result<()> {
     let body = body_json(response).await;
     assert!(body["access_token"].is_string());
 
+    Ok(())
+}
+
+// ─── Auth rate limit switch ───────────────────────────────────────────
+
+async fn login_statuses(router: &Router, n: usize) -> Vec<u16> {
+    let mut out = Vec::new();
+    for _ in 0..n {
+        let r = router
+            .clone()
+            .oneshot(api_request(
+                "POST",
+                "/api/auth/login",
+                json!({"email": AUTH_USER_EMAIL, "password": "wrong-password"}),
+            ))
+            .await
+            .unwrap();
+        out.push(r.status().as_u16());
+    }
+    out
+}
+
+#[tokio::test]
+async fn test_auth_rate_limit_enabled_by_default_429s() -> Result<()> {
+    let (router, _pool, _tmp) = setup_with_auth().await?;
+    let statuses = login_statuses(&router, 30).await;
+    assert!(
+        statuses.contains(&429),
+        "default config must rate-limit login; got {statuses:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_auth_rate_limit_disabled_never_429() -> Result<()> {
+    let (router, _pool, _tmp) = setup_with_auth_rate_limit(false).await?;
+    let statuses = login_statuses(&router, 30).await;
+    assert!(
+        statuses.iter().all(|s| *s == 401),
+        "disabled rate limit must never 429 login; got {statuses:?}"
+    );
+    for _ in 0..40 {
+        let me = router
+            .clone()
+            .oneshot(Request::builder().uri("/api/auth/me").body(Body::empty())?)
+            .await?;
+        assert_ne!(me.status(), 429);
+        let refresh = router
+            .clone()
+            .oneshot(api_request("POST", "/api/auth/refresh", json!({})))
+            .await?;
+        assert_ne!(refresh.status(), 429);
+    }
     Ok(())
 }
 
@@ -11872,6 +11933,7 @@ async fn setup_with_auth_and_acl() -> Result<(Router, PgPool, TempDir)> {
             // Users are seeded manually below — we want explicit control
             // over admin flag and group membership.
             initial_user: None,
+            rate_limit: Default::default(),
         }),
         recovery: Default::default(),
         retention: RetentionConfig::default(),
@@ -13983,6 +14045,7 @@ async fn test_config_returns_oidc_providers_with_auth() -> Result<()> {
             base_url: None,
             providers: HashMap::new(),
             initial_user: None,
+            rate_limit: Default::default(),
         }),
         recovery: Default::default(),
         retention: RetentionConfig::default(),
@@ -14076,6 +14139,7 @@ async fn test_config_returns_has_internal_auth_true() -> Result<()> {
                 },
             )]),
             initial_user: None,
+            rate_limit: Default::default(),
         }),
         recovery: Default::default(),
         retention: RetentionConfig::default(),
@@ -14153,6 +14217,7 @@ async fn test_config_returns_has_internal_auth_false_oidc_only() -> Result<()> {
                 },
             )]),
             initial_user: None,
+            rate_limit: Default::default(),
         }),
         recovery: Default::default(),
         retention: RetentionConfig::default(),
