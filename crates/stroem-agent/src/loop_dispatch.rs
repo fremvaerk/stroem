@@ -8,9 +8,8 @@
 //! (e.g., creating child jobs, saving state, checking cancellation).
 
 use anyhow::{bail, Context, Result};
-use rig::completion::{AssistantContent, CompletionRequest, Message, ToolDefinition, Usage};
-use rig::message::{Text, ToolCall, ToolResult, ToolResultContent, UserContent};
-use rig::OneOrMany;
+use rig_core::completion::{AssistantContent, Message, ToolDefinition, Usage};
+use rig_core::message::{CallId, ToolCall, ToolName, ToolResult, ToolResultContent, UserContent};
 use stroem_common::models::workflow::{ActionDef, AgentToolRef};
 use uuid::Uuid;
 
@@ -129,6 +128,12 @@ pub async fn dispatch_agent_loop(
     // Initialize or restore conversation state
     let mut conv_state = resume_state.unwrap_or_default();
 
+    // History saved by a rig-core 0.36 worker predates the current message
+    // schema; lift it so a step suspended across the upgrade resumes intact.
+    let reasoning_issuer = crate::provider::reasoning_issuer(provider_config, model_name)
+        .unwrap_or_else(|| provider_config.provider_type.clone());
+    crate::legacy_history::upgrade(&mut conv_state.messages, &reasoning_issuer);
+
     // Collect tool results: from explicit parameter or from resolved state populated by
     // the server when agent_tool child jobs complete.
     //
@@ -149,25 +154,16 @@ pub async fn dispatch_agent_loop(
 
     // If resuming with tool results, inject them as user messages
     if !effective_tool_results.is_empty() {
+        let history = parse_history(&conv_state.messages);
         let tool_result_contents: Vec<UserContent> = effective_tool_results
             .iter()
             .map(|(call_id, result_text)| {
-                UserContent::ToolResult(ToolResult {
-                    id: call_id.clone(),
-                    call_id: Some(call_id.clone()),
-                    content: OneOrMany::one(ToolResultContent::Text(Text {
-                        text: result_text.clone(),
-                    })),
-                })
+                UserContent::ToolResult(resumed_tool_result(&history, call_id, result_text))
             })
             .collect();
 
         let tool_msg = Message::User {
-            content: OneOrMany::many(tool_result_contents).unwrap_or_else(|_| {
-                OneOrMany::one(UserContent::Text(Text {
-                    text: "No tool results".to_string(),
-                }))
-            }),
+            content: tool_result_contents,
         };
         // Serialise first (fallible); only clear the source vec on success.
         conv_state.messages.push(serde_json::to_value(&tool_msg)?);
@@ -204,46 +200,24 @@ pub async fn dispatch_agent_loop(
         }
 
         // Build the completion request
-        let mut chat_history: Vec<Message> = Vec::new();
-
-        for msg_value in &conv_state.messages {
-            if let Ok(msg) = serde_json::from_value::<Message>(msg_value.clone()) {
-                chat_history.push(msg);
-            }
-        }
+        let mut chat_history = parse_history(&conv_state.messages);
 
         let prompt_msg = if conv_state.turn == 1 {
-            Message::User {
-                content: OneOrMany::one(UserContent::Text(Text {
-                    text: rendered_prompt.to_string(),
-                })),
-            }
+            Message::user(rendered_prompt)
         } else {
-            chat_history.pop().unwrap_or_else(|| Message::User {
-                content: OneOrMany::one(UserContent::Text(Text {
-                    text: "Continue.".to_string(),
-                })),
-            })
+            chat_history
+                .pop()
+                .unwrap_or_else(|| Message::user("Continue."))
         };
 
-        let request = CompletionRequest {
-            model: None,
-            preamble: effective_system.clone(),
-            chat_history: if chat_history.is_empty() {
-                OneOrMany::one(prompt_msg.clone())
-            } else {
-                let mut all = chat_history;
-                all.push(prompt_msg.clone());
-                OneOrMany::many(all).unwrap_or_else(|_| OneOrMany::one(prompt_msg.clone()))
-            },
-            documents: vec![],
-            tools: tool_defs.clone(),
-            temperature: temperature.map(f64::from),
-            max_tokens: Some(u64::from(max_tokens)),
-            tool_choice: None,
-            additional_params: None,
-            output_schema: None,
-        };
+        let request = crate::dispatch::completion_request(
+            effective_system.as_deref(),
+            chat_history,
+            prompt_msg,
+            tool_defs.clone(),
+            temperature,
+            max_tokens,
+        );
 
         // Make the LLM call with timeout
         let response = match tokio::time::timeout(
@@ -258,17 +232,15 @@ pub async fn dispatch_agent_loop(
             }
         };
 
-        // Track token usage
-        conv_state.total_input_tokens += response.usage.input_tokens;
-        conv_state.total_output_tokens += response.usage.output_tokens;
+        // Track token usage (a counter the provider did not report adds 0)
+        let turn_input_tokens = response.usage.input_tokens.unwrap_or(0);
+        let turn_output_tokens = response.usage.output_tokens.unwrap_or(0);
+        conv_state.total_input_tokens += turn_input_tokens;
+        conv_state.total_output_tokens += turn_output_tokens;
 
         // Save the prompt to conversation history (only on first turn)
         if conv_state.turn == 1 {
-            let user_msg = Message::User {
-                content: OneOrMany::one(UserContent::Text(Text {
-                    text: rendered_prompt.to_string(),
-                })),
-            };
+            let user_msg = Message::user(rendered_prompt);
             conv_state.messages.push(serde_json::to_value(&user_msg)?);
         }
 
@@ -285,7 +257,7 @@ pub async fn dispatch_agent_loop(
             job_id,
             &format!(
                 "[agent] Turn {}: LLM responded (in={}, out={} tokens)",
-                conv_state.turn, response.usage.input_tokens, response.usage.output_tokens
+                conv_state.turn, turn_input_tokens, turn_output_tokens
             ),
         )
         .await;
@@ -310,13 +282,14 @@ pub async fn dispatch_agent_loop(
                     .await;
                     tool_calls.push(tc.clone());
                 }
-                AssistantContent::Reasoning(r) => {
+                AssistantContent::Reasoning(sealed) => {
                     // Surface thinking/reasoning blocks in the log stream
-                    let thinking_text: String = r
-                        .content
-                        .iter()
+                    let thinking_text: String = sealed
+                        .open(sealed.issuer())
+                        .into_iter()
+                        .flat_map(|r| r.content.iter())
                         .filter_map(|c| match c {
-                            rig::message::ReasoningContent::Text { text, .. } => {
+                            rig_core::message::ReasoningContent::Text { text, .. } => {
                                 Some(text.as_str())
                             }
                             _ => None,
@@ -339,11 +312,14 @@ pub async fn dispatch_agent_loop(
             return Ok(DispatchOutcome::Completed {
                 output,
                 usage: Usage {
-                    input_tokens: conv_state.total_input_tokens,
-                    output_tokens: conv_state.total_output_tokens,
-                    total_tokens: conv_state.total_input_tokens + conv_state.total_output_tokens,
-                    cached_input_tokens: 0,
-                    cache_creation_input_tokens: 0,
+                    input_tokens: Some(conv_state.total_input_tokens),
+                    output_tokens: Some(conv_state.total_output_tokens),
+                    total_tokens: Some(
+                        conv_state.total_input_tokens + conv_state.total_output_tokens,
+                    ),
+                    cached_input_tokens: Some(0),
+                    cache_creation_input_tokens: Some(0),
+                    ..Usage::default()
                 },
                 turns: conv_state.turn,
             });
@@ -367,15 +343,12 @@ pub async fn dispatch_agent_loop(
                 task_calls.push(tc);
             } else {
                 // Unknown tool — return error as tool result
-                let err_result = UserContent::ToolResult(ToolResult {
-                    id: tc.id.clone(),
-                    call_id: tc.call_id.clone(),
-                    content: OneOrMany::one(ToolResultContent::Text(Text {
-                        text: format!("Error: unknown tool '{}'", tc.function.name),
-                    })),
-                });
+                let err_result = UserContent::ToolResult(tool_result_text(
+                    tc,
+                    format!("Error: unknown tool '{}'", tc.function.name),
+                ));
                 let msg = Message::User {
-                    content: OneOrMany::one(err_result),
+                    content: vec![err_result],
                 };
                 conv_state.messages.push(serde_json::to_value(&msg)?);
             }
@@ -409,13 +382,9 @@ pub async fn dispatch_agent_loop(
             )
             .await;
 
-            let tool_result = UserContent::ToolResult(ToolResult {
-                id: tc.id.clone(),
-                call_id: tc.call_id.clone(),
-                content: OneOrMany::one(ToolResultContent::Text(Text { text: result })),
-            });
+            let tool_result = UserContent::ToolResult(tool_result_text(tc, result));
             let msg = Message::User {
-                content: OneOrMany::one(tool_result),
+                content: vec![tool_result],
             };
             conv_state.messages.push(serde_json::to_value(&msg)?);
         }
@@ -425,15 +394,12 @@ pub async fn dispatch_agent_loop(
         // Handle ask_user (takes priority over task calls)
         if let Some(tc) = ask_user_call {
             if !action_spec.interactive {
-                let err_result = UserContent::ToolResult(ToolResult {
-                    id: tc.id.clone(),
-                    call_id: tc.call_id.clone(),
-                    content: OneOrMany::one(ToolResultContent::Text(Text {
-                        text: "Error: ask_user is not available. The 'interactive' flag is not enabled on this action.".to_string(),
-                    })),
-                });
+                let err_result = UserContent::ToolResult(tool_result_text(
+                    tc,
+                    "Error: ask_user is not available. The 'interactive' flag is not enabled on this action.".to_string(),
+                ));
                 let msg = Message::User {
-                    content: OneOrMany::one(err_result),
+                    content: vec![err_result],
                 };
                 conv_state.messages.push(serde_json::to_value(&msg)?);
                 continue;
@@ -449,7 +415,7 @@ pub async fn dispatch_agent_loop(
 
             conv_state.suspended_for_ask_user = true;
             conv_state.ask_user_call = Some(AskUserCall {
-                tool_call_id: tc.id.clone(),
+                tool_call_id: tool_call_handle(&tc.id),
                 message: message.clone(),
             });
 
@@ -467,7 +433,7 @@ pub async fn dispatch_agent_loop(
         if !task_calls.is_empty() {
             for tc in &task_calls {
                 let task_name = tools::task_name_from_tool_name(&tc.function.name)
-                    .unwrap_or_else(|| tc.function.name.clone());
+                    .unwrap_or_else(|| tc.function.name.to_string());
 
                 // Convert underscores back to hyphens for task lookup
                 let task_name_hyphen = task_name.replace('_', "-");
@@ -478,15 +444,12 @@ pub async fn dispatch_agent_loop(
                 } else if task_tool_infos.iter().any(|t| t.name == task_name_hyphen) {
                     task_name_hyphen.clone()
                 } else {
-                    let err_result = UserContent::ToolResult(ToolResult {
-                        id: tc.id.clone(),
-                        call_id: tc.call_id.clone(),
-                        content: OneOrMany::one(ToolResultContent::Text(Text {
-                            text: format!("Error: task '{}' not found", task_name),
-                        })),
-                    });
+                    let err_result = UserContent::ToolResult(tool_result_text(
+                        tc,
+                        format!("Error: task '{}' not found", task_name),
+                    ));
                     let msg = Message::User {
-                        content: OneOrMany::one(err_result),
+                        content: vec![err_result],
                     };
                     conv_state.messages.push(serde_json::to_value(&msg)?);
                     continue;
@@ -500,18 +463,15 @@ pub async fn dispatch_agent_loop(
                     _ => false,
                 });
                 if !allowed {
-                    let err_result = UserContent::ToolResult(ToolResult {
-                        id: tc.id.clone(),
-                        call_id: tc.call_id.clone(),
-                        content: OneOrMany::one(ToolResultContent::Text(Text {
-                            text: format!(
-                                "Error: task '{}' is not in the allowed tool set",
-                                resolved_task_name
-                            ),
-                        })),
-                    });
+                    let err_result = UserContent::ToolResult(tool_result_text(
+                        tc,
+                        format!(
+                            "Error: task '{}' is not in the allowed tool set",
+                            resolved_task_name
+                        ),
+                    ));
                     let msg = Message::User {
-                        content: OneOrMany::one(err_result),
+                        content: vec![err_result],
                     };
                     conv_state.messages.push(serde_json::to_value(&msg)?);
                     continue;
@@ -532,8 +492,8 @@ pub async fn dispatch_agent_loop(
                     ))?;
 
                 conv_state.pending_tool_calls.push(PendingToolCall {
-                    tool_call_id: tc.id.clone(),
-                    tool_name: tc.function.name.clone(),
+                    tool_call_id: tool_call_handle(&tc.id),
+                    tool_name: tc.function.name.to_string(),
                     child_job_id,
                 });
             }
@@ -563,7 +523,7 @@ fn build_tool_definitions(
                     if let Some(ref schema) = info.parameters_schema {
                         // Use pre-built schema from server — avoids re-running
                         // `input_schema_to_json_schema` on an empty input map.
-                        defs.push(rig::completion::ToolDefinition {
+                        defs.push(ToolDefinition {
                             name: format!("strom_task_{}", task.replace('-', "_")),
                             description: info
                                 .description
@@ -616,5 +576,264 @@ fn is_mcp_tool_call(
     {
         let _ = tool_name;
         false
+    }
+}
+
+/// The persisted conversation as rig messages. A message that does not parse
+/// is skipped (legacy history is lifted first, see [`crate::legacy_history`]).
+fn parse_history(messages: &[serde_json::Value]) -> Vec<Message> {
+    messages
+        .iter()
+        .filter_map(|value| serde_json::from_value::<Message>(value.clone()).ok())
+        .collect()
+}
+
+/// The string a tool call is recorded under in `AgentConversationState`
+/// (`PendingToolCall` / `AskUserCall` / `ResolvedToolResult::tool_call_id`):
+/// the id the provider issued, or rig's minted handle when it issued none.
+fn tool_call_handle(id: &CallId) -> String {
+    id.wire().into_owned()
+}
+
+/// A text tool result answering `tc`.
+fn tool_result_text(tc: &ToolCall, text: impl Into<String>) -> ToolResult {
+    tc.result(vec![ToolResultContent::text(text)])
+}
+
+/// The result for a tool call recorded as `tool_call_id`, answered after a
+/// suspension (task-tool child job or `ask_user`).
+///
+/// A tool result carries its call's id and the tool's name, so the call is
+/// looked up in the history: by [`tool_call_handle`], or — for a call saved
+/// by a rig-core 0.36 worker, which recorded OpenAI Responses calls under
+/// their `fc_…` item id — by the provider item id.
+fn resumed_tool_result(history: &[Message], tool_call_id: &str, text: &str) -> ToolResult {
+    let call = history
+        .iter()
+        .rev()
+        .filter_map(|message| match message {
+            Message::Assistant { content, .. } => Some(content),
+            _ => None,
+        })
+        .flatten()
+        .find_map(|content| match content {
+            AssistantContent::ToolCall(tc)
+                if tc.id.wire() == tool_call_id
+                    || tc.id.provider().and_then(|p| p.item_id.as_deref())
+                        == Some(tool_call_id) =>
+            {
+                Some(tc)
+            }
+            _ => None,
+        });
+    match call {
+        Some(tc) => tool_result_text(tc, text),
+        // Not in the history (it never is for a well-formed state): answer
+        // the id as the provider's, under a placeholder tool name.
+        None => ToolResult {
+            call: CallId::from_wire(tool_call_id),
+            name: ToolName::new("unknown_tool").expect("non-empty tool name"),
+            content: vec![ToolResultContent::text(text)],
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::ResolvedToolResult;
+    use crate::test_support::capture_one_request;
+
+    /// A context with no side effects: never cancelled, records nothing.
+    struct NoopContext;
+
+    #[async_trait::async_trait]
+    impl AgentContext for NoopContext {
+        async fn is_job_cancelled(&self, _job_id: Uuid) -> bool {
+            false
+        }
+        async fn create_task_tool_job(
+            &self,
+            _job_id: Uuid,
+            _step_name: &str,
+            _task_name: &str,
+            _input: serde_json::Value,
+        ) -> Result<Uuid> {
+            bail!("not used")
+        }
+        async fn save_agent_state(
+            &self,
+            _job_id: Uuid,
+            _step_name: &str,
+            _state: &AgentConversationState,
+        ) -> Result<()> {
+            Ok(())
+        }
+        async fn suspend_for_ask_user(
+            &self,
+            _job_id: Uuid,
+            _step_name: &str,
+            _state: &AgentConversationState,
+            _message: &str,
+        ) -> Result<()> {
+            Ok(())
+        }
+        async fn log(&self, _job_id: Uuid, _message: &str) {}
+    }
+
+    fn openai_provider(api_endpoint: String) -> AgentProviderConfig {
+        AgentProviderConfig {
+            provider_type: "openai".to_string(),
+            api_key: Some("test-key".to_string()),
+            api_endpoint: Some(api_endpoint),
+            model: "test-model".to_string(),
+            max_tokens: 256,
+            temperature: None,
+            max_retries: 0,
+        }
+    }
+
+    fn interactive_action() -> ActionDef {
+        serde_json::from_value(serde_json::json!({"type": "agent", "interactive": true})).unwrap()
+    }
+
+    /// An `ask_user` suspension saved by a rig-core 0.36 worker (JSON as rig
+    /// 0.36.0 serialized it): prompt; reasoning + text + task-tool call; its
+    /// result; the `ask_user` call. The server has since recorded the user's
+    /// answer under the call's id.
+    fn legacy_ask_user_state() -> AgentConversationState {
+        let messages: Vec<serde_json::Value> = serde_json::from_str(
+            r#"[
+              {"content": [{"text": "Deploy it", "type": "text"}], "role": "user"},
+              {"content": [
+                 {"content": [{"content": {"signature": "sig", "text": "thinking..."}, "type": "text"}], "id": null},
+                 {"text": "On it"},
+                 {"additional_params": null, "call_id": null,
+                  "function": {"arguments": {"env": "prod"}, "name": "strom_task_deploy"},
+                  "id": "call_abc", "signature": null}
+               ], "id": "msg_1", "role": "assistant"},
+              {"content": [{"call_id": "call_abc", "content": [{"text": "{\"ok\":true}", "type": "text"}],
+                            "id": "call_abc", "type": "toolresult"}], "role": "user"},
+              {"content": [{"additional_params": null, "call_id": null,
+                            "function": {"arguments": {"message": "Sure?"}, "name": "ask_user"},
+                            "id": "call_ask", "signature": null}], "id": null, "role": "assistant"}
+            ]"#,
+        )
+        .unwrap();
+        AgentConversationState {
+            messages,
+            turn: 2,
+            total_input_tokens: 10,
+            total_output_tokens: 5,
+            resolved_tool_results: vec![ResolvedToolResult {
+                tool_call_id: "call_ask".to_string(),
+                result_text: "yes".to_string(),
+            }],
+            ..AgentConversationState::new()
+        }
+    }
+
+    /// A step suspended by a rig-core 0.36 worker resumes on this one with
+    /// its whole conversation: both assistant tool calls and both answers
+    /// reach the provider, each answer paired with its call.
+    #[tokio::test]
+    async fn resume_of_legacy_ask_user_state_replays_calls_and_answers() {
+        let (base_url, server) = capture_one_request().await;
+        let provider = openai_provider(format!("{base_url}/v1"));
+        let result = dispatch_agent_loop(
+            &NoopContext,
+            Uuid::new_v4(),
+            "agent",
+            &interactive_action(),
+            &provider,
+            "test-model",
+            "Deploy it",
+            None,
+            Some(legacy_ask_user_state()),
+            None,
+            Vec::new(),
+            &[],
+        )
+        .await;
+        assert!(result.is_err(), "the capture server answers 400");
+
+        let messages = server.await.unwrap().body["messages"].clone();
+        let messages = messages.as_array().unwrap();
+        let roles: Vec<&str> = messages
+            .iter()
+            .map(|m| m["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(roles, ["user", "assistant", "tool", "assistant", "tool"]);
+        assert_eq!(messages[1]["tool_calls"][0]["id"], "call_abc");
+        assert_eq!(
+            messages[1]["tool_calls"][0]["function"]["name"],
+            "strom_task_deploy"
+        );
+        assert_eq!(messages[2]["tool_call_id"], "call_abc");
+        assert_eq!(messages[3]["tool_calls"][0]["id"], "call_ask");
+        assert_eq!(messages[4]["tool_call_id"], "call_ask");
+        assert!(messages[4]["content"].to_string().contains("yes"));
+    }
+
+    fn assistant_with_calls(calls: Vec<ToolCall>) -> Message {
+        Message::Assistant {
+            id: None,
+            content: calls.into_iter().map(AssistantContent::ToolCall).collect(),
+        }
+    }
+
+    fn function(name: &str) -> rig_core::message::ToolFunction {
+        rig_core::message::ToolFunction::new(ToolName::new(name).unwrap(), serde_json::json!({}))
+    }
+
+    #[test]
+    fn resumed_tool_result_pairs_with_the_recorded_call() {
+        let provider_call = ToolCall::from_wire("call_1", function("strom_task_a"));
+        // A call the provider issued no id for (Gemini, Ollama): rig mints one.
+        let minted_call = ToolCall::new(
+            CallId::Local(rig_core::message::LocalCallId::new()),
+            function("ask_user"),
+        );
+        // OpenAI Responses-style dual id; a rig-core 0.36 worker recorded it
+        // under its `fc_…` item id.
+        let dual_call = ToolCall::from_dual_wire("fc_9", "call_9", function("strom_task_b"));
+        let history = vec![
+            Message::user("go"),
+            assistant_with_calls(vec![provider_call.clone(), minted_call.clone()]),
+            assistant_with_calls(vec![dual_call.clone()]),
+        ];
+
+        for (call, recorded_as) in [
+            (&provider_call, tool_call_handle(&provider_call.id)),
+            (&minted_call, tool_call_handle(&minted_call.id)),
+            (&dual_call, tool_call_handle(&dual_call.id)),
+            (&dual_call, "fc_9".to_string()),
+        ] {
+            let result = resumed_tool_result(&history, &recorded_as, "done");
+            assert_eq!(result.call, call.id, "recorded as {recorded_as}");
+            assert_eq!(result.name, call.function.name);
+            assert_eq!(result.content, vec![ToolResultContent::text("done")]);
+        }
+    }
+
+    #[test]
+    fn resumed_tool_result_without_recorded_call_still_serializes() {
+        let result = resumed_tool_result(&[Message::user("go")], "call_x", "done");
+        assert_eq!(result.call, CallId::from_wire("call_x"));
+        assert_eq!(result.name, "unknown_tool");
+        let message = Message::User {
+            content: vec![UserContent::ToolResult(result)],
+        };
+        let json = serde_json::to_value(&message).unwrap();
+        assert_eq!(serde_json::from_value::<Message>(json).unwrap(), message);
+    }
+
+    #[test]
+    fn tool_call_handle_is_the_wire_id() {
+        assert_eq!(tool_call_handle(&CallId::from_wire("call_1")), "call_1");
+        assert_eq!(
+            tool_call_handle(&CallId::from_dual_wire("fc_1", "call_1")),
+            "call_1"
+        );
     }
 }

@@ -30,3 +30,7 @@ reqwest.workspace = true
 
 # Internal
 stroem-common.workspace = true
+
+[dev-dependencies]
+# StatusCode for rig ProviderError fixtures in provider tests
+http.workspace = true

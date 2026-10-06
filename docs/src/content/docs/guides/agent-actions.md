@@ -125,12 +125,12 @@ The following 19 providers are supported:
 | Azure | `azure` | Azure OpenAI Service | Yes (requires `api_endpoint`) |
 | Cohere | `cohere` | Cohere models | Yes |
 | DeepSeek | `deepseek` | DeepSeek models | Yes |
-| Galadriel | `galadriel` | Galadriel models | Yes |
+| Galadriel | `galadriel` | Galadriel models (OpenAI-compatible API) | Yes |
 | Gemini | `gemini` | Google Gemini | Yes |
 | Groq | `groq` | Groq models | Yes |
 | Hugging Face | `huggingface` | Hugging Face models | Yes |
 | Hyperbolic | `hyperbolic` | Hyperbolic AI | Yes |
-| Llamafile | `llamafile` | Local Llamafile server | No |
+| Llamafile | `llamafile` | Local Llamafile or llama.cpp `llama-server` (`api_endpoint` is the server root, without `/v1`) | No |
 | Mira | `mira` | Mira AI | Yes |
 | Mistral | `mistral` | Mistral models | Yes |
 | Moonshot | `moonshot` | Moonshot AI | Yes |

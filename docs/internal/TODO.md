@@ -590,6 +590,14 @@ Full analysis + the decided peek policy: `docs/superpowers/specs/2026-09-17-work
 - [x] MCP tool discovery + execution
 - [x] Mixed sync (MCP) / async (task) tool calls
 
+### rig-core 0.36 → 0.43 upgrade follow-ups (2026-10-06)
+- [ ] **Native structured output** — rig's `CompletionRequest::output_schema` sends the provider's own JSON-schema mode. We still inject `OutputDef::to_json_schema()` into the system prompt and parse the reply (`dispatch::build_effective_system` / `build_final_output`); switching is a behaviour change, kept out of the upgrade.
+- [ ] **Structured retry classification** — `provider::is_transient_error` still matches error text (kept as-is; `CompletionCallError` restores the transport cause rig 0.43 dropped from the chain). rig's `ProviderError::is_retryable()` is the typed classification (it also retries 408/425/504 and truncated replies); adopt it deliberately.
+- [ ] **`api_key` for ollama / llamafile is ignored** — unchanged behaviour, but rig 0.43 can now send it (`OllamaConfig::with_api_key`, llama.cpp `OptionalBearer`) for proxied/secured daemons.
+- [ ] **OpenAI Responses API** — rig now defaults `type: openai` to Responses; we pin Chat Completions (`OpenAI::chat`) to keep the wire. Decide whether to move.
+- [ ] **Rolling deploys mixing rig 0.36 and 0.43 workers** — 0.43 workers lift 0.36-era `agent_state.messages` (`legacy_history`), but a 0.36 worker cannot read history a 0.43 worker saved and silently drops those messages. Upgrade all agent-capable workers together (or let suspended agent steps drain first).
+- [ ] **Endpoint paths rig changed upstream** — with a custom `api_endpoint`, `perplexity` now posts to `{endpoint}/chat/completions` (0.36: `{endpoint}/v1/chat/completions`; the default URL is Perplexity's documented one either way).
+
 ### OutputDef Unification Review Fixes (2026-03-20)
 
 #### Critical
