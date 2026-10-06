@@ -78,7 +78,7 @@ stroem-test-support.workspace = true
 # Still needed directly: the S3 tests (s3_integration_test.rs,
 # log_peak_alloc_test.rs) start their own MinIO container via
 # tests/common/minio.rs.
-testcontainers = { version = "0.27" }
+testcontainers = { version = "0.28" }
 http = "1"
 http-body-util = "0.1"
 tokio-tungstenite = "0.30"
