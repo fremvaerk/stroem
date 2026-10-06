@@ -1,12 +1,35 @@
 # `json` input type
 
-Status: revision 2, proposed (2026-10-06)
+Status: revision 3, proposed (2026-10-06)
 
 A new task/action input field type, `type: json`, that holds any JSON value
 and keeps it structured through templates. Facts below are verified at
 `b310bb44` (v0.18.0).
 
 ## Revision history
+
+**Revision 3 (2026-10-06, Codex spec review round 2, verdict "no").** All
+seven findings verified against the code. (A) A filter that converts a
+string secret to a number (`"0042" | int` → `42`) escapes exact-text
+matching: § 9 no longer promises it — it is the existing filter-transformed
+class (the same expression renders an unmasked `"42"` into a string field
+today), now stated in D7 and the secrets guide. (B) Claim classified `json`
+by the persisted schema but prepared input with the live one: claim's whole
+input preparation — `json` classification, defaults and connection
+resolution — now reads the persisted `action_spec.input` (D10), and the live
+action lookup leaves `prepare_step_action_input`; this also closes revision
+2's persisted-body-vs-live-defaults drift. (3) A removed task / flow step
+passes the stored input through unrendered: verified pre-existing for every
+type, and NOT fixable by rendering persisted data — claim overwrites
+`job_step.input` with the RENDERED input (F13), so a re-claim would render a
+render's output (R26). Scoped out with that analysis (§ 6, § 13). (4) Re-run
+initial-mode precedence stated: the source's value (replay or value) beats
+the default. (5) Replay no longer overloads the value: an explicit
+`replay_fields` list on the execute request (D12), so `"••••••"` inside a
+`json` value is plain data, warned about but never blocked in the form. (6)
+The position formula was one column off; restated in 1-based terms with the
+end of `inner` bounded (§ 4.2). (7) The non-ASCII position test puts the
+character inside `inner`.
 
 **Revision 2 (2026-10-06, Codex spec review round 1, verdict "no").** Every
 finding verified against the code; all held. (1) Numeric secrets never reach
@@ -134,7 +157,19 @@ change to how non-`json` fields render.
   `redaction::redact_job_response`, `redaction.rs:576`). `resolve_rerun_sentinels` (`template.rs:754-790`)
   replaces an incoming field whose WHOLE value is `"••••••"` with the
   source's stored `raw_input` value, for secret and connection fields only
-  (`:766`); called from `job_creator.rs:381`.
+  (`:766`); called from `job_creator.rs:381` for `CreationMode::Rerun`
+  (`job_creator.rs:44`, built from `ExecuteTaskRequest.source_job_id`,
+  `web/api/tasks.rs:102-107`).
+- **F13 — `job_step.input` is raw before the first claim, rendered after.**
+  Creation stores the flow step's raw `input:` map, templates included
+  (`job_creator.rs:586`); every successful claim overwrites it with the
+  RENDERED input (`web/worker_api/jobs.rs:1176`, `JobStepRepo::update_input`).
+  A hook job's step input is the already-rendered hook payload from the start.
+  When claim cannot find the job's task or the step's flow step in the config
+  (`rendering.rs:64-77`) it passes `step.input` through unrendered — right
+  for a hook step and for a re-claim (retry, agent resume), wrong for a FIRST
+  claim, whose `step.input` still holds raw templates. Pre-existing, for every
+  field type.
 
 ## 3. Decisions
 
@@ -146,11 +181,12 @@ change to how non-`json` fields render.
 | D4 | `secret: true`, `options`, `allow_custom`, `multiple` are rejected on `json`. | A masked JSON editor (later, TODO). |
 | D5 | `json` is rejected in approval action `input` (approver forms). | Shared `JsonField` component now (later, TODO). |
 | D6 | For a `type: task` step, the caller's `input:` (bucket C) follows the **task T's** schema; action defaults (bucket D) follow the wrapping action's schema. | Action schema for both. |
-| D7 | Numeric secret values join the redaction set as their JSON text, and redaction masks **numbers** whose text contains one; `MaskAll` masks numbers. Boolean and null secret values are never redaction values (a one-bit value cannot be hidden by masking it, and masking every boolean would destroy the response) — unchanged from today, now documented. | Leave numbers unmasked (D2 makes `{{ secret.port \| int }}` a number); mask all booleans. |
-| D8 | The Run form gives a `json` field one of three explicit modes — **default** (field omitted; the server applies and renders the default), **replay** (re-run: the server replays the source's stored value), **value** (the parsed editor text, always sent). A templated default is never placed in the editor. | Revision 1's "text unchanged from the prefill → omit", which conflated the three intents and could submit masked markers or template text as data. |
+| D7 | Numeric secret values join the redaction set as their JSON text, and redaction masks **numbers** whose text contains one; `MaskAll` masks numbers. Boolean and null secret values are never redaction values (a one-bit value cannot be hidden by masking it, and masking every boolean would destroy the response) — unchanged from today, now documented. A FILTER-CONVERTED representation of a secret (`\| int` of `"0042"`, `\| upper`, `\| b64encode`, a slice) is not covered — the existing filter-transformed class (CLAUDE.md § Secrets in logs: no finite scrub matches every encoding), unchanged by `json`. | Leave numeric secrets unmasked; mask all booleans; collect derived forms (`"0042"` → also `42`), which only covers the conversions someone thought of. |
+| D8 | The Run form gives a `json` field one of three explicit modes — **default** (field omitted; the server applies and renders the default), **replay** (re-run: the field is named in `replay_fields`, D12, and the server replays the source's stored value), **value** (the parsed editor text, always sent). On a re-run the source's value takes precedence over the default. A templated default is never placed in the editor. | Revision 1's "text unchanged from the prefill → omit", which conflated the three intents and could submit masked markers or template text as data. |
 | D9 | Agent tool schema for `json`: a property with **no `type`** keyword. | `"object"` (blocks arrays). |
-| D10 | At claim, which fields of a step's `input:` are `json` is decided by the step's persisted `action_spec.input` (F7), the schema of the action body that consumes the input. | A live/pinned config lookup before rendering (revision 1's claim restructure): the input could then be typed by a newer definition than the body using it. |
+| D10 | At claim, the step's persisted `action_spec.input` (F7) is THE action input schema for all of input preparation: which fields of the step's `input:` are `json`, which defaults are merged, which fields are connection-typed. The live action is no longer looked up for input preparation. Same rule `type: task` dispatch already follows (`action_spec.input`, never a live lookup). | Live/pinned lookup before rendering (revision 1); persisted for classification but live for defaults and connections (revision 2 — a retyped field could be classified `json` and then resolved as a connection). |
 | D11 | A wrapper error's position is mapped back to the author's text; the original string is never rendered a second time. | Re-rendering the original for its error (a second `vals` call, possibly a different outcome). |
+| D12 | Re-run replay of a `json` field is requested by NAME: the execute request gains `replay_fields: [..]` (with `source_job_id`). Values are always data — `"••••••"` inside a `json` value means nothing special. | Overloading the value with the `"••••••"` sentinel (revision 2): a literal bullet string became inexpressible, and the form had to block innocent strings. |
 
 ## 4. The json rule
 
@@ -192,13 +228,21 @@ With `inner` from § 4.1:
 2. Decode the output with `serde_json::from_str`. That is the field's value.
 3. If step 1 fails, its `TemplateError` is returned with its position
    MAPPED to the author's string `s` (D11) — the expression is never
-   evaluated a second time. The wrapper is `PREFIX + inner + SUFFIX` with a
-   one-line `PREFIX` (`{% set __stroem_v = `); `inner` is copied verbatim,
-   so with `(L0, C0)` = the position of `inner`'s first character in `s`
-   (after the leading whitespace, `{{` and an optional `-`):
-   - wrapper line 1, column `c` inside `inner` → `(L0, C0 + c - len(PREFIX))`;
-   - wrapper line `l > 1` (a multi-line `inner`) → `(L0 + l - 1, c)`;
-   - a position inside `PREFIX` or `SUFFIX`, or none → no position.
+   evaluated a second time. The wrapper is `PREFIX + inner + SUFFIX`;
+   `PREFIX` (`{% set __stroem_v = `) is one line of `P` characters and
+   `inner` is copied verbatim. All positions below are 1-based
+   `(line, column)`, as `TemplateError` reports them.
+   - `(L0, C0)` = the position of `inner`'s first character in `s` (after
+     the leading whitespace, `{{` and an optional `-`). In the wrapper that
+     character is at `(1, P + 1)`.
+   - `inner`'s last character is at wrapper `(Le, Ce)`: `(1, P + n)` for a
+     one-line `inner` of `n` characters; otherwise `Le = 1 + ` the number of
+     newlines in `inner`, `Ce` = the characters after its last newline.
+   - A wrapper position `(l, c)` before `(1, P + 1)` or after `(Le, Ce)`
+     (lexicographic order — inside `PREFIX` or `SUFFIX`) → no position.
+   - `l = 1` → `(L0, C0 + c - (P + 1))`; so `(1, P + 1)` maps to `(L0, C0)`.
+   - `l > 1` → `(L0 + l - 1, c)` — the lines after the first are copied
+     whole, so their columns do not move.
    Columns count characters: Tera's lexer advances its column once per
    `char` (`tera-2.4.0/src/parsing/lexer.rs:270-277`) and `TemplateError`
    reports `start_col + 1` (`template_error.rs:80-81`). A new crate-private
@@ -309,7 +353,7 @@ Every site where a templated value lands in a field whose schema is known:
 | Site | Today | Change | Schema that decides `json` |
 |---|---|---|---|
 | Claim: action step `input:` (`rendering.rs:86`, from `jobs.rs:1063`; also agent steps and loop instances) | `render_input_map` | `render_input_typed` | the step's persisted `action_spec.input` (D10) |
-| Claim: action defaults (`prepare_action_input_roles` → `merge_action_defaults`, `template.rs:1072`) | `merge_action_defaults` | json branch (§ 4.4) | the action `prepare_step_action_input` already reads defaults from (unchanged source) |
+| Claim: action defaults and connection resolution (`prepare_step_action_input` → `prepare_action_input_roles` → `merge_action_defaults`, `template.rs:1072`) | `merge_action_defaults`, schema from the LIVE action (`rendering.rs:127-139`) | json branch (§ 4.4); schema from the persisted spec (D10) | the step's persisted `action_spec.input` |
 | Dispatch: `type: task` bucket C (`settlement/dispatch.rs:359`) | `render_input_map` | `render_input_typed` | task T `input` (resolved earlier in `handle_task_steps_pass`) |
 | Dispatch: `type: task` bucket D (`dispatch.rs:432`) | `merge_action_defaults` | json branch | wrapping action `input` (`action_spec.input`) |
 | Job creation: task defaults (`job_creator.rs:409`) — API, MCP, triggers, hooks, child jobs, agent tools, re-run, restart | `merge_defaults` | json branch | task `input` |
@@ -324,29 +368,51 @@ Unchanged: user-supplied values (F8), trigger `input:` (literal:
 and MCP arguments (literal), approval step input (`dispatch.rs:720`, no
 input schema applies), `when` and `for_each`.
 
-**Claim schema source (D10, F7).** `render_step_input` reads the input
-schema from `prep.step.action_spec` (its `input` key, deserialised as
-`HashMap<String, InputFieldDef>`); no config lookup, no reordering of claim.
-A step row without `action_spec`, or whose `input` key is absent or does not
-deserialise, renders with `schema = None` — today's behaviour. Consequences,
-each pinned by a test (§ 10):
+**Claim schema source (D10, F7).** One schema serves all of claim's input
+handling: `step_input_schema(&JobStepRow) -> Option<HashMap<String,
+InputFieldDef>>` reads `action_spec`'s `input` key. `render_step_input` uses
+it to classify `json` fields; `prepare_step_action_input` uses it for
+`merge_missing_action_fields`, the defaults merge and both connection passes
+(`prepare_action_input_roles`) — in place of today's live action lookup
+(`rendering.rs:127-139`, removed). The owner workspace for CONNECTION
+VALUES is unchanged (`ctx.action_workspace`, live or pinned): the persisted
+spec says which fields are connection-typed and what their defaults are; the
+owner's config still says what a connection name resolves to.
+
+- `None` (no `action_spec`, no `input` key, or an `input` that does not
+  deserialise) or an empty schema → the rendered input is returned as is —
+  today's `action.input.is_empty()` result (`rendering.rs:137`).
+- The task / flow-step early returns (`rendering.rs:64-77` in rendering,
+  `:102`, `:114` in preparation) are unchanged: when rendering passes the
+  stored input through, preparation does too (F13; see "Removed task or flow
+  step" below).
+
+Consequences, each pinned by a test (§ 10):
 
 - the action is deleted, renamed or retyped between job creation and claim
-  → the step's `input:` keeps the types it was created with, matching the
-  persisted body that consumes it;
-- `for_each` instances, agent steps, library (dotted) actions,
-  cross-workspace owners and pinned refs need no special case: each step row
-  carries its own resolved `action_spec`.
+  → claim prepares the input exactly as the persisted definition says —
+  types, defaults and connection-typed fields — matching the persisted body
+  that consumes it. A field retyped `json` → connection after creation stays
+  `json` for that step;
+- behaviour change, all types: an action's DEFAULTS edited after a job was
+  created no longer reach that job's unclaimed steps (today they do for
+  unpinned jobs; pinned jobs never saw edits). This is the rule `type: task`
+  dispatch already follows (bucket D, `action_spec.input`) and is listed in
+  the upgrade note;
+- `for_each` instances (`cascade.rs:538` copies the spec), agent steps,
+  library (dotted) actions, cross-workspace owners and pinned refs need no
+  special case: each step row carries its own resolved `action_spec`.
 
-Action DEFAULTS keep their existing source: `prepare_step_action_input`'s
-lookup in the job's config (live, or the pin's), whose early returns
-(`rendering.rs:102`, `:114`, `:135`, `:137`) are unchanged. The json branch
-classifies a default by the schema it is read from, so a default and its type
-always come from one definition. For an UNPINNED job whose action changes
-between creation and claim, the step's own `input:` (persisted schema) and an
-absent field's default (live schema) can be typed by different versions —
-the same pre-existing drift as today's persisted body vs live defaults
-(§ 13), not introduced here.
+**Removed task or flow step (pre-existing, not changed here).** When claim
+cannot find the job's task or the step's flow step, `step.input` is passed
+through unrendered (F13). For a FIRST claim that is raw template text, for
+every field type alike; a `json` field inherits exactly that. It cannot be
+fixed by rendering `step.input` instead: after the first claim that column
+holds the RENDERED input (`jobs.rs:1176`), and a hook step's input is a
+rendered payload from the start, so rendering it would render a render's
+output (R26). A correct fix needs to know whether `step.input` is still raw —
+e.g. a persisted "rendered" marker, or failing the first claim of a step
+whose flow step is gone — and belongs to claim, not to this type (§ 13).
 
 ## 7. UI, CLI, MCP, agent tools
 
@@ -358,25 +424,51 @@ alone, never from comparing text to a prefill.
 
 | Mode | Shown as | Sent | Entered when |
 |---|---|---|---|
-| **default** | the default, read-only, labelled "evaluated when the job runs"; buttons *Override* | field omitted — the server applies and renders the default | initial mode for a field whose default contains a template (any string with `{{`, `{%` or `{#`) |
-| **replay** | "the previous run's value (contains masked secrets)", read-only; buttons *Override* | the string `"••••••"`; the server substitutes the source job's STORED `raw_input` value for the whole field (`resolve_rerun_sentinels`, extended to `json`, F12) | initial mode on re-run when the source's `raw_input` has the field and any string inside the prefilled (redacted) value contains `••••••` |
-| **value** | a monospace `Textarea` (8 rows) with live validity, `Invalid JSON: line L, column C` (the user's own text); buttons *Use default* / *Use previous value* where applicable | the parsed text, always — even when it equals a default | every other case; *Override* enters it with an EMPTY editor |
+| **default** | the default, read-only, labelled "evaluated when the job runs"; button *Override* | field omitted — the server applies and renders the default | see "Initial mode" |
+| **replay** | "the previous run's value (contains masked secrets)", read-only; button *Override* | field omitted from `input` and its name listed in `replay_fields` (D12); the server takes the source job's STORED, unredacted `raw_input` value for the whole field | see "Initial mode" |
+| **value** | a monospace `Textarea` (8 rows) with live validity, `Invalid JSON: line L, column C` (the user's own text); buttons *Use default* / *Use previous value* where applicable | the parsed text in `input`, always — even when it equals a default | see "Initial mode"; *Override* enters it with an EMPTY editor |
 
-- Initial `value` text: the re-run source's value when it has no masked
-  string; else an untemplated default; else empty — as
-  `JSON.stringify(v, null, 2)`.
+- **Initial mode**, first match wins (the source's value beats the default,
+  because the source run's explicit value is stored before defaults are
+  merged, `job_creator.rs:404`, and replaying it is what Re-run means):
+  1. re-run, the source's `raw_input` has the field, and any string in its
+     prefilled (redacted) value contains `••••••` → **replay**;
+  2. re-run, the source's `raw_input` has the field → **value**, prefilled
+     with that value;
+  3. the default contains a template (any string with `{{`, `{%` or `{#`)
+     → **default**;
+  4. otherwise → **value**, prefilled with the default if there is one,
+     else empty.
+  Prefills are `JSON.stringify(v, null, 2)`.
 - Submitting in `value` mode (`buildExecuteInput`): invalid JSON blocks the
   run with the error inline; empty text omits the field (then the server
   applies the default, or the run is blocked as "required" when there is
-  none — `""` and `null` are typed explicitly); a parsed value with
-  `••••••` in any string blocks the run ("contains masked values — reset to
-  *Use previous value* or replace them"); a string containing `{{` shows a
-  non-blocking note that it is sent as text, not evaluated.
-- Server side, `resolve_rerun_sentinels` treats a `json` field like a secret
-  field: an incoming whole-field `"••••••"` with a `source_job_id` is replaced
-  by the source's stored value, or the field is removed when the source had
-  none (the default then applies). `restart` replays `raw_input` server-side
-  and never sees the UI, so it is unaffected.
+  none — `""` and `null` are typed explicitly). Two NON-blocking notes, since
+  any JSON string is valid (D1): a string containing `••••••` ("sent as
+  text; *Use previous value* replays the masked value instead"), and a
+  string containing `{{` ("sent as text, not evaluated").
+
+**`replay_fields` (D12)** — `ExecuteTaskRequest` (`web/api/tasks.rs:102`)
+gains `#[serde(default)] replay_fields: Vec<String>`, carried into
+`CreationMode::Rerun { source_job_id, replay_fields }`
+(`job_creator.rs:44`). Rules, applied where re-run sentinels are resolved
+today (`job_creator.rs:360-385`), before `merge_defaults`:
+
+- non-empty without `source_job_id` → 400 (`replay_fields requires
+  source_job_id`);
+- a name that is not a field of the task's input schema → 400;
+- a name that also appears in `input` → 400 (one field, one source);
+- otherwise each named field takes the source's stored `raw_input` value,
+  or is absent (the default then applies) when the source had none.
+
+It is accepted for every field type: the server has no reason to refuse it,
+and it is what the existing secret / connection sentinel would be if
+designed now. The UI uses it for `json` fields only; moving secret and
+connection replay onto it is a follow-up (§ 13). An `input` value is always
+data: `"••••••"` anywhere in a `json` value — from the form or an API
+client — is stored and used as text. `resolve_rerun_sentinels` is NOT
+extended to `json` (revision 2 did that; D12 replaces it). `restart` replays
+`raw_input` server-side and never sees the form, so it is unaffected.
 - Docs call out the difference from string fields (clearing a string field
   with a default sends `""`; an empty `json` editor sends nothing).
 
@@ -418,9 +510,24 @@ path, so the render-path table (Tera 2 spec § 3.4) gains a note, not a row.
 
 ## 9. Secrets and redaction
 
-D2 lets a secret become a NUMBER (`{{ secret.port | int }}`, or a numeric
-secret passed through). Masking numbers is only useful if numeric secrets
-are in the set, and today they are not (F11). Both halves change:
+D2 lets a secret reach a `json` field as a native NUMBER — a numeric secret
+passed through (`{{ secret.PORT }}` with `PORT: 5432`). Masking numbers is
+only useful if numeric secrets are in the set, and today they are not (F11).
+Both halves change (below).
+
+What is covered, exactly: a redaction value is matched against the TEXT of
+each string and (new) each number. So a secret's own value is masked
+wherever it appears, as a string or as a number whose text equals or
+contains it — including a string secret that `| int` turns into the same
+digits (`"5432"` → `5432`). A conversion that changes the text is NOT
+covered: `"0042" | int` → `42`, `| upper`, `| b64encode`, `| round`, a
+slice. That is the filter-transformed class CLAUDE.md § Secrets in logs
+already names (a filter chain can produce encodings no finite scrub
+matches), and it is not new: the same `{{ secret.PIN | int }}` renders an
+unmasked `"42"` into a STRING field today. `json` adds no new member to the
+class — a string field holds the same digits as text. Collecting derived
+forms (`"0042"` → also `42`) is rejected (D7): it covers only the
+conversions someone listed. `guides/secrets.md` states the rule.
 
 - **Collection.** `collect_strings` (`workspace_set.rs:268`) also collects
   a `Value::Number` as its JSON text (`n.to_string()`, serde_json's
@@ -472,43 +579,56 @@ are in the set, and today they are not (F11). Both halves change:
   in any error; § 4.5 parity test; the R26 render-once test extended to a
   `json` default; `merge_defaults` / `merge_action_defaults` json branches.
   § 4.2 step 3: a `vals`-style counting filter registered in a test engine is
-  invoked exactly ONCE when the expression fails; error positions point into
-  the author's string for a single-line `inner`, a multi-line `inner`, leading
-  whitespace / newlines before `{{`, `{{-`, and a non-ASCII prefix; a
-  position inside the wrapper's own text yields no position.
+  invoked exactly ONCE when the expression fails; exact mapped `(line,
+  column)` of the FIRST and of the LAST token of `inner` for: a one-line
+  `inner`, a multi-line `inner` (error on its second line), leading spaces
+  and newlines before `{{`, `{{-`, and a non-ASCII character inside `inner`
+  before the failing token (columns count characters, not bytes); a
+  position inside the wrapper's `PREFIX` or `SUFFIX` yields no position.
 - **validation:** `json` accepted; § 5.3 rejections; a connection type named
   `json` rejected; § 5.4 error and warning.
 - **redaction / collection:** a numeric workspace secret and a numeric
   `secret: true` connection property are collected (live, pinned and
   per-config sets) as text; numeric values of ≤ 3 characters are not; a
   number containing a secret is masked; a string containing a numeric secret
-  is masked; booleans and nulls are not collected or masked; `MaskAll` masks
-  numbers.
+  is masked; a string secret `"5432"` rendered with `| int` into a `json`
+  field is masked; `"0042" | int` is NOT (pins the documented limit, § 9);
+  booleans and nulls are not collected or masked; `MaskAll` masks numbers.
 - **stroem-agent:** `map_field_type("json")` has no `type`; one provider wire.
 - **stroem-server integration** (new `mod` lines in `tests/main.rs`): claim —
   an object from a previous step's output, `{{ items | length }}` as a
   number, `{{ each.item }}` in a `for_each` instance, an agent step, a
   library action, a cross-workspace owner action and a ref'd action; D10 —
-  the action retyped (string → json and json → string) and deleted between
-  creation and claim: the step's `input:` follows the persisted
-  `action_spec`; cross-workspace owner-default json error withheld, caller
+  between creation and claim the action is (a) retyped string → json,
+  (b) retyped json → string, (c) retyped json → a connection type,
+  (d) given a different default, (e) deleted: in every case the FINAL
+  prepared input sent to the worker equals the input prepared from the
+  persisted `action_spec` (types, defaults, connection-typed fields);
+  F13 — a removed flow step on a first claim still passes `step.input`
+  through unrendered (pins today's behaviour, § 6), and a re-claimed step
+  whose flow step is removed passes its rendered input through unchanged
+  (no second render); cross-workspace owner-default json error withheld, caller
   json error visible; `type: task` buckets C and D; a task `json` default
   with a secret leaf, masked in job detail; a numeric secret rendered
   natively, masked in job detail, MCP `get_job_status` and the webhook sync
-  response; `type: task` and plain action hooks; re-run — an incoming
-  whole-field `"••••••"` for a `json` field is replaced by the source's
-  stored value, and removed (default applies) when the source had none.
+  response; `type: task` and plain action hooks; `replay_fields` — a named
+  `json` field takes the source's stored (unredacted) value, is absent
+  (default applies) when the source had none, and the three 400s (no
+  `source_job_id`, unknown field, field also in `input`); a `json` value
+  containing `"••••••"` sent in `input` on a re-run is stored as text.
 - **CLI:** `stroem run` with a `json` field fed from a previous step, and a
   `json` ACTION default with a template leaf.
-- **UI:** vitest for the mode model (initial mode for: templated default,
+- **UI:** vitest for the mode model — initial mode for: templated default,
   untemplated default, no default, re-run with masked value, re-run with
-  unmasked value, re-run where the source lacks the field), for
-  `buildExecuteInput` per mode (default → omitted, replay → `"••••••"`,
-  value → parsed, always sent even when equal to the default; empty value →
-  omitted or blocked when required; invalid JSON blocked; a value containing
-  `••••••` blocked) and `InputFieldRow` (`json` editor, Override /
-  Use default / Use previous value); one Playwright run of a task with a
-  `json` input and one re-run of it.
+  unmasked value, re-run where the source lacks the field, and re-run with
+  a masked source value AND a templated default (→ replay: the source wins);
+  `buildExecuteInput` per mode (default → omitted; replay → omitted from
+  `input` and named in `replay_fields`; value → parsed, always sent even when
+  equal to the default; empty value → omitted, or blocked when required;
+  invalid JSON blocked; a value containing `••••••` or `{{` sent with a
+  non-blocking note); `InputFieldRow` (`json` editor, Override / Use default /
+  Use previous value); one Playwright run of a task with a `json` input and
+  one re-run of it.
 - **E2E** (`tests/e2e.sh`, new section): step A emits an object via
   `OUTPUT:`, step B receives it through a `json` field and echoes
   `{{ input.cfg.key }}`.
@@ -519,18 +639,25 @@ are in the set, and today they are not (F11). Both halves change:
   inputs" section (literal / single expression / error, `null` for missing,
   `json_encode` gives text, the Run form's three modes, D4/D5 limits).
 - `guides/rerun-and-restart.md`: a `json` value with masked secrets is
-  replayed whole.
+  replayed whole (*Use previous value*); the API's `replay_fields`.
+- API reference for `POST /api/workspaces/{ws}/tasks/{name}/execute`:
+  `replay_fields` and its three 400s.
 - `guides/templating.md`: native values in `json` fields.
 - `guides/secrets.md`: numeric secrets are masked (in numbers and in
   strings); boolean and null secret values are never masked, and why; values
-  of ≤ 3 characters are never masked.
+  of ≤ 3 characters are never masked; a filter that changes a secret's text
+  (`| int` of `"0042"`, `| upper`, `| b64encode`) is not covered, in any
+  field type.
 - Upgrade note under `operations/`: a connection type named `json` is
   rejected; numeric secrets are now masked everywhere, and a masked number
-  appears as the string `"••••••"`; rollout order (§ 12).
+  appears as the string `"••••••"`; claim prepares a step's input from the
+  action definition persisted at job creation (an edited default no longer
+  reaches in-flight jobs); rollout order (§ 12).
 - `docs/public/llms.txt` regenerated.
 - `CLAUDE.md`: a Key Patterns bullet (`render_input_typed` is the schema-aware
-  renderer; the json rule; claim classifies `json` fields by the persisted
-  `action_spec.input`; wrapper errors are position-mapped, never re-rendered)
+  renderer; the json rule; claim prepares input — `json` classification,
+  defaults, connection-typed fields — from the persisted `action_spec.input`;
+  wrapper errors are position-mapped, never re-rendered; `replay_fields`)
   and § Secrets in logs (numeric secrets collected and masked; booleans never).
 - `CONTEXT.md`: glossary entry **Native value** — the value a `json` field
   takes from a single-expression template.
@@ -549,7 +676,13 @@ are in the set, and today they are not (F11). Both halves change:
   rejected; numeric secrets (workspace secrets and `secret: true` connection
   properties written as YAML numbers) are now masked in job detail / MCP /
   webhook responses and scrubbed from error messages — in strings as well as
-  numbers — where today they are shown.
+  numbers — where today they are shown; claim reads an action's input
+  schema and defaults from the definition persisted at job creation, so an
+  action edited mid-job no longer changes that job's unclaimed steps (D10).
+- `replay_fields` is additive: old clients never send it; a server that does
+  not know it ignores it (serde default), so during a rolling deploy a re-run
+  from a new UI against an old replica runs the field's DEFAULT instead of
+  replaying — one more reason for the replica-first rollout above.
 - Proposed version: minor bump (0.19.0); the release decision is separate.
 
 ## 13. Follow-ups (TODO.md, not in this change)
@@ -562,11 +695,13 @@ are in the set, and today they are not (F11). Both halves change:
   every type.
 - Re-run of a non-secret string field whose value was partially masked in
   job detail (`"token=••••••"`) submits the marker as data (F12 replays
-  whole-field sentinels of secret / connection / `json` fields only).
-- Claim reads action DEFAULTS from the job's config (live for unpinned jobs)
-  but the action body from the persisted `action_spec` (F7); `type: task`
-  dispatch already reads persisted defaults only. Unify on the persisted
-  spec.
+  whole-field sentinels of secret / connection fields only). Moving secret
+  and connection replay onto `replay_fields` (D12) and offering *Use previous
+  value* for every type closes it.
+- First claim of a step whose task or flow step was removed passes raw
+  template text to the worker, for every field type (F13, § 6). Needs a way
+  to know whether `step.input` is still raw (a persisted marker), or to fail
+  that first claim.
 - The Run form converts `number` but not `integer` (`execute-input.ts:27`).
 - `json` in approval forms (D5); `secret: true` on `json` (D4).
 - If a provider rejects typeless tool properties: per-provider fallback (D9).
