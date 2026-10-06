@@ -28,6 +28,10 @@ struct McpToolInfo {
 }
 
 /// Type-erased trait for MCP service operations we need.
+// async_trait desugars this to a function returning a `Pin<Box<dyn Future>>`,
+// already `#[must_use]`, and redundantly marks the method itself `#[must_use]`
+// too — newer clippy's `double_must_use` flags that redundancy.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 trait McpService: Send + Sync {
     async fn call_tool(&self, params: CallToolRequestParams) -> Result<Vec<ContentBlock>>;

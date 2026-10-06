@@ -24,6 +24,10 @@ use crate::tools;
 ///
 /// Server implements this via direct DB calls.
 /// Worker implements this via HTTP calls to server endpoints.
+// async_trait desugars this to a function returning a `Pin<Box<dyn Future>>`,
+// already `#[must_use]`, and redundantly marks the method itself `#[must_use]`
+// too — newer clippy's `double_must_use` flags that redundancy.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait AgentContext: Send + Sync {
     /// Check if the job has been cancelled.
