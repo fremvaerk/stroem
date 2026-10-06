@@ -20,6 +20,8 @@ use stroem_common::constants::DEFAULT_RUNNER_IMAGE;
 /// Docker runner that executes commands inside Docker containers
 pub struct DockerRunner {
     docker: Docker,
+    /// Set once the client's API version has been negotiated with the daemon.
+    api_version_negotiated: tokio::sync::OnceCell<()>,
 }
 
 impl DockerRunner {
@@ -27,14 +29,41 @@ impl DockerRunner {
     pub fn new() -> Result<Self> {
         let docker =
             Docker::connect_with_local_defaults().context("Failed to connect to Docker daemon")?;
-        Ok(Self { docker })
+        Ok(Self::from_client(docker))
     }
 
     /// Create a new DockerRunner connecting to a specific Docker host
     pub fn with_host(host: &str) -> Result<Self> {
         let docker = Docker::connect_with_http_defaults()
             .with_context(|| format!("Failed to connect to Docker at {}", host))?;
-        Ok(Self { docker })
+        Ok(Self::from_client(docker))
+    }
+
+    fn from_client(docker: Docker) -> Self {
+        Self {
+            docker,
+            api_version_negotiated: tokio::sync::OnceCell::new(),
+        }
+    }
+
+    /// bollard requests its own newest Docker API version unless told
+    /// otherwise, and a daemon older than that rejects every request. Lower
+    /// it to the daemon's version once, before the first request. A failure
+    /// is neither cached (the daemon may come up later) nor fatal (the
+    /// request that follows reports the real error).
+    async fn ensure_api_version(&self) {
+        let negotiated = self
+            .api_version_negotiated
+            .get_or_try_init(|| async {
+                // The clone shares the client's version cell.
+                let docker = self.docker.clone().negotiate_version().await?;
+                tracing::info!("Docker API version: {}", docker.client_version());
+                Ok::<_, bollard::errors::Error>(())
+            })
+            .await;
+        if let Err(e) = negotiated {
+            tracing::warn!("Docker API version negotiation failed: {e:#}");
+        }
     }
 
     /// Build container config from RunConfig
@@ -204,6 +233,8 @@ impl Runner for DockerRunner {
             .as_deref()
             .unwrap_or(DEFAULT_RUNNER_IMAGE)
             .to_string();
+
+        self.ensure_api_version().await;
 
         // Pull image
         tracing::info!("Pulling image: {}", image);
@@ -413,6 +444,77 @@ impl Runner for DockerRunner {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    async fn fake_daemon(api_version: &str) -> wiremock::MockServer {
+        use wiremock::matchers::{method, path};
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(method("GET"))
+            .and(path("/version"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "ApiVersion": api_version })),
+            )
+            .mount(&server)
+            .await;
+        server
+    }
+
+    fn runner_for(server: &wiremock::MockServer) -> DockerRunner {
+        let docker =
+            Docker::connect_with_http(&server.uri(), 5, bollard::API_DEFAULT_VERSION).unwrap();
+        DockerRunner::from_client(docker)
+    }
+
+    #[tokio::test]
+    async fn api_version_is_lowered_to_an_older_daemon() {
+        let server = fake_daemon("1.41").await;
+        let runner = runner_for(&server);
+        assert!(
+            runner.docker.client_version()
+                > bollard::ClientVersion {
+                    major_version: 1,
+                    minor_version: 41
+                }
+        );
+
+        runner.ensure_api_version().await;
+
+        assert_eq!(runner.docker.client_version().to_string(), "1.41");
+    }
+
+    #[tokio::test]
+    async fn api_version_is_kept_for_a_newer_daemon() {
+        let default = bollard::API_DEFAULT_VERSION.to_string();
+        let server = fake_daemon("9.99").await;
+        let runner = runner_for(&server);
+
+        runner.ensure_api_version().await;
+
+        assert_eq!(runner.docker.client_version().to_string(), default);
+    }
+
+    #[tokio::test]
+    async fn failed_negotiation_is_retried_on_the_next_run() {
+        let server = wiremock::MockServer::start().await; // no /version yet
+        let runner = runner_for(&server);
+
+        runner.ensure_api_version().await;
+        assert!(runner.api_version_negotiated.get().is_none());
+
+        use wiremock::matchers::{method, path};
+        wiremock::Mock::given(method("GET"))
+            .and(path("/version"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "ApiVersion": "1.41" })),
+            )
+            .mount(&server)
+            .await;
+        runner.ensure_api_version().await;
+
+        assert!(runner.api_version_negotiated.get().is_some());
+        assert_eq!(runner.docker.client_version().to_string(), "1.41");
+    }
 
     #[test]
     fn test_build_container_config() {

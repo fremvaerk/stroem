@@ -3,7 +3,7 @@ title: Templating
 description: Tera template engine, variables, and step name rules
 ---
 
-Strøm uses [Tera](https://keats.github.io/tera/) for templating. Templates are rendered when a worker claims a step (or server-side for task actions).
+Strøm uses [Tera 2](https://keats.github.io/tera/) for templating. Templates are rendered on the server (when a worker claims a step, and for task actions, `when`, `for_each`, hooks and approval messages) and by the `stroem` CLI — never on the worker itself. Coming from Tera 1? See the [upgrade guide](/operations/upgrade-tera-2/).
 
 ## Available context
 
@@ -14,7 +14,7 @@ rule, not one per field.
 |---|---|---|
 | `input.*` | job input — or, in action bodies (`script`, `cmd`, `env`, `args`, `manifest`, `image`), the step's resolved input | approval `message:` sees the step's resolved input when the step has an input mapping, else job input |
 | `secret.*` | workspace secrets (the action's **owner** workspace in action bodies; the job's workspace elsewhere) | always present, `{}` when none |
-| `state.*` / `global_state.*` | the latest task / global state snapshot's `state.json` | present only when a parsed snapshot exists — `{{ not state }}` is true whenever no parsed `state.json` is available — no snapshot yet, a snapshot without a sidecar, or one whose sidecar did not parse |
+| `state.*` / `global_state.*` | the latest task / global state snapshot's `state.json` | `null` until a parsed snapshot exists — `{{ not state }}` is true whenever no parsed `state.json` is available (no snapshot yet, a snapshot without a sidecar, or one whose sidecar did not parse), and `{{ state.x \| default(value=0) }}` falls back to the default |
 | `job.revision` | workspace revision pinned at creation — for a [pinned job](/guides/git-refs/), the commit its ref resolved to | always present, `null` for pre-migration jobs |
 | `job.ref` | the [git ref](/guides/git-refs/) a pinned job runs at, as written (`release/2.3`, `v4.1.0`, a commit SHA) | always present, `null` (renders as an empty string) for every job that does not run on a ref |
 | `<step>.output` | a finished step's output (`null` when a completed step produced none; `null` for skipped, failed and suspended steps — either renders as an empty string) | hyphens in step names become underscores |
@@ -27,6 +27,12 @@ by the loop variable. When a worker claims the step, the server writes a
 `[render] step '…' shadows template variable '…'` line to the job log; for
 `when:`, `for_each:`, `type: task` inputs and approval messages the collision
 is recorded in the server log only. Avoid these names.
+
+A step named after a Tera 2 keyword — `none`, `null`, `self`, `loop`, `break`,
+`continue`, `true`, `false`, `and`, `or`, `not`, `is`, `in`, `if`, `else` —
+cannot be referenced from a template at all. The server logs
+`[render] step '…' is a Tera keyword and cannot be referenced in templates`.
+Rename the step.
 
 ## Basic usage
 
@@ -131,7 +137,35 @@ script: "echo {{ name | default(value='World') }}"
 script: "{% if enabled %}echo Active{% else %}echo Inactive{% endif %}"
 ```
 
-See the [Tera documentation](https://keats.github.io/tera/docs/) for the full feature set.
+See the [Tera 2 documentation](https://keats.github.io/tera/) for the full feature set.
+
+### Undefined values and `default`
+
+- Only the **last** path segment may be undefined: `{{ a.b | default(value=1) }}`
+  works when `b` is missing, `{{ a.b.c | default(value=1) }}` is an error when
+  `b` is missing. Use optional chaining: `{{ a.b?.c | default(value=1) }}`.
+- `default` replaces both undefined **and `null`** values, so
+  `{{ step.output.x | default(value='n/a') }}` works over a skipped, failed or
+  suspended step (whose `output` is `null`). Strøm keeps this Tera 1 behaviour on
+  top of Tera 2.
+- `state` and `global_state` are `null` before the first snapshot, so
+  `state.x | default(value=0)` is safe on a task's first run.
+- `and` / `or` return one of their operands, not a boolean.
+- Render arrays and objects with `| json_encode()` when you need JSON; a bare
+  `{{ obj }}` renders `{"k": v}` and a string array renders `["a", "b"]`.
+
+### Template errors
+
+Template errors are **value-free**: they carry a category, the position
+(`line L, column C`) and at most a type name or the failing filter's name —
+never the rendered value, a variable name or the template line — so they are
+safe in job logs, step errors and API responses. For the full Tera report run
+the same workspace locally with `stroem run` or `stroem validate`. Limits: `stroem validate` compiles only `when`, `for_each` and agent prompts (plus secrets and connections at load), and `stroem run` only runs tasks made entirely of local `type: script` steps.
+
+The Tera 1 filters `urlencode`, `urlencode_strict`, `slugify`,
+`filesizeformat`, `striptags`, `addslashes` and `get_env`, plus the `spaceless` filter, the `is matching`
+test and `get_random()`, are not available;
+see the [upgrade guide](/operations/upgrade-tera-2/#11-filters-that-were-not-restored).
 
 ## Input defaults with templates
 

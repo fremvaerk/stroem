@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { InputFieldRow } from "./input-field-row";
 import type { InputField } from "@/lib/types";
 
@@ -53,5 +53,58 @@ describe("InputFieldRow placeholders", () => {
     renderRow("ref", { type: "string" });
     const input = screen.getByLabelText("ref") as HTMLInputElement;
     expect(input.placeholder).toBe("ref");
+  });
+});
+
+describe("InputFieldRow date picker", () => {
+  // DayPicker opens on today's month (it does not follow `selected`), so pin
+  // the clock to the month under test. Only `Date` is faked: Radix popovers
+  // rely on real timers.
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(2026, 2, 10, 12, 0));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("focuses the selected day on open and emits yyyy-MM-dd on pick", () => {
+    const onChange = vi.fn();
+    render(
+      <InputFieldRow
+        fieldKey="day"
+        field={{ type: "date" }}
+        value="2026-03-15"
+        onChange={onChange}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /March 15, 2026/ }));
+
+    const grid = screen.getByRole("grid");
+    expect(grid).toHaveAccessibleName(/March 2026/);
+    // `autoFocus` (v10's replacement for `initialFocus`) focuses the selected day.
+    expect(document.activeElement).toHaveTextContent("15");
+
+    fireEvent.click(within(grid).getByRole("button", { name: /March 20/ }));
+    expect(onChange).toHaveBeenCalledWith("2026-03-20");
+  });
+
+  it("datetime field keeps the time part when a day is picked", () => {
+    const onChange = vi.fn();
+    render(
+      <InputFieldRow
+        fieldKey="at"
+        field={{ type: "datetime" }}
+        value="2026-03-15T09:30"
+        onChange={onChange}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /March 15, 2026/ }));
+    fireEvent.click(
+      within(screen.getByRole("grid")).getByRole("button", { name: /March 20/ }),
+    );
+    expect(onChange).toHaveBeenCalledWith("2026-03-20T09:30");
   });
 });

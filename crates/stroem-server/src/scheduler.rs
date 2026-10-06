@@ -2,7 +2,6 @@ use crate::state::{AliveGuard, AppState};
 use crate::workspace::WorkspaceManager;
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
-use croner::parser::{CronParser, Seconds};
 use croner::Cron;
 use std::collections::HashMap;
 use stroem_common::models::workflow::ConcurrencyPolicy;
@@ -213,11 +212,7 @@ async fn load_triggers(
                 _ => continue,
             };
 
-            let cron = match CronParser::builder()
-                .seconds(Seconds::Optional)
-                .build()
-                .parse(&cron_expr)
-            {
+            let cron = match stroem_common::cron::parse(&cron_expr) {
                 Ok(c) => c,
                 Err(e) => {
                     tracing::warn!(
@@ -556,11 +551,7 @@ mod tests {
     /// Helper: minimal `TriggerState` with the requested cron expression and
     /// a past `next_run`, so the per-tick code path treats it as due.
     fn due_trigger(cron_expr: &str, past_next_run: DateTime<Utc>) -> TriggerState {
-        let cron = CronParser::builder()
-            .seconds(Seconds::Optional)
-            .build()
-            .parse(cron_expr)
-            .unwrap();
+        let cron = stroem_common::cron::parse(cron_expr).unwrap();
         TriggerState {
             cron,
             cron_expr: cron_expr.to_string(),
@@ -721,10 +712,7 @@ mod tests {
     #[test]
     fn test_cron_parse_with_seconds() {
         // 6-field: every 10 seconds
-        let cron = CronParser::builder()
-            .seconds(Seconds::Optional)
-            .build()
-            .parse("*/10 * * * * *");
+        let cron = stroem_common::cron::parse("*/10 * * * * *");
         assert!(cron.is_ok());
     }
 

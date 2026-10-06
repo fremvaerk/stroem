@@ -366,6 +366,7 @@ mod tests {
             base_url: base_url.map(|s| s.to_string()),
             providers: HashMap::new(),
             initial_user: None,
+            rate_limit: Default::default(),
         }
     }
 

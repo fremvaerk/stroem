@@ -267,10 +267,22 @@ async fn run_dag(
                         continue;
                     }
                     Err(e) => {
-                        let msg = format!("when condition error: {:#}", e);
-                        eprintln!("Step '{}' failed: {}", step_name, msg);
+                        // The terminal gets Tera's full report; `<step>.error`
+                        // (what downstream templates see) the value-free
+                        // chain, as on the server.
+                        eprintln!(
+                            "Step '{}' failed: when condition error: {}",
+                            step_name,
+                            crate::local::error_report::full_report(&e)
+                        );
                         failed_count += 1;
-                        record_failure(&mut outcomes, &mut outputs, &mut errors, &step_name, msg);
+                        record_failure(
+                            &mut outcomes,
+                            &mut outputs,
+                            &mut errors,
+                            &step_name,
+                            format!("when condition error: {e:#}"),
+                        );
                         continue;
                     }
                 }
@@ -280,10 +292,19 @@ async fn run_dag(
                 let items = match evaluate_for_each(for_each_expr, &ctx) {
                     Ok(items) => items,
                     Err(e) => {
-                        let msg = format!("for_each expression error: {:#}", e);
-                        eprintln!("Step '{}' failed: {}", step_name, msg);
+                        eprintln!(
+                            "Step '{}' failed: for_each expression error: {}",
+                            step_name,
+                            crate::local::error_report::full_report(&e)
+                        );
                         failed_count += 1;
-                        record_failure(&mut outcomes, &mut outputs, &mut errors, &step_name, msg);
+                        record_failure(
+                            &mut outcomes,
+                            &mut outputs,
+                            &mut errors,
+                            &step_name,
+                            format!("for_each expression error: {e:#}"),
+                        );
                         continue;
                     }
                 };
@@ -351,7 +372,12 @@ async fn run_dag(
                             }
                         }
                         Err(e) => {
-                            eprintln!("  [{}] iteration {} error: {:#}", step_name, idx + 1, e);
+                            eprintln!(
+                                "  [{}] iteration {} error: {}",
+                                step_name,
+                                idx + 1,
+                                crate::local::error_report::full_report(&e)
+                            );
                             any_failed = true;
                             failed_count += 1;
                             if !step.continue_on_failure {
@@ -419,14 +445,18 @@ async fn run_dag(
                     record_failure(&mut outcomes, &mut outputs, &mut errors, &step_name, msg);
                 }
                 Err(e) => {
-                    eprintln!("Step '{}' error: {:#}", step_name, e);
+                    eprintln!(
+                        "Step '{}' error: {}",
+                        step_name,
+                        crate::local::error_report::full_report(&e)
+                    );
                     failed_count += 1;
                     record_failure(
                         &mut outcomes,
                         &mut outputs,
                         &mut errors,
                         &step_name,
-                        format!("{:#}", e),
+                        format!("{e:#}"),
                     );
                 }
             }
@@ -533,8 +563,9 @@ async fn execute_step(
 
 /// Build the render context for template evaluation.
 ///
-/// Produces `{ "input": ..., "step_name": { "output": ... }, "secret": ... }`
-/// with step names sanitized (hyphens → underscores) for Tera compatibility.
+/// Produces `{ "input": ..., "state": null, "global_state": null, "job": {...},
+/// "step_name": { "output": ... }, "secret": ... }` with step names sanitized
+/// (hyphens → underscores) for Tera compatibility.
 fn build_render_context(
     input: &serde_json::Value,
     outputs: &HashMap<String, Option<serde_json::Value>>,
@@ -543,6 +574,13 @@ fn build_render_context(
 ) -> serde_json::Value {
     let mut ctx = serde_json::Map::new();
     ctx.insert("input".to_string(), input.clone());
+    // Server parity (spec 2026-10-06 § 3.6 C2): `stroem run` keeps no
+    // snapshots, so `state` / `global_state` are null — never undefined, which
+    // Tera 2 rejects even under `| default` — and `job` has no revision or
+    // ref. Before the step outputs, so a step named `job` shadows it.
+    ctx.insert("state".to_string(), serde_json::Value::Null);
+    ctx.insert("global_state".to_string(), serde_json::Value::Null);
+    ctx.insert("job".to_string(), json!({ "revision": null, "ref": null }));
 
     for (step_name, output) in outputs {
         let sanitized = step_name.replace('-', "_");
@@ -654,15 +692,23 @@ fn evaluate_for_each(
         serde_json::Value::Array(arr) => arr.clone(),
         serde_json::Value::String(s) => {
             let rendered = render_template(s, ctx).context("Failed to render for_each template")?;
-            let parsed: serde_json::Value = serde_json::from_str(&rendered).with_context(|| {
-                format!(
-                    "for_each template rendered to '{}' which is not valid JSON",
-                    rendered
+            let parsed: serde_json::Value = serde_json::from_str(&rendered).map_err(|e| {
+                anyhow::anyhow!(
+                    "for_each must render a JSON array; the rendered text ({} bytes) is not valid JSON \
+                     ({:?} error at line {}, column {}). Render arrays and objects with `| json_encode()`, \
+                     e.g. {{{{ step.output.items | json_encode() }}}}",
+                    rendered.len(),
+                    e.classify(),
+                    e.line(),
+                    e.column()
                 )
             })?;
             match parsed {
                 serde_json::Value::Array(arr) => arr,
-                _ => bail!("for_each expression must evaluate to an array"),
+                other => bail!(
+                    "for_each must render a JSON array, got a JSON {}",
+                    stroem_common::template::json_type_name(&other)
+                ),
             }
         }
         _ => bail!("for_each must be a string template or a JSON array"),
@@ -809,6 +855,34 @@ mod tests {
         assert!(ctx["s"]["output"].is_null());
         assert_eq!(ctx["s"]["error"], "boom");
         assert!(ctx["ok_step"].get("error").is_none());
+    }
+
+    /// C2 parity with the server: `state` / `global_state` are null (not
+    /// undefined) and `job` exists, so first-run idioms render.
+    #[test]
+    fn test_build_render_context_has_null_state_and_job() {
+        let ctx = build_render_context(
+            &json!({}),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert!(ctx["state"].is_null());
+        assert!(ctx["global_state"].is_null());
+        assert_eq!(ctx["job"], json!({"revision": null, "ref": null}));
+        for (tpl, want) in [
+            ("{{ state.cursor | default(value=0) }}", "0"),
+            ("{{ global_state.last | default(value='never') }}", "never"),
+            ("{% if state.x %}a{% else %}b{% endif %}", "b"),
+            ("[{{ job.revision }}][{{ job.ref }}]", "[][]"),
+        ] {
+            assert_eq!(render_template(tpl, &ctx).unwrap(), want, "{tpl}");
+        }
+        // A step literally named `job` shadows the job metadata, as on the server.
+        let mut outputs = HashMap::new();
+        outputs.insert("job".to_string(), Some(json!("mine")));
+        let ctx = build_render_context(&json!({}), &outputs, &HashMap::new(), &HashMap::new());
+        assert_eq!(ctx["job"]["output"], "mine");
     }
 
     // --- build_run_config tests ---
@@ -1563,8 +1637,8 @@ tasks:
             result
                 .unwrap_err()
                 .to_string()
-                .contains("must evaluate to an array"),
-            "error should mention 'must evaluate to an array'"
+                .contains("got a JSON object"),
+            "error should mention 'got a JSON object'"
         );
     }
 

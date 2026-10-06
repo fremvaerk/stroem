@@ -1,6 +1,5 @@
 mod local;
 
-use anyhow::Result;
 use clap::Parser;
 
 #[derive(Parser)]
@@ -20,11 +19,17 @@ struct Cli {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() {
     tracing_subscriber::fmt::init();
 
     let cli = Cli::parse();
-    local::dispatch(cli.command, &cli.path).await
+    // Every top-level error — load, setup, validation — reaches the operator
+    // with Tera's full detail (spec 2026-10-06 § 3.2.3); the operator holds
+    // every secret anyway.
+    if let Err(e) = local::dispatch(cli.command, &cli.path).await {
+        eprintln!("Error: {}", local::error_report::full_report(&e));
+        std::process::exit(1);
+    }
 }
 
 #[cfg(test)]

@@ -59,7 +59,7 @@ tasks:
 
 ## Truthiness Rules
 
-Tera templates render to strings. The following values are considered **falsy** and cause the step to be skipped:
+Tera templates render to strings, and Strøm decides truthiness on the **rendered text** (after trimming). The following are **falsy** and cause the step to be skipped:
 
 | Value | Skipped? |
 |-------|----------|
@@ -68,8 +68,25 @@ Tera templates render to strings. The following values are considered **falsy** 
 | `"0"` | Yes |
 | `"null"` (case-insensitive: `"Null"`, `"NULL"`, etc.) | Yes |
 | `"none"` (case-insensitive: `"None"`, `"NONE"`, etc.) | Yes |
+| `"[]"` and `"{}"` (an empty array or object) | Yes |
+| Any number equal to zero: `"0"`, `"0.0"`, `"-0.0"` | Yes |
 | `"true"`, `"1"`, any other string | No |
 | Template error (e.g., undefined variable) | Fails the step |
+
+Worked cases (with `z = 0.0`, `e = []`, `m = {}`, `s = "false"`, `n = null`, `one = 1`):
+
+| `when:` | Result |
+|---|---|
+| `{{ z }}`, `{{ e }}`, `{{ m }}`, `{{ s }}`, `{{ n }}` | skipped |
+| `{{ e and one }}`, `{{ one and e }}` | skipped (`and` returns the empty operand) |
+| `{{ e or one }}` | runs (`or` returns `1`) |
+| `{{ one }}`, `{{ [0] }}`, `0.5`, `x` | runs (`[0]` is a non-empty array) |
+| empty string, `0`, `-0.0`, `None`, `NULL` | skipped |
+
+:::note
+A condition that renders an empty array (`when: "{{ scan.output.items }}"`) is
+now **false**; under Tera 1 it rendered `[]` and was truthy.
+:::
 
 :::caution
 Empty strings evaluate to falsy. Use `{{ input.value \| default(value='') }}` carefully — it will skip the step if undefined.
@@ -247,7 +264,7 @@ tasks:
 
 ## Error Handling
 
-If a `when` expression **fails to render** (e.g., undefined variable or syntax error), the step fails (status = `failed`, not skipped). This prevents silent failures:
+If a `when` expression **fails to render** (e.g., an undefined variable, an undefined operand of `and` / `or`, or a syntax error), the step fails (status = `failed`, not skipped). This prevents silent failures:
 
 ```yaml
 tasks:
@@ -263,6 +280,8 @@ tasks:
         # (doesn't skip — you get an error to fix)
         when: "{{ check.output.status }}"
 ```
+
+Comparing against a missing **field** is not an error: `{{ check.output.status == 'ok' }}` renders `false` when `status` is missing (`check.output` itself must still exist), so the step is skipped rather than failed. A missing *parent* (`a.b.c` with `b` missing) is still an error — use `a.b?.c`. Template errors never contain rendered values; run `stroem validate` or `stroem run` locally for Tera's full report. Limits: `stroem validate` compiles only `when`, `for_each` and agent prompts (plus secrets and connections at load), and `stroem run` only runs tasks made entirely of local `type: script` steps.
 
 To handle undefined outputs gracefully, use Tera filters:
 

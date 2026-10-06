@@ -2,11 +2,13 @@ import { test, expect } from "@playwright/test";
 import { login } from "./helpers";
 
 test.describe("Tasks", () => {
+  // login() already lands on "/". Do not reload it here: the reload's session
+  // restore (POST /api/auth/refresh) is still in flight when a test navigates
+  // on, the navigation aborts it after the server has rotated the refresh
+  // token, and the next page's restore then presents the consumed token (401)
+  // and lands on /login.
   test.beforeEach(async ({ page }) => {
     await login(page);
-  });
-  test.beforeEach(async ({ page }) => {
-    await page.goto("/");
   });
 
   test("tasks list renders", async ({ page }) => {

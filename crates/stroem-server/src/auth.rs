@@ -1,18 +1,18 @@
 use anyhow::{Context, Result};
 use argon2::{
-    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    password_hash::{phc::PasswordHash, PasswordHasher, PasswordVerifier},
     Argon2,
 };
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation};
+use rand::{rand_core::UnwrapErr, rngs::SysRng, Rng};
 use sha2::{Digest, Sha256};
 use stroem_common::models::auth::Claims;
 
 /// Hash a password using argon2id
 pub fn hash_password(password: &str) -> Result<String> {
-    let salt = SaltString::generate(&mut OsRng);
     let argon2 = Argon2::default();
     let hash = argon2
-        .hash_password(password.as_bytes(), &salt)
+        .hash_password(password.as_bytes())
         .map_err(|e| anyhow::anyhow!("Failed to hash password: {}", e))?;
     Ok(hash.to_string())
 }
@@ -76,8 +76,10 @@ pub fn validate_access_token(
     jwt_secret: &str,
     expected_aud: Option<&str>,
 ) -> Result<Claims> {
-    let mut validation = Validation::default();
-    validation.validate_aud = false;
+    let validation = Validation {
+        validate_aud: false,
+        ..Default::default()
+    };
     let token_data = jsonwebtoken::decode::<Claims>(
         token,
         &DecodingKey::from_secret(jwt_secret.as_bytes()),
@@ -141,13 +143,19 @@ pub fn hash_refresh_token(raw_token: &str) -> String {
 /// Format: `strm_` prefix + 32 random hex chars = 37 chars total.
 /// The prefix lets middleware distinguish API keys from JWTs.
 pub fn generate_api_key() -> (String, String) {
-    use argon2::password_hash::rand_core::RngCore;
-    let mut bytes = [0u8; 16];
-    OsRng.fill_bytes(&mut bytes);
+    let bytes: [u8; 16] = os_random_bytes();
     let hex_part: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
     let raw = format!("strm_{}", hex_part);
     let hash = hash_api_key(&raw);
     (raw, hash)
+}
+
+/// `N` bytes straight from the operating system's RNG, for tokens and keys.
+/// Panics if the OS RNG fails, like `rand_core` 0.6's `OsRng::fill_bytes` did.
+pub fn os_random_bytes<const N: usize>() -> [u8; N] {
+    let mut bytes = [0u8; N];
+    UnwrapErr(SysRng).fill_bytes(&mut bytes);
+    bytes
 }
 
 /// Hash an API key using SHA256.
@@ -166,6 +174,23 @@ mod tests {
         let password = "my-secure-password";
         let hash = hash_password(password).unwrap();
         assert!(verify_password(password, &hash).unwrap());
+    }
+
+    /// A hash written by argon2 0.5 (the version before the 0.6 upgrade) must
+    /// keep verifying: every stored `users.password_hash` predates it.
+    #[test]
+    fn test_password_verify_hash_from_argon2_0_5() {
+        let legacy = "$argon2id$v=19$m=19456,t=2,p=1$rpPApaufAdPjvmGt0qEUWQ$s98vLtDoHJZMJ2jC6Ebn3TC+Eb38u9FhwdbnwiDzkrA";
+        assert!(verify_password("legacy-argon2-0.5-password", legacy).unwrap());
+        assert!(!verify_password("wrong-password", legacy).unwrap());
+    }
+
+    #[test]
+    fn test_os_random_bytes_are_not_constant() {
+        let a: [u8; 32] = os_random_bytes();
+        let b: [u8; 32] = os_random_bytes();
+        assert_ne!(a, b);
+        assert_ne!(a, [0u8; 32]);
     }
 
     #[test]

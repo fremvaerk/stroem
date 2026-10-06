@@ -24,7 +24,9 @@ for id in $(docker ps -aq --filter "label=stroem.test=true"); do
     name=$(docker inspect --format '{{.Name}}' "$id" | sed 's#^/##')
 
     if [ "$age" -ge "$MAX_AGE_SECONDS" ]; then
-        docker rm -f "$id" >/dev/null
+        # -v: also remove the container's anonymous volumes (Postgres data),
+        # which would otherwise be left behind and fill the disk.
+        docker rm -f -v "$id" >/dev/null
         echo "removed $name (age ${age}s)"
         removed=$((removed + 1))
     else

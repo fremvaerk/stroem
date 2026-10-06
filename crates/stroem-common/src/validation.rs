@@ -272,11 +272,9 @@ fn validate_workflow_config_inner(
 
             // Validate when condition template syntax.
             //
-            // Two-pass strategy: first try `one_off` (compile + execute) with an
-            // empty context to catch syntax errors. If that fails (because the
-            // expression references variables not in the empty context), fall back
-            // to `add_raw_template` (compile only) to distinguish syntax errors
-            // from missing-variable errors.
+            // `check_template_syntax` compiles the expression on the rendering
+            // engine and runs it against an empty context: a compile error is
+            // a validation error, a runtime error (undefined variable) is not.
             //
             // Known limitation — variable references: we cannot validate which
             // step names are referenced in the expression at parse time, because
@@ -285,26 +283,15 @@ fn validate_workflow_config_inner(
             // (missing 'a') passes this check and surfaces as a condition
             // evaluation failure when the job runs.
             //
-            // Known limitation — unknown Tera filters: Tera's compile-time check
-            // only validates syntax, not filter names. An expression like
-            // `{{ foo | nonexistent_filter }}` passes both the `add_raw_template`
-            // compile step and the `one_off` call with an empty context (because
-            // the variable is undefined and the filter is never invoked), but will
-            // fail at render time when `foo` has a value. Unknown filters are
-            // therefore caught only at job execution time, not at YAML parse time.
+            // Unknown filters, tests and functions are rejected here: Tera 2
+            // checks every reference when the template compiles, including
+            // branches that never run (spec 2026-10-06 § 3.1).
             if let Some(ref when_expr) = step.when {
-                if tera::Tera::one_off(when_expr, &tera::Context::new(), false).is_err() {
-                    // Only catch syntax errors — undefined variables are OK at validation time
-                    let mut test_tera = tera::Tera::default();
-                    if let Err(e) = test_tera.add_raw_template("__when__", when_expr) {
-                        bail!(
-                            "Task '{}' step '{}' has invalid when expression '{}': {}",
-                            task_name,
-                            step_name,
-                            when_expr,
-                            e
-                        );
-                    }
+                if let Err(e) = crate::template::check_template_syntax(when_expr) {
+                    return Err(anyhow::Error::new(e).context(format!(
+                        "Task '{}' step '{}' has an invalid when expression",
+                        task_name, step_name
+                    )));
                 }
             }
 
@@ -321,18 +308,12 @@ fn validate_workflow_config_inner(
             if let Some(ref for_each) = step.for_each {
                 match for_each {
                     serde_json::Value::String(expr) => {
-                        // Validate as Tera template (same two-pass strategy as `when`)
-                        if tera::Tera::one_off(expr, &tera::Context::new(), false).is_err() {
-                            let mut test_tera = tera::Tera::default();
-                            if let Err(e) = test_tera.add_raw_template("__for_each__", expr) {
-                                bail!(
-                                    "Task '{}' step '{}' has invalid for_each expression '{}': {}",
-                                    task_name,
-                                    step_name,
-                                    expr,
-                                    e
-                                );
-                            }
+                        // Validate as Tera template (same check as `when`)
+                        if let Err(e) = crate::template::check_template_syntax(expr) {
+                            return Err(anyhow::Error::new(e).context(format!(
+                                "Task '{}' step '{}' has an invalid for_each expression",
+                                task_name, step_name
+                            )));
                         }
                     }
                     serde_json::Value::Array(arr) => {
@@ -345,12 +326,15 @@ fn validate_workflow_config_inner(
                             );
                         }
                     }
-                    _ => {
+                    // Name the JSON type only: a YAML literal is template
+                    // source and can hold a literal secret (spec 2026-10-06
+                    // § 3.3).
+                    other => {
                         bail!(
-                            "Task '{}' step '{}' for_each must be a string (Tera template) or array, got {:?}",
+                            "Task '{}' step '{}' field 'for_each' must be a string (Tera template) or array, got a JSON {}",
                             task_name,
                             step_name,
-                            for_each
+                            crate::template::json_type_name(other)
                         );
                     }
                 }
@@ -478,12 +462,7 @@ fn validate_workflow_config_inner(
         match trigger {
             crate::models::workflow::TriggerDef::Scheduler { cron, timezone, .. } => {
                 // Validate cron expression syntax
-                if croner::parser::CronParser::builder()
-                    .seconds(croner::parser::Seconds::Optional)
-                    .build()
-                    .parse(cron)
-                    .is_err()
-                {
+                if crate::cron::parse(cron).is_err() {
                     bail!(
                         "Trigger '{}' has invalid cron expression '{}'",
                         trigger_name,
@@ -740,10 +719,11 @@ fn validate_workflow_config_inner(
 
 /// Check one connection's values against its type: required properties present
 /// (unless the type supplies a default), unknown fields (warning), empty
-/// strings (error). Shared by load-time validation and by the resolver for
+/// strings (error). `label` is a full noun phrase (`Connection 'db'`, `input
+/// field 'db'`) and never a rendered value. Shared by load-time validation and by the resolver for
 /// connections whose type lives in another workspace.
 pub fn check_connection_values(
-    conn_name: &str,
+    label: &str,
     values: &HashMap<String, serde_json::Value>,
     type_name: &str,
     type_def: &ConnectionTypeDef,
@@ -751,31 +731,19 @@ pub fn check_connection_values(
     let mut warnings = Vec::new();
     for (prop_name, prop_def) in &type_def.properties {
         if prop_def.required && prop_def.default.is_none() && !values.contains_key(prop_name) {
-            bail!(
-                "Connection '{}' is missing required field '{}' (type '{}')",
-                conn_name,
-                prop_name,
-                type_name
-            );
+            bail!("{label} is missing required field '{prop_name}' (type '{type_name}')");
         }
     }
     for key in values.keys() {
         if !type_def.properties.contains_key(key) {
             warnings.push(format!(
-                "Connection '{}' has field '{}' not defined in type '{}'",
-                conn_name, key, type_name
+                "{label} has field '{key}' not defined in type '{type_name}'"
             ));
         }
     }
     for (key, value) in values {
-        if let Some(s) = value.as_str() {
-            if s.is_empty() {
-                bail!(
-                    "Connection '{}' field '{}' has an empty value",
-                    conn_name,
-                    key
-                );
-            }
+        if value.as_str().is_some_and(str::is_empty) {
+            bail!("{label} field '{key}' has an empty value");
         }
     }
     Ok(warnings)
@@ -828,7 +796,7 @@ fn validate_connections(config: &WorkspaceConfig) -> Result<Vec<String>> {
         if let Some(ref type_name) = conn.connection_type {
             if let Some(type_def) = config.connection_types.get(type_name) {
                 warnings.extend(check_connection_values(
-                    conn_name,
+                    &format!("Connection '{}'", conn_name),
                     &conn.values,
                     type_name,
                     type_def,
@@ -1756,31 +1724,21 @@ fn validate_agent_action(action: &ActionDef, action_name: &str) -> Result<Vec<St
         }
     }
 
-    // Validate prompt is valid Tera template syntax (same two-pass strategy as `when`)
+    // Validate prompt / system_prompt template syntax (same check as `when`)
     if let Some(ref prompt) = action.prompt {
-        if tera::Tera::one_off(prompt, &tera::Context::new(), false).is_err() {
-            let mut test_tera = tera::Tera::default();
-            if let Err(e) = test_tera.add_raw_template("__prompt__", prompt) {
-                bail!(
-                    "Action '{}' has invalid prompt template: {}",
-                    action_name,
-                    e
-                );
-            }
+        if let Err(e) = crate::template::check_template_syntax(prompt) {
+            return Err(anyhow::Error::new(e).context(format!(
+                "Action '{}' has an invalid prompt template",
+                action_name
+            )));
         }
     }
-
-    // Same for system_prompt
     if let Some(ref sp) = action.system_prompt {
-        if tera::Tera::one_off(sp, &tera::Context::new(), false).is_err() {
-            let mut test_tera = tera::Tera::default();
-            if let Err(e) = test_tera.add_raw_template("__system_prompt__", sp) {
-                bail!(
-                    "Action '{}' has invalid system_prompt template: {}",
-                    action_name,
-                    e
-                );
-            }
+        if let Err(e) = crate::template::check_template_syntax(sp) {
+            return Err(anyhow::Error::new(e).context(format!(
+                "Action '{}' has an invalid system_prompt template",
+                action_name
+            )));
         }
     }
 
@@ -2234,19 +2192,20 @@ mod tests {
             )]),
         };
         // missing required
-        let err = check_connection_values("c", &HashMap::new(), "t", &type_def).unwrap_err();
+        let err =
+            check_connection_values("Connection 'c'", &HashMap::new(), "t", &type_def).unwrap_err();
         assert!(err.to_string().contains("missing required field 'host'"));
         // unknown field → warning, not error
         let vals = HashMap::from([
             ("host".to_string(), serde_json::json!("h")),
             ("extra".to_string(), serde_json::json!(1)),
         ]);
-        let warnings = check_connection_values("c", &vals, "t", &type_def).unwrap();
+        let warnings = check_connection_values("Connection 'c'", &vals, "t", &type_def).unwrap();
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("'extra'"));
         // empty string → error
         let vals = HashMap::from([("host".to_string(), serde_json::json!(""))]);
-        let err = check_connection_values("c", &vals, "t", &type_def).unwrap_err();
+        let err = check_connection_values("Connection 'c'", &vals, "t", &type_def).unwrap_err();
         assert!(err.to_string().contains("empty value"));
     }
 
@@ -6550,8 +6509,35 @@ tasks:
             result
                 .unwrap_err()
                 .to_string()
-                .contains("for_each must be a string"),
-            "Error should mention 'for_each must be a string'"
+                .contains("'for_each' must be a string"),
+            "Error should mention 'for_each' must be a string"
+        );
+    }
+
+    /// Codex review (R19): an invalid literal `for_each` is never echoed —
+    /// the message names the task, step, field and JSON type only.
+    #[test]
+    fn test_for_each_invalid_literal_is_not_echoed() {
+        let yaml = r#"
+actions:
+  process:
+    type: script
+    script: echo hello
+tasks:
+  main:
+    flow:
+      step:
+        action: process
+        for_each: {"token": "literal-secret"}
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = validate_workflow_config(&config).unwrap_err();
+        let text = format!("{err:#} {err:?}");
+        assert!(!text.contains("literal-secret"), "{text}");
+        assert!(!text.contains("token"), "{text}");
+        assert_eq!(
+            format!("{err:#}"),
+            "Task 'main' step 'step' field 'for_each' must be a string (Tera template) or array, got a JSON object"
         );
     }
 

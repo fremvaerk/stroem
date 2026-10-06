@@ -1,183 +1,236 @@
 //! LLM provider dispatch via rig-core.
 //!
-//! Contains `call_completion` which builds a provider client and calls
-//! `CompletionModel::completion()`. Used by both single-turn and multi-turn
+//! Contains `call_completion`, which builds the provider's completion model
+//! and sends one request through it. Used by both single-turn and multi-turn
 //! dispatch paths.
 
 use anyhow::{bail, Context, Result};
-use rig::completion::{AssistantContent, CompletionModel as _, CompletionRequest, Usage};
-use rig::OneOrMany;
+use rig_core::completion::{AssistantContent, CompletionRequest, Usage};
+use rig_core::driver::DynModel;
+use rig_core::operation::Completion;
+use rig_core::providers::anthropic::AnthropicConfig;
+use rig_core::providers::cohere::CohereConfig;
+use rig_core::providers::gemini::GeminiConfig;
+use rig_core::providers::ollama::OllamaConfig;
+use rig_core::providers::openai::wire::{self as openai_wire, Dialect};
+use rig_core::providers::openai::OpenAIConfig;
+use rig_core::ProviderError;
 
 use crate::config::AgentProviderConfig;
 
 /// Simplified completion response (provider-independent).
 #[derive(Debug)]
 pub struct CompletionResponse {
-    pub choice: OneOrMany<AssistantContent>,
+    pub choice: Vec<AssistantContent>,
     pub usage: Usage,
     pub message_id: Option<String>,
 }
 
-/// Call the LLM completion endpoint using rig-core.
+/// Galadriel's OpenAI-compatible chat-completions API.
 ///
-/// Uses the lower-level `CompletionModel::completion()` interface which
-/// returns real token usage counts. Used by both the multi-turn dispatch
-/// loop and the single-turn path.
-pub async fn call_completion(
-    provider_config: &AgentProviderConfig,
-    model_name: &str,
-    request: CompletionRequest,
-) -> Result<CompletionResponse> {
-    use rig::prelude::CompletionClient as _;
+/// rig-core dropped its Galadriel provider (0xPlaygrounds/rig#2041), which
+/// was a plain chat-completions client on this base URL with Bearer auth, so
+/// `type: galadriel` keeps working as a generic OpenAI-compatible gateway.
+const GALADRIEL: Dialect = Dialect::gateway(
+    "galadriel",
+    "https://api.galadriel.com/v1/verified",
+    "GALADRIEL_API_KEY",
+);
 
-    /// Build a provider client, call completion, and erase the raw response type.
-    macro_rules! call_model {
-        ($client_type:ty, $label:expr, $api_key:expr) => {{
-            let mut builder = <$client_type>::builder().api_key($api_key);
-            if let Some(ref endpoint) = provider_config.api_endpoint {
-                builder = builder.base_url(endpoint);
-            }
-            let client = builder
-                .build()
-                .context(concat!("Failed to build ", $label, " client"))?;
-            let model = client.completion_model(model_name);
-            let resp = model
-                .completion(request)
-                .await
-                .context(concat!($label, " completion call failed"))?;
-            return Ok(CompletionResponse {
-                choice: resp.choice,
-                usage: resp.usage,
-                message_id: resp.message_id,
-            });
-        }};
-    }
+/// A provider's completion model, type-erased, with the label used in errors.
+struct ProviderModel {
+    model: DynModel<Completion>,
+    label: &'static str,
+}
 
+/// Build the completion model for `provider_config`.
+///
+/// Only constructs the client; nothing is sent. Every client shares rig's
+/// bundled reqwest transport.
+fn build_model(provider_config: &AgentProviderConfig, model_name: &str) -> Result<ProviderModel> {
+    let endpoint = provider_config.api_endpoint.as_deref();
     let require_api_key = || -> Result<&str> {
         provider_config
             .api_key
             .as_deref()
             .context("Agent provider requires api_key")
     };
+    // OpenAI-compatible vendors: the dialect carries the vendor's base URL,
+    // paths and request quirks; `completion` takes the dialect's default
+    // route (Chat Completions, or Responses for xAI).
+    let compatible = |dialect: &Dialect, label: &'static str| -> Result<ProviderModel> {
+        let mut config = OpenAIConfig::with_key(dialect, require_api_key()?);
+        if let Some(endpoint) = endpoint {
+            config = config.with_base_url(endpoint);
+        }
+        Ok(ProviderModel {
+            model: config.client().completion(model_name).erase(),
+            label,
+        })
+    };
 
-    // Each macro arm returns early via `return Ok(...)` to erase the
-    // provider-specific raw response type. The match itself is `!` (never).
-    match provider_config.provider_type.as_str() {
-        "anthropic" => call_model!(
-            rig::providers::anthropic::Client,
-            "Anthropic",
-            require_api_key()?.to_string()
-        ),
-        "openai" => call_model!(
-            rig::providers::openai::CompletionsClient,
-            "OpenAI",
-            require_api_key()?.to_string()
-        ),
-        "cohere" => call_model!(
-            rig::providers::cohere::Client,
-            "Cohere",
-            require_api_key()?.to_string()
-        ),
-        "deepseek" => call_model!(
-            rig::providers::deepseek::Client,
-            "DeepSeek",
-            require_api_key()?.to_string()
-        ),
-        "gemini" => call_model!(
-            rig::providers::gemini::Client,
-            "Gemini",
-            require_api_key()?.to_string()
-        ),
-        "groq" => call_model!(
-            rig::providers::groq::Client,
-            "Groq",
-            require_api_key()?.to_string()
-        ),
-        "mistral" => call_model!(
-            rig::providers::mistral::Client,
-            "Mistral",
-            require_api_key()?.to_string()
-        ),
-        "openrouter" => call_model!(
-            rig::providers::openrouter::Client,
-            "OpenRouter",
-            require_api_key()?.to_string()
-        ),
-        "together" => call_model!(
-            rig::providers::together::Client,
-            "Together",
-            require_api_key()?.to_string()
-        ),
-        "xai" => call_model!(
-            rig::providers::xai::Client,
-            "xAI",
-            require_api_key()?.to_string()
-        ),
-        "perplexity" => call_model!(
-            rig::providers::perplexity::Client,
-            "Perplexity",
-            require_api_key()?.to_string()
-        ),
-        "galadriel" => call_model!(
-            rig::providers::galadriel::Client,
-            "Galadriel",
-            require_api_key()?.to_string()
-        ),
-        "huggingface" => call_model!(
-            rig::providers::huggingface::Client,
-            "HuggingFace",
-            require_api_key()?.to_string()
-        ),
-        "hyperbolic" => call_model!(
-            rig::providers::hyperbolic::Client,
-            "Hyperbolic",
-            require_api_key()?.to_string()
-        ),
-        "mira" => call_model!(
-            rig::providers::mira::Client,
-            "Mira",
-            require_api_key()?.to_string()
-        ),
-        "moonshot" => call_model!(
-            rig::providers::moonshot::Client,
-            "Moonshot",
-            require_api_key()?.to_string()
-        ),
-        "ollama" => call_model!(
-            rig::providers::ollama::Client,
-            "Ollama",
-            rig::client::Nothing
-        ),
-        "llamafile" => call_model!(
-            rig::providers::llamafile::Client,
-            "Llamafile",
-            rig::client::Nothing
-        ),
+    let model = match provider_config.provider_type.as_str() {
+        "anthropic" => {
+            let mut config = AnthropicConfig::new(require_api_key()?);
+            if let Some(endpoint) = endpoint {
+                config = config.with_base_url(endpoint);
+            }
+            ProviderModel {
+                model: config.client().completion(model_name).erase(),
+                label: "Anthropic",
+            }
+        }
+        "openai" => {
+            // Chat Completions, not the Responses API rig now defaults OpenAI
+            // to: this is the endpoint `type: openai` has always called, and
+            // the one OpenAI-compatible servers (vLLM, ...) behind a custom
+            // `api_endpoint` implement.
+            let mut config = OpenAIConfig::new(require_api_key()?);
+            if let Some(endpoint) = endpoint {
+                config = config.with_base_url(endpoint);
+            }
+            ProviderModel {
+                model: config.client().chat(model_name).erase(),
+                label: "OpenAI",
+            }
+        }
         "azure" => {
             let api_key = require_api_key()?;
-            let endpoint = provider_config
-                .api_endpoint
-                .as_deref()
-                .context("Azure provider requires api_endpoint")?;
-            let auth = rig::providers::azure::AzureOpenAIAuth::ApiKey(api_key.to_string());
-            let client = rig::providers::azure::Client::builder()
-                .api_key(auth)
-                .azure_endpoint(endpoint.to_string())
-                .build()
-                .context("Failed to build Azure client")?;
-            let model = client.completion_model(model_name);
-            let resp = model
-                .completion(request)
-                .await
-                .context("Azure completion call failed")?;
-            #[allow(clippy::needless_return)]
-            return Ok(CompletionResponse {
-                choice: resp.choice,
-                usage: resp.usage,
-                message_id: resp.message_id,
-            });
+            let endpoint = endpoint.context("Azure provider requires api_endpoint")?;
+            // `api-key` header auth, deployment in the URL, API version
+            // 2024-10-21 — the dialect's defaults.
+            let config =
+                OpenAIConfig::with_key(&openai_wire::AZURE, api_key).with_base_url(endpoint);
+            ProviderModel {
+                model: config.client().completion(model_name).erase(),
+                label: "Azure",
+            }
         }
+        "cohere" => {
+            let mut config = CohereConfig::new(require_api_key()?);
+            if let Some(endpoint) = endpoint {
+                config = config.with_base_url(endpoint);
+            }
+            ProviderModel {
+                model: config.client().completion(model_name).erase(),
+                label: "Cohere",
+            }
+        }
+        "gemini" => {
+            let mut config = GeminiConfig::new(require_api_key()?);
+            if let Some(endpoint) = endpoint {
+                config = config.with_base_url(endpoint);
+            }
+            ProviderModel {
+                model: config.client().completion(model_name).erase(),
+                label: "Gemini",
+            }
+        }
+        "ollama" => {
+            // No credential is sent, as before: a configured `api_key` is
+            // ignored.
+            let mut config = OllamaConfig::new();
+            if let Some(endpoint) = endpoint {
+                config = config.with_base_url(endpoint);
+            }
+            ProviderModel {
+                model: config.client().completion(model_name).erase(),
+                label: "Ollama",
+            }
+        }
+        "llamafile" => {
+            // rig-core replaced its llamafile provider with llama.cpp's
+            // `llama-server`, which serves the same OpenAI-compatible API.
+            // An empty key sends no `Authorization` header, as before. The
+            // dialect's base URL includes `/v1` (`http://localhost:8080/v1`),
+            // while `api_endpoint` has always named the server root, so the
+            // `/v1` is appended to keep requests on `{root}/v1/chat/completions`.
+            let mut config = OpenAIConfig::with_key(&openai_wire::LLAMACPP, "");
+            if let Some(endpoint) = endpoint {
+                config = config.with_base_url(format!("{}/v1", endpoint.trim_end_matches('/')));
+            }
+            ProviderModel {
+                model: config.client().completion(model_name).erase(),
+                label: "Llamafile",
+            }
+        }
+        "deepseek" => compatible(&openai_wire::DEEPSEEK, "DeepSeek")?,
+        "galadriel" => compatible(&GALADRIEL, "Galadriel")?,
+        "groq" => compatible(&openai_wire::GROQ, "Groq")?,
+        "huggingface" => compatible(&openai_wire::HUGGINGFACE, "HuggingFace")?,
+        "hyperbolic" => compatible(&openai_wire::HYPERBOLIC, "Hyperbolic")?,
+        "mira" => compatible(&openai_wire::MIRA, "Mira")?,
+        "mistral" => compatible(&openai_wire::MISTRAL, "Mistral")?,
+        "moonshot" => compatible(&openai_wire::MOONSHOT, "Moonshot")?,
+        "openrouter" => compatible(&openai_wire::OPENROUTER, "OpenRouter")?,
+        "perplexity" => compatible(&openai_wire::PERPLEXITY, "Perplexity")?,
+        "together" => compatible(&openai_wire::TOGETHER, "Together")?,
+        "xai" => compatible(&rig_core::providers::xai::DIALECT, "xAI")?,
         other => bail!("Unknown agent provider type: {}", other),
+    };
+    Ok(model)
+}
+
+/// Call the LLM completion endpoint using rig-core.
+///
+/// Sends one unary request through the provider's completion model and
+/// returns its normalized response, including token usage. Used by both the
+/// multi-turn dispatch loop and the single-turn path.
+pub async fn call_completion(
+    provider_config: &AgentProviderConfig,
+    model_name: &str,
+    mut request: CompletionRequest,
+) -> Result<CompletionResponse> {
+    let ProviderModel { model, label } = build_model(provider_config, model_name)?;
+    if provider_config.provider_type == "galadriel" {
+        // The removed rig Galadriel client never put `max_tokens` on the wire.
+        request.max_tokens = None;
+    }
+    let resp = model
+        .call(request)
+        .await
+        .map_err(CompletionCallError)
+        .with_context(|| format!("{label} completion call failed"))?;
+    Ok(CompletionResponse {
+        choice: resp.choice,
+        usage: resp.usage,
+        message_id: resp.message_id,
+    })
+}
+
+/// The issuer rig seals this provider's reasoning blocks to: the provider
+/// descriptor's name (`anthropic`, `openai`, `gcp.gemini`, ...).
+///
+/// Used to lift reasoning persisted before rig sealed reasoning to its issuer
+/// (see [`crate::legacy_history`]).
+pub fn reasoning_issuer(provider_config: &AgentProviderConfig, model_name: &str) -> Option<String> {
+    build_model(provider_config, model_name)
+        .ok()
+        .map(|provider| provider.model.name().to_string())
+}
+
+/// A rig [`ProviderError`] whose transport failure stays in the source chain.
+///
+/// `ProviderError::Http` reports no `source()`, so `{:#}` would end at
+/// "error sending request for url (...)" and drop the cause ("connection
+/// refused", "operation timed out") that [`is_transient_error`] reads. This
+/// exposes the transport error as the source, restoring the chain the error
+/// carried before rig-core 0.43.
+#[derive(Debug)]
+struct CompletionCallError(ProviderError);
+
+impl std::fmt::Display for CompletionCallError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for CompletionCallError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match &self.0 {
+            ProviderError::Http(error) => Some(&**error),
+            other => std::error::Error::source(other),
+        }
     }
 }
 
@@ -216,6 +269,7 @@ pub fn is_transient_error(err: &anyhow::Error) -> bool {
 mod tests {
     use super::*;
     use crate::config::SUPPORTED_AGENT_PROVIDERS;
+    use crate::test_support::{capture_one_request, Captured};
 
     fn make_provider(provider_type: &str) -> AgentProviderConfig {
         AgentProviderConfig {
@@ -229,6 +283,195 @@ mod tests {
         }
     }
 
+    /// A one-message request: the user prompt "hello", nothing else set.
+    fn hello_request() -> CompletionRequest {
+        CompletionRequest::new("hello")
+    }
+
+    /// Every supported provider builds its client and gets as far as the
+    /// network: the call fails on the closed port, not on construction or
+    /// request encoding, and the connect failure keeps its cause in the
+    /// error chain, so it is classified transient and retried — as it was
+    /// before rig-core 0.43, whose `ProviderError::Http` drops the cause.
+    #[tokio::test]
+    async fn test_connect_failure_reaches_transport_and_is_transient_for_every_provider() {
+        for &provider_type in SUPPORTED_AGENT_PROVIDERS {
+            let mut provider_config = make_provider(provider_type);
+            provider_config.api_endpoint = Some("http://127.0.0.1:1".to_string());
+            let request = hello_request().max_tokens(64);
+            let err = call_completion(&provider_config, "test-model", request)
+                .await
+                .expect_err("closed port must fail");
+            let msg = format!("{:#}", err);
+            assert!(
+                msg.contains("completion call failed"),
+                "provider '{}' failed before sending: {}",
+                provider_type,
+                msg
+            );
+            assert!(
+                is_transient_error(&err),
+                "provider '{}': connect failure not classified transient: {}",
+                provider_type,
+                msg
+            );
+        }
+    }
+
+    /// The error text `is_transient_error` matches survives rig-core's
+    /// error types: retryable statuses are transient, client errors are not.
+    #[test]
+    fn test_is_transient_error_classifies_rig_provider_responses() {
+        let classify = |status: u16| {
+            let status = http::StatusCode::from_u16(status).unwrap();
+            let err = anyhow::Error::new(CompletionCallError(ProviderError::from_http_response(
+                status,
+                r#"{"error":{"message":"nope"}}"#,
+            )))
+            .context("OpenAI completion call failed");
+            is_transient_error(&err)
+        };
+        for status in [429, 500, 502, 503, 529] {
+            assert!(classify(status), "status {status} must be transient");
+        }
+        for status in [400, 401, 403, 404, 422] {
+            assert!(!classify(status), "status {status} must not be transient");
+        }
+    }
+
+    #[test]
+    fn test_completion_call_error_exposes_transport_cause() {
+        let io = std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "connection refused");
+        let transport = rig_core::http_client::Error::Instance(Box::new(io));
+        let err = anyhow::Error::new(CompletionCallError(ProviderError::from(transport)))
+            .context("Ollama completion call failed");
+        let msg = format!("{:#}", err);
+        assert!(msg.contains("connection refused"), "cause lost: {msg}");
+        assert!(is_transient_error(&err));
+    }
+
+    #[test]
+    fn test_reasoning_issuer_is_provider_descriptor_name() {
+        assert_eq!(
+            reasoning_issuer(&make_provider("anthropic"), "m").as_deref(),
+            Some("anthropic")
+        );
+        assert_eq!(
+            reasoning_issuer(&make_provider("openai"), "m").as_deref(),
+            Some("openai")
+        );
+        assert_eq!(reasoning_issuer(&make_provider("bedrock"), "m"), None);
+    }
+
+    /// Send `request` through `provider_config` (its `api_endpoint` pointed at
+    /// a one-shot local listener, plus `endpoint_suffix`) and return what
+    /// reached the wire. The listener answers 400, so the call itself fails.
+    async fn capture(
+        mut provider_config: AgentProviderConfig,
+        endpoint_suffix: &str,
+        request: CompletionRequest,
+    ) -> Captured {
+        let (base_url, server) = capture_one_request().await;
+        provider_config.api_endpoint = Some(format!("{base_url}{endpoint_suffix}"));
+        let _ = call_completion(&provider_config, "test-model", request).await;
+        server.await.unwrap()
+    }
+
+    fn shaped_request() -> CompletionRequest {
+        crate::dispatch::completion_request(
+            Some("be brief"),
+            Vec::new(),
+            rig_core::completion::Message::user("hello"),
+            Vec::new(),
+            Some(0.5),
+            128,
+        )
+    }
+
+    #[tokio::test]
+    async fn test_openai_uses_chat_completions_with_system_message_first() {
+        let captured = capture(make_provider("openai"), "/v1", shaped_request()).await;
+        assert_eq!(captured.request_line, "POST /v1/chat/completions HTTP/1.1");
+        assert!(captured.headers.contains("authorization: bearer test-key"));
+        let messages = captured.body["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["role"], "system");
+        // A one-part array, the shape rig-core 0.36 sent too.
+        assert_eq!(
+            messages[0]["content"],
+            serde_json::json!([{"type": "text", "text": "be brief"}])
+        );
+        assert_eq!(messages.last().unwrap()["role"], "user");
+        assert_eq!(captured.body["model"], "test-model");
+        assert_eq!(captured.body["temperature"], 0.5);
+    }
+
+    #[tokio::test]
+    async fn test_anthropic_sends_system_prompt_and_max_tokens() {
+        let captured = capture(make_provider("anthropic"), "", shaped_request()).await;
+        assert_eq!(captured.request_line, "POST /v1/messages HTTP/1.1");
+        assert!(captured.headers.contains("x-api-key: test-key"));
+        assert_eq!(captured.body["max_tokens"], 128);
+        assert_eq!(captured.body["temperature"], 0.5);
+        let system = captured.body["system"].to_string();
+        assert!(
+            system.contains("be brief"),
+            "system prompt not sent: {system}"
+        );
+        let messages = captured.body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "user");
+    }
+
+    #[tokio::test]
+    async fn test_azure_addresses_the_deployment_with_api_key_header() {
+        let captured = capture(make_provider("azure"), "", shaped_request()).await;
+        assert_eq!(
+            captured.request_line,
+            "POST /openai/deployments/test-model/chat/completions?api-version=2024-10-21 HTTP/1.1"
+        );
+        assert!(captured.headers.contains("api-key: test-key"));
+        assert!(!captured.headers.contains("authorization:"));
+    }
+
+    #[tokio::test]
+    async fn test_ollama_posts_api_chat_without_credentials() {
+        let captured = capture(make_provider("ollama"), "", shaped_request()).await;
+        assert_eq!(captured.request_line, "POST /api/chat HTTP/1.1");
+        assert!(!captured.headers.contains("authorization:"));
+    }
+
+    #[tokio::test]
+    async fn test_llamafile_endpoint_is_the_server_root() {
+        // `api_endpoint` has always named the server root; requests still
+        // go to `{root}/v1/chat/completions`, without credentials.
+        let captured = capture(make_provider("llamafile"), "/", shaped_request()).await;
+        assert_eq!(captured.request_line, "POST /v1/chat/completions HTTP/1.1");
+        assert!(!captured.headers.contains("authorization:"));
+    }
+
+    #[tokio::test]
+    async fn test_galadriel_omits_max_tokens() {
+        let captured = capture(make_provider("galadriel"), "", shaped_request()).await;
+        assert_eq!(captured.request_line, "POST /chat/completions HTTP/1.1");
+        assert!(captured.headers.contains("authorization: bearer test-key"));
+        assert!(captured.body.get("max_tokens").is_none());
+        assert!(captured.body.get("max_completion_tokens").is_none());
+        assert_eq!(captured.body["messages"][0]["role"], "system");
+    }
+
+    #[test]
+    fn test_galadriel_and_llamafile_map_to_their_replacements() {
+        let mut galadriel = make_provider("galadriel");
+        galadriel.api_endpoint = None;
+        let ProviderModel { model, label } = build_model(&galadriel, "m").unwrap();
+        assert_eq!((model.name(), label), ("galadriel", "Galadriel"));
+
+        let mut llamafile = make_provider("llamafile");
+        llamafile.api_key = None; // never needed one
+        let ProviderModel { model, label } = build_model(&llamafile, "m").unwrap();
+        assert_eq!((model.name(), label), ("llamacpp", "Llamafile"));
+    }
+
     #[tokio::test]
     async fn test_call_llm_unknown_provider_type() {
         let provider_config = AgentProviderConfig {
@@ -240,22 +483,7 @@ mod tests {
             temperature: None,
             max_retries: 0,
         };
-        let request = CompletionRequest {
-            model: None,
-            preamble: None,
-            chat_history: OneOrMany::one(rig::completion::Message::User {
-                content: OneOrMany::one(rig::message::UserContent::Text(rig::message::Text {
-                    text: "hello".to_string(),
-                })),
-            }),
-            documents: vec![],
-            tools: vec![],
-            temperature: None,
-            max_tokens: None,
-            tool_choice: None,
-            additional_params: None,
-            output_schema: None,
-        };
+        let request = hello_request();
         let result = call_completion(&provider_config, "some-model", request).await;
         assert!(result.is_err());
         let msg = format!("{:#}", result.unwrap_err());
@@ -277,22 +505,7 @@ mod tests {
             temperature: None,
             max_retries: 0,
         };
-        let request = CompletionRequest {
-            model: None,
-            preamble: None,
-            chat_history: OneOrMany::one(rig::completion::Message::User {
-                content: OneOrMany::one(rig::message::UserContent::Text(rig::message::Text {
-                    text: "hello".to_string(),
-                })),
-            }),
-            documents: vec![],
-            tools: vec![],
-            temperature: None,
-            max_tokens: None,
-            tool_choice: None,
-            additional_params: None,
-            output_schema: None,
-        };
+        let request = hello_request();
         let result = call_completion(&provider_config, "claude-3-5-haiku-latest", request).await;
         assert!(result.is_err());
         let msg = format!("{:#}", result.unwrap_err());
@@ -315,22 +528,7 @@ mod tests {
                 temperature: None,
                 max_retries: 0,
             };
-            let request = CompletionRequest {
-                model: None,
-                preamble: None,
-                chat_history: OneOrMany::one(rig::completion::Message::User {
-                    content: OneOrMany::one(rig::message::UserContent::Text(rig::message::Text {
-                        text: "hello".to_string(),
-                    })),
-                }),
-                documents: vec![],
-                tools: vec![],
-                temperature: None,
-                max_tokens: None,
-                tool_choice: None,
-                additional_params: None,
-                output_schema: None,
-            };
+            let request = hello_request();
             let result = call_completion(&provider_config, "test-model", request).await;
             assert!(result.is_err());
             let msg = format!("{:#}", result.unwrap_err());

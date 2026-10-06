@@ -931,6 +931,65 @@ mod tests {
         );
     }
 
+    /// R24: a manifest render failure names the field (`manifest`) but never
+    /// an object key — manifest keys are arbitrary author text. An `args`
+    /// failure is located by its index.
+    #[test]
+    fn test_render_action_spec_manifest_and_args_errors_never_name_keys() {
+        const KEY: &str = "keycanary-9z";
+        const TPL: &str = "{{ secret.X | upper | int }}";
+        let secrets = json!({"X": "deep-secret"});
+        assert!(
+            crate::test_support::tera_raw_detail_contains(
+                TPL,
+                &json!({"secret": {"X": "deep-secret"}}),
+                "DEEP-SECRET"
+            ),
+            "fixture must leak through Tera's raw text, else this test is vacuous"
+        );
+        let ws = ws_with_secrets(&secrets);
+        let step = make_step_row("step1", None);
+        let render = |spec: serde_json::Value| {
+            let err = render_action_spec(
+                Some(&spec),
+                &tctx(
+                    None,
+                    &ws,
+                    &ws,
+                    &[],
+                    None,
+                    None,
+                    None,
+                    &step,
+                    action_body_scope,
+                    Some(json!({})),
+                ),
+            )
+            .unwrap_err();
+            (format!("{err:#}"), format!("{err:?}"))
+        };
+
+        let (text, debug) = render(json!({"manifest": {"metadata": {"labels": {KEY: TPL}}}}));
+        assert!(
+            text.starts_with(
+                "Failed to render manifest template: Failed to render a template in this value: "
+            ),
+            "{text}"
+        );
+        let (args_text, args_debug) = render(json!({"args": ["--ok", TPL]}));
+        assert!(
+            args_text.starts_with(
+                "Failed to render args templates: Failed to render the template at `[1]`: "
+            ),
+            "{args_text}"
+        );
+        for all in [text, debug, args_text, args_debug] {
+            for needle in [KEY, "metadata", "labels", "deep-secret", "DEEP-SECRET"] {
+                assert!(!all.contains(needle), "{needle}: {all}");
+            }
+        }
+    }
+
     // -------------------------------------------------------------------------
     // render_image
     // -------------------------------------------------------------------------
@@ -1553,15 +1612,25 @@ mod tests {
 
     /// Git-refs spec § 7.2: an owner input default that fails to render is
     /// owner-side; the withheld sentence carries the step's `action_name`
-    /// verbatim.
+    /// verbatim. The default quotes the owner's secret in Tera's raw text
+    /// (asserted), never in the error chain (spec 2026-10-06 § 3.2).
     #[test]
     fn test_prepare_step_action_input_owner_default_error_is_owner_side() {
         use crate::workspace_set::WorkspaceSet;
         use std::sync::Arc;
 
+        const TPL: &str = "{{ 1 | round(method=secret.T) }}";
+        assert!(
+            crate::test_support::tera_raw_detail_contains(
+                TPL,
+                &json!({"secret": {"T": "owner-value"}}),
+                "owner-value"
+            ),
+            "fixture must leak through Tera's raw text, else this test is vacuous"
+        );
         let mut remote = make_action("script");
         let mut note = make_input_field("string");
-        note.default = Some(json!("{{ secret.T | round }}"));
+        note.default = Some(json!(TPL));
         remote.input.insert("note".to_string(), note);
         let mut owner = WorkspaceConfig::default();
         owner.actions.insert("remote".to_string(), remote);
@@ -1606,6 +1675,10 @@ mod tests {
         let err = prepare_step_action_input(Some(json!({})), &prep).unwrap_err();
         assert!(
             format!("{err:#}").contains("Failed to merge action input defaults"),
+            "{err:#}"
+        );
+        assert!(
+            !format!("{err:#} {err:?}").contains("owner-value"),
             "{err:#}"
         );
         assert!(is_owner_side_prepare_error(&err), "{err:#}");

@@ -10,7 +10,6 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
-use croner::parser::{CronParser, Seconds};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -70,11 +69,7 @@ pub fn compute_next_runs(trigger: &TriggerDef, count: usize) -> Vec<DateTime<Utc
         TriggerDef::Webhook { .. } | TriggerDef::EventSource { .. } => return vec![],
     };
 
-    let cron = match CronParser::builder()
-        .seconds(Seconds::Optional)
-        .build()
-        .parse(cron_expr)
-    {
+    let cron = match stroem_common::cron::parse(cron_expr) {
         Ok(c) => c,
         Err(_) => return vec![],
     };

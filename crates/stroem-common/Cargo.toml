@@ -11,6 +11,7 @@ serde_json.workspace = true
 redact.workspace = true
 serde_yaml.workspace = true
 tera.workspace = true
+tera-contrib.workspace = true
 uuid.workspace = true
 tracing.workspace = true
 croner.workspace = true

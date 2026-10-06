@@ -317,21 +317,24 @@ pub async fn fire_hooks_of_kind(
         )
         .await
         {
-            tracing::error!(
-                "Failed to fire hook {}[{}] for job {}: {:#}",
-                hook_type,
-                i,
-                job.job_id,
-                e
-            );
-            s.server_log(
-                job.job_id,
-                &format!(
-                    "[hooks] Failed to fire hook {}[{}] for action '{}': {:#}",
-                    hook_type, i, hook.action, e
-                ),
-            )
-            .await;
+            {
+                let detail = scrub_hook_error(&format!("{e:#}"), workspace_config);
+                tracing::error!(
+                    "Failed to fire hook {}[{}] for job {}: {}",
+                    hook_type,
+                    i,
+                    job.job_id,
+                    detail
+                );
+                s.server_log(
+                    job.job_id,
+                    &format!(
+                        "[hooks] Failed to fire hook {}[{}] for action '{}': {}",
+                        hook_type, i, hook.action, detail
+                    ),
+                )
+                .await;
+            }
         }
     }
 }
@@ -431,21 +434,24 @@ pub async fn fire_suspended_hooks(
         )
         .await
         {
-            tracing::error!(
-                "Failed to fire on_suspended hook[{}] for job {} step '{}': {:#}",
-                i,
-                job.job_id,
-                step_name,
-                e
-            );
-            s.server_log(
-                job.job_id,
-                &format!(
-                    "[hooks] Failed to fire on_suspended hook[{}] for action '{}': {:#}",
-                    i, hook.action, e
-                ),
-            )
-            .await;
+            {
+                let detail = scrub_hook_error(&format!("{e:#}"), workspace_config);
+                tracing::error!(
+                    "Failed to fire on_suspended hook[{}] for job {} step '{}': {}",
+                    i,
+                    job.job_id,
+                    step_name,
+                    detail
+                );
+                s.server_log(
+                    job.job_id,
+                    &format!(
+                        "[hooks] Failed to fire on_suspended hook[{}] for action '{}': {}",
+                        i, hook.action, detail
+                    ),
+                )
+                .await;
+            }
         }
     }
 }
@@ -819,6 +825,15 @@ fn foreign_hook_task_error(
             "hook uses action '{hook_action}' whose task '{task_ref}' is in another workspace; hook actions cannot call tasks across workspaces"
         )
     })
+}
+
+/// Defence in depth (spec § 3.4): template errors are value-free, but the
+/// chain also carries our own contexts; scrub with the workspace's secrets.
+fn scrub_hook_error(text: &str, cfg: &WorkspaceConfig) -> String {
+    crate::workspace_set::redact_secrets_in_str(
+        text,
+        &crate::workspace_set::collect_config_secret_values(cfg),
+    )
 }
 
 /// Select which hooks to fire for a job, applying the priority and fallback rules.
@@ -2025,6 +2040,94 @@ mod tests {
 
         let job = JobRepo::get(&pool, last).await.unwrap().unwrap();
         assert_eq!(hook_chain_depth(&pool, &job).await, 3);
+    }
+
+    // ─── Error scrubbing tests (defence in depth: Tera 1→2 upgrade) ──────────
+
+    #[test]
+    fn hook_error_text_is_scrubbed_with_workspace_secrets() {
+        let mut cfg = stroem_common::models::workflow::WorkspaceConfig::new();
+        cfg.secrets
+            .insert("T".into(), serde_json::json!("hook-raw-canary"));
+        let text = super::scrub_hook_error("failed: hook-raw-canary", &cfg);
+        assert!(!text.contains("hook-raw-canary"), "{text}");
+    }
+
+    /// Spec 2026-10-06 § 3.4 (Codex review, Low): a REAL hook-input render
+    /// failure, driven through `fire_single_hook`'s error path for both
+    /// callers (`fire_hooks_of_kind` → `on_error`, `fire_suspended_hooks` →
+    /// `on_suspended`), lands in the SOURCE job's `_server` log without the
+    /// secret or its upper-cased form — Tera's raw text carries the latter
+    /// (asserted first), so the absence is not vacuous.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn failing_hook_input_render_logs_a_value_free_line_to_the_source_job() {
+        const SECRET: &str = "hook-input-canary";
+        const TPL: &str = "{{ secret.X | upper | int }}";
+        let upper = SECRET.to_uppercase();
+        assert!(
+            crate::test_support::tera_raw_detail_contains(
+                TPL,
+                &json!({"secret": {"X": SECRET}}),
+                &upper
+            ),
+            "fixture must leak through Tera's raw text, else this test is vacuous"
+        );
+
+        let cfg: WorkspaceConfig = serde_yaml::from_str(
+            r#"
+secrets:
+  X: hook-input-canary
+actions:
+  notify:
+    type: script
+    script: echo hi
+"#,
+        )
+        .unwrap();
+        let hook = HookDef {
+            git_ref: None,
+            action: "notify".to_string(),
+            input: HashMap::from([("msg".to_string(), json!(TPL))]),
+        };
+        let mut task = make_task_def(vec![], vec![hook.clone()], vec![]);
+        task.on_suspended = vec![hook];
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let pool = stroem_test_support::test_pool().await;
+        let mgr = crate::workspace::WorkspaceManager::from_config("default", cfg.clone());
+        let app_state = crate::state::test_app_state_with_pool(pool, mgr, temp_dir.path());
+        let s = app_state.settlement();
+
+        let mut job = stroem_db::JobRow::test_default();
+        job.status = "failed".to_string();
+        fire_hooks_of_kind(&s, &cfg, &job, &task, HookKind::Error).await;
+        fire_suspended_hooks(&s, &cfg, &job, &task, "approve", "message").await;
+
+        let log = std::fs::read_to_string(temp_dir.path().join(format!("{}.jsonl", job.job_id)))
+            .expect("the source job has a log");
+        let lines: Vec<String> = log
+            .lines()
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+            .filter(|l| l["step"] == "_server")
+            .map(|l| l["line"].as_str().unwrap().to_string())
+            .collect();
+        for prefix in [
+            "[hooks] Failed to fire hook on_error[0] for action 'notify': ",
+            "[hooks] Failed to fire on_suspended hook[0] for action 'notify': ",
+        ] {
+            let line = lines
+                .iter()
+                .find(|l| l.starts_with(prefix))
+                .unwrap_or_else(|| panic!("no `{prefix}` line in {lines:?}"));
+            assert!(
+                line.contains("Failed to render hook input templates"),
+                "{line}"
+            );
+            assert!(line.contains("filter `int` failed"), "{line}");
+            assert!(!line.contains(SECRET), "{line}");
+            assert!(!line.contains(&upper), "{line}");
+        }
+        assert!(!log.contains(SECRET) && !log.contains(&upper), "{log}");
     }
 
     // ─── H2 regression: instrument spans must not Debug-print the JobRow ─────

@@ -437,9 +437,10 @@ async fn fail_claimed_step(
     ws_set: &crate::workspace_set::WorkspaceSet<'_>,
     failure: &ClaimFailure<'_>,
 ) -> Response {
-    // Tera quotes the offending value in filter/type errors, so a render error
-    // touching `{{ secret.* }}` embeds the secret verbatim. Scrub it here, at
-    // the single choke point every claim-time render failure passes through:
+    // Tera's own text quotes the offending value in filter errors; the template
+    // error is value-free since Tera 2 (spec 2026-10-06 § 3.2), and any other
+    // value that reaches a message is scrubbed here, at the single choke point
+    // every claim-time render failure passes through:
     // everything below persists or returns this string (job log,
     // `job_step.error_message`, `retry_history`, the 422 body), and only
     // `error_message` is masked again on read. The pins' own values join the
@@ -2293,10 +2294,14 @@ mod tests {
         let err = render_agent_prompts(Some(&action), &serde_json::json!({}))
             .expect_err("an unresolvable prompt template must be an error, not None");
         let msg = format!("{err:#}");
+        // Value-free since Tera 2 (spec 2026-10-06 § 3.2.1): the category and
+        // position, never the variable's name.
         assert!(
-            msg.contains("each"),
-            "error must name the unresolvable variable, got: {msg}"
+            msg.contains("Failed to render agent prompt template")
+                && msg.contains("undefined variable or field"),
+            "error must carry the real cause, got: {msg}"
         );
+        assert!(!msg.contains("each"), "the name is not echoed: {msg}");
     }
 
     #[test]
@@ -2307,8 +2312,13 @@ mod tests {
             .expect_err("an unresolvable system_prompt template must be an error, not None");
         let msg = format!("{err:#}");
         assert!(
-            msg.contains("missing_var"),
-            "error must name the unresolvable variable, got: {msg}"
+            msg.contains("Failed to render agent system_prompt template")
+                && msg.contains("undefined variable or field"),
+            "error must carry the real cause, got: {msg}"
+        );
+        assert!(
+            !msg.contains("missing_var"),
+            "the name is not echoed: {msg}"
         );
     }
 

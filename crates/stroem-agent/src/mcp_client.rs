@@ -260,7 +260,7 @@ impl McpClientManager {
     /// Get tool definitions from all connected MCP servers.
     ///
     /// Tool names are prefixed with `mcp_{server_name}_` to avoid collisions.
-    pub fn tool_definitions(&self) -> Vec<rig::completion::ToolDefinition> {
+    pub fn tool_definitions(&self) -> Vec<rig_core::completion::ToolDefinition> {
         let mut defs = Vec::new();
 
         for (server_name, conn) in &self.connections {
@@ -271,7 +271,7 @@ impl McpClientManager {
                     tool.name.replace('-', "_")
                 );
 
-                defs.push(rig::completion::ToolDefinition {
+                defs.push(rig_core::completion::ToolDefinition {
                     name: prefixed_name,
                     description: tool.description.clone(),
                     parameters: tool.input_schema.clone(),

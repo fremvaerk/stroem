@@ -82,6 +82,10 @@ export default defineConfig({
               slug: "operations/upgrade-0-17-dependency-flags",
             },
             {
+              label: "Upgrading to Tera 2",
+              slug: "operations/upgrade-tera-2",
+            },
+            {
               label: "Migrations 049–050 — Git Refs",
               slug: "operations/migration-049-050",
             },

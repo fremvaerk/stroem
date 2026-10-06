@@ -360,6 +360,31 @@ pub struct AuthConfig {
     #[serde(default)]
     pub providers: HashMap<String, ProviderConfig>,
     pub initial_user: Option<InitialUserConfig>,
+    #[serde(default)]
+    pub rate_limit: AuthRateLimitConfig,
+}
+
+/// Per-IP rate limiting on the auth routes (login, refresh, logout/me/OIDC,
+/// API keys).
+///
+/// This switch exists so test harnesses (e.g. the Playwright suite) can run
+/// many logins and page loads from a single IP. NEVER disable it in
+/// production: it is the brute-force protection on login and refresh.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthRateLimitConfig {
+    #[serde(default = "default_rate_limit_enabled")]
+    pub enabled: bool,
+}
+
+fn default_rate_limit_enabled() -> bool {
+    true
+}
+
+impl Default for AuthRateLimitConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 /// ACL action: what a matching rule grants
@@ -870,6 +895,14 @@ impl ServerConfig {
 /// for guessing weak secrets in multi-tenant SIEM environments.
 /// No-op when auth isn't configured.
 pub fn log_ha_diagnostics(config: &ServerConfig) {
+    if let Some(auth) = &config.auth {
+        if !auth.rate_limit.enabled {
+            tracing::warn!(
+                "Auth rate limiting is DISABLED via auth.rate_limit.enabled = false. \
+                 This removes brute-force protection on login/refresh and must only be used for tests."
+            );
+        }
+    }
     if let Some(auth) = &config.auth {
         tracing::info!(
             "HA: auth.jwt_secret loaded (len={}). All replicas MUST share this value — verify via your secret-management workflow.",
@@ -1804,6 +1837,66 @@ worker_token: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             WorkspaceSourceDef::Folder { path, .. } => assert_eq!(path, "./workspace"),
             _ => panic!("Expected folder workspace"),
         }
+    }
+
+    const RATE_LIMIT_AUTH_BASE: &str = r#"
+  jwt_secret: "the-quick-brown-fox-needs-32-chars!"
+  refresh_secret: "another-secret-for-refresh-32-ch"
+"#;
+
+    fn rate_limit_yaml(auth_extra: &str) -> String {
+        format!(
+            r#"listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost:5432/stroem"
+log_storage:
+  local_dir: "./logs"
+workspaces: {{}}
+worker_token: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+auth:{RATE_LIMIT_AUTH_BASE}{auth_extra}"#
+        )
+    }
+
+    fn load_yaml_str(yaml: &str) -> ServerConfig {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut file, yaml.as_bytes()).unwrap();
+        std::io::Write::flush(&mut file).unwrap();
+        load_config(file.path().to_str().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn test_auth_rate_limit_enabled_when_absent() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let config = load_yaml_str(&rate_limit_yaml(""));
+        assert!(config.auth.unwrap().rate_limit.enabled);
+    }
+
+    #[test]
+    fn test_auth_rate_limit_enabled_when_section_empty() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let config = load_yaml_str(&rate_limit_yaml("  rate_limit: {}\n"));
+        assert!(config.auth.unwrap().rate_limit.enabled);
+    }
+
+    #[test]
+    fn test_auth_rate_limit_disabled_by_yaml() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let config = load_yaml_str(&rate_limit_yaml("  rate_limit:\n    enabled: false\n"));
+        assert!(!config.auth.unwrap().rate_limit.enabled);
+    }
+
+    #[test]
+    fn test_env_override_auth_rate_limit_disabled() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        // SAFETY: test-only, serialized by ENV_MUTEX
+        unsafe {
+            std::env::set_var("STROEM__AUTH__RATE_LIMIT__ENABLED", "false");
+        }
+        let config = std::panic::catch_unwind(|| load_yaml_str(&rate_limit_yaml("")));
+        unsafe {
+            std::env::remove_var("STROEM__AUTH__RATE_LIMIT__ENABLED");
+        }
+        assert!(!config.unwrap().auth.unwrap().rate_limit.enabled);
     }
 
     #[test]
@@ -2758,6 +2851,7 @@ worker_token: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 base_url: None,
                 initial_user: None,
                 providers: std::collections::HashMap::new(),
+                rate_limit: Default::default(),
             });
             log_ha_diagnostics(&config);
         });

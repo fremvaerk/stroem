@@ -3,7 +3,6 @@ pub mod shell;
 pub mod traits;
 
 #[cfg(feature = "docker")]
-#[allow(deprecated)] // bollard 0.19 deprecates types; locked for testcontainers compat
 pub mod docker;
 
 #[cfg(feature = "kubernetes")]

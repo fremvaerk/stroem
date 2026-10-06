@@ -1,85 +1,71 @@
 use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
-use tera::Tera;
+use std::sync::{Arc, Mutex};
 
 use crate::budget::{is_deadline_exceeded, run_with_deadline, LoadBudget};
 use crate::models::workflow::{ConnectionDef, InputFieldDef, WorkspaceConfig};
+use crate::template_error::{TemplateError, ValsFailure, ValsFailureKind};
 
-/// Test-only wrapper keeping the historic two-argument filter signature.
-#[cfg(test)]
-fn vals_filter(
-    value: &tera::Value,
-    args: &HashMap<String, tera::Value>,
-) -> tera::Result<tera::Value> {
-    vals_filter_with(value, args, LoadBudget::unbounded())
-}
+/// Name the `vals` filter is registered under.
+pub(crate) const VALS_FILTER: &str = "vals";
 
 /// Tera filter that resolves `ref+` secret references via the vals CLI.
 ///
 /// Usage in templates: `{{ secret.KEY | vals }}`
-/// - Non-string values pass through unchanged
-/// - Strings not starting with `ref+` pass through unchanged
-/// - Strings starting with `ref+` are resolved via `vals eval`, killed if
-///   `budget` expires
-fn vals_filter_with(
+/// - Non-string values and strings not starting with `ref+` pass through.
+/// - `ref+` strings are resolved via `vals eval`, killed if `budget` expires.
+///
+/// A failure is recorded in `slot` (kind + stderr) and reported to Tera with
+/// a fixed message: neither the reference nor the stderr enters Tera's text.
+pub(crate) fn vals_filter_with(
     value: &tera::Value,
-    _args: &HashMap<String, tera::Value>,
     budget: LoadBudget,
-) -> tera::Result<tera::Value> {
+    slot: &Mutex<Option<ValsFailure>>,
+) -> tera::TeraResult<tera::Value> {
+    let fail = |kind: ValsFailureKind, stderr: String| {
+        *slot.lock().unwrap_or_else(|p| p.into_inner()) = Some(ValsFailure { kind, stderr });
+        tera::Error::message("vals failed")
+    };
     let s = match value.as_str() {
         Some(s) => s,
         None => return Ok(value.clone()),
     };
-
     if !s.starts_with("ref+") {
         return Ok(value.clone());
     }
 
-    let input = serde_json::json!({"_v": s});
-    let input_str = serde_json::to_string(&input)
-        .map_err(|e| tera::Error::msg(format!("vals: serialize failed: {e}")))?;
-
+    let input_str = serde_json::to_string(&serde_json::json!({ "_v": s }))
+        .map_err(|_| fail(ValsFailureKind::BadOutput, String::new()))?;
     let mut cmd = std::process::Command::new("vals");
     cmd.args(["eval", "-f", "-", "-o", "json"]);
     let output = run_with_deadline(cmd, Some(input_str.as_bytes()), &budget).map_err(|e| {
         if is_deadline_exceeded(&e) {
-            tera::Error::msg("vals: deadline exceeded while resolving a ref+ secret")
+            fail(ValsFailureKind::TimedOut, String::new())
         } else {
-            tera::Error::msg(format!(
-                "vals CLI not found. Install vals to use ref+ secrets: {e:#}"
-            ))
+            fail(ValsFailureKind::SpawnFailed, format!("{e:#}"))
         }
     })?;
-
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(tera::Error::msg(format!(
-            "vals eval failed (exit {}): {}",
-            output.status,
-            stderr.trim()
-        )));
+        return Err(fail(
+            ValsFailureKind::Exited(output.status.code()),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        ));
     }
-
     let resolved: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .map_err(|e| tera::Error::msg(format!("vals: invalid output JSON: {e}")))?;
-
+        .map_err(|_| fail(ValsFailureKind::BadOutput, String::new()))?;
     match resolved.get("_v").and_then(|v| v.as_str()) {
-        Some(resolved_str) => Ok(tera::Value::String(resolved_str.to_string())),
-        None => Err(tera::Error::msg("vals: resolved output missing '_v' key")),
+        Some(resolved_str) => Ok(tera::Value::from(resolved_str)),
+        None => Err(fail(ValsFailureKind::BadOutput, String::new())),
     }
 }
 
-/// Name the `vals` filter is registered under.
-const VALS_FILTER: &str = "vals";
-
-/// True when `err` is, or wraps, a failure of the `vals` filter: the CLI is
-/// missing, `vals eval` failed, its deadline passed, or its output was bad.
-/// Typed (tera's `CallFilter` kind for this filter), never by message text.
+/// True when `err` is, or wraps, a failure of the `vals` filter (typed: the
+/// filter records it in a side channel, spec § 3.7).
 pub fn is_vals_failure(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
-        cause.downcast_ref::<tera::Error>().is_some_and(
-            |e| matches!(&e.kind, tera::ErrorKind::CallFilter(name) if name == VALS_FILTER),
-        )
+        cause
+            .downcast_ref::<TemplateError>()
+            .is_some_and(TemplateError::is_vals_failure)
     })
 }
 
@@ -94,25 +80,33 @@ pub fn render_template_with(
     context: &serde_json::Value,
     budget: &LoadBudget,
 ) -> Result<String> {
-    let mut tera = Tera::default();
-    let template_name = "__template__";
+    let slot = Arc::new(Mutex::new(None));
+    let tera = crate::tera_engine::render_engine(*budget, slot.clone());
+    let ctx = tera::Context::from_serialize(context)
+        .map_err(|e| anyhow::Error::new(TemplateError::context_conversion(&e)))
+        .context("Failed to convert JSON to Tera context")?;
+    tera.render_str(template, &ctx, false).map_err(|e| {
+        let vals = slot.lock().unwrap_or_else(|p| p.into_inner()).take();
+        let outer = if matches!(e.kind(), tera::ErrorKind::SyntaxError(_)) {
+            "Failed to parse template"
+        } else {
+            "Failed to render template"
+        };
+        anyhow::Error::new(TemplateError::from_tera(&e, Some(template), vals)).context(outer)
+    })
+}
 
-    tera.add_raw_template(template_name, template)
-        .context("Failed to parse template")?;
-
-    let budget = *budget;
-    tera.register_filter(
-        VALS_FILTER,
-        move |value: &tera::Value, args: &HashMap<String, tera::Value>| {
-            vals_filter_with(value, args, budget)
-        },
-    );
-
-    let tera_context =
-        tera::Context::from_serialize(context).context("Failed to convert JSON to Tera context")?;
-
-    tera.render(template_name, &tera_context)
-        .context("Failed to render template")
+/// Compile `src` exactly as rendering would (`render_str`'s one-off
+/// restrictions included) without running anything that has a side effect.
+/// A runtime error (undefined variable, filter failure on the empty context)
+/// means the template compiled.
+pub fn check_template_syntax(src: &str) -> std::result::Result<(), TemplateError> {
+    let tera = crate::tera_engine::check_engine();
+    match tera.render_str(src, &tera::Context::new(), false) {
+        Ok(_) => Ok(()),
+        Err(e) if matches!(e.kind(), tera::ErrorKind::RenderingError(_)) => Ok(()),
+        Err(e) => Err(TemplateError::from_tera(&e, Some(src), None)),
+    }
 }
 
 /// Split a possibly-qualified reference `workspace.item` on the FIRST `.`.
@@ -268,28 +262,59 @@ pub struct ResolveScope<'a> {
 /// A connection located by [`resolve_connection_ref`].
 pub struct ResolvedConnection<'a> {
     pub workspace: String,
-    pub name: String,
     pub def: &'a ConnectionDef,
 }
 
+/// Why a connection reference did not resolve. Value-free: never holds the
+/// reference, which may have been rendered from a secret (spec § 3.3.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionRefError {
+    NotFound,
+    UnknownWorkspace,
+    WorkspaceUnavailable,
+    NotShared,
+    OfflineCrossWorkspace,
+}
+
+impl std::fmt::Display for ConnectionRefError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::NotFound => "no connection with that name exists",
+            Self::UnknownWorkspace => "the connection names an unknown workspace",
+            Self::WorkspaceUnavailable => "the workspace that owns the connection is not available",
+            Self::NotShared => "the connection exists but is not shared (set `shared: true` on it)",
+            Self::OfflineCrossWorkspace => {
+                "cross-workspace connection references require a server (run this task through `stroem-api trigger`)"
+            }
+        })
+    }
+}
+
+impl std::error::Error for ConnectionRefError {}
+
+/// True when a string contains any Tera template marker (`{{`, `{%`, `{#`).
+pub fn looks_templated(s: &str) -> bool {
+    s.contains("{{") || s.contains("{%") || s.contains("{#")
+}
+
 /// Locate a connection by bare or qualified name, enforcing the `shared` gate
-/// for any reference that crosses a workspace boundary.
+/// for any reference that crosses a workspace boundary. Errors never carry the
+/// reference (it may be a rendered secret).
 pub fn resolve_connection_ref<'a>(
     conn_ref: &str,
     scope: &ResolveScope<'a>,
-) -> Result<ResolvedConnection<'a>> {
+) -> std::result::Result<ResolvedConnection<'a>, ConnectionRefError> {
     let lookup = scope.lookup;
-    let value_cfg = found_config(
-        lookup,
-        scope.value_ws,
-        &format!("connection '{}'", conn_ref),
-    )?;
+    let value_cfg = match lookup.get(scope.value_ws) {
+        Lookup::Found(c) => c,
+        Lookup::Unknown => return Err(ConnectionRefError::UnknownWorkspace),
+        Lookup::Unavailable => return Err(ConnectionRefError::WorkspaceUnavailable),
+    };
 
     // 1. Literal local key (bare name, or a connection literally named "a.b").
     if let Some(def) = value_cfg.connections.get(conn_ref) {
         return Ok(ResolvedConnection {
             workspace: scope.value_ws.to_string(),
-            name: conn_ref.to_string(),
             def,
         });
     }
@@ -300,32 +325,14 @@ pub fn resolve_connection_ref<'a>(
             Lookup::Found(cfg) => match cfg.connections.get(item) {
                 Some(def) if ws == scope.value_ws || def.shared => Ok(ResolvedConnection {
                     workspace: ws.to_string(),
-                    name: item.to_string(),
                     def,
                 }),
-                Some(_) => bail!(
-                    "connection '{}' exists in workspace '{}' but is not shared (set `shared: true` on it in workspace '{}')",
-                    conn_ref,
-                    ws,
-                    ws
-                ),
-                None => bail!(
-                    "connection '{}' does not exist: workspace '{}' has no connection '{}'",
-                    conn_ref,
-                    ws,
-                    item
-                ),
+                Some(_) => Err(ConnectionRefError::NotShared),
+                None => Err(ConnectionRefError::NotFound),
             },
-            Lookup::Unknown if lookup.offline() => bail!(
-                "connection '{}': cross-workspace connection references require a server (run this task through `stroem-api trigger`)",
-                conn_ref
-            ),
-            Lookup::Unknown => bail!("connection '{}': unknown workspace '{}'", conn_ref, ws),
-            Lookup::Unavailable => bail!(
-                "connection '{}': workspace '{}' is not available",
-                conn_ref,
-                ws
-            ),
+            Lookup::Unknown if lookup.offline() => Err(ConnectionRefError::OfflineCrossWorkspace),
+            Lookup::Unknown => Err(ConnectionRefError::UnknownWorkspace),
+            Lookup::Unavailable => Err(ConnectionRefError::WorkspaceUnavailable),
         };
     }
 
@@ -336,70 +343,99 @@ pub fn resolve_connection_ref<'a>(
                 Some(def) if def.shared => {
                     return Ok(ResolvedConnection {
                         workspace: fb.to_string(),
-                        name: conn_ref.to_string(),
                         def,
                     })
                 }
-                Some(_) => bail!(
-                    "connection '{}' not found in workspace '{}'; '{}.{}' exists but is not shared",
-                    conn_ref,
-                    scope.value_ws,
-                    fb,
-                    conn_ref
-                ),
+                Some(_) => return Err(ConnectionRefError::NotShared),
                 None => {}
             }
         }
     }
 
-    bail!(
-        "connection '{}' does not exist in workspace '{}'",
-        conn_ref,
-        scope.value_ws
-    )
+    Err(ConnectionRefError::NotFound)
 }
 
 /// Evaluate a `when` condition template against a JSON context.
 ///
-/// Returns `true` (step should run) if the rendered result is truthy:
-/// non-empty and not `"false"`, `"0"`, `"null"`, or `"none"` (all
-/// comparisons are case-insensitive). Returns `false` (step should be
-/// skipped) otherwise. Template render errors propagate as `Err`.
+/// The rendered text is false when it is empty or, case-insensitively,
+/// `false`, `null`, `none`, `[]`, `{}`, or a number equal to zero (`0`,
+/// `0.0`, `-0.0`) — Strøm's convention over Tera 2's rendered output
+/// (spec 2026-10-06 § 3.6 C4). Render errors propagate as `Err`.
 pub fn evaluate_condition(template: &str, context: &serde_json::Value) -> Result<bool> {
     let rendered = render_template(template, context)?;
     let trimmed = rendered.trim();
-    if trimmed.is_empty() {
+    let lower = trimmed.to_lowercase();
+    if matches!(lower.as_str(), "" | "false" | "null" | "none" | "[]" | "{}") {
         return Ok(false);
     }
-    let lower = trimmed.to_lowercase();
-    Ok(lower != "false" && lower != "0" && lower != "null" && lower != "none")
+    if trimmed.parse::<f64>().is_ok_and(|n| n == 0.0) {
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 /// Recursively renders all string values in a JSON value as Tera templates.
 /// Objects and arrays are traversed; non-string leaves pass through unchanged.
+/// An error locates the failing string by array indices only, never by an
+/// object key or the template text (see [`render_location`]).
 pub fn render_json_strings(
     value: &serde_json::Value,
     context: &serde_json::Value,
 ) -> Result<serde_json::Value> {
+    render_strings_at(value, context, false, &mut Vec::new())
+}
+
+/// The error context naming where a nested render failed. Value-free by
+/// construction: the walk records an object key only as `None` — a key is
+/// author text (an action manifest's keys are arbitrary), so its text is
+/// never captured. A path of array indices alone is named exactly
+/// (`[1]`, e.g. the second `args` element); any other location, including
+/// the top level, gets one fixed sentence. The caller's own context names
+/// the root (`manifest`, `args`, the input field).
+fn render_location(path: &[Option<usize>]) -> String {
+    if !path.is_empty() && path.iter().all(Option::is_some) {
+        let indices: String = path.iter().flatten().map(|i| format!("[{i}]")).collect();
+        format!("Failed to render the template at `{indices}`")
+    } else {
+        "Failed to render a template in this value".to_string()
+    }
+}
+
+/// Shared walk of [`render_json_strings`] (`only_templated == false`) and
+/// [`render_value_deep`] (only strings containing `{{`). `path` holds one
+/// entry per level: `Some(index)` in an array, `None` under an object key.
+fn render_strings_at(
+    value: &serde_json::Value,
+    context: &serde_json::Value,
+    only_templated: bool,
+    path: &mut Vec<Option<usize>>,
+) -> Result<serde_json::Value> {
     match value {
         serde_json::Value::String(s) => {
-            let rendered = render_template(s, context)
-                .with_context(|| format!("Failed to render template in JSON string: {}", s))?;
+            if only_templated && !s.contains("{{") {
+                return Ok(value.clone());
+            }
+            let rendered = render_template(s, context).with_context(|| render_location(path))?;
             Ok(serde_json::Value::String(rendered))
         }
         serde_json::Value::Object(map) => {
             let mut result = serde_json::Map::new();
             for (k, v) in map {
-                result.insert(k.clone(), render_json_strings(v, context)?);
+                path.push(None);
+                let rendered = render_strings_at(v, context, only_templated, path)?;
+                path.pop();
+                result.insert(k.clone(), rendered);
             }
             Ok(serde_json::Value::Object(result))
         }
         serde_json::Value::Array(arr) => {
-            let result: Result<Vec<_>> = arr
-                .iter()
-                .map(|v| render_json_strings(v, context))
-                .collect();
-            Ok(serde_json::Value::Array(result?))
+            let mut result = Vec::with_capacity(arr.len());
+            for (i, v) in arr.iter().enumerate() {
+                path.push(Some(i));
+                result.push(render_strings_at(v, context, only_templated, path)?);
+                path.pop();
+            }
+            Ok(serde_json::Value::Array(result))
         }
         other => Ok(other.clone()),
     }
@@ -648,31 +684,24 @@ pub fn resolve_connection_inputs_scoped(
             }
         };
 
+        let label = format!("Input field '{}'", field_name);
         let field_ct = canonical_type_ref(&field_def.field_type, scope.schema_ws, scope.lookup)
-            .with_context(|| format!("Input field '{}'", field_name))?;
-        let resolved = resolve_connection_ref(conn_name, scope).with_context(|| {
-            format!(
-                "Input field '{}' references connection '{}'",
-                field_name, conn_name
-            )
-        })?;
-
+            .with_context(|| label.clone())?;
+        let resolved = resolve_connection_ref(conn_name, scope)
+            .map_err(|kind| anyhow::anyhow!("{label}: {kind}"))?;
         let values = match resolved.def.connection_type {
             None => resolved.def.values.clone(),
             Some(ref declared) => {
                 let conn_ct = canonical_type_ref(declared, &resolved.workspace, scope.lookup)
-                    .with_context(|| format!("connection '{}'", conn_name))?;
+                    .map_err(|_| {
+                        anyhow::anyhow!(
+                            "{label}: the type of the connection it names could not be resolved"
+                        )
+                    })?;
                 if conn_ct != field_ct {
-                    bail!(
-                        "Input field '{}' expects type '{}' but connection '{}' is type '{}'",
-                        field_name,
-                        field_ct,
-                        conn_name,
-                        conn_ct
-                    );
+                    bail!("{label} expects type '{field_ct}' but the connection it names is type '{conn_ct}'");
                 }
                 if conn_ct.workspace != resolved.workspace {
-                    // Foreign-typed connection: defaults + checks not done at load.
                     let type_cfg =
                         found_config(scope.lookup, &conn_ct.workspace, "connection type")?;
                     let type_def = type_cfg
@@ -680,18 +709,15 @@ pub fn resolve_connection_inputs_scoped(
                         .get(&conn_ct.name)
                         .with_context(|| format!("connection type '{}' vanished", conn_ct))?;
                     let with_defaults = resolved.def.values_with_type_defaults(type_def);
+                    let field_label = format!("input field '{}'", field_name);
                     let warnings = crate::validation::check_connection_values(
-                        &format!("{}.{}", resolved.workspace, resolved.name),
+                        &field_label,
                         &with_defaults,
                         &conn_ct.to_string(),
                         type_def,
                     )?;
                     for w in warnings {
-                        tracing::warn!(
-                            connection = %format!("{}.{}", resolved.workspace, resolved.name),
-                            "{}",
-                            w
-                        );
+                        tracing::warn!(field = %field_name, "{}", w);
                     }
                     with_defaults
                 } else {
@@ -767,46 +793,21 @@ pub fn resolve_rerun_sentinels(
 
 /// Recursively walk a JSON value tree and render all string values containing `{{`
 /// through Tera. Objects and arrays are traversed recursively; other types are cloned as-is.
+/// An error locates the failing string by array indices only, never by an
+/// object key or the template text (see [`render_location`]).
 pub fn render_value_deep(
     value: &serde_json::Value,
     context: &serde_json::Value,
 ) -> Result<serde_json::Value> {
-    match value {
-        serde_json::Value::String(s) => {
-            if s.contains("{{") {
-                let rendered = render_template(s, context)
-                    .with_context(|| format!("Failed to render template in value: {}", s))?;
-                Ok(serde_json::Value::String(rendered))
-            } else {
-                Ok(value.clone())
-            }
-        }
-        serde_json::Value::Object(map) => {
-            let mut result = serde_json::Map::new();
-            for (k, v) in map {
-                result.insert(k.clone(), render_value_deep(v, context)?);
-            }
-            Ok(serde_json::Value::Object(result))
-        }
-        serde_json::Value::Array(arr) => {
-            let mut result = Vec::new();
-            for v in arr {
-                result.push(render_value_deep(v, context)?);
-            }
-            Ok(serde_json::Value::Array(result))
-        }
-        _ => Ok(value.clone()),
-    }
+    render_strings_at(value, context, true, &mut Vec::new())
 }
 
 /// Merge action-level input defaults into already-rendered step input.
 ///
-/// 1. Calls `merge_defaults()` to fill missing fields from the action's input schema
-/// 2. Calls `render_value_deep()` ONLY on the fields that step 1 filled in from
-///    defaults (a field already present in `rendered_input` is never touched
-///    again, no matter what `merge_defaults()` returns for it)
-///
-/// This handles the case where an action defines a default like:
+/// Every schema field absent from `rendered_input` is filled from its RAW
+/// schema default, and that default is rendered EXACTLY ONCE against
+/// `context`: a string default containing `{{` through Tera, an object or
+/// array default by walking it with `render_value_deep()`, e.g.
 /// ```yaml
 /// input:
 ///   clickhouse:
@@ -815,50 +816,44 @@ pub fn render_value_deep(
 ///       host: "{{ secret.clickhouse.host }}"
 ///       port: 8443
 /// ```
-/// The object default is inserted by `merge_defaults()` as-is, then
-/// `render_value_deep()` walks it to render the `{{ secret.clickhouse.host }}`
-/// template.
 ///
-/// Values already present in `rendered_input` are deliberately excluded from
-/// that second pass and passed through byte-for-byte: they were rendered once
-/// already, in the caller's own context. Re-rendering them here — against
-/// this call's context, which for a cross-workspace action is the *owner's*
-/// `secret` map — would let a caller smuggle out the owner's secrets with a
-/// Tera string-literal trick (a value like `'{{ "{{ secret.TOKEN }}" }}'`
-/// renders to a literal `{{ secret.TOKEN }}` on the first, caller-side pass,
-/// then would render again to the real secret value if this function
-/// re-rendered already-resolved fields).
+/// Exactly once matters (R26): the output of a render is never rendered
+/// again. A default such as `"{{ input.note }}"` can render to a
+/// caller-supplied literal `{{ secret.TOKEN }}` (the caller-side output of
+/// `'{{ "{{ secret.TOKEN }}" }}'`); a second pass — this function used to
+/// run `merge_defaults()` and then `render_value_deep()` over the same
+/// fields — would render THAT against this call's context, for a
+/// cross-workspace action the *owner's* `secret` map, and hand the owner's
+/// secret to the caller.
+///
+/// Values already present in `rendered_input` are passed through
+/// byte-for-byte for the same reason: they were rendered once already, in
+/// the caller's own context.
 pub fn merge_action_defaults(
     rendered_input: &serde_json::Value,
     action_input_schema: &HashMap<String, InputFieldDef>,
     context: &serde_json::Value,
 ) -> Result<serde_json::Value> {
-    let empty = serde_json::Map::new();
-    let input_map = rendered_input.as_object().unwrap_or(&empty);
+    let mut merged_map = rendered_input.as_object().cloned().unwrap_or_default();
 
-    let merged = merge_defaults(rendered_input, action_input_schema, context)
+    for (field_name, field_def) in action_input_schema {
+        if merged_map.contains_key(field_name) {
+            continue;
+        }
+        let Some(default_value) = &field_def.default else {
+            continue;
+        };
+        let rendered = match default_value {
+            serde_json::Value::String(s) if s.contains("{{") => {
+                render_template(s, context).map(serde_json::Value::String)
+            }
+            _ => render_value_deep(default_value, context),
+        }
+        .with_context(|| {
+            format!("Failed to render default template for input field '{field_name}'")
+        })
         .context("Failed to merge action input defaults")?;
-    let mut merged_map = merged.as_object().cloned().unwrap_or_default();
-
-    // Only fields absent from the caller-supplied input were filled in from
-    // schema defaults above; render templates in those alone. A value the
-    // caller supplied (including a connection object an earlier resolver
-    // pass already substituted in) must never be re-rendered here — doing so
-    // against, e.g., the action owner's `secret` context would let a caller
-    // smuggle out owner secrets via a Tera string-literal trick
-    // (`'{{ "{{ secret.TOKEN }}" }}'`).
-    let mut defaults_only = serde_json::Map::new();
-    for (key, value) in merged_map.iter() {
-        if !input_map.contains_key(key) {
-            defaults_only.insert(key.clone(), value.clone());
-        }
-    }
-    let rendered_defaults = render_value_deep(&serde_json::Value::Object(defaults_only), context)
-        .context("Failed to render templates in action defaults")?;
-    if let serde_json::Value::Object(rendered_map) = rendered_defaults {
-        for (key, value) in rendered_map {
-            merged_map.insert(key, value);
-        }
+        merged_map.insert(field_name.clone(), rendered);
     }
 
     Ok(serde_json::Value::Object(merged_map))
@@ -1239,7 +1234,7 @@ fn resolve_provenance_bucket(
     resolve_bucket_by_role(input, task_schema, value, task, others)
 }
 
-fn json_type_name(v: &serde_json::Value) -> &'static str {
+pub fn json_type_name(v: &serde_json::Value) -> &'static str {
     match v {
         serde_json::Value::Null => "null",
         serde_json::Value::Bool(_) => "boolean",
@@ -1256,6 +1251,33 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn when_truth_table_follows_rendered_text() {
+        let ctx = json!({"z": 0.0, "e": [], "m": {}, "s": "false", "n": null, "one": 1});
+        let cases = [
+            ("{{ z }}", false),
+            ("{{ e }}", false),
+            ("{{ m }}", false),
+            ("{{ s }}", false),
+            ("{{ n }}", false),
+            ("", false),
+            ("0", false),
+            ("-0.0", false),
+            ("None", false),
+            ("NULL", false),
+            ("{{ one }}", true),
+            ("{{ [0] }}", true),
+            ("x", true),
+            ("0.5", true),
+            ("{{ e and one }}", false),
+            ("{{ one and e }}", false),
+            ("{{ e or one }}", true),
+        ];
+        for (tpl, expected) in cases {
+            assert_eq!(evaluate_condition(tpl, &ctx).unwrap(), expected, "{tpl}");
+        }
+    }
+
+    #[test]
     fn test_render_simple_variable() {
         let template = "Hello {{ name }}";
         let context = json!({"name": "World"});
@@ -1265,18 +1287,15 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_action_defaults_renders_a_self_referencing_default_twice() {
-        // `merge_action_defaults` composes `merge_defaults` (which already
-        // renders a *string* default through Tera as it fills it in) with a
-        // second `render_value_deep` pass over the same "filled from
-        // defaults" bucket (needed for the *object*-default case its own doc
-        // comment documents, e.g. `{host: "{{ secret.foo }}"}`). For a plain
-        // string default that itself renders to another `{{ }}` expression,
-        // this doubles up: `merge_defaults` renders `"{{ secret.X }}"` to
-        // secret X's OWN raw value, and `render_value_deep` then renders
-        // THAT a second time. See `crates/stroem-server/tests/integration_test.rs`
-        // `test_xws_task_two_pass_default_is_pinned_behaviour`, which locks
-        // this in end-to-end through a `type: task` action's input default.
+    fn test_merge_action_defaults_renders_a_self_referencing_default_once() {
+        // A string default renders exactly once (R26). `"{{ secret.X }}"`
+        // renders to secret X's OWN raw value — the literal text
+        // `{{ secret.Y }}` — and that output is never rendered again. Until
+        // R26 `merge_action_defaults` ran `merge_defaults` (which renders a
+        // string default) and then `render_value_deep` over the same fields,
+        // landing on `yval`; this test pinned that. The end-to-end pin is
+        // `crates/stroem-server/tests/integration_test.rs`
+        // `test_xws_task_default_is_rendered_exactly_once`.
         use std::collections::HashMap;
         let caller_bucket = json!({});
         let mut schema = HashMap::new();
@@ -1290,7 +1309,7 @@ mod tests {
         );
         let secrets_ctx = json!({"secret": {"X": "{{ secret.Y }}", "Y": "yval"}});
         let merged = merge_action_defaults(&caller_bucket, &schema, &secrets_ctx).unwrap();
-        assert_eq!(merged, json!({"note": "yval"}));
+        assert_eq!(merged, json!({"note": "{{ secret.Y }}"}));
     }
 
     #[test]
@@ -1588,57 +1607,53 @@ mod tests {
         assert_eq!(result, None);
     }
 
+    fn vals_direct(value: tera::Value) -> tera::TeraResult<tera::Value> {
+        vals_filter_with(&value, LoadBudget::unbounded(), &Mutex::new(None))
+    }
+
     #[test]
     fn test_vals_filter_passthrough_non_string() {
-        let value = json!(42);
-        let args = HashMap::new();
-        let result = vals_filter(&value, &args).unwrap();
-        assert_eq!(result, json!(42));
+        let result = vals_direct(tera::Value::from(42)).unwrap();
+        assert_eq!(result.to_string(), "42");
     }
 
     #[test]
     fn test_vals_filter_passthrough_no_ref() {
-        let value = json!("plain-text");
-        let args = HashMap::new();
-        let result = vals_filter(&value, &args).unwrap();
-        assert_eq!(result, json!("plain-text"));
+        let result = vals_direct(tera::Value::from("plain-text")).unwrap();
+        assert_eq!(result.as_str(), Some("plain-text"));
     }
 
     #[test]
     fn test_vals_filter_passthrough_empty() {
-        let value = json!("");
-        let args = HashMap::new();
-        let result = vals_filter(&value, &args).unwrap();
-        assert_eq!(result, json!(""));
+        let result = vals_direct(tera::Value::from("")).unwrap();
+        assert_eq!(result.as_str(), Some(""));
     }
 
     #[test]
     fn test_vals_filter_passthrough_boolean() {
-        let args = HashMap::new();
-        let result = vals_filter(&json!(true), &args).unwrap();
-        assert_eq!(result, json!(true));
+        let result = vals_direct(tera::Value::from(true)).unwrap();
+        assert_eq!(result.as_bool(), Some(true));
     }
 
     #[test]
     fn test_vals_filter_passthrough_null() {
-        let args = HashMap::new();
-        let result = vals_filter(&json!(null), &args).unwrap();
-        assert_eq!(result, json!(null));
+        let result = vals_direct(tera::Value::none()).unwrap();
+        assert!(result.is_none(), "{result:?}");
     }
 
     #[test]
     fn test_vals_filter_ref_value_errors() {
-        // When vals is not installed: "vals CLI not found"
-        // When vals is installed but backend unreachable: "vals eval failed"
-        let value = json!("ref+vault://secret/key");
-        let args = HashMap::new();
-        let result = vals_filter(&value, &args);
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
+        // vals missing ("could not be started") or the backend unreachable
+        // ("failed (exit status N)"): typed either way, and the reference
+        // never reaches the message.
+        let err = render_template("{{ 'ref+vault://secret/key' | vals }}", &json!({})).unwrap_err();
+        assert!(is_vals_failure(&err), "{err:#}");
+        let text = format!("{err:#} {err:?}");
         assert!(
-            err.contains("vals CLI not found") || err.contains("vals eval failed"),
-            "Expected vals-related error, got: {err}"
+            text.contains("vals could not be started") || text.contains("vals failed (exit"),
+            "Expected vals-related error, got: {text}"
         );
+        assert!(!text.contains("vault://secret/key"), "{text}");
     }
 
     #[test]
@@ -1674,6 +1689,83 @@ mod tests {
         let context = json!({});
         let result = render_template(template, &context).unwrap();
         assert_eq!(result, "plain-value");
+    }
+
+    #[test]
+    fn check_template_syntax_accepts_vals_and_json_encode() {
+        assert!(check_template_syntax("{{ 'ref+vault://x' | vals }}").is_ok());
+        assert!(check_template_syntax("{{ x | json_encode() }}").is_ok());
+        assert!(check_template_syntax("{{ undefined_var.field }}").is_ok());
+    }
+
+    #[test]
+    fn check_template_syntax_rejects_unknown_filter_blocks_and_extends() {
+        assert_eq!(
+            check_template_syntax("{% if false %}{{ x | nope }}{% endif %}")
+                .unwrap_err()
+                .message(),
+            "template uses an unknown filter"
+        );
+        assert_eq!(
+            check_template_syntax("{% block b %}{% endblock %}")
+                .unwrap_err()
+                .message(),
+            "{% block %} is not supported"
+        );
+        assert_eq!(
+            check_template_syntax("{% extends \"x\" %}")
+                .unwrap_err()
+                .message(),
+            "{% extends %} is not supported"
+        );
+    }
+
+    #[test]
+    fn vals_passes_non_ref_values_through() {
+        assert_eq!(
+            render_template("{{ 'plain' | vals }}", &json!({})).unwrap(),
+            "plain"
+        );
+        assert_eq!(
+            render_template("{{ 42 | vals }}", &json!({})).unwrap(),
+            "42"
+        );
+    }
+
+    #[test]
+    fn vals_records_failure_kind_in_slot() {
+        // vals passes an unknown scheme (`ref+bogus-backend://`) through
+        // unchanged; a missing local file fails offline when vals is installed.
+        let slot = std::sync::Mutex::new(None);
+        let r = vals_filter_with(
+            &tera::Value::from("ref+file:///nonexistent-stroem-test/x.txt"),
+            LoadBudget::unbounded(),
+            &slot,
+        );
+        assert!(r.is_err());
+        let kind = slot.lock().unwrap().as_ref().map(|v| v.kind);
+        assert!(
+            matches!(
+                kind,
+                Some(ValsFailureKind::SpawnFailed) | Some(ValsFailureKind::Exited(_))
+            ),
+            "{kind:?}"
+        );
+    }
+
+    #[test]
+    fn non_vals_render_error_is_not_a_vals_failure() {
+        let err = render_template("{{ 'x' | int }}", &json!({})).unwrap_err();
+        assert!(!is_vals_failure(&err));
+    }
+
+    #[test]
+    fn json_encode_keeps_sorted_key_order() {
+        let ctx = json!({"m": {"b": 1, "a": 2, "c": 3}});
+        assert_eq!(
+            render_template("{{ m | json_encode() }}", &ctx).unwrap(),
+            r#"{"a":2,"b":1,"c":3}"#
+        );
     }
 
     // --- merge_defaults tests ---
@@ -2246,7 +2338,10 @@ mod tests {
         .unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("expects type 'caller.clickhouse'"), "{msg}");
-        assert!(msg.contains("is type 'jobs.clickhouse'"), "{msg}");
+        assert!(
+            msg.contains("the connection it names is type 'jobs.clickhouse'"),
+            "{msg}"
+        );
     }
 
     #[test]
@@ -2255,10 +2350,9 @@ mod tests {
         let err =
             resolve_connection_inputs(&json!({"ch": "nope.x"}), &schema_of("jobs.clickhouse"), &ws)
                 .unwrap_err();
-        assert!(
-            format!("{err:#}").contains("unknown workspace 'nope'"),
-            "{err:#}"
-        );
+        let msg = format!("{err:#}");
+        assert!(msg.contains("names an unknown workspace"), "{msg}");
+        assert!(!msg.contains("nope"), "{msg}");
     }
 
     #[test]
@@ -2434,11 +2528,8 @@ mod tests {
         )
         .unwrap_err();
         let msg = format!("{err:#}");
-        assert!(msg.contains("not found in workspace 'caller'"), "{msg}");
-        assert!(
-            msg.contains("'jobs.private-ch' exists but is not shared"),
-            "{msg}"
-        );
+        assert!(msg.contains("exists but is not shared"), "{msg}");
+        assert!(!msg.contains("private-ch"), "{msg}");
         // (3) caller-local bare name wins over an owner name of the same spelling
         ws.configs.get_mut("caller").unwrap().connections.insert(
             "clickhouse-prod".to_string(),
@@ -2538,16 +2629,25 @@ mod tests {
         assert!(msg.contains("is not shared"), "{msg}");
 
         // Owner default that fails to render (defaults merge) → ActionDefault.
-        let schema = HashMap::from([(
-            "note".to_string(),
-            field("string", false, Some(json!("{{ secret.TOKEN | round }}"))),
-        )]);
+        // Tera's raw text quotes the owner's secret; the chain never does.
+        const TPL: &str = "{{ 1 | round(method=secret.TOKEN) }}";
+        assert!(
+            crate::template_error::raw_detail_contains(
+                TPL,
+                &json!({"secret": {"TOKEN": "owner-secret"}}),
+                "owner-secret"
+            ),
+            "fixture must leak through Tera's raw text, else this test is vacuous"
+        );
+        let schema =
+            HashMap::from([("note".to_string(), field("string", false, Some(json!(TPL))))]);
         let (bucket, msg) = bucket_of(json!({}), &schema);
         assert_eq!(bucket, Some(ProvenanceBucket::ActionDefault), "{msg}");
         assert!(
             msg.contains("Failed to merge action input defaults"),
             "{msg}"
         );
+        assert!(!msg.contains("owner-secret"), "{msg}");
 
         // Owner default naming a connection the owner lacks (owner pass) →
         // ActionDefault.
@@ -2557,7 +2657,8 @@ mod tests {
         )]);
         let (bucket, msg) = bucket_of(json!({}), &schema);
         assert_eq!(bucket, Some(ProvenanceBucket::ActionDefault), "{msg}");
-        assert!(msg.contains("missing-ch"), "{msg}");
+        assert!(!msg.contains("missing-ch"), "{msg}");
+        assert!(msg.contains("Input field 'ch'"), "{msg}");
     }
 
     #[test]
@@ -2602,6 +2703,204 @@ mod tests {
     }
 
     #[test]
+    fn rendered_connection_name_never_in_error_chain() {
+        // (a) the name does not resolve
+        let ws = make_ws_with_connection();
+        let mut schema = HashMap::new();
+        schema.insert("db".to_string(), field("postgres", false, None));
+        let err = resolve_connection_inputs(
+            &json!({"db": "CONNCANARY"}),
+            &schema,
+            &SingleWorkspace {
+                name: "local",
+                config: &ws,
+            },
+        )
+        .unwrap_err();
+        let text = format!("{err:#}");
+        assert!(!text.contains("CONNCANARY"), "{text}");
+        assert!(
+            text.contains("Input field 'db': no connection with that name exists"),
+            "{text}"
+        );
+
+        // (b) resolves to a foreign-typed connection missing a required field
+        let mut multi = three_workspaces();
+        multi
+            .configs
+            .get_mut("jobs")
+            .unwrap()
+            .connection_types
+            .insert(
+                "clickhouse".to_string(),
+                ConnectionTypeDef {
+                    properties: HashMap::from([(
+                        "host".to_string(),
+                        crate::models::workflow::ConnectionPropertyDef {
+                            property_type: "string".into(),
+                            required: true,
+                            default: None,
+                            secret: false,
+                        },
+                    )]),
+                },
+            );
+        multi.configs.get_mut("infra").unwrap().connections.insert(
+            "CONNCANARY".to_string(),
+            ConnectionDef {
+                connection_type: Some("jobs.clickhouse".into()),
+                shared: true,
+                values: HashMap::new(),
+            },
+        );
+        let err = resolve_connection_inputs(
+            &json!({"ch": "infra.CONNCANARY"}),
+            &schema_of("jobs.clickhouse"),
+            &multi,
+        )
+        .unwrap_err();
+        let text = format!("{err:#}");
+        assert!(!text.contains("CONNCANARY"), "{text}");
+        assert!(
+            text.contains("input field 'ch' is missing required field 'host'"),
+            "{text}"
+        );
+
+        // (c) resolves to a connection of the wrong type
+        let mut ws = make_ws_with_connection();
+        ws.connection_types.insert(
+            "redis".to_string(),
+            ConnectionTypeDef {
+                properties: HashMap::new(),
+            },
+        );
+        let prod = ws.connections["prod_db"].clone();
+        ws.connections.insert("CONNCANARY".to_string(), prod);
+        let mut schema = HashMap::new();
+        schema.insert("cache".to_string(), field("redis", false, None));
+        let err = resolve_connection_inputs(
+            &json!({"cache": "CONNCANARY"}),
+            &schema,
+            &SingleWorkspace {
+                name: "local",
+                config: &ws,
+            },
+        )
+        .unwrap_err();
+        let text = format!("{err:#}");
+        assert!(!text.contains("CONNCANARY"), "{text}");
+        assert!(text.contains("Input field 'cache' expects type"), "{text}");
+    }
+
+    #[test]
+    fn every_connection_ref_error_kind_is_value_free_in_the_full_chain() {
+        let mut multi = three_workspaces();
+        multi.configs.get_mut("jobs").unwrap().connections.insert(
+            "CONNCANARY".to_string(),
+            conn(Some("clickhouse"), false, "x"),
+        );
+        let cases = [
+            ("jobs.CONNCANARY", "exists but is not shared"),
+            ("jobs.CONNCANARYZ", "no connection with that name exists"),
+            ("CONNCANARYWS.x", "names an unknown workspace"),
+            ("broken.CONNCANARY", "is not available"),
+        ];
+        for (reference, expected) in cases {
+            let err = resolve_connection_inputs(
+                &json!({"ch": reference}),
+                &schema_of("jobs.clickhouse"),
+                &multi,
+            )
+            .unwrap_err();
+            let text = format!("{err:#}");
+            assert!(!text.contains("CONNCANARY"), "{reference}: {text}");
+            assert!(text.contains("Input field 'ch'"), "{reference}: {text}");
+            assert!(text.contains(expected), "{reference}: {text}");
+        }
+        // Offline cross-workspace reference.
+        let ws = make_ws_with_connection();
+        let err = resolve_connection_inputs(
+            &json!({"db": "CONNCANARYWS.x"}),
+            &HashMap::from([("db".to_string(), field("postgres", false, None))]),
+            &SingleWorkspace {
+                name: "local",
+                config: &ws,
+            },
+        )
+        .unwrap_err();
+        let text = format!("{err:#}");
+        assert!(!text.contains("CONNCANARY"), "{text}");
+        assert!(text.contains("Input field 'db'"), "{text}");
+    }
+
+    #[test]
+    fn foreign_typed_connection_empty_value_and_unknown_field_use_field_label() {
+        let mut multi = three_workspaces();
+        multi
+            .configs
+            .get_mut("jobs")
+            .unwrap()
+            .connection_types
+            .insert(
+                "clickhouse".to_string(),
+                ConnectionTypeDef {
+                    properties: HashMap::from([(
+                        "host".to_string(),
+                        crate::models::workflow::ConnectionPropertyDef {
+                            property_type: "string".into(),
+                            required: false,
+                            default: None,
+                            secret: false,
+                        },
+                    )]),
+                },
+            );
+        multi.configs.get_mut("infra").unwrap().connections.insert(
+            "CONNCANARY".to_string(),
+            ConnectionDef {
+                connection_type: Some("jobs.clickhouse".into()),
+                shared: true,
+                values: HashMap::from([("host".to_string(), json!(""))]),
+            },
+        );
+        let err = resolve_connection_inputs(
+            &json!({"ch": "infra.CONNCANARY"}),
+            &schema_of("jobs.clickhouse"),
+            &multi,
+        )
+        .unwrap_err();
+        let text = format!("{err:#}");
+        assert!(!text.contains("CONNCANARY"), "{text}");
+        assert!(
+            text.contains("input field 'ch' field 'host' has an empty value"),
+            "{text}"
+        );
+
+        // Unknown field: a warning, labelled by the input field.
+        let type_def = ConnectionTypeDef {
+            properties: HashMap::new(),
+        };
+        let warnings = crate::validation::check_connection_values(
+            "input field 'ch'",
+            &HashMap::from([("extra".to_string(), json!("v"))]),
+            "jobs.clickhouse",
+            &type_def,
+        )
+        .unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("input field 'ch'"), "{warnings:?}");
+        assert!(!warnings[0].contains("CONNCANARY"), "{warnings:?}");
+    }
+
+    #[test]
+    fn looks_templated_recognises_all_three_markers() {
+        assert!(looks_templated("{{ x }}"));
+        assert!(looks_templated("{% if x %}a{% endif %}"));
+        assert!(looks_templated("{# c #}a"));
+        assert!(!looks_templated("plain"));
+    }
+
+    #[test]
     fn test_resolve_connection_inputs_missing_connection() {
         let ws = make_ws_with_connection();
         let input = json!({"db": "nonexistent"});
@@ -2618,8 +2917,8 @@ mod tests {
         );
         assert!(result.is_err());
         let err = format!("{:#}", result.unwrap_err());
-        assert!(err.contains("nonexistent"));
-        assert!(err.contains("does not exist"));
+        assert!(!err.contains("nonexistent"), "{err}");
+        assert!(err.contains("no connection with that name exists"), "{err}");
     }
 
     #[test]
@@ -2647,7 +2946,10 @@ mod tests {
         assert!(result.is_err());
         let err = format!("{:#}", result.unwrap_err());
         assert!(err.contains("expects type") && err.contains("redis"));
-        assert!(err.contains("is type") && err.contains("postgres"));
+        assert!(
+            err.contains("the connection it names is type") && err.contains("postgres"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -3190,6 +3492,101 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// Spec 2026-10-06 § 3.3 + R24: a failing nested template is located by
+    /// array indices only — never by an object key (author text: an action
+    /// manifest's keys are arbitrary), its template text or a value. The
+    /// caller's context names the root (`manifest`, `args`, the field).
+    #[test]
+    fn deep_render_errors_never_name_object_keys_or_the_template() {
+        const SRC: &str = "src-canary-path-3c";
+        const KEY: &str = "keycanary-9z";
+        let ctx = json!({"secret": {"X": "deep-secret"}});
+        let tpl = format!("{{{{ secret.X | upper | int }}}} {SRC}");
+        assert!(
+            crate::template_error::raw_detail_contains(&tpl, &ctx, "DEEP-SECRET"),
+            "fixture must leak through Tera's raw text, else this test is vacuous"
+        );
+        let forbidden = [
+            SRC,
+            KEY,
+            "deep-secret",
+            "DEEP-SECRET",
+            "secret.X",
+            "containers",
+            "app.kubernetes.io",
+        ];
+        type Render = fn(&serde_json::Value, &serde_json::Value) -> Result<serde_json::Value>;
+        let in_object = [
+            json!({"spec": {"containers": [{"name": "ok"}, {KEY: tpl}]}}),
+            json!({"metadata": {"labels": {"app.kubernetes.io/name": tpl}}}),
+            json!({KEY: ["ok", tpl]}),
+            json!({KEY: tpl}),
+            json!(tpl),
+        ];
+        for render in [render_json_strings as Render, render_value_deep as Render] {
+            for v in &in_object {
+                let err = render(v, &ctx).unwrap_err();
+                let text = format!("{err:#}");
+                assert!(
+                    text.contains("Failed to render a template in this value"),
+                    "{text}"
+                );
+                assert!(!text.contains("at `"), "{text}");
+                let all = format!("{text} {err:?}");
+                for needle in forbidden {
+                    assert!(!all.contains(needle), "{needle}: {all}");
+                }
+            }
+            for (v, at) in [
+                (json!(["a", tpl]), "[1]"),
+                (json!([["a"], ["b", tpl]]), "[1][1]"),
+            ] {
+                let err = render(&v, &ctx).unwrap_err();
+                let text = format!("{err:#}");
+                assert!(
+                    text.contains(&format!("Failed to render the template at `{at}`")),
+                    "{text}"
+                );
+                let all = format!("{text} {err:?}");
+                for needle in forbidden {
+                    assert!(!all.contains(needle), "{needle}: {all}");
+                }
+            }
+        }
+    }
+
+    /// R24 through an action default: an object default's key is never
+    /// echoed; the chain names the input field (schema config) only.
+    #[test]
+    fn merge_action_defaults_error_never_names_an_object_default_key() {
+        const KEY: &str = "keycanary-9z";
+        let mut schema = HashMap::new();
+        schema.insert(
+            "conn".to_string(),
+            field(
+                "object",
+                false,
+                Some(json!({"nested": {KEY: "{{ secret.X | upper | int }}"}})),
+            ),
+        );
+        let ctx = json!({"secret": {"X": "deep-secret"}});
+        let err = merge_action_defaults(&json!({}), &schema, &ctx).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("Failed to merge action input defaults"),
+            "{text}"
+        );
+        assert!(text.contains("input field 'conn'"), "{text}");
+        assert!(
+            text.contains("Failed to render a template in this value"),
+            "{text}"
+        );
+        let all = format!("{text} {err:?}");
+        for needle in [KEY, "nested", "deep-secret", "DEEP-SECRET"] {
+            assert!(!all.contains(needle), "{needle}: {all}");
+        }
+    }
+
     // --- merge_action_defaults tests ---
 
     #[test]
@@ -3303,6 +3700,75 @@ mod tests {
         let context = json!({"secret": {"deep": "resolved"}});
         let result = merge_action_defaults(&rendered_input, &schema, &context).unwrap();
         assert_eq!(result["config"]["level1"]["level2"]["value"], "resolved");
+    }
+
+    /// R26: a string default is rendered EXACTLY once. Before the fix,
+    /// `merge_defaults` rendered it and `render_value_deep` rendered the
+    /// result again, so a default that renders to a caller-supplied literal
+    /// `{{ secret.TOKEN }}` (the caller-side output of
+    /// `'{{ "{{ secret.TOKEN }}" }}'`) was rendered a second time against the
+    /// owner's `secret` map and yielded the owner's secret.
+    #[test]
+    fn merge_action_defaults_renders_a_string_default_exactly_once() {
+        const CANARY: &str = "owner-secret-canary";
+        let mut schema = HashMap::new();
+        schema.insert(
+            "copy".to_string(),
+            field("string", false, Some(json!("{{ input.note }}"))),
+        );
+        schema.insert("note".to_string(), field("string", false, None));
+        let context = json!({
+            "secret": {"TOKEN": CANARY},
+            "input": {"note": "{{ secret.TOKEN }}"},
+        });
+        let rendered_input = json!({"note": "{{ secret.TOKEN }}"});
+
+        let merged = merge_action_defaults(&rendered_input, &schema, &context).unwrap();
+
+        assert_eq!(merged["copy"], "{{ secret.TOKEN }}", "{merged}");
+        assert_eq!(merged["note"], "{{ secret.TOKEN }}", "{merged}");
+        assert!(!merged.to_string().contains(CANARY), "{merged}");
+    }
+
+    /// R26 counterpart: an object/array default's nested templates are the
+    /// owner's own and still render, also exactly once.
+    #[test]
+    fn merge_action_defaults_renders_nested_object_and_array_defaults_once() {
+        let mut schema = HashMap::new();
+        schema.insert(
+            "conn".to_string(),
+            field(
+                "object",
+                false,
+                Some(json!({
+                    "host": "{{ secret.TOKEN }}",
+                    "echo": "{{ input.note }}",
+                    "port": 5432,
+                })),
+            ),
+        );
+        schema.insert(
+            "list".to_string(),
+            field(
+                "array",
+                false,
+                Some(json!(["{{ secret.TOKEN }}", "{{ input.note }}", 7])),
+            ),
+        );
+        let context = json!({
+            "secret": {"TOKEN": "owner-secret-canary"},
+            "input": {"note": "{{ secret.TOKEN }}"},
+        });
+
+        let merged = merge_action_defaults(&json!({}), &schema, &context).unwrap();
+
+        assert_eq!(merged["conn"]["host"], "owner-secret-canary");
+        assert_eq!(merged["conn"]["echo"], "{{ secret.TOKEN }}");
+        assert_eq!(merged["conn"]["port"], 5432);
+        assert_eq!(
+            merged["list"],
+            json!(["owner-secret-canary", "{{ secret.TOKEN }}", 7])
+        );
     }
 
     #[test]
@@ -4024,26 +4490,12 @@ mod tests {
             &expired,
         )
         .unwrap_err();
-        assert!(format!("{err:#}").contains("deadline"), "{err:#}");
-    }
-
-    /// The typed vals marker: tera's `CallFilter("vals")` anywhere in the
-    /// chain. Never the word "vals" in a message.
-    #[test]
-    fn is_vals_failure_recognises_the_vals_filter_and_nothing_else() {
-        let expired = crate::budget::LoadBudget::until(std::time::Instant::now());
-        let vals =
-            render_template_with("{{ 'ref+echo://x' | vals }}", &json!({}), &expired).unwrap_err();
-        assert!(is_vals_failure(&vals), "{vals:#}");
-        let wrapped = vals.context("Failed to render secret 'k'");
-        assert!(is_vals_failure(&wrapped), "{wrapped:#}");
-
-        let missing = render_template("{{ secret.vals }}", &json!({"secret": {}})).unwrap_err();
-        assert!(format!("{missing:#}").contains("vals"), "{missing:#}");
-        assert!(!is_vals_failure(&missing), "{missing:#}");
-
-        let other_filter = render_template("{{ 'vals' | round }}", &json!({})).unwrap_err();
-        assert!(!is_vals_failure(&other_filter), "{other_filter:#}");
+        assert!(is_vals_failure(&err), "{err:#}");
+        assert!(format!("{err:#}").contains("vals timed out"), "{err:#}");
+        assert!(
+            !format!("{err:#} {err:?}").contains("ref+echo://x"),
+            "{err:#}"
+        );
     }
 
     #[test]

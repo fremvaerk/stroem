@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde_json::Value as JsonValue;
-use sqlx::PgPool;
+use sqlx::{AssertSqlSafe, PgPool};
 use std::collections::HashMap;
 use stroem_common::models::job::JobStatus;
 use uuid::Uuid;
@@ -11,7 +11,14 @@ use uuid::Uuid;
 /// [`JobRepo::get_settled_descendants_with_running_parent_step`].
 const MAX_TASK_DEPTH: i32 = 10;
 
-const JOB_COLUMNS: &str = "job_id, workspace, task_name, mode, input, output, status, source_type, source_id, worker_id, revision, created_at, started_at, completed_at, log_path, parent_job_id, parent_step_name, timeout_secs, retry_of_job_id, retry_job_id, retry_attempt, max_retries, raw_input, source_job_id, restart_from_step, git_ref, task_folder";
+/// The [`JobRow`] column list. A macro rather than a `const` so a query can
+/// `concat!` it into a `&'static str`, which sqlx accepts as SQL directly.
+macro_rules! job_columns {
+    () => {
+        "job_id, workspace, task_name, mode, input, output, status, source_type, source_id, worker_id, revision, created_at, started_at, completed_at, log_path, parent_job_id, parent_step_name, timeout_secs, retry_of_job_id, retry_job_id, retry_attempt, max_retries, raw_input, source_job_id, restart_from_step, git_ref, task_folder"
+    };
+}
+const JOB_COLUMNS: &str = job_columns!();
 
 /// Escape LIKE/ILIKE special characters so the search term is a pure substring match.
 fn escape_like(input: &str) -> String {
@@ -479,9 +486,10 @@ impl JobRepo {
 
     /// Get job by ID
     pub async fn get(pool: &PgPool, job_id: Uuid) -> Result<Option<JobRow>> {
-        let job = sqlx::query_as::<_, JobRow>(&format!(
-            "SELECT {} FROM job WHERE job_id = $1",
-            JOB_COLUMNS
+        let job = sqlx::query_as::<_, JobRow>(concat!(
+            "SELECT ",
+            job_columns!(),
+            " FROM job WHERE job_id = $1"
         ))
         .bind(job_id)
         .fetch_optional(pool)
@@ -535,7 +543,8 @@ impl JobRepo {
             JOB_COLUMNS, where_clause
         );
 
-        let mut query = sqlx::query_as::<_, JobRow>(&sql);
+        // AssertSqlSafe: only constant fragments and `$n` placeholders are interpolated; every value is bound.
+        let mut query = sqlx::query_as::<_, JobRow>(AssertSqlSafe(sql));
         if let Some(ws) = workspace {
             query = query.bind(ws);
         }
@@ -902,7 +911,8 @@ impl JobRepo {
 
         let sql = format!("SELECT COUNT(*) FROM job{where_clause}");
 
-        let mut query = sqlx::query_as::<_, (i64,)>(&sql);
+        // AssertSqlSafe: only constant fragments and `$n` placeholders are interpolated; every value is bound.
+        let mut query = sqlx::query_as::<_, (i64,)>(AssertSqlSafe(sql));
         if let Some(ws) = workspace {
             query = query.bind(ws);
         }
@@ -946,7 +956,8 @@ impl JobRepo {
             "SELECT COUNT(*) FROM job WHERE {}",
             conditions.join(" AND ")
         );
-        let mut query = sqlx::query_as::<_, (i64,)>(&sql)
+        // AssertSqlSafe: only constant fragments and `$n` placeholders are interpolated; every value is bound.
+        let mut query = sqlx::query_as::<_, (i64,)>(AssertSqlSafe(sql))
             .bind(workspace)
             .bind(task_name);
         if let Some(s) = status {
@@ -989,7 +1000,8 @@ impl JobRepo {
             JOB_COLUMNS,
             conditions.join(" AND ")
         );
-        let mut query = sqlx::query_as::<_, JobRow>(&sql)
+        // AssertSqlSafe: only constant fragments and `$n` placeholders are interpolated; every value is bound.
+        let mut query = sqlx::query_as::<_, JobRow>(AssertSqlSafe(sql))
             .bind(workspace)
             .bind(task_name);
         if let Some(s) = status {
@@ -1028,9 +1040,10 @@ impl JobRepo {
 
     /// Get active child jobs for a parent job (for recursive cancellation)
     pub async fn get_child_jobs(pool: &PgPool, parent_job_id: Uuid) -> Result<Vec<JobRow>> {
-        let jobs = sqlx::query_as::<_, JobRow>(&format!(
-            "SELECT {} FROM job WHERE parent_job_id = $1 AND status IN ('pending', 'running')",
-            JOB_COLUMNS
+        let jobs = sqlx::query_as::<_, JobRow>(concat!(
+            "SELECT ",
+            job_columns!(),
+            " FROM job WHERE parent_job_id = $1 AND status IN ('pending', 'running')"
         ))
         .bind(parent_job_id)
         .fetch_all(pool)
@@ -1044,9 +1057,10 @@ impl JobRepo {
     /// execution history of the parent's `type: task` steps. Ties on
     /// `created_at` are broken by id so the order is deterministic.
     pub async fn list_children(pool: &PgPool, parent_job_id: Uuid) -> Result<Vec<JobRow>> {
-        let jobs = sqlx::query_as::<_, JobRow>(&format!(
-            "SELECT {} FROM job WHERE parent_job_id = $1 ORDER BY created_at DESC, job_id DESC",
-            JOB_COLUMNS
+        let jobs = sqlx::query_as::<_, JobRow>(concat!(
+            "SELECT ",
+            job_columns!(),
+            " FROM job WHERE parent_job_id = $1 ORDER BY created_at DESC, job_id DESC"
         ))
         .bind(parent_job_id)
         .fetch_all(pool)
@@ -1089,15 +1103,17 @@ impl JobRepo {
         pool: &PgPool,
         root_job_id: Uuid,
     ) -> Result<Vec<JobRow>> {
-        let rows = sqlx::query_as::<_, JobRow>(&format!(
+        let rows = sqlx::query_as::<_, JobRow>(concat!(
             "WITH RECURSIVE descendants AS ( \
                  SELECT j.*, 1 AS depth FROM job j WHERE j.parent_job_id = $1 \
                  UNION ALL \
                  SELECT c.*, d.depth + 1 FROM job c \
                  JOIN descendants d ON c.parent_job_id = d.job_id \
-                 WHERE d.depth < {} \
+                 WHERE d.depth < $2 \
              ) \
-             SELECT {} FROM descendants j \
+             SELECT ",
+            job_columns!(),
+            " FROM descendants j \
              WHERE j.source_type = 'task' \
                AND j.status IN ('completed', 'failed', 'cancelled', 'skipped') \
                AND EXISTS ( \
@@ -1111,10 +1127,10 @@ impl JobRepo {
                    WHERE ls.job_id = j.job_id \
                      AND ls.status IN ('running', 'claimed') \
                ) \
-             ORDER BY j.depth DESC",
-            MAX_TASK_DEPTH, JOB_COLUMNS
+             ORDER BY j.depth DESC"
         ))
         .bind(root_job_id)
+        .bind(MAX_TASK_DEPTH)
         .fetch_all(pool)
         .await
         .context("Failed to get settled descendants with running parent step")?;
@@ -1490,13 +1506,14 @@ impl JobRepo {
         source_type: &str,
         source_id: &str,
     ) -> Result<Vec<JobRow>> {
-        let sql = format!(
-            "SELECT {} FROM job \
+        let sql = concat!(
+            "SELECT ",
+            job_columns!(),
+            " FROM job \
              WHERE source_type = $1 AND source_id = $2 \
-               AND status IN ('pending', 'running')",
-            JOB_COLUMNS
+               AND status IN ('pending', 'running')"
         );
-        let rows = sqlx::query_as::<_, JobRow>(&sql)
+        let rows = sqlx::query_as::<_, JobRow>(sql)
             .bind(source_type)
             .bind(source_id)
             .fetch_all(pool)
@@ -1540,7 +1557,8 @@ impl JobRepo {
              ORDER BY created_at DESC LIMIT ${next} OFFSET ${}",
             next + 1
         );
-        let mut query = sqlx::query_as::<_, JobRow>(&sql);
+        // AssertSqlSafe: only constant fragments and `$n` placeholders are interpolated; every value is bound.
+        let mut query = sqlx::query_as::<_, JobRow>(AssertSqlSafe(sql));
         for v in scope.bind_values() {
             query = query.bind(v);
         }
@@ -1575,7 +1593,8 @@ impl JobRepo {
         let (acl, next) = scope.predicate(1);
         let (filters, _) = Self::list_filters(next, status, source_type, search);
         let sql = format!("SELECT COUNT(*) FROM job WHERE {acl}{filters}");
-        let mut query = sqlx::query_as::<_, (i64,)>(&sql);
+        // AssertSqlSafe: only constant fragments and `$n` placeholders are interpolated; every value is bound.
+        let mut query = sqlx::query_as::<_, (i64,)>(AssertSqlSafe(sql));
         for v in scope.bind_values() {
             query = query.bind(v);
         }
@@ -1605,7 +1624,8 @@ impl JobRepo {
         }
         let (acl, _) = scope.predicate(1);
         let sql = format!("SELECT status, COUNT(*) FROM job WHERE {acl} GROUP BY status");
-        let mut query = sqlx::query_as::<_, (String, i64)>(&sql);
+        // AssertSqlSafe: only constant fragments and `$n` placeholders are interpolated; every value is bound.
+        let mut query = sqlx::query_as::<_, (String, i64)>(AssertSqlSafe(sql));
         for v in scope.bind_values() {
             query = query.bind(v);
         }

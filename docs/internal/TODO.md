@@ -7,10 +7,17 @@ Last updated: 2026-06-03.
 
 ## Security
 
+- [ ] **Configurable per-route auth rate limits** — limits are hard-coded in `build_api_routes` (login 3 s/burst 10, refresh 2 s/15, logout/me/OIDC 3 s/20, API keys 1 s/60); only an all-or-nothing `auth.rate_limit.enabled` switch exists (tests, 2026-10-06). `/api/auth/me` is JWT-authenticated yet limited per IP, and the UI calls refresh + me on every page load, so the limit caps page loads per IP. User deferred per-route config.
+- [ ] **`ClientIpExtractor` trusts client-supplied `X-Forwarded-For` / `X-Real-IP`** — the first value from any client is used, so a client can pick a fresh rate-limit bucket per request and bypass the login brute-force limit. Needs a trusted-proxy setting.
+- [ ] **Refresh-token rotation has no grace window** — `auth::refresh` deletes the old token before issuing the new one, so a refresh request the browser aborts after the server processed it (navigation mid-restore) logs the user out on the next page load (401). Consider a short reuse window.
+- [x] **Double render of action defaults** (R26) — `merge_action_defaults` rendered string defaults twice. Real reach: in production the defaults context is `{"secret": owner_secrets}` only, so the caller-`input` smuggling vector was latent; the reachable effect was an owner secret whose resolved value contains `{{` being evaluated a second time. Fixed in PR #8; tests `template::tests::merge_action_defaults_renders_a_string_default_exactly_once`, `template::tests::test_merge_action_defaults_renders_a_self_referencing_default_once`, integration `test_xws_task_default_is_rendered_exactly_once`.
+- [x] Verify `merge_action_defaults`-style double rendering does not exist elsewhere — `render_value_deep` has no other caller; task-input `merge_defaults` renders once.
+- [ ] Task-input OBJECT defaults' nested templates are not rendered by `merge_defaults`, while action object defaults are (pre-existing difference).
+- [ ] **`vals` deadline is classified secret-class by the PinStore** — the deadline's type is lost inside `ValsFailure` (`TimedOut` is still classified secret-class by `is_vals_failure`), so a `vals` timeout becomes `PinUnavailable` (secret-class) although CLAUDE.md says a deadline is never secret-class. Decide and align (spec 2026-10-06 § 3.7).
 - [x] **Worker logs rendered secret values at INFO/WARN** — `execute_step` is `#[tracing::instrument]`ed on the full `ClaimedStep`, whose `action_spec.env` already contains rendered secrets (DB passwords, SMTP creds, API keys). Every log line inside the span carries them in plaintext (seen in prod `stroem-worker` pod logs 2026-09-02). Fixed: sensitive fields on `ClaimedStep`/`ClaimResponse` and the worker-API request bodies are `stroem_common::secret::Secret<T>` (`redact` crate) so `Debug` is redacted by construction; `execute_step` span is `skip_all` with id fields; server handlers `skip(state, req)`. Wire format unchanged (`serialize_opt_secret`).
 - [ ] **Config secrets are plain `String`s** — `AgentProviderConfig.api_key` (stroem-agent), `WorkerConfig.worker_token`, server `jwt_secret`/`refresh_secret`/OIDC `client_secret`/`worker_token`. Nothing `Debug`-logs the config today, but a stray `{:?}` would leak them. Wrap in `stroem_common::secret::Secret<String>` (config crate deserialize is transparent) — follow-up to the worker-log fix.
 - [x] **Tera render errors can leak secret values into persisted step errors** — Tera's `try_get_value!` embeds the offending value in filter errors: `{{ secret.db.host | round }}` yielded ``Filter `round` was called on an incorrect value: got "db.internal.prod"``. Every claim-time render failure formatted that chain with `format!("{:#}", e)` and handed it to `fail_claimed_step`, which persisted it to `job_step.error_message` + `retry_history`, wrote it to the job log, and returned it in the 422 body; `redact_response` masked `error_message` but not `retry_history`. Fixed at the choke point: `fail_claimed_step` now takes the `WorkspaceSet` and scrubs known secret values (`workspace_set::redact_secrets_in_str`, sharing the primitive with `redact_json`) before anything is logged, persisted or returned, so the value never reaches the database — all five claim-time render paths covered. `redact_response` also masks `retry_history` now, for rows written before the fix. Regression tests: `test_claim_render_error_does_not_leak_secret_values` (integration, exercises the real claim endpoint), `test_redact_response_redacts_retry_history`, and three unit tests on the primitive incl. the empty-secret guard.
-- [ ] **Cascade-time render errors do not scrub connection secrets reached via `{{ input.* }}`** — residual of the 2026-09-11 render-error scrub. `cascade::run` and `fail_task_step` scrub with `collect_config_secret_values` (the workspace's own `secrets:`), because they are pure / transaction-scoped and cannot build a `WorkspaceSet`. Job input can also carry RESOLVED connection values, and a `secret: true` connection property reached through `{{ input.conn.password | round }}` in a `when:`, `for_each:`, `type: task` input or approval message would still be quoted verbatim in the persisted error. The claim-time paths do not have this gap — `fail_claimed_step` uses the full `collect_redaction_values(&ws_set)`. Fix needs the connection-property schema at cascade time; job-detail redaction (`redaction::job_redaction`, formerly `redact_response`) masks `error_message` + `retry_history` on read in the meantime, so the exposure is the job log and the DB row, not the job-detail API.
+- [x] **Cascade-time render errors do not scrub connection secrets reached via `{{ input.* }}`** — residual of the 2026-09-11 render-error scrub. `cascade::run` and `fail_task_step` scrub with `collect_config_secret_values` (the workspace's own `secrets:`), because they are pure / transaction-scoped and cannot build a `WorkspaceSet`. Job input can also carry RESOLVED connection values, and a `secret: true` connection property reached through `{{ input.conn.password | round }}` in a `when:`, `for_each:`, `type: task` input or approval message would still be quoted verbatim in the persisted error. The claim-time paths do not have this gap — `fail_claimed_step` uses the full `collect_redaction_values(&ws_set)`. Fix needs the connection-property schema at cascade time; job-detail redaction (`redaction::job_redaction`, formerly `redact_response`) masks `error_message` + `retry_history` on read in the meantime, so the exposure is the job log and the DB row, not the job-detail API. **Closed 2026-10-06 by the Tera 2 upgrade:** template errors are value-free by construction (fixed category, position, at most a type or filter name), so a cascade-time render error can no longer quote a connection secret.
 - [ ] **`fail_task_step`'s two render-error callers have no dedicated regression test** — the `type: task` step-input and approval-message paths (`settlement/dispatch.rs`) are covered by the shared primitive's unit tests and by scrubbing at the choke point, but neither was driven by its own failing test the way the claim path (`test_claim_render_error_does_not_leak_secret_values`) and the cascade path (`when_condition_error_does_not_leak_secret_values`) were. Needs a testcontainer fixture with a suspended approval step.
 - [ ] **Rendered secrets in Kube pod spec `env`** — the Kube runner passes rendered `env` (incl. secrets) as plain pod env vars, readable via `kubectl describe pod` by anyone with pod read access in the runner namespace. Consider projecting them through a per-step ephemeral `Secret` object (owner-ref'd to the pod) instead.
 - [x] Worker token exposed in K8s pod spec — moved to env var
@@ -333,6 +340,7 @@ Full analysis + the decided peek policy: `docs/superpowers/specs/2026-09-17-work
 - [x] Version reporting feature tests (DB round-trip, API responses, serde backward compat, /api/config version)
 - [x] Worker `execute_claimed_step` integration test (3 wiremock-based tests: happy path, workspace failure, command failure)
 - [ ] Live DockerRunner execution tests
+- [ ] The two `#[ignore]`d real-Docker tests (`docker::tests::test_docker_echo`, `test_docker_cancellation`) hang when run CONCURRENTLY (default harness threads): `test_docker_echo` never finishes, each passes alone (2 s / 12 s). Seen 2026-10-06 against Docker 29.4 / OrbStack with and without API version negotiation, so it predates bollard 0.21. Suspects: two concurrent `create_image` pulls of `alpine:latest`, or attach-before-start ordering. Run them with `--test-threads=1` until understood.
 - [ ] Live KubeRunner execution tests (use testcontainers k3s module; refactor KubeRunner to accept optional kube::Client; NoWorkspace mode first, WithWorkspace needs mock tarball endpoint)
 - [x] Runner error path tests (6 tests: shell nonexistent workdir/binary/script, docker container config unit tests)
 - [x] `render_connections()` unit test (13 tests in workflow.rs)
@@ -589,6 +597,51 @@ Full analysis + the decided peek policy: `docs/superpowers/specs/2026-09-17-work
 - [x] MCP client manager via rmcp
 - [x] MCP tool discovery + execution
 - [x] Mixed sync (MCP) / async (task) tool calls
+
+### rig-core 0.36 → 0.43 upgrade follow-ups (2026-10-06)
+- [ ] **Native structured output** — rig's `CompletionRequest::output_schema` sends the provider's own JSON-schema mode. We still inject `OutputDef::to_json_schema()` into the system prompt and parse the reply (`dispatch::build_effective_system` / `build_final_output`); switching is a behaviour change, kept out of the upgrade.
+- [ ] **Structured retry classification** — `provider::is_transient_error` still matches error text (kept as-is; `CompletionCallError` restores the transport cause rig 0.43 dropped from the chain). rig's `ProviderError::is_retryable()` is the typed classification (it also retries 408/425/504 and truncated replies); adopt it deliberately.
+- [ ] **`api_key` for ollama / llamafile is ignored** — unchanged behaviour, but rig 0.43 can now send it (`OllamaConfig::with_api_key`, llama.cpp `OptionalBearer`) for proxied/secured daemons.
+- [ ] **OpenAI Responses API** — rig now defaults `type: openai` to Responses; we pin Chat Completions (`OpenAI::chat`) to keep the wire. Decide whether to move.
+- [ ] **Rolling deploys mixing rig 0.36 and 0.43 workers** — 0.43 workers lift 0.36-era `agent_state.messages` (`legacy_history`), but a 0.36 worker cannot read history a 0.43 worker saved and silently drops those messages. Upgrade all agent-capable workers together (or let suspended agent steps drain first).
+- [ ] **Endpoint paths rig changed upstream** — with a custom `api_endpoint`, `perplexity` now posts to `{endpoint}/chat/completions` (0.36: `{endpoint}/v1/chat/completions`; the default URL is Perplexity's documented one either way).
+
+### Tera 2 follow-ups (2026-10-06)
+- [ ] **Opt-in server-side debug log of `vals` stderr** — vals stderr is now visible only through local `stroem validate` / `stroem run` (server logs are value-free, and local runs use the operator's credentials, so a pod-only failure such as a missing IAM permission may not reproduce). An opt-in debug log would restore server-side visibility. User decision pending.
+- [ ] **Extend `stroem validate` to every template field** — it compiles only `when`, `for_each` and agent prompts (plus secrets/connections at workspace load); script/env/input/args/manifest/approval/hook templates are first compiled at claim time, so an unknown filter there fails the step, not validation.
+- [ ] **Restore `matching` / `spaceless` via tera-contrib `regex`** (ruling R23) — dropped in Tera 2 and documented in the upgrade guide; revisit if users ask.
+- [x] Task 11: json_encode "sorted keys" wording (spec says parity with Tera 1)
+- [ ] Task 11: conditionals.md note lacks pointer to `?.`/default for a null step output
+- [ ] Task 1: add `assert!(is_vals_failure(&err.context(..)))` (wrapped-context detection) — lost with the deleted is_vals_failure_recognises test
+- [ ] Task 1: `run_with_deadline` `wait()`/`try_wait()` failures are also labelled "vals could not be started" (`SpawnFailed`)
+- [ ] Task 1: assert an exact column number once (off-by-one guard for start_col + 1)
+- [ ] Task 1: validation-level tests for unknown-filter rejection in when/for_each/prompt and no expression in the message
+- [ ] Task 1: check_template_syntax catch-all also rejects Io/Utf8Conversion kinds (stricter than spec wording; harmless)
+- [ ] Task 1: tera_engine::base() dead code behind #[allow(dead_code)]
+- [ ] Task 2: forged-throw test should also assert message == "undefined variable or field"
+- [ ] Task 2: drift sub-shapes not exercised ("exists but its value is undefined", test/function hint forms, 7 of 8 constants)
+- [ ] Task 2: context-conversion case checks only message (no canary/Display/Debug)
+- [ ] Task 2: removed-builtin hint ignores Tera 1 kind (e.g. "filter `range`" though range was a function) — per-kind lists
+- [ ] Task 2: enrich returns Tera's text slices (byte-equal) instead of &'static list entries; truncated "Invalid type" returns None instead of the generic sentence
+- [ ] Task 3: `now` match arm `(_, true) if utc` awkward
+- [ ] Task 3: tests missing slice floats/start>=end, filter without value, date naive/float, default boolean=true on undefined
+- [ ] Task 4: CLI has no no-echo test for the invalid-JSON for_each path
+- [ ] Task 4: truth table lacks "-0", "0e0", "NaN", " 0 ", "[ ]" rows
+- [ ] Task 4: stale test name test_for_each_non_json_error_without_object_hint
+- [ ] Task 5: comment that FRAMEWORK_KEYS and TERA_KEYWORDS are disjoint (log_lines branch relies on it)
+- [ ] Task 5: test that a hyphenated non-keyword step (say-hello) yields no collision
+- [x] Task 5: docs should mention `state is defined` now true without a snapshot (check T11 upgrade guide)
+- [ ] Task 6: test_resolve_unavailable_workspace_is_distinct_error lacks `!contains("broken")`
+- [ ] Task 6: typed classification (anyhow::Error::new(kind).context(label)) instead of phrase matching
+- [ ] Task 6: models/workflow.rs test placed above `use super::*;`
+- [ ] Task 7: redundant `{ }` block around scrubbed logging (~326)
+- [ ] Task 7: scrub_env_error / scrub_hook_error duplicate — one helper in workspace_set
+- [ ] Task 6: field-labelled type-ref resolution failure now matches no classifier phrase → 500 (structural, non-author condition; reviewer judged acceptable)
+- [ ] Task 8: context guard in raw_detail_guard.rs is single-line only (multi-line with_context(|| { format!(..) }) skipped) — weak regression guard
+- [ ] Task 9: proof values are hard-coded copies of fixture secrets — derive from the fixture (or assert yaml.contains(value))
+- [ ] Task 9: no positive scrub test left (fail_task_step/fail_claimed_step/cascade scrub with value-bearing text) — seam test with synthetic text or TODO.md entry
+- [ ] Task 9: test_claim_fails_agent_step_with_real_prompt_render_error lacks absence of nonexistent_var; jobs.rs `!contains("each")` → "each.item"
+- [ ] Task 10: the § 3.9 item 3 comment could say Tera 1 errored here
 
 ### OutputDef Unification Review Fixes (2026-03-20)
 

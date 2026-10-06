@@ -97,7 +97,7 @@ jobs:
 
       - name: Run E2E tests
         run: ./tests/e2e.sh
-        timeout-minutes: 15
+        timeout-minutes: 30
 
   playwright:
     name: Playwright Tests

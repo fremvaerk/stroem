@@ -4,9 +4,7 @@
 //! and utility functions shared across both single and multi-turn paths.
 
 use anyhow::{bail, Result};
-use rig::completion::{CompletionRequest, Message, Usage};
-use rig::message::{Text, UserContent};
-use rig::OneOrMany;
+use rig_core::completion::{CompletionRequest, Message, ToolDefinition, Usage};
 use stroem_common::models::workflow::ActionDef;
 
 use crate::config::AgentProviderConfig;
@@ -56,24 +54,14 @@ pub async fn execute_single_turn_with_retry(
             tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
         }
 
-        let prompt_msg = Message::User {
-            content: OneOrMany::one(UserContent::Text(Text {
-                text: prompt.to_string(),
-            })),
-        };
-
-        let request = CompletionRequest {
-            model: None,
-            preamble: effective_system.clone(),
-            chat_history: OneOrMany::one(prompt_msg),
-            documents: vec![],
-            tools: vec![],
-            temperature: temperature.map(f64::from),
-            max_tokens: Some(u64::from(max_tokens)),
-            tool_choice: None,
-            additional_params: None,
-            output_schema: None,
-        };
+        let request = completion_request(
+            effective_system.as_deref(),
+            Vec::new(),
+            Message::user(prompt),
+            Vec::new(),
+            temperature,
+            max_tokens,
+        );
 
         call_result = match tokio::time::timeout(
             LLM_CALL_TIMEOUT,
@@ -86,7 +74,7 @@ pub async fn execute_single_turn_with_retry(
                     .choice
                     .iter()
                     .filter_map(|c| match c {
-                        rig::completion::AssistantContent::Text(t) => Some(t.text.clone()),
+                        rig_core::completion::AssistantContent::Text(t) => Some(t.text.clone()),
                         _ => None,
                     })
                     .collect::<Vec<_>>()
@@ -114,9 +102,44 @@ pub async fn execute_single_turn_with_retry(
 
     Ok(SingleTurnResponse {
         content,
-        input_tokens: usage.input_tokens,
-        output_tokens: usage.output_tokens,
+        input_tokens: usage.input_tokens.unwrap_or(0),
+        output_tokens: usage.output_tokens.unwrap_or(0),
     })
+}
+
+/// Build the completion request both dispatch paths send.
+///
+/// The system prompt (with any output-schema suffix already appended) leads
+/// the conversation as a system message — rig's place for what used to be the
+/// request `preamble` — followed by the prior `history` and then `prompt`.
+/// Tool choice, extra provider parameters and native structured output stay
+/// unset, and prompt content is kept out of rig's telemetry spans.
+pub fn completion_request(
+    system: Option<&str>,
+    history: Vec<Message>,
+    prompt: Message,
+    tools: Vec<ToolDefinition>,
+    temperature: Option<f32>,
+    max_tokens: u32,
+) -> CompletionRequest {
+    let mut chat_history = Vec::with_capacity(history.len() + 2);
+    if let Some(system) = system {
+        chat_history.push(Message::system(system));
+    }
+    chat_history.extend(history);
+    chat_history.push(prompt);
+    CompletionRequest {
+        model: None,
+        chat_history,
+        documents: vec![],
+        tools,
+        temperature: temperature.map(f64::from),
+        max_tokens: Some(u64::from(max_tokens)),
+        tool_choice: None,
+        additional_params: None,
+        output_schema: None,
+        record_telemetry_content: false,
+    }
 }
 
 /// Strip a single layer of markdown code fences (```json ... ``` or ``` ... ```).
@@ -237,6 +260,49 @@ mod tests {
             spec["output"] = schema;
         }
         serde_json::from_value(spec).expect("make_action: failed to deserialize ActionDef")
+    }
+
+    // --- completion_request tests ---
+
+    #[test]
+    fn test_completion_request_shape() {
+        let history = vec![Message::user("earlier"), Message::assistant("reply")];
+        let tool = ToolDefinition {
+            name: "ask_user".to_string(),
+            description: "d".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+        };
+        let request = completion_request(
+            Some("You are helpful."),
+            history,
+            Message::user("now"),
+            vec![tool.clone()],
+            Some(0.25),
+            512,
+        );
+        assert_eq!(request.system_instructions(), Some("You are helpful."));
+        assert_eq!(request.chat_history.len(), 4);
+        assert_eq!(request.chat_history[1], Message::user("earlier"));
+        assert_eq!(request.chat_history[2], Message::assistant("reply"));
+        assert_eq!(request.chat_history[3], Message::user("now"));
+        assert_eq!(request.tools, vec![tool]);
+        assert_eq!(request.temperature, Some(0.25));
+        assert_eq!(request.max_tokens, Some(512));
+        assert!(request.model.is_none());
+        assert!(request.documents.is_empty());
+        assert!(request.tool_choice.is_none());
+        assert!(request.additional_params.is_none());
+        assert!(request.output_schema.is_none());
+        assert!(!request.record_telemetry_content);
+        assert!(request.validate_message_content().is_ok());
+    }
+
+    #[test]
+    fn test_completion_request_without_system_prompt() {
+        let request = completion_request(None, Vec::new(), Message::user("hi"), vec![], None, 64);
+        assert_eq!(request.system_instructions(), None);
+        assert_eq!(request.chat_history, vec![Message::user("hi")]);
+        assert_eq!(request.temperature, None);
     }
 
     // --- build_effective_system tests ---

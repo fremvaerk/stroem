@@ -76,11 +76,14 @@ pub async fn handle_task_steps(
 /// to `job_step.error_message` (and so returned by REST/MCP) INSTEAD of the
 /// scrubbed `err` — used when an owner-side render error's value can take an
 /// unbounded number of representations (raw, JSON-escaped, Rust
-/// Debug-escaped, and any further wrapping a filter chain like `{{ secret.X
-/// | json_encode | round }}` can apply) that no finite scrub can enumerate
-/// (spec § 3.3, "Error scrubbing"). Withholding at the ownership boundary,
-/// rather than trying to match one more representation each time a new one
-/// is found, is the only rule that actually converges.
+/// Debug-escaped, and any further transformation a filter chain like `{{
+/// secret.X | upper | int }}` can apply — Tera's raw text quotes the
+/// upper-cased value) that no finite scrub can enumerate (spec § 3.3, "Error
+/// scrubbing"). Withholding at the ownership boundary, rather than trying to
+/// match one more representation each time a new one is found, is the only
+/// rule that actually converges. Since Tera 2 the template error carries none
+/// of Tera's text (spec 2026-10-06 § 3.2); scrub and withholding stay as the
+/// second and third lines.
 #[allow(clippy::too_many_arguments)]
 async fn fail_task_step(
     pool: &PgPool,
@@ -94,10 +97,12 @@ async fn fail_task_step(
     persist_override: Option<&str>,
 ) -> Result<()> {
     // Two of the callers pass a Tera render error (task-step input, approval
-    // message), and Tera quotes the offending value — so a template touching
-    // `{{ secret.* }}` embeds the secret. Scrub here, the single choke point
-    // both reach, before the message is logged or persisted to
-    // `job_step.error_message` / `retry_history`.
+    // message). Tera's own text quotes the offending value, so a template
+    // touching `{{ secret.* }}` would embed the secret; the template error is
+    // value-free since Tera 2 (spec 2026-10-06 § 3.2), and this scrub — here,
+    // the single choke point both reach, before the message is logged or
+    // persisted to `job_step.error_message` / `retry_history` — is the second
+    // line.
     //
     // The caller's own secrets plus — for a `type: task` step — the action
     // owner's and task owner's (spec § 3.3), because an owner-side default
@@ -447,7 +452,7 @@ async fn handle_task_steps_pass(
                     // renders one of O's OWN template defaults, never a
                     // caller-supplied value, so origin and phase agree: it is
                     // withheld whenever O != A. A filter chain (e.g. `{{
-                    // secret.X | json_encode | round }}`) can wrap a secret in
+                    // secret.X | upper | int }}`) can transform a secret into
                     // an unbounded number of representations no finite scrub
                     // enumerates.
                     let owner_boundary = base_ws != workspace_name;

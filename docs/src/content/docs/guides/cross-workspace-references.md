@@ -92,9 +92,9 @@ reference to one from elsewhere is rejected depends on where the reference
 appears:
 
 - **Literal references** — task input defaults, and a flow-step value written
-  as a plain string — are checked at job creation and fail immediately with
+  as a plain string containing none of `{{`, `{%` or `{#` — are checked at job creation and fail immediately with
   `400 Bad Request` and a message ending in `is not shared`.
-- **Templated flow-step values** (anything containing `{{ ... }}`) can't be
+- **Templated flow-step values** (anything containing `{{`, `{%` or `{#`) can't be
   checked before the job runs, since the template may resolve to a different
   connection depending on prior step output. These are resolved when the step
   is claimed and fail that step instead — the job is created successfully,
@@ -195,8 +195,9 @@ encoded (raw, JSON-escaped, or otherwise — a filter chain can produce
 arbitrarily many encodings, which is exactly why this is withheld outright
 rather than scrubbed).
 
-Full details still land in the server log for operators, with the
-workspace's known secret values scrubbed out — but that scrub is
+The server log is value-free for template errors too: full detail is only
+available locally, via `stroem validate` or `stroem run`. Other server-log
+text carries the workspace's known secret values scrubbed out — but that scrub is
 best-effort (it matches a secret's exact value plus its JSON-escaped and
 Rust-debug-escaped forms), not a guarantee: an unusual encoding, such as a
 long or unusual filter chain, could in principle still leave a trace of the

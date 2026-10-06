@@ -287,9 +287,10 @@ actions:
     language: python
     dependencies: [pandas]
     script: |
+      import json
       import pandas as pd
       df = pd.read_csv("/workspace/data.csv")
-      print(f"OUTPUT: {{\"rows\": {len(df)}}}")
+      print("OUTPUT: " + json.dumps({"rows": len(df)}))
 ```
 
 ### Runner image override
@@ -439,12 +440,10 @@ changed several existing behaviours:
    what the caller itself supplied. The child job's input is unaffected and
    still carries the full merged input.
 
-A note on defaults that predates this release but is easy to miss: a
-default value in a `type: task` action's `input` is rendered once while
-merging defaults, then again by the general template renderer — so a
-default whose first render produces `{{ … }}` is interpreted a second time.
-`default: "{{ secret.X }}"` where secret `X`'s own value is itself the
-literal string `{{ secret.Y }}` resolves all the way to `Y`'s value.
+Action input defaults are rendered exactly once. A default whose render
+produces `{{ … }}` text (for example `default: "{{ secret.X }}"` where
+secret `X`'s value contains `{{`) keeps that text literally; it is never
+evaluated a second time.
 
 ## Pod manifest overrides
 

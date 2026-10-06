@@ -65,7 +65,7 @@ pub fn cmd_validate(path: &str) -> Result<()> {
             Ok(())
         }
         Err(e) => {
-            eprintln!("[FAIL] {:#}", e);
+            eprintln!("[FAIL] {}", crate::local::error_report::full_report(&e));
             anyhow::bail!("Validation failed");
         }
     }

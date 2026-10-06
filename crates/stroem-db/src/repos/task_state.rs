@@ -24,14 +24,33 @@ pub struct TaskStateRow {
 const INSERT_SQL: &str = "INSERT INTO task_state (id, workspace, task_name, job_id, storage_key, size_bytes, has_json, state_json, git_ref) \
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8::json, $9)";
 
-const COLUMNS: &str = "id, workspace, task_name, job_id, storage_key, size_bytes, has_json, state_json, created_at, git_ref";
+/// The [`TaskStateRow`] column list. A macro rather than a `const` so a query
+/// can `concat!` it into a `&'static str`, which sqlx accepts as SQL directly.
+macro_rules! columns {
+    () => {
+        "id, workspace, task_name, job_id, storage_key, size_bytes, has_json, state_json, created_at, git_ref"
+    };
+}
 
-/// `git_ref = $n`, or `git_ref IS NULL` for the unpinned partition. Two shapes
-/// rather than `IS NOT DISTINCT FROM`, so the btree index applies.
-fn partition(param: usize, git_ref: Option<&str>) -> String {
+/// Latest snapshot of a partition: `git_ref = $3`, or `git_ref IS NULL` for the
+/// unpinned partition. Two shapes rather than `IS NOT DISTINCT FROM`, so the
+/// btree index applies.
+fn latest_sql(git_ref: Option<&str>) -> &'static str {
     match git_ref {
-        Some(_) => format!("git_ref = ${param}"),
-        None => "git_ref IS NULL".to_string(),
+        Some(_) => concat!(
+            "SELECT ",
+            columns!(),
+            " FROM task_state \
+             WHERE workspace = $1 AND task_name = $2 AND git_ref = $3 \
+             ORDER BY created_at DESC, id DESC LIMIT 1"
+        ),
+        None => concat!(
+            "SELECT ",
+            columns!(),
+            " FROM task_state \
+             WHERE workspace = $1 AND task_name = $2 AND git_ref IS NULL \
+             ORDER BY created_at DESC, id DESC LIMIT 1"
+        ),
     }
 }
 
@@ -54,13 +73,7 @@ impl TaskStateRepo {
         task_name: &str,
         git_ref: Option<&str>,
     ) -> Result<Option<TaskStateRow>> {
-        let sql = format!(
-            "SELECT {COLUMNS} FROM task_state \
-             WHERE workspace = $1 AND task_name = $2 AND {} \
-             ORDER BY created_at DESC, id DESC LIMIT 1",
-            partition(3, git_ref)
-        );
-        let mut q = sqlx::query_as::<_, TaskStateRow>(&sql)
+        let mut q = sqlx::query_as::<_, TaskStateRow>(latest_sql(git_ref))
             .bind(workspace)
             .bind(task_name);
         if let Some(r) = git_ref {
@@ -73,12 +86,15 @@ impl TaskStateRepo {
 
     /// Get a specific snapshot by ID.
     pub async fn get(pool: &PgPool, id: Uuid) -> Result<Option<TaskStateRow>> {
-        let sql = format!("SELECT {COLUMNS} FROM task_state WHERE id = $1");
-        sqlx::query_as::<_, TaskStateRow>(&sql)
-            .bind(id)
-            .fetch_optional(pool)
-            .await
-            .context("Failed to get task state snapshot")
+        sqlx::query_as::<_, TaskStateRow>(concat!(
+            "SELECT ",
+            columns!(),
+            " FROM task_state WHERE id = $1"
+        ))
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .context("Failed to get task state snapshot")
     }
 
     /// Insert into the unpinned partition. See [`Self::insert_for_ref`].
@@ -225,17 +241,18 @@ impl TaskStateRepo {
         workspace: &str,
         task_name: &str,
     ) -> Result<Vec<TaskStateRow>> {
-        let sql = format!(
-            "SELECT {COLUMNS} FROM task_state \
+        sqlx::query_as::<_, TaskStateRow>(concat!(
+            "SELECT ",
+            columns!(),
+            " FROM task_state \
              WHERE workspace = $1 AND task_name = $2 \
              ORDER BY created_at DESC, id DESC"
-        );
-        sqlx::query_as::<_, TaskStateRow>(&sql)
-            .bind(workspace)
-            .bind(task_name)
-            .fetch_all(pool)
-            .await
-            .context("Failed to list task state snapshots")
+        ))
+        .bind(workspace)
+        .bind(task_name)
+        .fetch_all(pool)
+        .await
+        .context("Failed to list task state snapshots")
     }
 
     /// [`Self::prune_for_ref`] on the unpinned partition.

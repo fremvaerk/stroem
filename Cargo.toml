@@ -31,23 +31,24 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
 # Database
-sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "json"] }
+sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "json"] }
 
 # Web
 axum = { version = "0.8", features = ["ws"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
+tower-http = { version = "0.7", features = ["cors", "trace", "fs"] }
 reqwest = { version = "0.13", features = ["json", "query"] }
 
 # Templates
-tera = "1"
+tera = { version = "2.4", features = ["preserve_order"] }
+tera-contrib = { version = "0.3", default-features = false, features = ["json"] }
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
 
 # Auth
-argon2 = "0.5"
-jsonwebtoken = { version = "10", features = ["rust_crypto"] }
+argon2 = "0.6"
+jsonwebtoken = { version = "11", features = ["rust_crypto"] }
 sha2 = "0.11"
 
 # Static file embedding
@@ -61,7 +62,7 @@ config = { version = "0.15", default-features = false, features = ["yaml"] }
 ctrlc = "3"
 
 # Scheduler
-croner = "3"
+croner = "4"
 chrono-tz = "0.10"
 tokio-util = "0.7"
 
@@ -73,10 +74,10 @@ url = "2"
 rustls = { version = "0.23", default-features = false }
 
 # Container runners
-bollard = "0.20"
+bollard = "0.21"
 futures-util = "0.3"
-kube = { version = "3", features = ["client", "rustls-tls", "ring"] }
-k8s-openapi = { version = "0.27", features = ["latest"] }
+kube = { version = "4", features = ["client", "rustls-tls", "ring"] }
+k8s-openapi = { version = "0.28", features = ["latest"] }
 
 # Concurrency utilities
 dashmap = "6"
@@ -88,13 +89,13 @@ schemars = "1"
 http = "1"
 
 # LLM agent framework
-rig-core = "0.36"
+rig-core = { version = "0.43", default-features = false, features = ["reqwest", "rustls"] }
 
 # Workspace sources
 async-trait = "0.1"
 git2 = { version = "0.21", features = ["ssh", "https"] }
 notify = { version = "8" }
-blake2 = "0.10"
+blake2 = "0.11"
 flate2 = "1"
 tar = "0.4"
 

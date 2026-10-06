@@ -296,6 +296,18 @@ pub(crate) fn test_app_state_with_workspaces(
     mgr: WorkspaceManager,
     log_dir: &std::path::Path,
 ) -> AppState {
+    let pool = PgPool::connect_lazy("postgres://invalid:5432/db").unwrap();
+    test_app_state_with_pool(pool, mgr, log_dir)
+}
+
+/// [`test_app_state_with_workspaces`] around a caller-supplied pool (e.g. a
+/// `stroem_test_support::test_pool()`), for unit tests whose path reads the DB.
+#[cfg(test)]
+pub(crate) fn test_app_state_with_pool(
+    pool: PgPool,
+    mgr: WorkspaceManager,
+    log_dir: &std::path::Path,
+) -> AppState {
     use crate::config::{DbConfig, LogStorageConfig, RecoveryConfig, RetentionConfig};
     let config = ServerConfig {
         listen: "127.0.0.1:0".to_string(),
@@ -331,7 +343,6 @@ pub(crate) fn test_app_state_with_workspaces(
         pin_store: None,
     };
     let log_storage = LogStorage::new(log_dir);
-    let pool = PgPool::connect_lazy("postgres://invalid:5432/db").unwrap();
     AppState::new(pool, mgr, config, log_storage, HashMap::new(), None)
 }
 

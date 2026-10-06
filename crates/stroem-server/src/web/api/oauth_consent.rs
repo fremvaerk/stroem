@@ -12,12 +12,11 @@
 //!      challenge, and return the final redirect URL the SPA should navigate
 //!      the browser to.
 
-use crate::auth::hash_token;
+use crate::auth::{hash_token, os_random_bytes};
 use crate::oauth::MCP_SCOPE;
 use crate::state::AppState;
 use crate::web::api::middleware::AuthUser;
 use crate::web::error::AppError;
-use argon2::password_hash::rand_core::{OsRng, RngCore};
 use axum::extract::State;
 use axum::Json;
 use chrono::Duration;
@@ -175,8 +174,7 @@ pub async fn consent(
 
     // Mint code: 32 random bytes hex-encoded → 64-char opaque token. Hashed
     // at rest so a DB read can't replay it.
-    let mut bytes = [0u8; 32];
-    OsRng.fill_bytes(&mut bytes);
+    let bytes: [u8; 32] = os_random_bytes();
     let raw_code: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
     let code_hash = hash_token(&raw_code);
     let expires = chrono::Utc::now() + Duration::seconds(AUTH_CODE_TTL_SECS);

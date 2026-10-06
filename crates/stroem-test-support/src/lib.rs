@@ -1,12 +1,33 @@
 use anyhow::{Context, Result};
 use sqlx::postgres::PgPoolOptions;
-use sqlx::PgPool;
-use testcontainers::core::ImageExt;
+use sqlx::{AssertSqlSafe, PgPool};
+use testcontainers::core::{ImageExt, IntoContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
-use testcontainers::ContainerAsync;
-use testcontainers_modules::postgres::Postgres;
+use testcontainers::{ContainerAsync, ContainerRequest, GenericImage};
 use tokio::sync::OnceCell;
 use uuid::Uuid;
+
+/// The test Postgres container: `postgres:11-alpine`, user, password and
+/// database all `postgres`, started with `-c fsync=off`. A plain
+/// `GenericImage` equivalent of the `testcontainers-modules` 0.15 `Postgres`
+/// module's defaults (that crate does not support `testcontainers` 0.28).
+///
+/// Ready once "database system is ready to accept connections" has appeared
+/// on stderr and on stdout — the module's condition, kept as is. The
+/// entrypoint's temporary init server (Unix socket only) can satisfy both
+/// just before the real server starts; sqlx's pool connect retries a refused
+/// TCP connection, which covers that gap.
+fn postgres_image() -> ContainerRequest<GenericImage> {
+    const READY: &str = "database system is ready to accept connections";
+    GenericImage::new("postgres", "11-alpine")
+        .with_exposed_port(5432.tcp())
+        .with_wait_for(WaitFor::message_on_stderr(READY))
+        .with_wait_for(WaitFor::message_on_stdout(READY))
+        .with_env_var("POSTGRES_DB", "postgres")
+        .with_env_var("POSTGRES_USER", "postgres")
+        .with_env_var("POSTGRES_PASSWORD", "postgres")
+        .with_cmd(["-c", "fsync=off"])
+}
 
 pub struct TestDb {
     pub pool: PgPool,
@@ -19,7 +40,7 @@ struct SharedContainer {
     // process exit — this container's eventual removal is
     // `scripts/test-clean.sh`'s job, not this field's, and that's by
     // design (see the design spec § 3.1).
-    _container: ContainerAsync<Postgres>,
+    _container: ContainerAsync<GenericImage>,
     base_url: String,
 }
 
@@ -28,13 +49,13 @@ static SHARED: OnceCell<SharedContainer> = OnceCell::const_new();
 async fn default_base_url() -> Result<String> {
     let shared = SHARED
         .get_or_try_init(|| async {
-            let container = Postgres::default()
+            let container = postgres_image()
                 .with_label("stroem.test", "true")
-                // testcontainers-modules' Postgres image's own default
-                // command is `-c fsync=off`; `.with_cmd` REPLACES it rather
-                // than appending, so fsync=off must be restated here or
-                // every per-test CREATE DATABASE ... TEMPLATE pays for a
-                // real fsync'd file copy.
+                // `postgres_image()`'s own command is `-c fsync=off`;
+                // `.with_cmd` REPLACES it rather than appending, so
+                // fsync=off must be restated here or every per-test
+                // CREATE DATABASE ... TEMPLATE pays for a real fsync'd file
+                // copy.
                 .with_cmd(["-c", "fsync=off", "-c", "max_connections=200"])
                 .start()
                 .await
@@ -78,9 +99,10 @@ pub async fn test_db() -> TestDb {
         .connect(&format!("{admin_url}/postgres"))
         .await
         .expect("connect to postgres admin database");
-    sqlx::query(&format!(
+    // AssertSqlSafe: a database name cannot be a bind parameter; `db_name` is `t_` + a generated UUID.
+    sqlx::query(AssertSqlSafe(format!(
         r#"CREATE DATABASE "{db_name}" TEMPLATE stroem_template"#
-    ))
+    )))
     .execute(&admin_pool)
     .await
     .expect("create isolated test database");
@@ -214,7 +236,6 @@ async fn ensure_template_migrated_locked(admin_pool: &PgPool, admin_url: &str) -
 #[cfg(test)]
 mod tests {
     use testcontainers::runners::AsyncRunner;
-    use testcontainers_modules::postgres::Postgres;
 
     #[tokio::test]
     async fn test_db_returns_isolated_databases() {
@@ -239,8 +260,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_pool_disables_fsync_for_speed() {
-        // testcontainers-modules' Postgres image defaults to `-c fsync=off`
-        // (its own default command); `.with_cmd` in `default_base_url`
+        // `postgres_image()` defaults to `-c fsync=off` (its own
+        // command); `.with_cmd` in `default_base_url`
         // REPLACES that default rather than appending to it, so without
         // explicitly re-adding `fsync=off` here, every per-test
         // `CREATE DATABASE ... TEMPLATE` pays for a real fsync'd file copy
@@ -266,7 +287,7 @@ mod tests {
 
     #[tokio::test]
     async fn ensure_template_migrated_creates_marker_and_is_idempotent() {
-        let container = Postgres::default().start().await.unwrap();
+        let container = super::postgres_image().start().await.unwrap();
         let port = container.get_host_port_ipv4(5432).await.unwrap();
         let admin_url = format!("postgres://postgres:postgres@localhost:{port}");
 
@@ -292,7 +313,7 @@ mod tests {
 
     #[tokio::test]
     async fn ensure_template_migrated_remigrates_on_fingerprint_mismatch() {
-        let container = Postgres::default().start().await.unwrap();
+        let container = super::postgres_image().start().await.unwrap();
         let port = container.get_host_port_ipv4(5432).await.unwrap();
         let admin_url = format!("postgres://postgres:postgres@localhost:{port}");
         let admin_pool = sqlx::postgres::PgPoolOptions::new()
@@ -330,7 +351,7 @@ mod tests {
 
     #[tokio::test]
     async fn ensure_template_migrated_clears_the_marker_before_attempting_the_drop() {
-        let container = Postgres::default().start().await.unwrap();
+        let container = super::postgres_image().start().await.unwrap();
         let port = container.get_host_port_ipv4(5432).await.unwrap();
         let admin_url = format!("postgres://postgres:postgres@localhost:{port}");
         let admin_pool = sqlx::postgres::PgPoolOptions::new()
@@ -388,7 +409,7 @@ mod tests {
 
     #[tokio::test]
     async fn ensure_template_migrated_serializes_concurrent_callers() {
-        let container = Postgres::default().start().await.unwrap();
+        let container = super::postgres_image().start().await.unwrap();
         let port = container.get_host_port_ipv4(5432).await.unwrap();
         let admin_url = format!("postgres://postgres:postgres@localhost:{port}");
 

@@ -687,6 +687,7 @@ async fn build_test_app_with_auth(
         base_url: None,
         providers: HashMap::new(),
         initial_user: None,
+        rate_limit: Default::default(),
     };
 
     let config = ServerConfig {

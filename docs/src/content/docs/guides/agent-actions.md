@@ -125,12 +125,12 @@ The following 19 providers are supported:
 | Azure | `azure` | Azure OpenAI Service | Yes (requires `api_endpoint`) |
 | Cohere | `cohere` | Cohere models | Yes |
 | DeepSeek | `deepseek` | DeepSeek models | Yes |
-| Galadriel | `galadriel` | Galadriel models | Yes |
+| Galadriel | `galadriel` | Galadriel models (OpenAI-compatible API) | Yes |
 | Gemini | `gemini` | Google Gemini | Yes |
 | Groq | `groq` | Groq models | Yes |
 | Hugging Face | `huggingface` | Hugging Face models | Yes |
 | Hyperbolic | `hyperbolic` | Hyperbolic AI | Yes |
-| Llamafile | `llamafile` | Local Llamafile server | No |
+| Llamafile | `llamafile` | Local Llamafile or llama.cpp `llama-server` (`api_endpoint` is the server root, without `/v1`) | No |
 | Mira | `mira` | Mira AI | Yes |
 | Mistral | `mistral` | Mistral models | Yes |
 | Moonshot | `moonshot` | Moonshot AI | Yes |
@@ -358,8 +358,8 @@ Both `prompt` and `system_prompt` are Tera templates. They're rendered at step e
 
 :::caution[A template that cannot be rendered fails the step]
 If `prompt` or `system_prompt` references a variable that does not resolve, the
-step fails at claim time with the underlying Tera error (for example
-`Variable 'nonexistent' not found`), and that message is recorded on the step.
+step fails at claim time with a value-free template error (for example
+`undefined variable or field (line 1, column 4)`), and that message is recorded on the step.
 
 Earlier versions swallowed the render error: a failing `prompt` surfaced as the
 misleading `Agent step has no rendered prompt`, and a failing `system_prompt`

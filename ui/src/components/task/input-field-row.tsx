@@ -190,7 +190,7 @@ export function InputFieldRow({
               weekStartsOn={1}
               selected={validDate}
               onSelect={(d) => onChange(d ? format(d, "yyyy-MM-dd") : "")}
-              initialFocus
+              autoFocus
             />
           </PopoverContent>
         </Popover>
@@ -244,7 +244,7 @@ export function InputFieldRow({
                 weekStartsOn={1}
                 selected={validDate}
                 onSelect={updateDate}
-                initialFocus
+                autoFocus
               />
             </PopoverContent>
           </Popover>

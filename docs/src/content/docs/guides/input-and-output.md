@@ -94,7 +94,7 @@ Fields marked `required: true` without a default will produce an error if not pr
 
 A field left empty in the **Run task** form is treated the same way as an API call that omits the key. If the field has no `default`, the key is not sent at all, so `{{ input.field | default(value='x') }}` applies the fallback and a plain `{{ input.field }}` fails to render, exactly as it would for an API, CLI or MCP caller that left the field out. If the field *has* a `default`, clearing it sends an empty string, which is an explicit override.
 
-Tera's `default` filter only fires for an *absent* variable, never for an empty string, so a template that must tolerate both should test the value: `{% if input.field %}{{ input.field }}{% else %}x{% endif %}`.
+Tera's `default` filter fires for an *absent* or `null` variable, never for an empty string, so a template that must tolerate both should test the value: `{% if input.field %}{{ input.field }}{% else %}x{% endif %}`.
 
 ### Secret inputs
 

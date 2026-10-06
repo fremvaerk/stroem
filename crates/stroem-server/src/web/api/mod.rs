@@ -241,6 +241,13 @@ async fn require_auth(
 }
 
 pub fn build_api_routes(state: Arc<AppState>) -> Router {
+    // `auth.rate_limit.enabled: false` (tests only) removes every per-IP auth limit.
+    let rate_limited = state
+        .config
+        .auth
+        .as_ref()
+        .is_none_or(|a| a.rate_limit.enabled);
+
     // Rate limit on the API-key routes. The layer covers GET (list), POST
     // (create) AND DELETE on this router, and the UI issues list+create+reload
     // per key operation — so the previous strict (12 s / burst 5 ≈ 5 req/min)
@@ -255,8 +262,12 @@ pub fn build_api_routes(state: Arc<AppState>) -> Router {
             "/auth/api-keys",
             get(api_keys::list_api_keys).post(api_keys::create_api_key),
         )
-        .route("/auth/api-keys/{prefix}", delete(api_keys::delete_api_key))
-        .layer(auth_rate_limit_layer!(1, 60));
+        .route("/auth/api-keys/{prefix}", delete(api_keys::delete_api_key));
+    let api_key_create = if rate_limited {
+        api_key_create.layer(auth_rate_limit_layer!(1, 60))
+    } else {
+        api_key_create
+    };
 
     // OAuth consent endpoint — gated on the `mcp` feature because it only
     // exists to support the OAuth flow that fronts /mcp.
@@ -332,22 +343,32 @@ pub fn build_api_routes(state: Arc<AppState>) -> Router {
     ));
 
     // Login rate limit: 20 req/min per IP (one token every 3 s, burst 10).
-    let login_routes = Router::new()
-        .route("/auth/login", post(auth::login))
-        .layer(auth_rate_limit_layer!(3, 10));
+    let login_routes = Router::new().route("/auth/login", post(auth::login));
+    let login_routes = if rate_limited {
+        login_routes.layer(auth_rate_limit_layer!(3, 10))
+    } else {
+        login_routes
+    };
 
     // Refresh rate limit: 30 req/min per IP (one token every 2 s, burst 15).
-    let refresh_routes = Router::new()
-        .route("/auth/refresh", post(auth::refresh))
-        .layer(auth_rate_limit_layer!(2, 15));
+    let refresh_routes = Router::new().route("/auth/refresh", post(auth::refresh));
+    let refresh_routes = if rate_limited {
+        refresh_routes.layer(auth_rate_limit_layer!(2, 15))
+    } else {
+        refresh_routes
+    };
 
     // Relaxed limit for logout / me / OIDC: 20 req/min per IP (one token every 3 s, burst 20).
     let general_auth_routes = Router::new()
         .route("/auth/logout", post(auth::logout))
         .route("/auth/me", get(auth::me))
         .route("/auth/oidc/{provider}", get(oidc::oidc_start))
-        .route("/auth/oidc/{provider}/callback", get(oidc::oidc_callback))
-        .layer(auth_rate_limit_layer!(3, 20));
+        .route("/auth/oidc/{provider}/callback", get(oidc::oidc_callback));
+    let general_auth_routes = if rate_limited {
+        general_auth_routes.layer(auth_rate_limit_layer!(3, 20))
+    } else {
+        general_auth_routes
+    };
 
     // Public routes (no auth required — includes WS which handles auth internally).
     let public = Router::new()
@@ -370,13 +391,14 @@ pub fn build_api_routes(state: Arc<AppState>) -> Router {
 /// chain equally is unsafe once wrapped infra errors (sqlx, I/O, ...) are in
 /// the mix:
 ///
-/// - **Precise phrases** (`is not shared`, `unknown workspace`, `has no
-///   connection`) are specific enough to `stroem_common::template`'s
-///   cross-workspace error text that they are safe to match anywhere in the
-///   FULL context chain (`{:#}`) — `create_job_for_task` wraps the
+/// - **Precise phrases** (`is not shared`, `unknown workspace`, `no
+///   connection with that name exists`, plus the legacy `has no connection`)
+///   are specific enough to `stroem_common::template`'s
+///   `ConnectionRefError` sentences that they are safe to match anywhere in
+///   the FULL context chain (`{:#}`) — `create_job_for_task` wraps the
 ///   author-facing phrase several `.context()` layers deep (e.g. "step
-///   '...': failed to resolve connection inputs" -> "Input field '...'
-///   references connection '...'" -> the actual cause).
+///   '...': failed to resolve connection inputs" -> "Input field '...': the
+///   connection exists but is not shared ...").
 /// - **Legacy broad phrases** (`not found`, `does not exist`, `resolve
 ///   connection`, `has no action`, `required`, `invalid`, `validation`,
 ///   `merge input defaults`) are common enough that an inner infra-layer
@@ -423,7 +445,8 @@ pub(crate) fn classify_execute_error(e: anyhow::Error) -> AppError {
     }
     let precise_user_error = chain.contains("is not shared") // cross-workspace connection gate
         || chain.contains("unknown workspace") // qualified ref to a workspace that is not configured
-        || chain.contains("has no connection") // cross-workspace: owner workspace exists, connection doesn't
+        || chain.contains("has no connection") // legacy wording of the line below
+        || chain.contains("no connection with that name exists") // `ConnectionRefError::NotFound` (value-free)
         || chain.contains("was removed in 0.18.0") // legacy continue_when_skipped flag (validate_task_dependency_shape)
         || chain.contains("must not be empty") // depends_on tree shape: empty all/any group
         || chain.contains("empty accept list") // depends_on tree shape: accept: []
@@ -456,9 +479,9 @@ mod classify_execute_error_tests {
     #[test]
     fn unshared_cross_workspace_connection_is_bad_request() {
         let e = anyhow::anyhow!(
-            "connection 'owner.private' exists in workspace 'owner' but is not shared (set `shared: true` on it in workspace 'owner')"
+            "Input field 'conn': {}",
+            stroem_common::template::ConnectionRefError::NotShared
         )
-        .context("Input field 'conn' references connection 'owner.private'")
         .context("Failed to resolve connection inputs");
 
         let err = classify_execute_error(e);
@@ -469,9 +492,22 @@ mod classify_execute_error_tests {
     }
 
     #[test]
+    fn value_free_missing_connection_inside_a_chain_is_bad_request() {
+        let e = anyhow::anyhow!(
+            "Input field 'db': {}",
+            stroem_common::template::ConnectionRefError::NotFound
+        )
+        .context("some outer layer without a legacy phrase");
+        assert!(matches!(classify_execute_error(e), AppError::BadRequest(_)));
+    }
+
+    #[test]
     fn unavailable_owner_workspace_is_internal() {
-        let e = anyhow::anyhow!("connection 'owner.x': workspace 'owner' is not available")
-            .context("Failed to resolve connection inputs");
+        let e = anyhow::anyhow!(
+            "Input field 'conn': {}",
+            stroem_common::template::ConnectionRefError::WorkspaceUnavailable
+        )
+        .context("Failed to resolve connection inputs");
 
         let err = classify_execute_error(e);
         assert!(
@@ -547,15 +583,18 @@ mod classify_execute_error_tests {
     /// matchable by the `"resolve connection"` legacy phrase.
     #[test]
     fn missing_bare_connection_with_owner_side_marker_is_bad_request() {
-        let e = anyhow::anyhow!("connection 'typo' does not exist in workspace 'default'")
-            .context(crate::job_creator::OwnerSideRender)
-            .context("Failed to resolve connection inputs");
+        let e = anyhow::anyhow!(
+            "Input field 'db': {}",
+            stroem_common::template::ConnectionRefError::NotFound
+        )
+        .context(crate::job_creator::OwnerSideRender)
+        .context("Failed to resolve connection inputs");
 
         let err = classify_execute_error(e);
         match err {
             AppError::BadRequest(msg) => {
                 assert!(msg.contains("Failed to resolve connection inputs"), "{msg}");
-                assert!(msg.contains("does not exist"), "{msg}");
+                assert!(msg.contains("no connection with that name exists"), "{msg}");
             }
             other => panic!("expected BadRequest, got {other:?}"),
         }

@@ -7,11 +7,10 @@ use stroem_server::blob_storage::{BlobArchive, S3BlobArchive};
 use stroem_server::log_read::StepFilter;
 use stroem_server::log_storage::{JobLogMeta, LogStorage};
 use tempfile::TempDir;
-use testcontainers::core::ContainerPort;
-use testcontainers::runners::AsyncRunner;
-use testcontainers::ImageExt;
-use testcontainers_modules::minio::MinIO;
 use uuid::Uuid;
+
+#[path = "common/minio.rs"]
+mod minio;
 
 /// `read_tail`'s tail budget for tests that want the whole log — well above
 /// anything these fixtures write.
@@ -39,38 +38,6 @@ fn test_meta() -> JobLogMeta {
     }
 }
 
-/// MinIO image for the S3 tests — keep in sync with `log_peak_alloc_test.rs`.
-const MINIO_IMAGE: &str = "cgr.dev/chainguard/minio";
-const MINIO_TAG: &str = "latest";
-
-async fn setup_minio() -> Result<(testcontainers::ContainerAsync<MinIO>, String)> {
-    // Neither Docker Hub (404 since 2026-09) nor quay.io (401 since 2026-09-24) serves
-    // minio/minio any more; Chainguard's build of the same server does (`latest` only).
-    let container = MinIO::default()
-        .with_name(MINIO_IMAGE)
-        .with_tag(MINIO_TAG)
-        // The image declares no EXPOSE; host port 0 = a free port Docker picks.
-        .with_mapped_port(0, ContainerPort::Tcp(9000))
-        .start()
-        .await?;
-    let port = container.get_host_port_ipv4(9000).await?;
-    let endpoint = format!("http://127.0.0.1:{}", port);
-    Ok((container, endpoint))
-}
-
-fn test_s3_client(endpoint: &str) -> aws_sdk_s3::Client {
-    let creds =
-        aws_sdk_s3::config::Credentials::new("minioadmin", "minioadmin", None, None, "test");
-    let config = aws_sdk_s3::Config::builder()
-        .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
-        .region(aws_sdk_s3::config::Region::new("us-east-1"))
-        .endpoint_url(endpoint)
-        .credentials_provider(creds)
-        .force_path_style(true)
-        .build();
-    aws_sdk_s3::Client::from_conf(config)
-}
-
 async fn create_bucket(client: &aws_sdk_s3::Client, bucket: &str) -> Result<()> {
     client.create_bucket().bucket(bucket).send().await?;
     Ok(())
@@ -90,9 +57,9 @@ fn make_log_storage(
 
 #[tokio::test]
 async fn test_s3_upload_and_download() -> Result<()> {
-    let (_container, endpoint) = setup_minio().await?;
+    let (_container, endpoint) = minio::start().await?;
     let bucket = format!("test-{}", Uuid::new_v4());
-    let client = test_s3_client(&endpoint);
+    let client = minio::s3_client(&endpoint);
     create_bucket(&client, &bucket).await?;
 
     let temp_dir = TempDir::new()?;
@@ -128,9 +95,9 @@ async fn test_s3_upload_and_download() -> Result<()> {
 
 #[tokio::test]
 async fn test_s3_read_fallback_when_local_missing() -> Result<()> {
-    let (_container, endpoint) = setup_minio().await?;
+    let (_container, endpoint) = minio::start().await?;
     let bucket = format!("test-{}", Uuid::new_v4());
-    let client = test_s3_client(&endpoint);
+    let client = minio::s3_client(&endpoint);
     create_bucket(&client, &bucket).await?;
 
     let temp_dir = TempDir::new()?;
@@ -164,9 +131,9 @@ async fn test_s3_read_fallback_when_local_missing() -> Result<()> {
 
 #[tokio::test]
 async fn test_s3_local_preferred_over_s3() -> Result<()> {
-    let (_container, endpoint) = setup_minio().await?;
+    let (_container, endpoint) = minio::start().await?;
     let bucket = format!("test-{}", Uuid::new_v4());
-    let client = test_s3_client(&endpoint);
+    let client = minio::s3_client(&endpoint);
     create_bucket(&client, &bucket).await?;
 
     let temp_dir = TempDir::new()?;
@@ -212,9 +179,9 @@ async fn test_s3_local_preferred_over_s3() -> Result<()> {
 
 #[tokio::test]
 async fn test_s3_key_with_prefix() -> Result<()> {
-    let (_container, endpoint) = setup_minio().await?;
+    let (_container, endpoint) = minio::start().await?;
     let bucket = format!("test-{}", Uuid::new_v4());
-    let client = test_s3_client(&endpoint);
+    let client = minio::s3_client(&endpoint);
     create_bucket(&client, &bucket).await?;
 
     let temp_dir = TempDir::new()?;
@@ -248,9 +215,9 @@ async fn test_s3_key_with_prefix() -> Result<()> {
 
 #[tokio::test]
 async fn test_s3_get_step_log_falls_back_to_s3() -> Result<()> {
-    let (_container, endpoint) = setup_minio().await?;
+    let (_container, endpoint) = minio::start().await?;
     let bucket = format!("test-{}", Uuid::new_v4());
-    let client = test_s3_client(&endpoint);
+    let client = minio::s3_client(&endpoint);
     create_bucket(&client, &bucket).await?;
 
     let temp_dir = TempDir::new()?;
@@ -289,9 +256,9 @@ async fn test_s3_get_step_log_falls_back_to_s3() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn s3_delete_prefix_removes_only_matching() -> Result<()> {
-    let (_container, endpoint) = setup_minio().await?;
+    let (_container, endpoint) = minio::start().await?;
     let bucket = format!("test-{}", Uuid::new_v4());
-    let client = test_s3_client(&endpoint);
+    let client = minio::s3_client(&endpoint);
     create_bucket(&client, &bucket).await?;
 
     let blob = S3BlobArchive::from_client(client, bucket);
@@ -423,9 +390,9 @@ async fn s3_delete_prefix_surfaces_partial_failures() -> Result<()> {
 
 #[tokio::test]
 async fn s3_open_and_read_range_are_bounded_and_version_pinned() -> Result<()> {
-    let (_container, endpoint) = setup_minio().await?;
+    let (_container, endpoint) = minio::start().await?;
     let bucket = format!("test-{}", Uuid::new_v4());
-    let client = test_s3_client(&endpoint);
+    let client = minio::s3_client(&endpoint);
     create_bucket(&client, &bucket).await?;
     let archive = S3BlobArchive::from_client(client.clone(), bucket.clone());
 

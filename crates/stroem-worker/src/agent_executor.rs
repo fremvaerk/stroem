@@ -314,12 +314,13 @@ pub async fn execute_agent_step(
                 }
                 Ok(DispatchOutcome::Completed {
                     output,
-                    usage: rig::completion::Usage {
-                        input_tokens: resp.input_tokens,
-                        output_tokens: resp.output_tokens,
-                        total_tokens: resp.input_tokens + resp.output_tokens,
-                        cached_input_tokens: 0,
-                        cache_creation_input_tokens: 0,
+                    usage: rig_core::completion::Usage {
+                        input_tokens: Some(resp.input_tokens),
+                        output_tokens: Some(resp.output_tokens),
+                        total_tokens: Some(resp.input_tokens + resp.output_tokens),
+                        cached_input_tokens: Some(0),
+                        cache_creation_input_tokens: Some(0),
+                        ..Default::default()
                     },
                     turns: 1,
                 })
@@ -352,8 +353,8 @@ pub async fn execute_agent_step(
                         serde_json::json!({
                             "model": model_name,
                             "provider": provider_name,
-                            "input_tokens": usage.input_tokens,
-                            "output_tokens": usage.output_tokens,
+                            "input_tokens": usage.input_tokens.unwrap_or(0),
+                            "output_tokens": usage.output_tokens.unwrap_or(0),
                             "latency_ms": elapsed_ms,
                             "turns": turns,
                         }),

@@ -1,5 +1,6 @@
 pub mod budget;
 pub mod constants;
+pub mod cron;
 pub mod dag;
 pub mod depends_on;
 pub mod duration;
@@ -11,5 +12,8 @@ pub mod models;
 pub mod secret;
 pub mod sops;
 pub mod template;
+pub mod template_error;
+pub(crate) mod tera_compat;
+pub(crate) mod tera_engine;
 pub mod validation;
 pub mod workspace_loader;

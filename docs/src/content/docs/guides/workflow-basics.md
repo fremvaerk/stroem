@@ -387,8 +387,7 @@ The validator checks:
 - Flow steps reference existing actions
 - Dependencies reference existing steps within the same flow
 - No cycles in the dependency graph
-- Step `when` conditions have valid Tera template syntax
-- Step `for_each` expressions have valid Tera template syntax
+- Step `when` conditions and `for_each` expressions, and agent `prompt` / `system_prompt` templates, have valid Tera 2 syntax — and use only filters, tests and functions that exist (unknown ones are rejected, even in an untaken branch; see the [Tera 2 upgrade guide](/operations/upgrade-tera-2/))
 - Step names don't contain `[` or `]` (reserved for loop instances)
 - Trigger cron expressions are valid
 - Hook action references exist

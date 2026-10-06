@@ -36,6 +36,23 @@ auth:
 | `base_url` | OIDC only | Public URL of the server (for redirect URI construction) |
 | `providers` | Yes | Authentication providers map |
 | `initial_user` | No | Seeds an initial user on startup if one doesn't already exist |
+| `rate_limit.enabled` | No | Per-IP rate limits on the auth routes (login, refresh, logout/me/OIDC, API keys). Default `true`. Env: `STROEM__AUTH__RATE_LIMIT__ENABLED` |
+
+### Rate limiting
+
+The auth routes are rate limited per client IP (login and refresh are the brute-force protection). The limits are fixed. `auth.rate_limit.enabled` switches off the limits on the four auth route groups (login, refresh, logout/me/OIDC, API keys); it exists for test harnesses that run many logins and page loads from a single IP (for example the Playwright suite). It does not affect the separate per-IP limit on MCP OAuth client registration (`/oauth/register`):
+
+```yaml
+auth:
+  rate_limit:
+    enabled: false   # testing only
+```
+
+or `STROEM__AUTH__RATE_LIMIT__ENABLED=false`. The server logs a warning at startup when it is disabled.
+
+:::caution
+Disabling rate limiting removes brute-force protection on login and refresh. Use it only for test environments, never in production.
+:::
 
 ## Internal authentication
 

@@ -85,6 +85,7 @@ async fn setup() -> Result<(Router, PgPool, TempDir)> {
                 email: USER_EMAIL.to_string(),
                 password: USER_PASSWORD.to_string(),
             }),
+            rate_limit: Default::default(),
         }),
         recovery: Default::default(),
         retention: RetentionConfig::default(),

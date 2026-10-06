@@ -3,7 +3,7 @@
 //! Converts Strøm task schemas and built-in tools (ask_user) into
 //! rig-core `ToolDefinition` objects for LLM tool calling.
 
-use rig::completion::ToolDefinition;
+use rig_core::completion::ToolDefinition;
 use std::collections::HashMap;
 use stroem_common::models::workflow::{InputFieldDef, TaskDef};
 
