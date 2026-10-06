@@ -44,7 +44,7 @@ working unchanged. You do not need to edit anything for these.
   also available (sorted keys, same output as before).
 - **C4 — `when:` falsiness is decided on the rendered text.** Empty,
   `false`, `null`, `none` (case-insensitive) are false, as before — plus
-  `[]`, `{}` and any number equal to zero. See [item 12](#12-when-treats-and-numeric-zero-as-false)
+  `[]`, `{}` and any number equal to zero. See [item 12](#12-when-treats-empty-arrays-empty-maps-and-numeric-zero-as-false)
   and the [Conditionals guide](/guides/conditionals/#truthiness-rules).
 
 ## What changes
@@ -140,13 +140,22 @@ backslashes literally.
 
 ```yaml
 # Before: worked in Tera 1, syntax error in Tera 2
-script: "echo {{ input.path | replace(from='C:\path', to='/') }}"
+script: |
+  echo {{ input.path | replace(from='C:\path', to='/') }}
 ```
 
 ```yaml
-# After: double the backslash
-script: "echo {{ input.path | replace(from='C:\\path', to='/') }}"
+# After: double the backslash (Tera sees one escaped backslash)
+script: |
+  echo {{ input.path | replace(from='C:\\path', to='/') }}
 ```
+
+YAML and Tera each process escapes, as two separate layers. The snippets use
+a block scalar (`script: |`) because it passes backslashes to Tera untouched.
+In a YAML *double-quoted* string, YAML would consume the backslashes first
+(`\p` is not even a valid YAML escape, and `\\` collapses to one backslash
+before Tera sees it), so use a block scalar or a single-quoted YAML string
+for templates containing backslashes.
 
 ### 6. Tests take keyword arguments; macros and `.0` indexing are gone
 
@@ -273,7 +282,7 @@ env:
 
 Passing the value through `env` also avoids shell-quoting problems.
 
-### 12. `when:` treats `[]`, `{}` and numeric zero as false
+### 12. `when:` treats empty arrays, empty maps and numeric zero as false
 
 `when:` is false when the rendered text is empty, `false`, `null`, `none`
 (case-insensitive), `[]`, `{}` or a number equal to zero (`0`, `0.0`, `-0.0`).
@@ -290,8 +299,13 @@ when: "{{ scan.output.items }}"
 
 A workspace whose secret or connection template fails to render does not
 load. The error (shown in the UI, API and MCP, and logged) names which secret
-or connection and the value-free message, for example
-`Failed to render secret 'DB_PASSWORD': filter `int` failed (line 1, column 4)`.
+or connection and the value-free message. Illustrative shape (the wording
+of the surrounding context may differ):
+
+```text
+Failed to render secret 'DB_PASSWORD': filter `int` failed (line 1, column 4)
+```
+
 To see Tera's or `vals`' full output, run `stroem validate` or `stroem run`
 against the workspace locally.
 
