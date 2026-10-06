@@ -1179,6 +1179,14 @@ fn render_secret_value(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn literal_secret_with_block_marker_is_not_rendered() {
+        let mut cfg: WorkspaceConfig =
+            serde_yaml::from_str("secrets:\n  PW: \"p{%ss{#x\"\n").unwrap();
+        cfg.render_secrets().unwrap();
+        assert_eq!(cfg.secrets["PW"], serde_json::json!("p{%ss{#x"));
+    }
+
     use super::*;
     use serde_json::json;
 

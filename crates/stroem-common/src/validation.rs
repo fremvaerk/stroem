@@ -716,10 +716,11 @@ fn validate_workflow_config_inner(
 
 /// Check one connection's values against its type: required properties present
 /// (unless the type supplies a default), unknown fields (warning), empty
-/// strings (error). Shared by load-time validation and by the resolver for
+/// strings (error). `label` is a full noun phrase (`Connection 'db'`, `input
+/// field 'db'`) and never a rendered value. Shared by load-time validation and by the resolver for
 /// connections whose type lives in another workspace.
 pub fn check_connection_values(
-    conn_name: &str,
+    label: &str,
     values: &HashMap<String, serde_json::Value>,
     type_name: &str,
     type_def: &ConnectionTypeDef,
@@ -727,31 +728,19 @@ pub fn check_connection_values(
     let mut warnings = Vec::new();
     for (prop_name, prop_def) in &type_def.properties {
         if prop_def.required && prop_def.default.is_none() && !values.contains_key(prop_name) {
-            bail!(
-                "Connection '{}' is missing required field '{}' (type '{}')",
-                conn_name,
-                prop_name,
-                type_name
-            );
+            bail!("{label} is missing required field '{prop_name}' (type '{type_name}')");
         }
     }
     for key in values.keys() {
         if !type_def.properties.contains_key(key) {
             warnings.push(format!(
-                "Connection '{}' has field '{}' not defined in type '{}'",
-                conn_name, key, type_name
+                "{label} has field '{key}' not defined in type '{type_name}'"
             ));
         }
     }
     for (key, value) in values {
-        if let Some(s) = value.as_str() {
-            if s.is_empty() {
-                bail!(
-                    "Connection '{}' field '{}' has an empty value",
-                    conn_name,
-                    key
-                );
-            }
+        if value.as_str().is_some_and(str::is_empty) {
+            bail!("{label} field '{key}' has an empty value");
         }
     }
     Ok(warnings)
@@ -804,7 +793,7 @@ fn validate_connections(config: &WorkspaceConfig) -> Result<Vec<String>> {
         if let Some(ref type_name) = conn.connection_type {
             if let Some(type_def) = config.connection_types.get(type_name) {
                 warnings.extend(check_connection_values(
-                    conn_name,
+                    &format!("Connection '{}'", conn_name),
                     &conn.values,
                     type_name,
                     type_def,
@@ -2200,19 +2189,20 @@ mod tests {
             )]),
         };
         // missing required
-        let err = check_connection_values("c", &HashMap::new(), "t", &type_def).unwrap_err();
+        let err =
+            check_connection_values("Connection 'c'", &HashMap::new(), "t", &type_def).unwrap_err();
         assert!(err.to_string().contains("missing required field 'host'"));
         // unknown field → warning, not error
         let vals = HashMap::from([
             ("host".to_string(), serde_json::json!("h")),
             ("extra".to_string(), serde_json::json!(1)),
         ]);
-        let warnings = check_connection_values("c", &vals, "t", &type_def).unwrap();
+        let warnings = check_connection_values("Connection 'c'", &vals, "t", &type_def).unwrap();
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("'extra'"));
         // empty string → error
         let vals = HashMap::from([("host".to_string(), serde_json::json!(""))]);
-        let err = check_connection_values("c", &vals, "t", &type_def).unwrap_err();
+        let err = check_connection_values("Connection 'c'", &vals, "t", &type_def).unwrap_err();
         assert!(err.to_string().contains("empty value"));
     }
 

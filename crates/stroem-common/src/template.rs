@@ -266,18 +266,51 @@ pub struct ResolvedConnection<'a> {
     pub def: &'a ConnectionDef,
 }
 
+/// Why a connection reference did not resolve. Value-free: never holds the
+/// reference, which may have been rendered from a secret (spec § 3.3.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionRefError {
+    NotFound,
+    UnknownWorkspace,
+    WorkspaceUnavailable,
+    NotShared,
+    OfflineCrossWorkspace,
+}
+
+impl std::fmt::Display for ConnectionRefError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::NotFound => "no connection with that name exists",
+            Self::UnknownWorkspace => "the connection names an unknown workspace",
+            Self::WorkspaceUnavailable => "the workspace that owns the connection is not available",
+            Self::NotShared => "the connection exists but is not shared (set `shared: true` on it)",
+            Self::OfflineCrossWorkspace => {
+                "cross-workspace connection references require a server (run this task through `stroem-api trigger`)"
+            }
+        })
+    }
+}
+
+impl std::error::Error for ConnectionRefError {}
+
+/// True when a string contains any Tera template marker (`{{`, `{%`, `{#`).
+pub fn looks_templated(s: &str) -> bool {
+    s.contains("{{") || s.contains("{%") || s.contains("{#")
+}
+
 /// Locate a connection by bare or qualified name, enforcing the `shared` gate
-/// for any reference that crosses a workspace boundary.
+/// for any reference that crosses a workspace boundary. Errors never carry the
+/// reference (it may be a rendered secret).
 pub fn resolve_connection_ref<'a>(
     conn_ref: &str,
     scope: &ResolveScope<'a>,
-) -> Result<ResolvedConnection<'a>> {
+) -> std::result::Result<ResolvedConnection<'a>, ConnectionRefError> {
     let lookup = scope.lookup;
-    let value_cfg = found_config(
-        lookup,
-        scope.value_ws,
-        &format!("connection '{}'", conn_ref),
-    )?;
+    let value_cfg = match lookup.get(scope.value_ws) {
+        Lookup::Found(c) => c,
+        Lookup::Unknown => return Err(ConnectionRefError::UnknownWorkspace),
+        Lookup::Unavailable => return Err(ConnectionRefError::WorkspaceUnavailable),
+    };
 
     // 1. Literal local key (bare name, or a connection literally named "a.b").
     if let Some(def) = value_cfg.connections.get(conn_ref) {
@@ -297,29 +330,12 @@ pub fn resolve_connection_ref<'a>(
                     name: item.to_string(),
                     def,
                 }),
-                Some(_) => bail!(
-                    "connection '{}' exists in workspace '{}' but is not shared (set `shared: true` on it in workspace '{}')",
-                    conn_ref,
-                    ws,
-                    ws
-                ),
-                None => bail!(
-                    "connection '{}' does not exist: workspace '{}' has no connection '{}'",
-                    conn_ref,
-                    ws,
-                    item
-                ),
+                Some(_) => Err(ConnectionRefError::NotShared),
+                None => Err(ConnectionRefError::NotFound),
             },
-            Lookup::Unknown if lookup.offline() => bail!(
-                "connection '{}': cross-workspace connection references require a server (run this task through `stroem-api trigger`)",
-                conn_ref
-            ),
-            Lookup::Unknown => bail!("connection '{}': unknown workspace '{}'", conn_ref, ws),
-            Lookup::Unavailable => bail!(
-                "connection '{}': workspace '{}' is not available",
-                conn_ref,
-                ws
-            ),
+            Lookup::Unknown if lookup.offline() => Err(ConnectionRefError::OfflineCrossWorkspace),
+            Lookup::Unknown => Err(ConnectionRefError::UnknownWorkspace),
+            Lookup::Unavailable => Err(ConnectionRefError::WorkspaceUnavailable),
         };
     }
 
@@ -334,23 +350,13 @@ pub fn resolve_connection_ref<'a>(
                         def,
                     })
                 }
-                Some(_) => bail!(
-                    "connection '{}' not found in workspace '{}'; '{}.{}' exists but is not shared",
-                    conn_ref,
-                    scope.value_ws,
-                    fb,
-                    conn_ref
-                ),
+                Some(_) => return Err(ConnectionRefError::NotShared),
                 None => {}
             }
         }
     }
 
-    bail!(
-        "connection '{}' does not exist in workspace '{}'",
-        conn_ref,
-        scope.value_ws
-    )
+    Err(ConnectionRefError::NotFound)
 }
 
 /// Evaluate a `when` condition template against a JSON context.
@@ -645,31 +651,20 @@ pub fn resolve_connection_inputs_scoped(
             }
         };
 
+        let label = format!("Input field '{}'", field_name);
         let field_ct = canonical_type_ref(&field_def.field_type, scope.schema_ws, scope.lookup)
-            .with_context(|| format!("Input field '{}'", field_name))?;
-        let resolved = resolve_connection_ref(conn_name, scope).with_context(|| {
-            format!(
-                "Input field '{}' references connection '{}'",
-                field_name, conn_name
-            )
-        })?;
-
+            .with_context(|| label.clone())?;
+        let resolved = resolve_connection_ref(conn_name, scope)
+            .map_err(|kind| anyhow::anyhow!("{label}: {kind}"))?;
         let values = match resolved.def.connection_type {
             None => resolved.def.values.clone(),
             Some(ref declared) => {
                 let conn_ct = canonical_type_ref(declared, &resolved.workspace, scope.lookup)
-                    .with_context(|| format!("connection '{}'", conn_name))?;
+                    .with_context(|| format!("{label}: its connection's type"))?;
                 if conn_ct != field_ct {
-                    bail!(
-                        "Input field '{}' expects type '{}' but connection '{}' is type '{}'",
-                        field_name,
-                        field_ct,
-                        conn_name,
-                        conn_ct
-                    );
+                    bail!("{label} expects type '{field_ct}' but the connection it names is type '{conn_ct}'");
                 }
                 if conn_ct.workspace != resolved.workspace {
-                    // Foreign-typed connection: defaults + checks not done at load.
                     let type_cfg =
                         found_config(scope.lookup, &conn_ct.workspace, "connection type")?;
                     let type_def = type_cfg
@@ -677,18 +672,15 @@ pub fn resolve_connection_inputs_scoped(
                         .get(&conn_ct.name)
                         .with_context(|| format!("connection type '{}' vanished", conn_ct))?;
                     let with_defaults = resolved.def.values_with_type_defaults(type_def);
+                    let field_label = format!("input field '{}'", field_name);
                     let warnings = crate::validation::check_connection_values(
-                        &format!("{}.{}", resolved.workspace, resolved.name),
+                        &field_label,
                         &with_defaults,
                         &conn_ct.to_string(),
                         type_def,
                     )?;
                     for w in warnings {
-                        tracing::warn!(
-                            connection = %format!("{}.{}", resolved.workspace, resolved.name),
-                            "{}",
-                            w
-                        );
+                        tracing::warn!(field = %field_name, "{}", w);
                     }
                     with_defaults
                 } else {
@@ -2343,7 +2335,10 @@ mod tests {
         .unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("expects type 'caller.clickhouse'"), "{msg}");
-        assert!(msg.contains("is type 'jobs.clickhouse'"), "{msg}");
+        assert!(
+            msg.contains("the connection it names is type 'jobs.clickhouse'"),
+            "{msg}"
+        );
     }
 
     #[test]
@@ -2352,10 +2347,9 @@ mod tests {
         let err =
             resolve_connection_inputs(&json!({"ch": "nope.x"}), &schema_of("jobs.clickhouse"), &ws)
                 .unwrap_err();
-        assert!(
-            format!("{err:#}").contains("unknown workspace 'nope'"),
-            "{err:#}"
-        );
+        let msg = format!("{err:#}");
+        assert!(msg.contains("names an unknown workspace"), "{msg}");
+        assert!(!msg.contains("nope"), "{msg}");
     }
 
     #[test]
@@ -2531,11 +2525,8 @@ mod tests {
         )
         .unwrap_err();
         let msg = format!("{err:#}");
-        assert!(msg.contains("not found in workspace 'caller'"), "{msg}");
-        assert!(
-            msg.contains("'jobs.private-ch' exists but is not shared"),
-            "{msg}"
-        );
+        assert!(msg.contains("exists but is not shared"), "{msg}");
+        assert!(!msg.contains("private-ch"), "{msg}");
         // (3) caller-local bare name wins over an owner name of the same spelling
         ws.configs.get_mut("caller").unwrap().connections.insert(
             "clickhouse-prod".to_string(),
@@ -2654,7 +2645,8 @@ mod tests {
         )]);
         let (bucket, msg) = bucket_of(json!({}), &schema);
         assert_eq!(bucket, Some(ProvenanceBucket::ActionDefault), "{msg}");
-        assert!(msg.contains("missing-ch"), "{msg}");
+        assert!(!msg.contains("missing-ch"), "{msg}");
+        assert!(msg.contains("Input field 'ch'"), "{msg}");
     }
 
     #[test]
@@ -2699,6 +2691,104 @@ mod tests {
     }
 
     #[test]
+    fn rendered_connection_name_never_in_error_chain() {
+        // (a) the name does not resolve
+        let ws = make_ws_with_connection();
+        let mut schema = HashMap::new();
+        schema.insert("db".to_string(), field("postgres", false, None));
+        let err = resolve_connection_inputs(
+            &json!({"db": "CONNCANARY"}),
+            &schema,
+            &SingleWorkspace {
+                name: "local",
+                config: &ws,
+            },
+        )
+        .unwrap_err();
+        let text = format!("{err:#}");
+        assert!(!text.contains("CONNCANARY"), "{text}");
+        assert!(
+            text.contains("Input field 'db': no connection with that name exists"),
+            "{text}"
+        );
+
+        // (b) resolves to a foreign-typed connection missing a required field
+        let mut multi = three_workspaces();
+        multi
+            .configs
+            .get_mut("jobs")
+            .unwrap()
+            .connection_types
+            .insert(
+                "clickhouse".to_string(),
+                ConnectionTypeDef {
+                    properties: HashMap::from([(
+                        "host".to_string(),
+                        crate::models::workflow::ConnectionPropertyDef {
+                            property_type: "string".into(),
+                            required: true,
+                            default: None,
+                            secret: false,
+                        },
+                    )]),
+                },
+            );
+        multi.configs.get_mut("infra").unwrap().connections.insert(
+            "CONNCANARY".to_string(),
+            ConnectionDef {
+                connection_type: Some("jobs.clickhouse".into()),
+                shared: true,
+                values: HashMap::new(),
+            },
+        );
+        let err = resolve_connection_inputs(
+            &json!({"ch": "infra.CONNCANARY"}),
+            &schema_of("jobs.clickhouse"),
+            &multi,
+        )
+        .unwrap_err();
+        let text = format!("{err:#}");
+        assert!(!text.contains("CONNCANARY"), "{text}");
+        assert!(
+            text.contains("input field 'ch' is missing required field 'host'"),
+            "{text}"
+        );
+
+        // (c) resolves to a connection of the wrong type
+        let mut ws = make_ws_with_connection();
+        ws.connection_types.insert(
+            "redis".to_string(),
+            ConnectionTypeDef {
+                properties: HashMap::new(),
+            },
+        );
+        let prod = ws.connections["prod_db"].clone();
+        ws.connections.insert("CONNCANARY".to_string(), prod);
+        let mut schema = HashMap::new();
+        schema.insert("cache".to_string(), field("redis", false, None));
+        let err = resolve_connection_inputs(
+            &json!({"cache": "CONNCANARY"}),
+            &schema,
+            &SingleWorkspace {
+                name: "local",
+                config: &ws,
+            },
+        )
+        .unwrap_err();
+        let text = format!("{err:#}");
+        assert!(!text.contains("CONNCANARY"), "{text}");
+        assert!(text.contains("Input field 'cache' expects type"), "{text}");
+    }
+
+    #[test]
+    fn looks_templated_recognises_all_three_markers() {
+        assert!(looks_templated("{{ x }}"));
+        assert!(looks_templated("{% if x %}a{% endif %}"));
+        assert!(looks_templated("{# c #}a"));
+        assert!(!looks_templated("plain"));
+    }
+
+    #[test]
     fn test_resolve_connection_inputs_missing_connection() {
         let ws = make_ws_with_connection();
         let input = json!({"db": "nonexistent"});
@@ -2715,8 +2805,8 @@ mod tests {
         );
         assert!(result.is_err());
         let err = format!("{:#}", result.unwrap_err());
-        assert!(err.contains("nonexistent"));
-        assert!(err.contains("does not exist"));
+        assert!(!err.contains("nonexistent"), "{err}");
+        assert!(err.contains("no connection with that name exists"), "{err}");
     }
 
     #[test]
@@ -2744,7 +2834,10 @@ mod tests {
         assert!(result.is_err());
         let err = format!("{:#}", result.unwrap_err());
         assert!(err.contains("expects type") && err.contains("redis"));
-        assert!(err.contains("is type") && err.contains("postgres"));
+        assert!(
+            err.contains("the connection it names is type") && err.contains("postgres"),
+            "{err}"
+        );
     }
 
     #[test]

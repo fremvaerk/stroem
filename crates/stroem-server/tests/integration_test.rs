@@ -2077,10 +2077,8 @@ async fn test_cross_workspace_action_caller_bare_unshared_name_fails_at_creation
     // `private-conn` is a literal → pre-check rejects at creation.
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let text = body_json(response).await.to_string();
-    assert!(
-        text.contains("'owner.private-conn' exists but is not shared"),
-        "{text}"
-    );
+    assert!(text.contains("exists but is not shared"), "{text}");
+    assert!(!text.contains("private-conn"), "{text}");
     Ok(())
 }
 
@@ -3070,7 +3068,7 @@ async fn test_execute_task_missing_connection_returns_400() -> Result<()> {
         .unwrap_or_default()
         .to_string();
     assert!(msg.contains("resolve connection"), "{msg}");
-    assert!(msg.contains("does not exist"), "{msg}");
+    assert!(msg.contains("no connection with that name exists"), "{msg}");
 
     Ok(())
 }

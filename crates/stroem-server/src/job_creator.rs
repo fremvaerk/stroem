@@ -1309,7 +1309,7 @@ pub(crate) fn precheck_literal_connection_inputs(
             continue;
         }
         if let Some(serde_json::Value::String(s)) = flow_step.input.get(field) {
-            if !s.contains("{{") {
+            if !stroem_common::template::looks_templated(s) {
                 literal_schema.insert(field.clone(), def.clone());
                 literal_values.insert(field.clone(), serde_json::Value::String(s.clone()));
             }
@@ -1356,7 +1356,7 @@ pub(crate) async fn precheck_task_step_literals(
             continue;
         }
         match flow_step.input.get(field) {
-            Some(serde_json::Value::String(s)) if s.contains("{{") => {}
+            Some(serde_json::Value::String(s)) if stroem_common::template::looks_templated(s) => {}
             Some(v) => {
                 literals.insert(field.clone(), v.clone());
             }
@@ -1461,6 +1461,56 @@ mod tests {
         // Templated → skipped (no error even though it would not resolve)
         precheck_literal_connection_inputs("s", &step("{{ input.pick }}"), &action, &roles)
             .unwrap();
+    }
+
+    #[test]
+    fn precheck_block_template_skipped_and_literal_error_is_value_free() {
+        use crate::workspace_set::WorkspaceSet;
+        use stroem_common::models::workflow::{
+            ActionDef, ConnectionTypeDef, FlowStep, InputFieldDef, WorkspaceConfig,
+        };
+
+        let mut caller = WorkspaceConfig::default();
+        caller.connection_types.insert(
+            "ch".to_string(),
+            ConnectionTypeDef {
+                properties: Default::default(),
+            },
+        );
+        let set = WorkspaceSet::from_parts("caller", Some(&caller), vec![], vec![]);
+        let roles = RoleScope {
+            caller: RoleConfig {
+                workspace: "caller",
+                config: &caller,
+            },
+            action_owner: None,
+            task_owner: None,
+            others: &set,
+        };
+        let mut action: ActionDef = serde_yaml::from_str("type: script\nscript: echo").unwrap();
+        action.input.insert(
+            "conn".to_string(),
+            InputFieldDef {
+                field_type: "ch".to_string(),
+                ..serde_yaml::from_str("type: string").unwrap()
+            },
+        );
+        let step = |v: &str| -> FlowStep {
+            serde_yaml::from_str(&format!("action: a\ninput:\n  conn: \"{v}\"")).unwrap()
+        };
+
+        precheck_literal_connection_inputs(
+            "s",
+            &step("{% if true %}CONNCANARY{% endif %}"),
+            &action,
+            &roles,
+        )
+        .unwrap();
+        let err = precheck_literal_connection_inputs("s", &step("CONNCANARY"), &action, &roles)
+            .unwrap_err();
+        let text = format!("{err:#}");
+        assert!(!text.contains("CONNCANARY"), "{text}");
+        assert!(text.contains("Input field '"), "{text}");
     }
 
     #[test]
@@ -1908,6 +1958,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn precheck_task_step_literals_block_template_skipped_and_error_value_free() {
+        let (mgr, a_cfg, t_cfg) = precheck_task_manager();
+        let resolved = ResolvedTask {
+            workspace: "T".to_string(),
+            task_name: "deploy".to_string(),
+            task: t_cfg.tasks.get("deploy").unwrap().clone(),
+            config: OwnerConfig::Foreign(Arc::new(t_cfg.clone())),
+        };
+        let caller = || RoleConfig {
+            workspace: "A",
+            config: &a_cfg,
+        };
+
+        let step = deploy_step("  db: \"{% if true %}CONNCANARY{% endif %}\"");
+        precheck_task_step_literals("s", &step, &resolved, &mgr, caller(), &a_cfg)
+            .await
+            .unwrap();
+
+        let step = deploy_step("  db: \"CONNCANARY\"");
+        let err = precheck_task_step_literals("s", &step, &resolved, &mgr, caller(), &a_cfg)
+            .await
+            .unwrap_err();
+        let text = format!("{err:#}");
+        assert!(!text.contains("CONNCANARY"), "{text}");
+        assert!(text.contains("Input field '"), "{text}");
+    }
+
+    #[tokio::test]
     async fn precheck_task_step_literals_templated_value_not_checked() {
         let (mgr, a_cfg, t_cfg) = precheck_task_manager();
         let resolved = ResolvedTask {
@@ -2021,6 +2099,11 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(format!("{err:#}").contains("does not exist"), "{err:#}");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("no connection with that name exists"),
+            "{text}"
+        );
+        assert!(!text.contains("nope"), "{text}");
     }
 }

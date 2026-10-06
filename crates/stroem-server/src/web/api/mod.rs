@@ -423,7 +423,8 @@ pub(crate) fn classify_execute_error(e: anyhow::Error) -> AppError {
     }
     let precise_user_error = chain.contains("is not shared") // cross-workspace connection gate
         || chain.contains("unknown workspace") // qualified ref to a workspace that is not configured
-        || chain.contains("has no connection") // cross-workspace: owner workspace exists, connection doesn't
+        || chain.contains("has no connection") // legacy wording of the line below
+        || chain.contains("no connection with that name exists") // `ConnectionRefError::NotFound` (value-free)
         || chain.contains("was removed in 0.18.0") // legacy continue_when_skipped flag (validate_task_dependency_shape)
         || chain.contains("must not be empty") // depends_on tree shape: empty all/any group
         || chain.contains("empty accept list") // depends_on tree shape: accept: []
@@ -466,6 +467,13 @@ mod classify_execute_error_tests {
             AppError::BadRequest(msg) => assert!(msg.contains("is not shared"), "{msg}"),
             other => panic!("expected BadRequest, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn value_free_missing_connection_inside_a_chain_is_bad_request() {
+        let e = anyhow::anyhow!("Input field 'db': no connection with that name exists")
+            .context("some outer layer without a legacy phrase");
+        assert!(matches!(classify_execute_error(e), AppError::BadRequest(_)));
     }
 
     #[test]
