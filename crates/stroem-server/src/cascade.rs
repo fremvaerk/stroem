@@ -101,25 +101,22 @@ fn render_for_each_template(
 ) -> Result<Vec<serde_json::Value>> {
     let rendered = stroem_common::template::render_template(template, render_ctx)
         .context("Failed to render for_each template")?;
-    let value: serde_json::Value = serde_json::from_str(&rendered).with_context(|| {
-        // Detect the common "[object]" rendering that Tera produces for
-        // objects/arrays and suggest the fix.
-        if rendered.contains("[object]") {
-            format!(
-                "for_each template rendered to non-JSON: {}. \
-                 Hint: Tera renders objects/arrays as \"[object]\". \
-                 Use the `json_encode()` filter, e.g. {{{{ step.output | json_encode() }}}}",
-                rendered,
-            )
-        } else {
-            format!("for_each template rendered to non-JSON: {}", rendered)
-        }
+    let value: serde_json::Value = serde_json::from_str(&rendered).map_err(|e| {
+        anyhow::anyhow!(
+            "for_each must render a JSON array; the rendered text ({} bytes) is not valid JSON \
+             ({:?} error at line {}, column {}). Render arrays and objects with `| json_encode()`, \
+             e.g. {{{{ step.output.items | json_encode() }}}}",
+            rendered.len(),
+            e.classify(),
+            e.line(),
+            e.column()
+        )
     })?;
     match value {
         serde_json::Value::Array(arr) => Ok(arr),
-        _ => bail!(
-            "for_each expression must evaluate to a JSON array, got {}",
-            value
+        other => bail!(
+            "for_each must render a JSON array, got a JSON {}",
+            stroem_common::template::json_type_name(&other)
         ),
     }
 }
@@ -2581,41 +2578,36 @@ mod tests {
     // --- render_for_each_template: error message tests ---
 
     #[test]
-    fn test_for_each_object_rendering_suggests_json_encode() {
-        // Tera renders objects as "[object]" — the error message should
-        // suggest using the json_encode() filter.
-        let ctx = json!({"step1": {"output": [{"a": 1}, {"a": 2}]}});
-        let result = render_for_each_template("{{ step1.output }}", &ctx);
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
+    fn for_each_errors_never_contain_rendered_content() {
+        let ctx = json!({"secret": {"X": "for-each-canary"}});
+        let err = render_for_each_template("{{ secret.X | upper }}", &ctx).unwrap_err();
+        let text = format!("{err:#}");
         assert!(
-            msg.contains("[object]"),
-            "Error should contain '[object]': {}",
-            msg
+            !text.contains("FOR-EACH-CANARY") && !text.contains("for-each-canary"),
+            "{text}"
         );
-        assert!(
-            msg.contains("json_encode()"),
-            "Error should suggest json_encode(): {}",
-            msg
-        );
+        assert!(text.contains("is not valid JSON"), "{text}");
+        let err = render_for_each_template("{{ secret | json_encode() }}", &ctx).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(!text.contains("for-each-canary"), "{text}");
+        assert!(text.contains("got a JSON object"), "{text}");
     }
 
     #[test]
     fn test_for_each_non_json_error_without_object_hint() {
-        // When the rendered output is non-JSON but not the [object] pattern,
-        // the error should not include the json_encode hint.
+        // Shape-only error: it never echoes the rendered text.
         let ctx = json!({"step1": {"output": "hello"}});
         let result = render_for_each_template("{{ step1.output }}", &ctx);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(
-            msg.contains("non-JSON"),
-            "Error should mention non-JSON: {}",
+            msg.contains("is not valid JSON"),
+            "Error should mention invalid JSON: {}",
             msg
         );
         assert!(
-            !msg.contains("json_encode"),
-            "Error should NOT suggest json_encode for plain strings: {}",
+            !msg.contains("hello"),
+            "Error must not echo the rendered text: {}",
             msg
         );
     }
@@ -2623,13 +2615,13 @@ mod tests {
     #[test]
     fn test_for_each_valid_json_non_array_errors() {
         // A template that renders to valid JSON but not an array should
-        // produce a clear "must evaluate to a JSON array" error.
+        // produce a clear "must render a JSON array" error.
         let ctx = json!({"count": 5});
         let result = render_for_each_template("{{ count }}", &ctx);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(
-            msg.contains("must evaluate to a JSON array"),
+            msg.contains("got a JSON number"),
             "Error should mention array requirement: {}",
             msg
         );

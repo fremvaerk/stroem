@@ -654,15 +654,23 @@ fn evaluate_for_each(
         serde_json::Value::Array(arr) => arr.clone(),
         serde_json::Value::String(s) => {
             let rendered = render_template(s, ctx).context("Failed to render for_each template")?;
-            let parsed: serde_json::Value = serde_json::from_str(&rendered).with_context(|| {
-                format!(
-                    "for_each template rendered to '{}' which is not valid JSON",
-                    rendered
+            let parsed: serde_json::Value = serde_json::from_str(&rendered).map_err(|e| {
+                anyhow::anyhow!(
+                    "for_each must render a JSON array; the rendered text ({} bytes) is not valid JSON \
+                     ({:?} error at line {}, column {}). Render arrays and objects with `| json_encode()`, \
+                     e.g. {{{{ step.output.items | json_encode() }}}}",
+                    rendered.len(),
+                    e.classify(),
+                    e.line(),
+                    e.column()
                 )
             })?;
             match parsed {
                 serde_json::Value::Array(arr) => arr,
-                _ => bail!("for_each expression must evaluate to an array"),
+                other => bail!(
+                    "for_each must render a JSON array, got a JSON {}",
+                    stroem_common::template::json_type_name(&other)
+                ),
             }
         }
         _ => bail!("for_each must be a string template or a JSON array"),
@@ -1563,8 +1571,8 @@ tasks:
             result
                 .unwrap_err()
                 .to_string()
-                .contains("must evaluate to an array"),
-            "error should mention 'must evaluate to an array'"
+                .contains("got a JSON object"),
+            "error should mention 'got a JSON object'"
         );
     }
 

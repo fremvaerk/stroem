@@ -355,18 +355,21 @@ pub fn resolve_connection_ref<'a>(
 
 /// Evaluate a `when` condition template against a JSON context.
 ///
-/// Returns `true` (step should run) if the rendered result is truthy:
-/// non-empty and not `"false"`, `"0"`, `"null"`, or `"none"` (all
-/// comparisons are case-insensitive). Returns `false` (step should be
-/// skipped) otherwise. Template render errors propagate as `Err`.
+/// The rendered text is false when it is empty or, case-insensitively,
+/// `false`, `null`, `none`, `[]`, `{}`, or a number equal to zero (`0`,
+/// `0.0`, `-0.0`) — Strøm's convention over Tera 2's rendered output
+/// (spec 2026-10-06 § 3.6 C4). Render errors propagate as `Err`.
 pub fn evaluate_condition(template: &str, context: &serde_json::Value) -> Result<bool> {
     let rendered = render_template(template, context)?;
     let trimmed = rendered.trim();
-    if trimmed.is_empty() {
+    let lower = trimmed.to_lowercase();
+    if matches!(lower.as_str(), "" | "false" | "null" | "none" | "[]" | "{}") {
         return Ok(false);
     }
-    let lower = trimmed.to_lowercase();
-    Ok(lower != "false" && lower != "0" && lower != "null" && lower != "none")
+    if trimmed.parse::<f64>().is_ok_and(|n| n == 0.0) {
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 /// Recursively renders all string values in a JSON value as Tera templates.
@@ -1233,7 +1236,7 @@ fn resolve_provenance_bucket(
     resolve_bucket_by_role(input, task_schema, value, task, others)
 }
 
-fn json_type_name(v: &serde_json::Value) -> &'static str {
+pub fn json_type_name(v: &serde_json::Value) -> &'static str {
     match v {
         serde_json::Value::Null => "null",
         serde_json::Value::Bool(_) => "boolean",
@@ -1248,6 +1251,33 @@ fn json_type_name(v: &serde_json::Value) -> &'static str {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn when_truth_table_follows_rendered_text() {
+        let ctx = json!({"z": 0.0, "e": [], "m": {}, "s": "false", "n": null, "one": 1});
+        let cases = [
+            ("{{ z }}", false),
+            ("{{ e }}", false),
+            ("{{ m }}", false),
+            ("{{ s }}", false),
+            ("{{ n }}", false),
+            ("", false),
+            ("0", false),
+            ("-0.0", false),
+            ("None", false),
+            ("NULL", false),
+            ("{{ one }}", true),
+            ("{{ [0] }}", true),
+            ("x", true),
+            ("0.5", true),
+            ("{{ e and one }}", false),
+            ("{{ one and e }}", false),
+            ("{{ e or one }}", true),
+        ];
+        for (tpl, expected) in cases {
+            assert_eq!(evaluate_condition(tpl, &ctx).unwrap(), expected, "{tpl}");
+        }
+    }
 
     #[test]
     fn test_render_simple_variable() {
