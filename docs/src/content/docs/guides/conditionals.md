@@ -281,7 +281,7 @@ tasks:
         when: "{{ check.output.status }}"
 ```
 
-Comparing against a missing **field** is not an error: `{{ check.output.status == 'ok' }}` renders `false` when `status` is missing (`check.output` itself must still exist), so the step is skipped rather than failed. A missing *parent* (`a.b.c` with `b` missing) is still an error — use `a.b?.c`. Template errors never contain rendered values; run `stroem run` locally for Tera's full report.
+Comparing against a missing **field** is not an error: `{{ check.output.status == 'ok' }}` renders `false` when `status` is missing (`check.output` itself must still exist), so the step is skipped rather than failed. A missing *parent* (`a.b.c` with `b` missing) is still an error — use `a.b?.c`. Template errors never contain rendered values; run `stroem validate` or `stroem run` locally for Tera's full report. Limits: `stroem validate` compiles only `when`, `for_each` and agent prompts (plus secrets and connections at load), and `stroem run` only runs tasks made entirely of local `type: script` steps.
 
 To handle undefined outputs gracefully, use Tera filters:
 

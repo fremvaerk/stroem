@@ -19,7 +19,10 @@ Templates render on the **server** (claim, cascade, dispatch, hooks, event
 sources) and in the **CLI** (`stroem run`, `stroem validate`) — never on
 workers. A job can be claimed on one server replica and cascaded on another,
 so **upgrade all server replicas together** (a rolling deploy with mixed
-versions can evaluate the same template two different ways). Workers do not
+versions can evaluate the same template two different ways). The Helm chart's
+default is a rolling update, so for the upgrade either scale the server to
+1 replica first, or switch the strategy to `Recreate`; otherwise accept that
+during the rolling window a job may render on either version. Workers do not
 need to be upgraded in lockstep for templating.
 
 ## Kept from Tera 1
@@ -36,12 +39,19 @@ working unchanged. You do not need to edit anything for these.
   `{{ state.cursor | default(value=0) }}` and `{% if state.cursor %}` still
   work on a task's first run, and `{{ not state }}` is still true. (Only
   `{{ state is defined }}` changes: it is now true even without a snapshot.)
+  Only one level (`state.x`) is covered: `state.a.b` with no snapshot still
+  errors — write `state?.a?.b` or use `default`.
 - **C3 — Tera 1 filters and functions restored**, ported from Tera 1's own
   implementation so output is byte-identical: `as_str`, `trim_start_matches`,
   `trim_end_matches`, `linebreaksbr`, `map(attribute=)`,
   `filter(attribute=, value=)`, `concat(with=)`, `slice(start=, end=)`,
   `date(format=, timezone=)` and `now(timestamp=, utc=)`. `json_encode` is
-  also available (sorted keys, same output as before).
+  also available (same output as before; keys of maps that come from the
+  context are sorted, map literals written in a template keep insertion
+  order). `indent` and `unique` are kept with Tera 1 semantics too:
+  `indent(prefix=…)` works as in Tera 1 (and `width=` also works), and
+  `unique` is case-insensitive by default, with `case_sensitive=` and
+  `attribute=` as in Tera 1.
 - **C4 — `when:` falsiness is decided on the rendered text.** Empty,
   `false`, `null`, `none` (case-insensitive) are false, as before — plus
   `[]`, `{}` and any number equal to zero. See [item 12](#12-when-treats-empty-arrays-empty-maps-and-numeric-zero-as-false)
@@ -179,13 +189,14 @@ when: "{{ input.cfg is map }}"
 ### 7. Stricter numeric and list filters
 
 - `int` and `float` **error** on unparsable input (Tera 1 returned `0`):
-  `{{ "abc" | int }}` fails. Guard with `{% if x is number %}` or validate
-  the input.
+  `{{ "abc" | int }}` fails, and the `default=` kwarg is gone — it is no
+  longer accepted. Guard with `{% if x is number %}` or validate the input.
+  Note `is number` is false for numeric strings such as `"42"`.
 - `round(method="common")` is invalid — use `round` without `method`, or
   `"ceil"` / `"floor"`.
 - `truncate` requires `length=`.
-- `first`, `last` and `nth` on an empty array give `none` (rendered as an
-  empty string) instead of an error.
+- `first`, `last` and `nth` on an empty array give `none` instead of Tera 1's
+  `""`.
 
 ```yaml
 # Before
@@ -203,8 +214,10 @@ input:
 Tera 2 checks every filter, test and function when the template is compiled
 — including in branches that never execute. A typo that used to hide in an
 untaken `{% if %}` now fails the template. `stroem validate` reports unknown
-references in `when`, `for_each` and agent `prompt` / `system_prompt`; the
-other template fields are checked when they render.
+references in `when`, `for_each` and agent `prompt` / `system_prompt` only
+(plus secrets and connections, which compile at workspace load); the other
+template fields — script, env, input, args, manifest, approval messages and
+hook input — are first compiled when a step is claimed.
 
 ```yaml
 # Fails at parse time even though the branch is never taken
@@ -222,7 +235,7 @@ position, and at most a type name or the failing filter's name:
 template rendering failed (line 1, column 12)
 undefined variable or field (line 1, column 4)
 filter `int` failed (line 1, column 14)
-a filter received a value of the wrong type (expected `f64`, got `string`)
+a filter received a value of the wrong type (expected f64, got string)
 filter `urlencode` is not available in Tera 2; see the upgrade guide
 ```
 
@@ -267,6 +280,9 @@ not restored: `urlencode`, `urlencode_strict`, `slugify`, `filesizeformat`,
 `striptags`, `addslashes`, and the `get_env` function. Using one fails with
 ``filter `urlencode` is not available in Tera 2; see the upgrade guide``.
 
+Also removed in Tera 2 and not restored: the `spaceless` filter, the
+`matching(...)` test (`is matching`) and the `get_random()` function.
+
 Do the transformation where it is cheap and explicit — in the script:
 
 ```yaml
@@ -307,13 +323,19 @@ Failed to render secret 'DB_PASSWORD': filter `int` failed (line 1, column 4)
 ```
 
 To see Tera's or `vals`' full output, run `stroem validate` or `stroem run`
-against the workspace locally.
+against the workspace locally. `vals` stderr is shown **only** there; the
+server logs no longer carry it. Local runs use the operator's own
+credentials, so a failure that only happens in the pod (for example a missing
+IAM permission) may not reproduce locally.
 
 ## Checklist
 
-1. Upgrade all server replicas together.
+1. Upgrade all server replicas together (scale to 1 or use `Recreate`).
 2. Run `stroem validate` on every workspace and fix the unknown-filter and
-   syntax errors (items 5, 6, 8, 11).
+   syntax errors (items 5, 6, 8, 11). It compiles only `when`, `for_each` and
+   agent prompts (plus secrets and connections at load); the other template
+   fields are first compiled at claim time. `stroem run` only runs tasks made
+   entirely of local `type: script` steps.
 3. Search your YAML for `| default` on nested paths, `{% if a.b %}` over
    optional parents, and `and` / `or` over optional input (items 1, 2).
 4. Search for `when:` over arrays or comparisons against fields that might be

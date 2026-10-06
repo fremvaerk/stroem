@@ -133,7 +133,7 @@ Errors about a value *after* rendering (for example a rendered connection name
 that does not resolve) name the input field, never the value. As a second
 layer, errors raised while rendering a step at claim time are also scrubbed
 against the known secret values **before** they are written. To see Tera's full
-report, run the workflow locally with `stroem run` or `stroem validate`.
+report, run the workflow locally with `stroem run` or `stroem validate`. Limits: `stroem validate` compiles only `when`, `for_each` and agent prompts (plus secrets and connections at load), and `stroem run` only runs tasks made entirely of local `type: script` steps.
 
 :::caution
 `{{ obj }}` renders a whole object. `"dsn={{ input.db }}"` with a

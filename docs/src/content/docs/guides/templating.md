@@ -160,7 +160,7 @@ Template errors are **value-free**: they carry a category, the position
 (`line L, column C`) and at most a type name or the failing filter's name —
 never the rendered value, a variable name or the template line — so they are
 safe in job logs, step errors and API responses. For the full Tera report run
-the same workspace locally with `stroem run` or `stroem validate`.
+the same workspace locally with `stroem run` or `stroem validate`. Limits: `stroem validate` compiles only `when`, `for_each` and agent prompts (plus secrets and connections at load), and `stroem run` only runs tasks made entirely of local `type: script` steps.
 
 The Tera 1 filters `urlencode`, `urlencode_strict`, `slugify`,
 `filesizeformat`, `striptags`, `addslashes` and `get_env` are not available;
