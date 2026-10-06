@@ -20,7 +20,14 @@ pub struct WorkspaceStateRow {
     pub git_ref: Option<String>,
 }
 
-const COLUMNS: &str = "id, workspace, written_by_task, job_id, storage_key, size_bytes, has_json, state_json, created_at, git_ref";
+/// The [`WorkspaceStateRow`] column list. A macro rather than a `const` so a
+/// query can `concat!` it into a `&'static str`, which sqlx accepts as SQL
+/// directly.
+macro_rules! columns {
+    () => {
+        "id, workspace, written_by_task, job_id, storage_key, size_bytes, has_json, state_json, created_at, git_ref"
+    };
+}
 
 pub struct WorkspaceStateRepo;
 
@@ -36,16 +43,22 @@ impl WorkspaceStateRepo {
         workspace: &str,
         git_ref: Option<&str>,
     ) -> Result<Option<WorkspaceStateRow>> {
-        let filter = if git_ref.is_some() {
-            "git_ref = $2"
+        let sql = if git_ref.is_some() {
+            concat!(
+                "SELECT ",
+                columns!(),
+                " FROM workspace_state WHERE workspace = $1 AND git_ref = $2 \
+                 ORDER BY created_at DESC, id DESC LIMIT 1"
+            )
         } else {
-            "git_ref IS NULL"
+            concat!(
+                "SELECT ",
+                columns!(),
+                " FROM workspace_state WHERE workspace = $1 AND git_ref IS NULL \
+                 ORDER BY created_at DESC, id DESC LIMIT 1"
+            )
         };
-        let sql = format!(
-            "SELECT {COLUMNS} FROM workspace_state WHERE workspace = $1 AND {filter} \
-             ORDER BY created_at DESC, id DESC LIMIT 1"
-        );
-        let mut q = sqlx::query_as::<_, WorkspaceStateRow>(&sql).bind(workspace);
+        let mut q = sqlx::query_as::<_, WorkspaceStateRow>(sql).bind(workspace);
         if let Some(r) = git_ref {
             q = q.bind(r);
         }
@@ -56,12 +69,15 @@ impl WorkspaceStateRepo {
 
     /// Get a specific snapshot by ID.
     pub async fn get(pool: &PgPool, id: Uuid) -> Result<Option<WorkspaceStateRow>> {
-        let sql = format!("SELECT {COLUMNS} FROM workspace_state WHERE id = $1");
-        sqlx::query_as::<_, WorkspaceStateRow>(&sql)
-            .bind(id)
-            .fetch_optional(pool)
-            .await
-            .context("Failed to get workspace state snapshot")
+        sqlx::query_as::<_, WorkspaceStateRow>(concat!(
+            "SELECT ",
+            columns!(),
+            " FROM workspace_state WHERE id = $1"
+        ))
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .context("Failed to get workspace state snapshot")
     }
 
     /// Insert into the unpinned partition.
@@ -196,15 +212,16 @@ impl WorkspaceStateRepo {
 
     /// List every snapshot of a workspace, all partitions, newest first.
     pub async fn list(pool: &PgPool, workspace: &str) -> Result<Vec<WorkspaceStateRow>> {
-        let sql = format!(
-            "SELECT {COLUMNS} FROM workspace_state WHERE workspace = $1 \
+        sqlx::query_as::<_, WorkspaceStateRow>(concat!(
+            "SELECT ",
+            columns!(),
+            " FROM workspace_state WHERE workspace = $1 \
              ORDER BY created_at DESC, id DESC"
-        );
-        sqlx::query_as::<_, WorkspaceStateRow>(&sql)
-            .bind(workspace)
-            .fetch_all(pool)
-            .await
-            .context("Failed to list workspace state snapshots")
+        ))
+        .bind(workspace)
+        .fetch_all(pool)
+        .await
+        .context("Failed to list workspace state snapshots")
     }
 
     /// [`Self::prune_for_ref`] on the unpinned partition.

@@ -1,11 +1,17 @@
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use serde_json::Value as JsonValue;
-use sqlx::PgPool;
+use sqlx::{AssertSqlSafe, PgPool};
 use stroem_common::models::job::StepStatus;
 use uuid::Uuid;
 
-const STEP_COLUMNS: &str = "job_id, step_name, action_name, action_type, action_image, action_spec, input, output, status, worker_id, started_at, completed_at, error_message, required_ability, required_tags, runner, timeout_secs, when_condition, for_each_expr, loop_source, loop_index, loop_total, loop_item, agent_state, suspended_at, retry_attempt, max_retries, retry_backoff_secs, retry_strategy, retry_jitter, retry_history, retry_at, action_workspace, action_revision, carried_over, skip_reason, action_ref, task_workspace, task_ref, task_revision, pin_releases";
+/// The [`JobStepRow`] column list. A macro rather than a `const` so a query can
+/// `concat!` it into a `&'static str`, which sqlx accepts as SQL directly.
+macro_rules! step_columns {
+    () => {
+        "job_id, step_name, action_name, action_type, action_image, action_spec, input, output, status, worker_id, started_at, completed_at, error_message, required_ability, required_tags, runner, timeout_secs, when_condition, for_each_expr, loop_source, loop_index, loop_total, loop_item, agent_state, suspended_at, retry_attempt, max_retries, retry_backoff_secs, retry_strategy, retry_jitter, retry_history, retry_at, action_workspace, action_revision, carried_over, skip_reason, action_ref, task_workspace, task_ref, task_revision, pin_releases"
+    };
+}
 
 /// Job step row from database
 #[derive(Debug, Clone, Default, sqlx::FromRow)]
@@ -397,7 +403,8 @@ impl JobStepRepo {
             });
         }
 
-        let mut q = sqlx::query(&query);
+        // AssertSqlSafe: only constant fragments and `$n` placeholders are interpolated; every value is bound.
+        let mut q = sqlx::query(AssertSqlSafe(query));
         for row in rows {
             q = q
                 .bind(row.job_id)
@@ -641,7 +648,7 @@ impl JobStepRepo {
             .context("Failed to serialize worker capabilities")?;
         let worker_tags_json =
             serde_json::to_value(worker_tags).context("Failed to serialize worker tags")?;
-        let step = sqlx::query_as::<_, JobStepRow>(&format!(
+        let step = sqlx::query_as::<_, JobStepRow>(concat!(
             r#"
             UPDATE job_step SET status = 'running', worker_id = $4, started_at = NOW()
             WHERE (job_id, step_name) = (
@@ -658,9 +665,8 @@ impl JobStepRepo {
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
             )
-            RETURNING {}
-            "#,
-            STEP_COLUMNS
+            RETURNING "#,
+            step_columns!()
         ))
         .bind(worker_capabilities_json)
         .bind(worker_tags_json)
@@ -675,9 +681,10 @@ impl JobStepRepo {
 
     /// Get all steps for a job
     pub async fn get_steps_for_job(pool: &PgPool, job_id: Uuid) -> Result<Vec<JobStepRow>> {
-        let steps = sqlx::query_as::<_, JobStepRow>(&format!(
-            "SELECT {} FROM job_step WHERE job_id = $1 ORDER BY step_name",
-            STEP_COLUMNS
+        let steps = sqlx::query_as::<_, JobStepRow>(concat!(
+            "SELECT ",
+            step_columns!(),
+            " FROM job_step WHERE job_id = $1 ORDER BY step_name"
         ))
         .bind(job_id)
         .fetch_all(pool)
@@ -821,9 +828,10 @@ impl JobStepRepo {
     ) -> Result<FailOutcome> {
         let mut tx = pool.begin().await.context("begin fail_or_retry")?;
 
-        let row = sqlx::query_as::<_, JobStepRow>(&format!(
-            "SELECT {} FROM job_step WHERE job_id = $1 AND step_name = $2 FOR UPDATE",
-            STEP_COLUMNS
+        let row = sqlx::query_as::<_, JobStepRow>(concat!(
+            "SELECT ",
+            step_columns!(),
+            " FROM job_step WHERE job_id = $1 AND step_name = $2 FOR UPDATE"
         ))
         .bind(job_id)
         .bind(step_name)
@@ -1021,9 +1029,10 @@ impl JobStepRepo {
         job_id: Uuid,
         step_name: &str,
     ) -> Result<Option<JobStepRow>> {
-        let step = sqlx::query_as::<_, JobStepRow>(&format!(
-            "SELECT {} FROM job_step WHERE job_id = $1 AND step_name = $2",
-            STEP_COLUMNS,
+        let step = sqlx::query_as::<_, JobStepRow>(concat!(
+            "SELECT ",
+            step_columns!(),
+            " FROM job_step WHERE job_id = $1 AND step_name = $2"
         ))
         .bind(job_id)
         .bind(step_name)
@@ -1036,9 +1045,10 @@ impl JobStepRepo {
 
     /// Get ready steps for a job (for orchestrator to check)
     pub async fn get_ready_steps(pool: &PgPool, job_id: Uuid) -> Result<Vec<JobStepRow>> {
-        let steps = sqlx::query_as::<_, JobStepRow>(&format!(
-            "SELECT {} FROM job_step WHERE job_id = $1 AND status = 'ready' ORDER BY step_name",
-            STEP_COLUMNS
+        let steps = sqlx::query_as::<_, JobStepRow>(concat!(
+            "SELECT ",
+            step_columns!(),
+            " FROM job_step WHERE job_id = $1 AND status = 'ready' ORDER BY step_name"
         ))
         .bind(job_id)
         .fetch_all(pool)
@@ -1232,9 +1242,10 @@ impl JobStepRepo {
 
     /// Get currently running steps for a job (for active cancellation/kill).
     pub async fn get_running_steps(pool: &PgPool, job_id: Uuid) -> Result<Vec<JobStepRow>> {
-        let steps = sqlx::query_as::<_, JobStepRow>(&format!(
-            "SELECT {} FROM job_step WHERE job_id = $1 AND status = 'running'",
-            STEP_COLUMNS
+        let steps = sqlx::query_as::<_, JobStepRow>(concat!(
+            "SELECT ",
+            step_columns!(),
+            " FROM job_step WHERE job_id = $1 AND status = 'running'"
         ))
         .bind(job_id)
         .fetch_all(pool)
@@ -1525,7 +1536,6 @@ impl JobStepRepo {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
 
     /// Verify the `Result<bool>` contract of `approve_step`, and document that
@@ -1553,13 +1563,13 @@ mod tests {
         );
     }
 
-    /// Verify the SQL columns constant includes `suspended_at` so that
+    /// Verify the SQL column list includes `suspended_at` so that
     /// `get_steps_for_job` returns the field used by the hooks diff logic.
     #[test]
     fn test_step_columns_includes_suspended_at() {
         assert!(
-            STEP_COLUMNS.contains("suspended_at"),
-            "STEP_COLUMNS must include suspended_at for suspended hook detection"
+            step_columns!().contains("suspended_at"),
+            "step_columns! must include suspended_at for suspended hook detection"
         );
     }
 

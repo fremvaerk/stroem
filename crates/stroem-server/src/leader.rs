@@ -157,8 +157,8 @@ async fn try_acquire(db_url: &str) -> Result<Option<PgConnection>> {
     // Parse URL and annotate the connection with an application_name so
     // pg_stat_activity rows are easy to identify.
     //
-    // sqlx 0.8's `PgConnectOptions` doesn't expose a per-options connect
-    // timeout directly, so we wrap the entire attempt in `tokio::time::timeout`
+    // sqlx's `PgConnectOptions` (0.8, 0.9) has no per-options connect
+    // timeout, so we wrap the entire attempt in `tokio::time::timeout`
     // (5 s). This ensures the leader loop fails fast during an RDS Multi-AZ
     // failover or network partition instead of blocking for the OS TCP timeout
     // (~2 min).

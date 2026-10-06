@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use sqlx::postgres::PgPoolOptions;
-use sqlx::PgPool;
+use sqlx::{AssertSqlSafe, PgPool};
 use testcontainers::core::{ImageExt, IntoContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, ContainerRequest, GenericImage};
@@ -99,9 +99,10 @@ pub async fn test_db() -> TestDb {
         .connect(&format!("{admin_url}/postgres"))
         .await
         .expect("connect to postgres admin database");
-    sqlx::query(&format!(
+    // AssertSqlSafe: a database name cannot be a bind parameter; `db_name` is `t_` + a generated UUID.
+    sqlx::query(AssertSqlSafe(format!(
         r#"CREATE DATABASE "{db_name}" TEMPLATE stroem_template"#
-    ))
+    )))
     .execute(&admin_pool)
     .await
     .expect("create isolated test database");

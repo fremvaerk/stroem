@@ -61,7 +61,7 @@ async fn cr_stalled(pool: &sqlx::PgPool) -> Result<Vec<Uuid>> {
         .collect())
 }
 
-async fn cr_jobs_where(pool: &sqlx::PgPool, sql: &str, id: Uuid) -> Vec<JobRow> {
+async fn cr_jobs_where(pool: &sqlx::PgPool, sql: &'static str, id: Uuid) -> Vec<JobRow> {
     let ids: Vec<Uuid> = sqlx::query_scalar(sql)
         .bind(id)
         .fetch_all(pool)

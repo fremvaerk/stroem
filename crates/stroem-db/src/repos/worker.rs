@@ -4,8 +4,13 @@ use serde_json::Value as JsonValue;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-const WORKER_COLUMNS: &str =
-    "worker_id, name, capabilities, tags, exclusive, last_heartbeat, registered_at, status, version";
+/// The [`WorkerRow`] column list. A macro rather than a `const` so a query can
+/// `concat!` it into a `&'static str`, which sqlx accepts as SQL directly.
+macro_rules! worker_columns {
+    () => {
+        "worker_id, name, capabilities, tags, exclusive, last_heartbeat, registered_at, status, version"
+    };
+}
 
 /// Worker row from database
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -106,9 +111,10 @@ impl WorkerRepo {
 
     /// Get worker by ID
     pub async fn get(pool: &PgPool, worker_id: Uuid) -> Result<Option<WorkerRow>> {
-        let worker = sqlx::query_as::<_, WorkerRow>(&format!(
-            "SELECT {} FROM worker WHERE worker_id = $1",
-            WORKER_COLUMNS
+        let worker = sqlx::query_as::<_, WorkerRow>(concat!(
+            "SELECT ",
+            worker_columns!(),
+            " FROM worker WHERE worker_id = $1"
         ))
         .bind(worker_id)
         .fetch_optional(pool)
@@ -146,9 +152,10 @@ impl WorkerRepo {
 
     /// List workers ordered by status (active first), then by registered_at descending
     pub async fn list(pool: &PgPool, limit: i64, offset: i64) -> Result<Vec<WorkerRow>> {
-        let workers = sqlx::query_as::<_, WorkerRow>(&format!(
-            "SELECT {} FROM worker ORDER BY status ASC, registered_at DESC LIMIT $1 OFFSET $2",
-            WORKER_COLUMNS
+        let workers = sqlx::query_as::<_, WorkerRow>(concat!(
+            "SELECT ",
+            worker_columns!(),
+            " FROM worker ORDER BY status ASC, registered_at DESC LIMIT $1 OFFSET $2"
         ))
         .bind(limit)
         .bind(offset)
