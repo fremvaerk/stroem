@@ -83,7 +83,7 @@ pub fn render_template_with(
     let slot = Arc::new(Mutex::new(None));
     let tera = crate::tera_engine::render_engine(*budget, slot.clone());
     let ctx = tera::Context::from_serialize(context)
-        .map_err(|e| anyhow::Error::new(TemplateError::from_tera(&e, None, None)))
+        .map_err(|e| anyhow::Error::new(TemplateError::context_conversion(&e)))
         .context("Failed to convert JSON to Tera context")?;
     tera.render_str(template, &ctx, false).map_err(|e| {
         let vals = slot.lock().unwrap_or_else(|p| p.into_inner()).take();

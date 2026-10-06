@@ -21,10 +21,12 @@ use uuid::Uuid;
 pub const FRAMEWORK_KEYS: [&str; 6] = ["input", "secret", "state", "global_state", "job", "each"];
 
 /// Tera 2 keywords: a step with one of these (sanitized) names cannot be
-/// referenced in a template (spec 2026-10-06 § 3.8).
-pub const TERA_KEYWORDS: [&str; 15] = [
-    "none", "null", "self", "loop", "break", "continue", "true", "false", "and", "or", "not", "is",
-    "in", "if", "else",
+/// referenced in a template (spec 2026-10-06 § 3.8). tera-2.4.0
+/// `parsing/parser.rs` `RESERVED_NAMES` (incl. the capitalised `True`,
+/// `False`, `None` literals) plus `if` / `else` of the inline if-expression.
+pub const TERA_KEYWORDS: [&str; 18] = [
+    "none", "None", "null", "self", "loop", "break", "continue", "true", "True", "false", "False",
+    "and", "or", "not", "is", "in", "if", "else",
 ];
 
 /// One resolved snapshot row. `json` is the persisted sidecar copy
@@ -836,14 +838,42 @@ mod tests {
             job_revision: None,
             job_ref: None,
         };
-        let rows = vec![row("none", "completed", Some(json!("x")))];
+        let rows = vec![
+            row("none", "completed", Some(json!("x"))),
+            row("True", "completed", Some(json!("x"))),
+            row("False", "completed", Some(json!("x"))),
+            row("None", "completed", Some(json!("x"))),
+        ];
         let v = build(&job, &views(&rows), None, Scope::StepInput);
         let lines = v.log_lines();
-        assert!(
-            lines.iter().any(|l| l
-                == "[render] step 'none' is a Tera keyword and cannot be referenced in templates"),
-            "{lines:?}"
-        );
+        for step in ["none", "True", "False", "None"] {
+            let want = format!(
+                "[render] step '{step}' is a Tera keyword and cannot be referenced in templates"
+            );
+            assert!(lines.contains(&want), "{step}: {lines:?}");
+        }
+    }
+
+    /// Every name Tera 2 reserves (tera-2.4.0 `parsing/parser.rs`
+    /// `RESERVED_NAMES`) is a keyword here: a step named after one cannot
+    /// be referenced, as Tera 2 itself shows.
+    #[test]
+    fn tera_keywords_cover_tera_2_reserved_names() {
+        for name in [
+            "true", "True", "false", "False", "loop", "self", "and", "or", "not", "is", "in",
+            "continue", "break", "none", "None", "null",
+        ] {
+            assert!(TERA_KEYWORDS.contains(&name), "{name}");
+        }
+        let ctx = json!({"True": {"output": "x"}, "None": {"output": "x"}});
+        for name in ["True", "None"] {
+            let rendered =
+                stroem_common::template::render_template(&format!("{{{{ {name}.output }}}}"), &ctx);
+            assert!(
+                rendered.as_deref().map_or(true, |r| r != "x"),
+                "{name} must not be addressable: {rendered:?}"
+            );
+        }
     }
 
     #[test]

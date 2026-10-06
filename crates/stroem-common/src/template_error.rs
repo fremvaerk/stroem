@@ -84,6 +84,18 @@ impl TemplateError {
         }
     }
 
+    /// A `tera::Context::from_serialize` failure: the context, not the
+    /// template, is at fault — nothing was compiled yet.
+    pub(crate) fn context_conversion(err: &tera::Error) -> Self {
+        TemplateError {
+            message: "template context could not be prepared".to_string(),
+            line: None,
+            column: None,
+            vals: None,
+            raw: err.to_string(),
+        }
+    }
+
     /// The value-free message, without position.
     pub fn message(&self) -> &str {
         &self.message
@@ -225,6 +237,8 @@ const TERA_CONSTANT_MESSAGES: &[&str] = &[
     "Slice end is undefined",
     "Not a valid key type",
     "Tried to escape an undefined value",
+    "Tried to render a variable that is undefined",
+    "Cannot slice an undefined value",
     "Function `range` was called with arguments that overflow i128",
 ];
 
@@ -603,11 +617,30 @@ mod tests {
                 "{tpl}: {text}"
             );
         }
-        // A non-map context is a Context conversion failure (Msg).
-        let err = render_template("{{ x }}", &json!([1, 2])).unwrap_err();
+        // A non-map context is a Context conversion failure (Msg): the
+        // context is at fault, nothing was compiled.
+        let err =
+            render_template(&format!("{{{{ x }}}} {SOURCE_CANARY}"), &json!([1, 2])).unwrap_err();
         assert_eq!(
             template_error(&err).message(),
-            "template could not be compiled"
+            "template context could not be prepared"
         );
+        let text = format!("{err:#} {err:?}");
+        assert!(!text.contains(SOURCE_CANARY), "{text}");
+        assert!(!text.contains("could not be compiled"), "{text}");
+    }
+
+    /// Drift tests for the placeholder-free Tera 2 messages kept verbatim
+    /// (tera-2.4.0 src/vm/interpreter.rs): a wording change upstream fails
+    /// here instead of silently degrading to the category.
+    #[test]
+    fn undefined_render_and_slice_messages_are_kept_verbatim() {
+        let m = msg("{{ name?.unknown }}", json!({"name": "Bob"}));
+        assert_eq!(
+            m,
+            "Tried to render a variable that is undefined (line 1, column 10)"
+        );
+        let m = msg("{{ missing[:1] }}", json!({}));
+        assert_eq!(m, "Cannot slice an undefined value (line 1, column 4)");
     }
 }
