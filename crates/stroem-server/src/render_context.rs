@@ -20,6 +20,13 @@ use uuid::Uuid;
 /// equals one of these collides with it (spec §3.3 rule 1, §6).
 pub const FRAMEWORK_KEYS: [&str; 6] = ["input", "secret", "state", "global_state", "job", "each"];
 
+/// Tera 2 keywords: a step with one of these (sanitized) names cannot be
+/// referenced in a template (spec 2026-10-06 § 3.8).
+pub const TERA_KEYWORDS: [&str; 15] = [
+    "none", "null", "self", "loop", "break", "continue", "true", "false", "and", "or", "not", "is",
+    "in", "if", "else",
+];
+
 /// One resolved snapshot row. `json` is the persisted sidecar copy
 /// (migration 047); `None` when the row has none, could not be parsed, or
 /// predates 047. `storage_key`/`has_json` are what the worker needs to
@@ -213,10 +220,14 @@ impl RenderContext {
         self.collisions
             .iter()
             .map(|c| {
-                format!(
-                    "[render] step '{}' shadows template variable '{}'",
-                    c.step, c.key
-                )
+                if TERA_KEYWORDS.contains(&c.key) {
+                    format!("[render] step '{}' is a Tera keyword and cannot be referenced in templates", c.step)
+                } else {
+                    format!(
+                        "[render] step '{}' shadows template variable '{}'",
+                        c.step, c.key
+                    )
+                }
             })
             .collect()
     }
@@ -270,12 +281,17 @@ fn build_entries(
         "secret",
         serde_json::to_value(secrets).unwrap_or_else(|_| json!({})),
     );
-    if let Some(v) = job.snapshots.task.as_ref().and_then(|s| s.json.as_ref()) {
-        upsert(&mut ctx, "state", v.clone());
-    }
-    if let Some(v) = job.snapshots.global.as_ref().and_then(|s| s.json.as_ref()) {
-        upsert(&mut ctx, "global_state", v.clone());
-    }
+    // C2 (spec 2026-10-06 § 3.6): `null`, not absent, when there is no
+    // snapshot — Tera 2 errors on `state.x | default(..)` when `state` is
+    // undefined but not when it is null.
+    let task_state = job.snapshots.task.as_ref().and_then(|s| s.json.clone());
+    upsert(&mut ctx, "state", task_state.unwrap_or(Value::Null));
+    let global_state = job.snapshots.global.as_ref().and_then(|s| s.json.clone());
+    upsert(
+        &mut ctx,
+        "global_state",
+        global_state.unwrap_or(Value::Null),
+    );
     // Before step outputs so a step literally named `job` shadows it.
     upsert(&mut ctx, "job", job_context(job.job_revision, job.job_ref));
 
@@ -313,6 +329,12 @@ fn build_entries(
         }
         let name = s.step_name.replace('-', "_");
         if let Some(key) = FRAMEWORK_KEYS.iter().find(|k| **k == name) {
+            collisions.push(Collision {
+                step: s.step_name.to_string(),
+                key,
+            });
+        }
+        if let Some(key) = TERA_KEYWORDS.iter().find(|k| **k == name) {
             collisions.push(Collision {
                 step: s.step_name.to_string(),
                 key,
@@ -758,7 +780,7 @@ mod tests {
     }
 
     #[test]
-    fn secret_always_present_state_only_when_json_present() {
+    fn secret_always_present_state_null_without_json() {
         let caller = secrets(&[]);
         let sn = snaps(None, Some(json!({"g": 1})));
         let job = JobContext {
@@ -772,8 +794,56 @@ mod tests {
         };
         let v = build(&job, &[], None, Scope::StepInput);
         assert_eq!(v.as_value()["secret"], json!({}));
-        assert!(v.as_value().get("state").is_none());
+        assert_eq!(v.as_value().get("state"), Some(&Value::Null));
         assert_eq!(v.as_value()["global_state"]["g"], 1);
+    }
+
+    #[test]
+    fn absent_snapshot_renders_state_as_null() {
+        let caller = secrets(&[]);
+        let sn = Snapshots::default();
+        let job = JobContext {
+            job_id: uuid::Uuid::nil(),
+            job_input: None,
+            caller_secrets: &caller,
+            owner_secrets: &caller,
+            snapshots: &sn,
+            job_revision: None,
+            job_ref: None,
+        };
+        let ctx = build(&job, &[], None, Scope::StepInput);
+        let v = ctx.as_value();
+        let r = |t: &str| stroem_common::template::render_template(t, v).unwrap();
+        assert_eq!(r("{{ state.cursor | default(value=0) }}"), "0");
+        assert_eq!(
+            r("{{ global_state.last | default(value='never') }}"),
+            "never"
+        );
+        assert_eq!(r("{% if state.x %}a{% else %}b{% endif %}"), "b");
+        assert_eq!(r("{{ not state }}"), "true");
+    }
+
+    #[test]
+    fn step_named_after_a_tera_keyword_is_reported() {
+        let caller = secrets(&[]);
+        let sn = Snapshots::default();
+        let job = JobContext {
+            job_id: uuid::Uuid::nil(),
+            job_input: None,
+            caller_secrets: &caller,
+            owner_secrets: &caller,
+            snapshots: &sn,
+            job_revision: None,
+            job_ref: None,
+        };
+        let rows = vec![row("none", "completed", Some(json!("x")))];
+        let v = build(&job, &views(&rows), None, Scope::StepInput);
+        let lines = v.log_lines();
+        assert!(
+            lines.iter().any(|l| l
+                == "[render] step 'none' is a Tera keyword and cannot be referenced in templates"),
+            "{lines:?}"
+        );
     }
 
     #[test]
