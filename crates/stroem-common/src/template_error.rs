@@ -42,25 +42,38 @@ impl TemplateError {
         src: Option<&str>,
         vals: Option<ValsFailure>,
     ) -> Self {
-        let _ = src; // used by Task 2's filter-name enrichment
-        let (category, span) = match err.kind() {
-            tera::ErrorKind::SyntaxError(r) => ("template syntax error", Some(r.span().clone())),
+        let (category, span, enriched) = match err.kind() {
+            tera::ErrorKind::SyntaxError(r) => (
+                "template syntax error",
+                Some(r.span().clone()),
+                enrich(r.message()),
+            ),
             tera::ErrorKind::RenderingError(r) => {
-                ("template rendering failed", Some(r.span().clone()))
+                let mut enriched = enrich(r.message());
+                if enriched.is_none() {
+                    if let Some(f) = failing_filter(src, r.span()) {
+                        enriched = Some(format!("filter `{f}` failed"));
+                    }
+                }
+                (
+                    "template rendering failed",
+                    Some(r.span().clone()),
+                    enriched,
+                )
             }
-            tera::ErrorKind::Msg(text) => (msg_category(text), None),
+            tera::ErrorKind::Msg(text) => (msg_category(text), None, removed_builtin_hint(text)),
             tera::ErrorKind::InvalidArgument { .. } => {
-                ("a filter received a value of the wrong type", None)
+                ("a filter received a value of the wrong type", None, None)
             }
             tera::ErrorKind::MissingArgument { .. } => {
-                ("a filter call is missing a required argument", None)
+                ("a filter call is missing a required argument", None, None)
             }
-            tera::ErrorKind::OutOfRangeArgument { .. } => ("a number is out of range", None),
-            _ => ("template rendering failed", None),
+            tera::ErrorKind::OutOfRangeArgument { .. } => ("a number is out of range", None, None),
+            _ => ("template rendering failed", None, None),
         };
         let message = match &vals {
             Some(v) => vals_category(v.kind),
-            None => category.to_string(),
+            None => enriched.unwrap_or_else(|| category.to_string()),
         };
         TemplateError {
             message,
@@ -113,6 +126,212 @@ fn msg_category(text: &str) -> &'static str {
     } else {
         "template could not be compiled"
     }
+}
+
+/// Every filter, test and function name Tera 1.20 shipped (tera-1.20.1
+/// src/tera.rs `register_builtin_*`). A name in this list is public
+/// vocabulary, never a value.
+pub const TERA1_BUILTIN_NAMES: &[&str] = &[
+    "upper",
+    "lower",
+    "trim",
+    "trim_start",
+    "trim_end",
+    "trim_start_matches",
+    "trim_end_matches",
+    "truncate",
+    "wordcount",
+    "replace",
+    "capitalize",
+    "title",
+    "linebreaksbr",
+    "indent",
+    "striptags",
+    "spaceless",
+    "urlencode",
+    "urlencode_strict",
+    "escape",
+    "escape_xml",
+    "slugify",
+    "addslashes",
+    "split",
+    "int",
+    "float",
+    "first",
+    "last",
+    "nth",
+    "join",
+    "sort",
+    "unique",
+    "slice",
+    "group_by",
+    "filter",
+    "map",
+    "concat",
+    "abs",
+    "pluralize",
+    "round",
+    "filesizeformat",
+    "length",
+    "reverse",
+    "date",
+    "json_encode",
+    "as_str",
+    "get",
+    "default",
+    "safe",
+    "defined",
+    "undefined",
+    "odd",
+    "even",
+    "string",
+    "number",
+    "divisibleby",
+    "iterable",
+    "object",
+    "starting_with",
+    "ending_with",
+    "containing",
+    "matching",
+    "range",
+    "now",
+    "throw",
+    "get_random",
+    "get_env",
+];
+
+/// Tera 2's `Value::name()` strings (tera-2.4.0 src/value/mod.rs).
+const TERA_TYPE_NAMES: &[&str] = &[
+    "undefined",
+    "none",
+    "bool",
+    "u64",
+    "i64",
+    "f64",
+    "u128",
+    "i128",
+    "array",
+    "bytes",
+    "string",
+    "map/struct",
+];
+
+/// Tera 2 messages with no placeholder: safe to show verbatim.
+const TERA_CONSTANT_MESSAGES: &[&str] = &[
+    "Cannot divide by 0",
+    "Slicing step cannot be 0",
+    "Slice step is undefined",
+    "Slice start is undefined",
+    "Slice end is undefined",
+    "Not a valid key type",
+    "Tried to escape an undefined value",
+    "Function `range` was called with arguments that overflow i128",
+];
+
+/// Names our engine registers as filters: Tera 2 builtins
+/// (tera-2.4.0 src/tera.rs `register_builtin_filters`) + ours.
+pub(crate) const REGISTERED_FILTERS: &[&str] = &[
+    "safe",
+    "default",
+    "upper",
+    "lower",
+    "wordcount",
+    "escape",
+    "escape_html",
+    "escape_xml",
+    "newlines_to_br",
+    "pluralize",
+    "trim",
+    "trim_start",
+    "trim_end",
+    "replace",
+    "capitalize",
+    "title",
+    "truncate",
+    "indent",
+    "str",
+    "int",
+    "float",
+    "length",
+    "reverse",
+    "split",
+    "abs",
+    "round",
+    "first",
+    "last",
+    "nth",
+    "join",
+    "sort",
+    "unique",
+    "get",
+    "values",
+    "keys",
+    "pairs",
+    "group_by",
+    "json_encode",
+    "vals",
+];
+
+/// Value-free detail for a Tera message: fixed text or closed-set members
+/// only. A filter error can forge any message shape (`throw`), so nothing
+/// free-form is ever captured.
+fn enrich(tera_message: &str) -> Option<String> {
+    let m = tera_message.trim();
+    if TERA_CONSTANT_MESSAGES.contains(&m) {
+        return Some(m.to_string());
+    }
+    if (m.starts_with("Variable `")
+        && (m.contains("` is not defined") || m.contains("` exists but its value is undefined")))
+        || (m.starts_with("Field `") && m.contains("` is not defined"))
+    {
+        return Some("undefined variable or field".to_string());
+    }
+    if let Some(rest) = m.strip_prefix("Invalid type for the value, expected `") {
+        let mut parts = rest.split('`');
+        let expected = parts.next()?;
+        let actual = parts.nth(1)?;
+        if TERA_TYPE_NAMES.contains(&expected) && TERA_TYPE_NAMES.contains(&actual) {
+            return Some(format!(
+                "a filter received a value of the wrong type (expected {expected}, got {actual})"
+            ));
+        }
+        return Some("a filter received a value of the wrong type".to_string());
+    }
+    None
+}
+
+/// `filter `name` is not available in Tera 2…` when an unknown-reference
+/// report names a Tera 1 builtin; `None` otherwise. The emitted name is the
+/// closed-list member, never the captured text.
+fn removed_builtin_hint(msg_text: &str) -> Option<String> {
+    let line = msg_text.lines().next()?;
+    let first = line.strip_prefix("error: ").unwrap_or(line);
+    for (prefix, kind) in [
+        ("Unknown filter `", "filter"),
+        ("Unknown test `", "test"),
+        ("Unknown function `", "function"),
+    ] {
+        if let Some(rest) = first.strip_prefix(prefix) {
+            let name = rest.split('`').next()?;
+            let known = TERA1_BUILTIN_NAMES.iter().copied().find(|n| *n == name)?;
+            return Some(format!(
+                "{kind} `{known}` is not available in Tera 2; see the upgrade guide"
+            ));
+        }
+    }
+    None
+}
+
+/// Best effort: a registered filter name that appears as `| name` inside the
+/// error's span text. Can only ever return a member of REGISTERED_FILTERS.
+fn failing_filter(src: Option<&str>, span: &tera::Span) -> Option<&'static str> {
+    let text = src?.get(span.range.clone())?;
+    let after_pipe = text.rsplit('|').next()?.trim_start();
+    let ident: String = after_pipe
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+    REGISTERED_FILTERS.iter().copied().find(|f| *f == ident)
 }
 
 fn vals_category(kind: ValsFailureKind) -> String {
@@ -173,7 +392,12 @@ mod tests {
             assert!(!text.contains(&CONTEXT_CANARY.to_uppercase()), "{text}");
             assert!(!text.contains(SOURCE_CANARY), "{text}");
         }
-        assert_eq!(te.message(), "template rendering failed");
+        assert!(
+            te.message() == "template rendering failed"
+                || te.message().starts_with("filter `int` failed"),
+            "{}",
+            te.message()
+        );
         assert!(te.to_string().contains("(line 1, column"), "{te}");
     }
 
@@ -207,6 +431,121 @@ mod tests {
         assert_eq!(
             template_error(&err).message(),
             "{% block %} is not supported"
+        );
+    }
+
+    fn msg(tpl: &str, ctx: serde_json::Value) -> String {
+        let err = render_template(tpl, &ctx).unwrap_err();
+        template_error(&err).to_string()
+    }
+
+    #[test]
+    fn undefined_variable_is_categorised_without_the_name() {
+        let m = msg("{{ nosuchvar_9c1 }}", json!({}));
+        assert!(m.starts_with("undefined variable or field"), "{m}");
+        assert!(!m.contains("nosuchvar_9c1"), "{m}");
+        let m = msg("{{ input.nosuchfield_9c1 }}", json!({"input": {"a": 1}}));
+        assert!(m.starts_with("undefined variable or field"), "{m}");
+        assert!(!m.contains("nosuchfield_9c1"), "{m}");
+    }
+
+    #[test]
+    fn type_mismatch_keeps_closed_set_type_names() {
+        let m = msg("{{ 'abc' | round }}", json!({}));
+        assert!(
+            m.starts_with("a filter received a value of the wrong type (expected"),
+            "{m}"
+        );
+    }
+
+    #[test]
+    fn constant_tera_message_is_kept_verbatim() {
+        let m = msg("{{ 1 / 0 }}", json!({}));
+        assert!(m.starts_with("Cannot divide by 0"), "{m}");
+    }
+
+    #[test]
+    fn removed_tera1_filter_is_named_with_a_hint() {
+        let err = render_template("{{ x | urlencode }}", &json!({"x": "a"})).unwrap_err();
+        assert_eq!(
+            template_error(&err).message(),
+            "filter `urlencode` is not available in Tera 2; see the upgrade guide"
+        );
+    }
+
+    #[test]
+    fn forged_throw_message_selects_fixed_text_only() {
+        let ctx = json!({"secret": {"X": format!("Variable `{CONTEXT_CANARY}` is not defined")}});
+        let err = render_template("{{ throw(message=secret.X) }}", &ctx).unwrap_err();
+        let text = format!("{err:#} {err:?}");
+        assert!(!text.contains(CONTEXT_CANARY), "{text}");
+    }
+
+    /// Value-bearing rendering cases: Tera's raw MESSAGE (not the report,
+    /// which contains the source line) carries the context canary — the
+    /// fixture is real — and our text carries nothing.
+    #[test]
+    fn corpus_value_bearing_cases_are_value_free() {
+        let ctx = json!({"secret": {"X": CONTEXT_CANARY, "N": "0x1f-not-a-number"}});
+        let cases = [
+            "{{ 1 | round(method=secret.X) }}",
+            "{{ {} | get(key=secret.X) }}",
+            "{{ secret.X | upper | int }}",
+            "{{ secret.X | float }}",
+            "{{ secret.N | int(base=16) }}",
+            "{{ throw(message=secret.X) }}",
+        ];
+        for tpl in cases {
+            let tpl = format!("{tpl} {SOURCE_CANARY}");
+            let err = render_template(&tpl, &ctx).unwrap_err();
+            let te = template_error(&err);
+            let raw = te.raw_detail();
+            assert!(
+                raw.contains(CONTEXT_CANARY)
+                    || raw.contains(&CONTEXT_CANARY.to_uppercase())
+                    || raw.contains("1f-not-a-number"),
+                "fixture not real for {tpl}: {raw}"
+            );
+            for text in [format!("{err:#}"), format!("{err:?}"), te.to_string()] {
+                for needle in [
+                    CONTEXT_CANARY.to_string(),
+                    CONTEXT_CANARY.to_uppercase(),
+                    SOURCE_CANARY.to_string(),
+                    "1f-not-a-number".to_string(),
+                ] {
+                    assert!(!text.contains(&needle), "{tpl}: {text}");
+                }
+            }
+        }
+    }
+
+    /// Cases with no ReportError or no context evaluation: exact fallback.
+    #[test]
+    fn corpus_compile_and_conversion_cases_use_fixed_text() {
+        let cases: [(&str, &str); 4] = [
+            ("{{ 'a' ~ }}", "template syntax error"),
+            ("{{ x | srccanary91be }}", "template uses an unknown filter"),
+            (
+                "{% if x is srccanary91be %}{% endif %}",
+                "template uses an unknown test",
+            ),
+            ("{{ srccanary91be() }}", "template uses an unknown function"),
+        ];
+        for (tpl, expected) in cases {
+            let err =
+                render_template(&format!("{tpl} {SOURCE_CANARY}"), &json!({"x": 1})).unwrap_err();
+            assert_eq!(template_error(&err).message(), expected, "{tpl}");
+            let text = format!("{err:#} {err:?}");
+            assert!(
+                !text.contains("srccanary91be") && !text.contains(SOURCE_CANARY),
+                "{tpl}: {text}"
+            );
+        }
+        // A non-map context is a Context conversion failure (Msg).
+        let err = render_template("{{ x }}", &json!([1, 2])).unwrap_err();
+        assert_eq!(
+            template_error(&err).message(),
+            "template could not be compiled"
         );
     }
 }
