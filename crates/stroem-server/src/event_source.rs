@@ -20,6 +20,28 @@ fn scrub_env_error(text: &str, cfg: &stroem_common::models::workflow::WorkspaceC
     )
 }
 
+/// The context an event source's `env` renders against: the workspace's
+/// secrets only.
+fn env_render_context(cfg: &stroem_common::models::workflow::WorkspaceConfig) -> serde_json::Value {
+    serde_json::json!({ "secret": cfg.secrets })
+}
+
+/// The exact `tracing::warn!` line logged when an event source's `env` fails
+/// to render: the error chain, scrubbed with the workspace's secrets.
+fn env_render_failure_line(
+    ws_name: &str,
+    trigger_name: &str,
+    err: &anyhow::Error,
+    cfg: &stroem_common::models::workflow::WorkspaceConfig,
+) -> String {
+    format!(
+        "EventSourceManager: failed to render env for '{}/{}': {}",
+        ws_name,
+        trigger_name,
+        scrub_env_error(&format!("{err:#}"), cfg)
+    )
+}
+
 /// Spawn the event source manager background task.
 ///
 /// On each reconcile cycle the manager ensures that exactly one active event
@@ -379,7 +401,7 @@ async fn collect_desired(state: &AppState) -> Vec<DesiredEventSource> {
             None => continue,
         };
 
-        let secrets_ctx = serde_json::json!({ "secret": config.secrets });
+        let secrets_ctx = env_render_context(&config);
 
         for (trigger_name, trigger_def) in &config.triggers {
             // Rendering `env` may shell out to `vals`: one beat per source.
@@ -429,12 +451,9 @@ async fn collect_desired(state: &AppState) -> Vec<DesiredEventSource> {
             let resolved_env = match render_env_map(&env, &secrets_ctx) {
                 Ok(e) => e,
                 Err(e) => {
-                    let detail = scrub_env_error(&format!("{e:#}"), &config);
                     tracing::warn!(
-                        "EventSourceManager: failed to render env for '{}/{}': {}",
-                        ws_name,
-                        trigger_name,
-                        detail
+                        "{}",
+                        env_render_failure_line(ws_name, trigger_name, &e, &config)
                     );
                     continue;
                 }
@@ -1097,5 +1116,38 @@ mod tests {
             .insert("T".into(), serde_json::json!("env-raw-canary"));
         let text = super::scrub_env_error("failed: env-raw-canary", &cfg);
         assert!(!text.contains("env-raw-canary"), "{text}");
+    }
+
+    /// The env-render warning, end to end: a REAL failing env template,
+    /// rendered by the manager's own function against the manager's own
+    /// context, then formatted by the line the `warn!` logs verbatim. Tera's
+    /// raw detail carries the upper-cased secret (`| upper` then `| int`
+    /// fails on it) — a form no value scrub matches — and the line must
+    /// carry neither it nor the secret itself.
+    #[test]
+    fn env_render_failure_line_never_carries_the_secret() {
+        const TPL: &str = "{{ secret.X | upper | int }}";
+        let mut cfg = stroem_common::models::workflow::WorkspaceConfig::new();
+        cfg.secrets
+            .insert("X".into(), serde_json::json!("env-raw-canary"));
+        let ctx = super::env_render_context(&cfg);
+        assert!(
+            crate::test_support::tera_raw_detail_contains(TPL, &ctx, "ENV-RAW-CANARY"),
+            "fixture must leak through Tera's raw text, else this test is vacuous"
+        );
+        let env = HashMap::from([("TOKEN_ENV".to_string(), TPL.to_string())]);
+        let err = super::render_env_map(&env, &ctx).unwrap_err();
+
+        let line = super::env_render_failure_line("ws1", "queue", &err, &cfg);
+
+        assert!(
+            line.starts_with("EventSourceManager: failed to render env for 'ws1/queue': "),
+            "{line}"
+        );
+        assert!(line.contains("for key 'TOKEN_ENV'"), "{line}");
+        assert!(
+            !line.to_lowercase().contains("env-raw-canary"),
+            "neither the secret nor a case-transformed form may appear: {line}"
+        );
     }
 }
