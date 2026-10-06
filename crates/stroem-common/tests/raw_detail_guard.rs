@@ -2,23 +2,44 @@
 
 use std::path::{Path, PathBuf};
 
-/// Does `text` call or name `raw_detail`? Whitespace is removed first, so
-/// `te.raw_detail ()` and a split `TemplateError::\n raw_detail` count; a
-/// hit is the bare identifier (not `raw_detail_contains`) followed by `(`
-/// or reached through a path (`TemplateError::raw_detail`, `<T>::raw_detail`).
-fn mentions_raw_detail(text: &str) -> bool {
-    const NAME: &str = "raw_detail";
-    let squashed: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+/// Splits `text` into tokens, whitespace dropped: an identifier
+/// (`[A-Za-z0-9_]+`) is one token, every other character its own.
+fn tokens(text: &str) -> Vec<&str> {
     let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
-    squashed.match_indices(NAME).any(|(at, _)| {
-        let before = &squashed[..at];
-        let after = &squashed[at + NAME.len()..];
-        if before.chars().next_back().is_some_and(is_ident)
-            || after.chars().next().is_some_and(is_ident)
-        {
-            return false;
+    let mut out = Vec::new();
+    let mut chars = text.char_indices().peekable();
+    while let Some((start, c)) = chars.next() {
+        if c.is_whitespace() {
+            continue;
         }
-        after.starts_with('(') || before.ends_with("::")
+        let mut end = start + c.len_utf8();
+        if is_ident(c) {
+            while let Some(&(i, n)) = chars.peek() {
+                if !is_ident(n) {
+                    break;
+                }
+                end = i + n.len_utf8();
+                chars.next();
+            }
+        }
+        out.push(&text[start..end]);
+    }
+    out
+}
+
+/// Does `text` define, call or name `raw_detail`? Matched on tokens, so
+/// whitespace and line breaks anywhere (`te.raw_detail ()`, a split
+/// `TemplateError::\n raw_detail`) do not matter and `raw_detail_contains`
+/// is a different identifier. A hit is the `raw_detail` token followed by
+/// `(`, reached through a path (`TemplateError::raw_detail`,
+/// `<T>::raw_detail`), or declared (`fn raw_detail`).
+fn mentions_raw_detail(text: &str) -> bool {
+    let toks = tokens(text);
+    toks.iter().enumerate().any(|(i, &t)| {
+        t == "raw_detail"
+            && (toks.get(i + 1) == Some(&"(")
+                || (i >= 2 && toks[i - 1] == ":" && toks[i - 2] == ":")
+                || (i >= 1 && toks[i - 1] == "fn"))
     })
 }
 
@@ -44,17 +65,29 @@ fn only_the_cli_and_template_error_mention_raw_detail() {
     let mut hits = Vec::new();
     visit(crates, &mut seen, &mut hits);
 
-    // Vacuity check: the walk reached the definition and the matcher
-    // recognised it, so an empty offender list means something.
+    // Vacuity check: the walk reached the defining file, the matcher
+    // recognises the definition line itself (not only some other mention in
+    // that file), and the file is reported, so an empty offender list means
+    // something.
     assert!(
         seen.iter()
             .any(|p| p.ends_with("stroem-common/src/template_error.rs")),
         "the walk never visited template_error.rs"
     );
+    let def_src = std::fs::read_to_string(crates.join("stroem-common/src/template_error.rs"))
+        .expect("read template_error.rs");
+    let def_line = def_src
+        .lines()
+        .find(|l| l.trim_start().starts_with("pub fn raw_detail("))
+        .expect("raw_detail's definition in template_error.rs");
+    assert!(
+        mentions_raw_detail(def_line),
+        "the matcher does not recognise raw_detail's own definition: {def_line}"
+    );
     assert!(
         hits.iter()
             .any(|p| p.ends_with("stroem-common/src/template_error.rs")),
-        "the matcher no longer recognises raw_detail's own definition: {hits:?}"
+        "template_error.rs is not reported although it defines raw_detail: {hits:?}"
     );
 
     let allowed = |p: &String| {
@@ -87,6 +120,19 @@ fn the_matcher_catches_spacing_and_path_forms() {
         "tera_fixtures::raw_detail_contains(t)"
     ));
     assert!(!mentions_raw_detail("// see raw_detail_guard.rs"));
+    // The definition, however it is spaced, and a call after a keyword
+    // (whitespace squashing used to glue `fn`/`return` onto the name).
+    assert!(mentions_raw_detail("pub fn raw_detail(&self) -> String {"));
+    assert!(mentions_raw_detail("pub fn\n    raw_detail\n    (&self)"));
+    assert!(mentions_raw_detail("return raw_detail(&te);"));
+    // Not hits: a bare mention, a field, a longer identifier, another
+    // function whose name ends in `raw_detail`.
+    assert!(!mentions_raw_detail("the raw_detail is CLI-only"));
+    assert!(!mentions_raw_detail("let d = te.raw_detail;"));
+    assert!(!mentions_raw_detail("fn raw_detail_contains(tpl: &str)"));
+    assert!(!mentions_raw_detail("fn my_raw_detail()"));
+    assert!(!mentions_raw_detail("x.not_raw_detail()"));
+    assert!(!mentions_raw_detail("é raw_details()"));
 }
 
 #[test]
