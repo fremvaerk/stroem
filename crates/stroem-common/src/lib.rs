@@ -13,6 +13,7 @@ pub mod secret;
 pub mod sops;
 pub mod template;
 pub mod template_error;
+pub(crate) mod tera_compat;
 pub(crate) mod tera_engine;
 pub mod validation;
 pub mod workspace_loader;

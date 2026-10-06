@@ -8,6 +8,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 static BASE: LazyLock<tera::Tera> = LazyLock::new(|| {
     let mut t = tera::Tera::default();
     t.register_filter("json_encode", tera_contrib::json::json_encode);
+    crate::tera_compat::register(&mut t);
     t
 });
 
