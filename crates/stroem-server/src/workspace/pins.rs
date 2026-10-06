@@ -2294,11 +2294,14 @@ mod tests {
     }
 
     /// Transience comes from the loader's typed markers, never from words in
-    /// the message: this error names `vals` and `sops` and is neither.
+    /// the message: this error names `vals` and `sops` and is neither. The
+    /// words sit in the connection's name, which our context quotes — a
+    /// template error never echoes a variable name since Tera 2 (spec
+    /// 2026-10-06 § 3.2.1).
     #[tokio::test]
     async fn ensure_error_text_naming_vals_and_sops_is_still_permanent() {
         let yaml = format!(
-            "{}connections:\n  db:\n    host: \"{{{{ secret.vals_and_sops }}}}\"\n",
+            "{}connections:\n  vals_and_sops:\n    host: \"{{{{ secret.missing }}}}\"\n",
             workflow("v1")
         );
         let (_r, url, c1) = bare_remote(&[("wf.yaml", &yaml)]);

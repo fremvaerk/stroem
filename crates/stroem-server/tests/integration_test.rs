@@ -33,6 +33,9 @@ use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 use uuid::Uuid;
 
+#[path = "common/tera_fixtures.rs"]
+mod tera_fixtures;
+
 /// `read_tail`'s tail budget for tests that want the whole log — well above
 /// anything these fixtures write.
 const ALL: u64 = 16 * 1024 * 1024;
@@ -3235,14 +3238,16 @@ fn xws_build_ws_b() -> WorkspaceConfig {
         ("TOKEN_ESCAPE".to_string(), json!("has\"quote\\and-slash")),
         // Contains U+001B (ESC), a control character: an owner default
         // using Tera's `round(method=...)` filter on an invalid method
-        // value renders this into the filter's error via Rust's `{:?}`
-        // (Debug) formatting, not JSON escaping -- the two escaping schemes
-        // diverge on how they render a control character like this one.
+        // value quotes it in Tera's raw error (Tera 1 Debug-escaped it,
+        // Tera 2 quotes it verbatim) — the raw, JSON-escaped and
+        // Debug-escaped forms all differ on a control character like this.
         ("TOKEN_CTRL".to_string(), json!("prefix\u{1b}suffix")),
-        // H1 round 3: a filter chain (`json_encode` then `round`) wraps this
-        // secret in a representation no finite scrub enumerates — the
-        // reason the fix withholds owner-side render errors entirely at the
-        // ownership boundary instead of chasing one more representation.
+        // H1 round 3: a filter chain (`upper` then `int` under Tera 2;
+        // `json_encode` then `round` under Tera 1) puts this secret in
+        // Tera's raw error in a TRANSFORMED form no finite scrub
+        // enumerates — the reason the fix withholds owner-side render
+        // errors entirely at the ownership boundary instead of chasing one
+        // more representation.
         ("TOKEN_CHAIN".to_string(), json!("left\"right")),
     ]);
 
@@ -3301,9 +3306,10 @@ fn xws_build_ws_b() -> WorkspaceConfig {
         "note".to_string(),
         InputFieldDef {
             field_type: "string".to_string(),
-            // `round` expects a number: rendering this against a string
-            // secret raises a Tera error that quotes the raw value.
-            default: Some(json!("{{ secret.TOKEN | round }}")),
+            // `round(method=…)` rejects any method but `ceil`/`floor`, and
+            // Tera's raw error quotes the rejected value verbatim
+            // (`tera_fixtures`, proven in each test that uses it).
+            default: Some(json!(tera_fixtures::quoting_round_method("secret.TOKEN"))),
             ..Default::default()
         },
     );
@@ -3329,39 +3335,40 @@ fn xws_build_ws_b() -> WorkspaceConfig {
     ws.actions
         .insert("run-bad-array-default".to_string(), run_bad_array_default);
 
-    // Follow-up H1 regression fixture: Tera's `round` filter Debug-formats
-    // its `method` argument on an invalid value
-    // (`tera::builtins::filters::number::round`), not JSON-serialises it —
-    // this renders a control character differently than `run-bad-default`'s
-    // plain-quoted Tera error above.
+    // Follow-up H1 regression fixture: the same `round(method=…)` quoting
+    // path as `run-bad-default`, on a secret with a control character (Tera
+    // 1 Debug-formatted the rejected `method`; Tera 2 quotes it verbatim) —
+    // its raw, JSON-escaped and Debug-escaped forms all differ.
     let mut run_bad_round_default = xws_task_action("deploy");
     run_bad_round_default.input.insert(
         "note".to_string(),
         InputFieldDef {
             field_type: "string".to_string(),
-            default: Some(json!("{{ 1 | round(method=secret.TOKEN_CTRL) }}")),
+            default: Some(json!(tera_fixtures::quoting_round_method(
+                "secret.TOKEN_CTRL"
+            ))),
             ..Default::default()
         },
     );
     ws.actions
         .insert("run-bad-round-default".to_string(), run_bad_round_default);
 
-    // H1 round 3 fixture: a filter CHAIN (`json_encode` then `round`) on an
-    // invalid value. `json_encode` first turns the secret into a JSON-text
-    // string; `round`'s `value` arg then fails its own numeric type check
-    // (`try_get_value!("round", "value", f64, value)`) and quotes THAT
-    // already-JSON-encoded string via `serde_json::Value`'s `Display` impl
-    // — the secret ends up double-JSON-escaped, a representation neither
-    // the raw, single-JSON-escaped, nor Debug-escaped scrub matches. Any
-    // filter chain can nest arbitrarily many such wrappings, which is why
-    // the fix withholds the whole error at the ownership boundary instead
-    // of adding yet another representation to match.
+    // H1 round 3 fixture: a filter CHAIN on an invalid value. `upper` first
+    // transforms the secret; `int` then fails to parse THAT string and
+    // Tera's raw error quotes the upper-cased form — a representation
+    // neither the raw, JSON-escaped, nor Debug-escaped scrub matches (Tera
+    // 1's equivalent was `json_encode | round`, double-JSON-escaping it).
+    // Any filter chain can nest arbitrarily many such transformations,
+    // which is why the fix withholds the whole error at the ownership
+    // boundary instead of adding yet another representation to match.
     let mut run_bad_chain_default = xws_task_action("deploy");
     run_bad_chain_default.input.insert(
         "note".to_string(),
         InputFieldDef {
             field_type: "string".to_string(),
-            default: Some(json!("{{ secret.TOKEN_CHAIN | json_encode | round }}")),
+            default: Some(json!(tera_fixtures::quoting_upper_int(
+                "secret.TOKEN_CHAIN"
+            ))),
             ..Default::default()
         },
     );
@@ -3413,7 +3420,9 @@ fn xws_build_ws_b() -> WorkspaceConfig {
         "note".to_string(),
         InputFieldDef {
             field_type: "string".to_string(),
-            default: Some(json!("{{ secret.TOKEN_CHAIN | json_encode | round }}")),
+            default: Some(json!(tera_fixtures::quoting_upper_int(
+                "secret.TOKEN_CHAIN"
+            ))),
             ..Default::default()
         },
     );
@@ -3435,9 +3444,10 @@ fn xws_build_ws_b() -> WorkspaceConfig {
 
     // Same-workspace regression pin (H1 round 3, spec § 3.3): O == T == B
     // here — when this task is executed directly against B (not through a
-    // cross-workspace caller in A), the withholding rule does not apply and
-    // `run-bad-default`'s Tera error must still be scrubbed (mask present),
-    // exactly as before round 3.
+    // cross-workspace caller in A), the withholding rule does not apply:
+    // `run-bad-default`'s render error stays visible. Since Tera 2 the
+    // template error is value-free (spec 2026-10-06 § 3.2), with the scrub
+    // as the second line.
     ws.tasks.insert(
         "local-secret-error".to_string(),
         xws_task_def(vec![("run", xws_flow_step("run-bad-default"))]),
@@ -3450,16 +3460,12 @@ fn xws_build_ws_b() -> WorkspaceConfig {
 /// Workspace `A`: the caller. See the doc comments on each task below for
 /// which seam it exercises.
 fn xws_build_ws_a() -> WorkspaceConfig {
-    let mut ws = WorkspaceConfig {
-        // PREFIX is crafted so it is a substring of the generic prefix of
-        // the Tera filter-type error immediately preceding B's own TOKEN
-        // value (".. got \"ABCD-token\" ..") — a naive per-secret sequential
-        // redaction (rather than span-union) would consume "ABCD" via this
-        // caller secret and leave a dangling "-token" fragment from B's own
-        // secret unmasked.
-        secrets: HashMap::from([("PREFIX".to_string(), json!("incorrect value: got \"ABCD"))]),
-        ..Default::default()
-    };
+    // No secrets: the span-union PREFIX/crossing case that used a caller
+    // secret here (crossing B's TOKEN inside a Tera 1 error) is a unit test
+    // of `redact_secrets_in_str` on synthetic input since Tera 2, whose
+    // template errors carry no value for the scrub to see
+    // (`workspace_set::tests::redact_crossing_occurrences_leave_no_fragment`).
+    let mut ws = WorkspaceConfig::default();
 
     ws.actions
         .insert("call-deploy".to_string(), xws_task_action("B.deploy"));
@@ -4398,6 +4404,14 @@ async fn test_xws_task_owner_task_removed_before_dispatch_fails_step() -> Result
 /// pre-round-3 version of this test asserted.
 #[tokio::test]
 async fn test_xws_task_secret_scrub_covers_owner_default_error() -> Result<()> {
+    assert!(
+        tera_fixtures::raw_detail_contains(
+            &tera_fixtures::quoting_round_method("secret.TOKEN"),
+            &json!({"secret": {"TOKEN": "ABCD-token"}}),
+            "ABCD-token",
+        ),
+        "fixture must leak through Tera's raw text, else this test is vacuous"
+    );
     let (router, pool, _mgr, _tmp) = setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
 
     let resp = router
@@ -4571,20 +4585,30 @@ async fn test_xws_task_secret_scrub_covers_array_valued_owner_default() -> Resul
 /// an owner action default (`note`) renders Tera's `{{ 1 |
 /// round(method=secret.TOKEN_CTRL) }}`, where `TOKEN_CTRL` contains U+001B
 /// (a control character) and is not one of `round`'s allowed methods.
-/// `tera::builtins::filters::number::round` formats the invalid `method`
-/// argument with `{:?}` (Rust `Debug`), not `serde_json`'s JSON escaping —
-/// the two schemes diverge on control characters. This action's owner
-/// (`B`) differs from the caller's workspace (`A`), so
-/// `merge_action_defaults`'s error (branch (a), spec section 3.3) is
-/// withheld entirely rather than scrubbed -- the persisted error contains
-/// no representation of the secret at all. Asserts neither the raw secret
-/// nor its Debug-escaped form appears in the persisted step error, the
-/// REST job detail, the job log, or MCP's `get_job_status` text.
+/// Tera's raw error quotes the invalid `method` argument (Tera 1 with `{:?}`
+/// — Rust `Debug` — Tera 2 verbatim; asserted below), and the raw,
+/// JSON-escaped and Debug-escaped forms diverge on control characters.
+/// Since Tera 2 the template error itself is value-free (spec 2026-10-06
+/// § 3.2); and this action's owner (`B`) differs from the caller's
+/// workspace (`A`), so `merge_action_defaults`'s error (branch (a), spec
+/// section 3.3) is also withheld entirely rather than scrubbed -- the
+/// persisted error contains no representation of the secret at all.
+/// Asserts neither the raw secret nor its Debug-escaped form appears in the
+/// persisted step error, the REST job detail, the job log, or MCP's
+/// `get_job_status` text.
 #[tokio::test]
 async fn test_xws_task_secret_scrub_covers_debug_escaped_owner_default() -> Result<()> {
+    let raw_secret = "prefix\u{1b}suffix";
+    assert!(
+        tera_fixtures::raw_detail_contains(
+            &tera_fixtures::quoting_round_method("secret.TOKEN_CTRL"),
+            &json!({"secret": {"TOKEN_CTRL": raw_secret}}),
+            raw_secret,
+        ),
+        "fixture must leak through Tera's raw text, else this test is vacuous"
+    );
     let (router, pool, _mgr, _tmp) = setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
 
-    let raw_secret = "prefix\u{1b}suffix";
     let debug_escaped = format!("{raw_secret:?}");
     let debug_escaped = debug_escaped
         .strip_prefix('"')
@@ -4665,20 +4689,29 @@ async fn test_xws_task_secret_scrub_covers_debug_escaped_owner_default() -> Resu
 
 /// H1 round 3 (the finding that closed the representation-matching approach
 /// for good): an owner action default renders `{{ secret.TOKEN_CHAIN |
-/// json_encode | round }}`. `json_encode` turns the secret into a
-/// JSON-text STRING; `round`'s own numeric type check on that string then
-/// fails and quotes it via `serde_json::Value`'s `Display` impl — the
-/// secret ends up JSON-escaped a SECOND time, a representation the raw,
-/// single-JSON-escaped, and Debug-escaped scrubs all miss (and a longer
-/// filter chain could nest arbitrarily many more). Because this action's
-/// owner (`B`) differs from the caller's workspace (`A`), the error is
-/// withheld entirely (spec § 3.3) rather than scrubbed, so no filter chain,
-/// however deep, can leak the secret into this job. Asserts the persisted
-/// step error, REST detail, job log, and MCP text contain neither `left`
-/// nor `right`, contain the withheld wording, and that the job still fails
-/// with its dependents cascaded as before.
+/// upper | int }}`. `upper` transforms the secret; `int` then fails to parse
+/// that string and Tera's raw error quotes the UPPER-CASED form (asserted
+/// below) — a representation the raw, JSON-escaped, and Debug-escaped scrubs
+/// all miss (Tera 1's `json_encode | round` double-JSON-escaped it the same
+/// way, and a longer filter chain could nest arbitrarily many more). Since
+/// Tera 2 the template error itself is value-free (spec 2026-10-06 § 3.2);
+/// and because this action's owner (`B`) differs from the caller's
+/// workspace (`A`), the error is also withheld entirely (spec § 3.3) rather
+/// than scrubbed, so no filter chain, however deep, can leak the secret into
+/// this job. Asserts the persisted step error, REST detail, job log, and MCP
+/// text contain neither `left`/`right` nor `LEFT`/`RIGHT`, contain the
+/// withheld wording, and that the job still fails with its dependents
+/// cascaded as before.
 #[tokio::test]
 async fn test_xws_task_secret_scrub_withholds_owner_side_render_errors() -> Result<()> {
+    assert!(
+        tera_fixtures::raw_detail_contains(
+            &tera_fixtures::quoting_upper_int("secret.TOKEN_CHAIN"),
+            &json!({"secret": {"TOKEN_CHAIN": "left\"right"}}),
+            "LEFT\"RIGHT",
+        ),
+        "fixture must leak through Tera's raw text, else this test is vacuous"
+    );
     let (router, pool, _mgr, _tmp) = setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
 
     let resp = router
@@ -4698,8 +4731,9 @@ async fn test_xws_task_secret_scrub_withholds_owner_side_render_errors() -> Resu
     let err = run.error_message.clone().unwrap_or_default();
     assert!(err.contains("details withheld"), "{err}");
     assert!(err.contains("workspace 'B'"), "{err}");
-    assert!(!err.contains("left"), "{err}");
-    assert!(!err.contains("right"), "{err}");
+    for fragment in ["left", "right", "LEFT", "RIGHT"] {
+        assert!(!err.contains(fragment), "{err}");
+    }
     assert!(!err.contains("••••••"), "{err}");
 
     // The REST job detail must carry the same withheld text.
@@ -4708,8 +4742,9 @@ async fn test_xws_task_secret_scrub_withholds_owner_side_render_errors() -> Resu
         .oneshot(api_get(&format!("/api/jobs/{parent}")))
         .await?;
     let detail_text = body_json(detail).await.to_string();
-    assert!(!detail_text.contains("left"), "{detail_text}");
-    assert!(!detail_text.contains("right"), "{detail_text}");
+    for fragment in ["left", "right", "LEFT", "RIGHT"] {
+        assert!(!detail_text.contains(fragment), "{detail_text}");
+    }
 
     // The job's log stream must never leak the secret either.
     let logs = router
@@ -4717,8 +4752,9 @@ async fn test_xws_task_secret_scrub_withholds_owner_side_render_errors() -> Resu
         .oneshot(api_get(&format!("/api/jobs/{parent}/logs")))
         .await?;
     let logs_text = body_json(logs).await.to_string();
-    assert!(!logs_text.contains("left"), "{logs_text}");
-    assert!(!logs_text.contains("right"), "{logs_text}");
+    for fragment in ["left", "right", "LEFT", "RIGHT"] {
+        assert!(!logs_text.contains(fragment), "{logs_text}");
+    }
 
     // MCP's `get_job_status` must return the same withheld text.
     let session_id = xws_mcp_initialize(&router).await?;
@@ -4743,8 +4779,9 @@ async fn test_xws_task_secret_scrub_withholds_owner_side_render_errors() -> Resu
         status_text.contains("details withheld"),
         "MCP get_job_status must surface the withheld message: {status_text}"
     );
-    assert!(!status_text.contains("left"), "{status_text}");
-    assert!(!status_text.contains("right"), "{status_text}");
+    for fragment in ["left", "right", "LEFT", "RIGHT"] {
+        assert!(!status_text.contains(fragment), "{status_text}");
+    }
 
     // Dependents cascade exactly as any other server-dispatched failure —
     // withholding only changes the persisted TEXT, never the job/step
@@ -4759,10 +4796,21 @@ async fn test_xws_task_secret_scrub_withholds_owner_side_render_errors() -> Resu
 /// `local-secret-error` runs `run-bad-default` (the same action/task
 /// pair as `test_xws_task_secret_scrub_covers_owner_default_error`) but
 /// executed directly against `B` — its own owner — so `O == T == A == B`
-/// here and the pre-round-3 behaviour must be unchanged: the Tera error is
-/// scrubbed (`••••••` present), not withheld.
+/// here: the render error stays visible, not withheld. Under Tera 1 its
+/// text quoted the secret and this test asserted the scrub's `••••••`; since
+/// Tera 2 the template error never carries Tera's text (spec 2026-10-06
+/// § 3.2), so nothing reaches the scrub and the assertion is that the secret
+/// is ABSENT although the fixture quotes it in Tera's raw error.
 #[tokio::test]
-async fn test_xws_task_secret_scrub_same_workspace_still_masks() -> Result<()> {
+async fn test_xws_task_secret_never_in_same_workspace_error() -> Result<()> {
+    assert!(
+        tera_fixtures::raw_detail_contains(
+            &tera_fixtures::quoting_round_method("secret.TOKEN"),
+            &json!({"secret": {"TOKEN": "ABCD-token"}}),
+            "ABCD-token",
+        ),
+        "fixture must leak through Tera's raw text, else this test is vacuous"
+    );
     let (router, pool, _mgr, _tmp) = setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
 
     let resp = router
@@ -4779,7 +4827,11 @@ async fn test_xws_task_secret_scrub_same_workspace_still_masks() -> Result<()> {
     let run = steps.iter().find(|s| s.step_name == "run").unwrap();
     assert_eq!(run.status, "failed", "{steps:?}");
     let err = run.error_message.clone().unwrap_or_default();
-    assert!(err.contains("••••••"), "{err}");
+    assert!(
+        err.contains("Failed to merge action input defaults"),
+        "the error stays visible: {err}"
+    );
+    assert!(err.contains("round"), "it names the failing filter: {err}");
     assert!(!err.contains("details withheld"), "{err}");
     assert!(!err.contains("ABCD-token"), "{err}");
     assert!(!err.contains("-token"), "{err}");
@@ -4826,6 +4878,14 @@ async fn test_xws_task_form_b_caller_literal_never_withheld() -> Result<()> {
 /// creator instead of the provenance resolver.
 #[tokio::test]
 async fn test_xws_task_secret_scrub_withholds_task_default_chain_error() -> Result<()> {
+    assert!(
+        tera_fixtures::raw_detail_contains(
+            &tera_fixtures::quoting_upper_int("secret.TOKEN_CHAIN"),
+            &json!({"secret": {"TOKEN_CHAIN": "left\"right"}}),
+            "LEFT\"RIGHT",
+        ),
+        "fixture must leak through Tera's raw text, else this test is vacuous"
+    );
     let (router, pool, _mgr, _tmp) = setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
 
     let resp = router
@@ -4844,8 +4904,9 @@ async fn test_xws_task_secret_scrub_withholds_task_default_chain_error() -> Resu
     let err = run.error_message.clone().unwrap_or_default();
     assert!(err.contains("details withheld"), "{err}");
     assert!(err.contains("workspace 'B'"), "{err}");
-    assert!(!err.contains("left"), "{err}");
-    assert!(!err.contains("right"), "{err}");
+    for fragment in ["left", "right", "LEFT", "RIGHT"] {
+        assert!(!err.contains(fragment), "{err}");
+    }
     let parent_row = JobRepo::get(&pool, parent).await?.unwrap();
     assert_eq!(parent_row.status, "failed");
     Ok(())
@@ -30145,9 +30206,12 @@ async fn test_claim_fails_agent_step_with_real_prompt_render_error() -> Result<(
     );
     let body = body_json(response).await;
     let err = body["error"].as_str().unwrap_or_default();
+    // Since Tera 2 the message is value-free (spec 2026-10-06 § 3.2.1): it
+    // names the category and position, never the variable.
     assert!(
-        err.contains("nonexistent_var"),
-        "claim error must name the unresolvable variable, got: {err}"
+        err.contains("Failed to render agent prompt template")
+            && err.contains("undefined variable or field"),
+        "claim error must carry the real cause, got: {err}"
     );
 
     // …and the persisted step error must carry the real cause, not the
@@ -30157,8 +30221,9 @@ async fn test_claim_fails_agent_step_with_real_prompt_render_error() -> Result<(
     assert_eq!(step.status, "failed");
     let stored = step.error_message.clone().unwrap_or_default();
     assert!(
-        stored.contains("nonexistent_var"),
-        "persisted error must name the unresolvable variable, got: {stored}"
+        stored.contains("Failed to render agent prompt template")
+            && stored.contains("undefined variable or field"),
+        "persisted error must carry the real cause, got: {stored}"
     );
     assert!(
         !stored.contains("has no rendered prompt"),
@@ -30293,22 +30358,34 @@ async fn test_claim_renders_each_item_in_agent_prompt_for_loop_instance() -> Res
 
 // ─── Claim-time render errors must not leak secret values ───
 //
-// Security regression (2026-09-11): Tera embeds the offending value in filter
-// error messages — `{{ secret.X | round }}` yields
-//   Filter `round` was called on an incorrect value: got "<the secret>" …
-// `claim_job` formats that chain with `format!("{:#}", e)` and hands it to
-// `fail_claimed_step`, which appends it to the job log, persists it to
-// `job_step.error_message` AND `retry_history`, and returns it in the 422 body.
-// `redact_response` masks `error_message` on read but not `retry_history`, and
-// neither the job log nor the worker response is redacted at all. Scrub at the
-// source so the value never reaches the database.
+// Security regression (2026-09-11): Tera's raw error text embeds the offending
+// value in filter errors — under Tera 2 `{{ 1 | round(method=secret.X) }}`
+// yields
+//   Invalid argument for `method`: <the secret>. Only `ceil` and `floor` …
+// (Tera 1 did the same for `{{ secret.X | round }}`). `claim_job` formats the
+// chain with `format!("{:#}", e)` and hands it to `fail_claimed_step`, which
+// appends it to the job log, persists it to `job_step.error_message` AND
+// `retry_history`, and returns it in the 422 body. `redact_response` masks
+// `error_message` on read but not `retry_history`, and neither the job log nor
+// the worker response is redacted at all. Since Tera 2 the template error
+// carries none of Tera's text (spec 2026-10-06 § 3.2); `fail_claimed_step`
+// still scrubs at the source as the second line.
 #[tokio::test]
 async fn test_claim_render_error_does_not_leak_secret_values() -> Result<()> {
-    let (router, pool, _tmp) = setup().await?;
-
     // `db.internal.prod` is a literal secret value in the test workspace
     // (secrets.db.host), so it is one of the collected redaction values.
     const SECRET_VALUE: &str = "db.internal.prod";
+    let template = tera_fixtures::quoting_round_method("secret.db.host");
+    assert!(
+        tera_fixtures::raw_detail_contains(
+            &template,
+            &json!({"secret": {"db": {"host": SECRET_VALUE}}}),
+            SECRET_VALUE,
+        ),
+        "fixture must leak through Tera's raw text, else this test is vacuous"
+    );
+
+    let (router, pool, _tmp) = setup().await?;
 
     let job_id = JobRepo::create(
         &pool,
@@ -30333,8 +30410,8 @@ async fn test_claim_render_error_does_not_leak_secret_values() -> Result<()> {
         action_name: "greet".to_string(),
         action_type: "script".to_string(),
         action_image: None,
-        // `round` on a string is a filter type error; Tera puts the value in it.
-        action_spec: Some(json!({"script": "echo {{ secret.db.host | round }}"})),
+        // An invalid `round` method: Tera's raw error quotes the value.
+        action_spec: Some(json!({"script": format!("echo {template}")})),
         input: None,
         status: "ready".to_string(),
         required_ability: "script".to_string(),
@@ -30371,6 +30448,7 @@ async fn test_claim_render_error_does_not_leak_secret_values() -> Result<()> {
         .to_string();
 
     let response = router
+        .clone()
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
@@ -30402,6 +30480,18 @@ async fn test_claim_render_error_does_not_leak_secret_values() -> Result<()> {
     assert!(
         !stored.contains(SECRET_VALUE),
         "persisted error_message leaked the secret value: {stored}"
+    );
+
+    // The job log (never redacted on read) carries the failure, not the value.
+    let logs = router
+        .oneshot(api_get(&format!("/api/jobs/{job_id}/logs")))
+        .await?;
+    assert_eq!(logs.status(), StatusCode::OK);
+    let logs_text = body_json(logs).await.to_string();
+    assert!(logs_text.contains("round"), "{logs_text}");
+    assert!(
+        !logs_text.contains(SECRET_VALUE),
+        "job log leaked the secret value: {logs_text}"
     );
 
     Ok(())

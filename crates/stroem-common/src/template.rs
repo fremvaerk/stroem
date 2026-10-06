@@ -2584,6 +2584,15 @@ mod tests {
         assert_eq!(out["ch"]["host"], "ch.jobs.internal");
     }
 
+    /// True when rendering `tpl` against `ctx` fails and Tera's raw detail
+    /// contains `needle` (spec 2026-10-06 § 3.5: proves a fixture is real).
+    fn raw_detail_contains(tpl: &str, ctx: &serde_json::Value, needle: &str) -> bool {
+        let err = render_template(tpl, ctx).unwrap_err();
+        err.chain()
+            .find_map(|c| c.downcast_ref::<TemplateError>())
+            .is_some_and(|te| te.raw_detail().contains(needle))
+    }
+
     /// Git-refs spec § 7.2: claim decides withholding by ORIGIN. Each phase
     /// of `prepare_action_input_roles` tags its errors with the bucket it
     /// serves — the caller pass `Caller`, the defaults merge and the owner
@@ -2626,16 +2635,25 @@ mod tests {
         assert!(msg.contains("is not shared"), "{msg}");
 
         // Owner default that fails to render (defaults merge) → ActionDefault.
-        let schema = HashMap::from([(
-            "note".to_string(),
-            field("string", false, Some(json!("{{ secret.TOKEN | round }}"))),
-        )]);
+        // Tera's raw text quotes the owner's secret; the chain never does.
+        const TPL: &str = "{{ 1 | round(method=secret.TOKEN) }}";
+        assert!(
+            raw_detail_contains(
+                TPL,
+                &json!({"secret": {"TOKEN": "owner-secret"}}),
+                "owner-secret"
+            ),
+            "fixture must leak through Tera's raw text, else this test is vacuous"
+        );
+        let schema =
+            HashMap::from([("note".to_string(), field("string", false, Some(json!(TPL))))]);
         let (bucket, msg) = bucket_of(json!({}), &schema);
         assert_eq!(bucket, Some(ProvenanceBucket::ActionDefault), "{msg}");
         assert!(
             msg.contains("Failed to merge action input defaults"),
             "{msg}"
         );
+        assert!(!msg.contains("owner-secret"), "{msg}");
 
         // Owner default naming a connection the owner lacks (owner pass) →
         // ActionDefault.

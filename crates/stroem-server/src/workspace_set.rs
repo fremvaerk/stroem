@@ -135,8 +135,9 @@ fn collect_occurrences(s: &str, needle: &str, spans: &mut Vec<(usize, usize)>) {
 /// value overlapping itself — leave no legible fragment.
 ///
 /// Used for free text that can embed a secret without any JSON structure to
-/// key off — notably Tera error messages, which quote the offending value
-/// (`Filter `round` was called on an incorrect value: got `"<secret>"``). Those
+/// key off — notably render-failure messages. Tera's own error text quotes
+/// the offending value; since Tera 2 our template errors never carry that
+/// text (spec 2026-10-06 § 3.2), and this scrub is the second line. Those
 /// messages are persisted to `job_step.error_message` and `retry_history`,
 /// appended to the job log, and returned to the worker, so they must be
 /// scrubbed at the point of failure rather than only on read.
@@ -149,7 +150,7 @@ fn collect_occurrences(s: &str, needle: &str, spans: &mut Vec<(usize, usize)>) {
 /// `\u00XX`), each only when it differs from the forms already searched. A
 /// value error printed via a JSON `Value`'s `Display` impl (e.g. the
 /// now-fixed `resolve_connection_inputs_scoped` "expects a connection name"
-/// bail) renders a secret in JSON-escaped form; Tera itself formats some
+/// bail) renders a secret in JSON-escaped form; Tera 1 formatted some
 /// filter arguments with `{:?}` (e.g. `round`'s `method` argument on a
 /// non-numeric/invalid value, `tera::builtins::filters::number::round`),
 /// which renders a secret in Rust's Debug-escaped form instead — a secret
@@ -273,6 +274,22 @@ fn collect_strings(value: &serde_json::Value, out: &mut Vec<String>) {
     }
 }
 
+/// Test-only proof that a security fixture is real (spec 2026-10-06 § 3.5):
+/// true when rendering `tpl` against `ctx` fails and Tera's RAW detail — the
+/// text our value-free `TemplateError` never shows — contains `needle`. A
+/// test asserting a secret is absent from our output first asserts this, so
+/// it cannot pass vacuously. The guard
+/// (`stroem-common/tests/raw_detail_guard.rs`) allows this file for this
+/// helper; other server unit tests call it rather than reading Tera's text.
+#[cfg(test)]
+pub(crate) fn tera_raw_detail_contains(tpl: &str, ctx: &serde_json::Value, needle: &str) -> bool {
+    let err = stroem_common::template::render_template(tpl, ctx)
+        .expect_err("the fixture must fail to render");
+    err.chain()
+        .find_map(|c| c.downcast_ref::<stroem_common::template_error::TemplateError>())
+        .is_some_and(|te| te.raw_detail().contains(needle))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -393,9 +410,10 @@ mod tests {
 
     #[test]
     fn redact_crossing_occurrences_leave_no_fragment() {
-        // The exact shape Tera produces: the caller-controlled value covers the
-        // error prefix and the START of the owner secret; the owner secret
-        // continues past it. Sequential replacement leaves `-token"`.
+        // The shape Tera 1's error text had (synthetic input since Tera 2,
+        // whose template errors carry no value): the caller-controlled value
+        // covers the error prefix and the START of the owner secret; the owner
+        // secret continues past it. Sequential replacement leaves `-token"`.
         let text = r#"incorrect value: got "ABCD-token""#;
         for order in [
             secrets(&[r#"incorrect value: got "ABCD"#, "ABCD-token"]),
@@ -562,36 +580,31 @@ mod tests {
         );
     }
 
-    /// Template-layer regression: Tera's `round` filter Debug-formats its
-    /// `method` argument on an invalid value
-    /// (`tera::builtins::filters::number::round`, `got \`{:?}\``). Rendering
-    /// `{{ 1 | round(method=secret.TOKEN) }}` with a secret containing
-    /// U+001B (ESC) produces a real Tera error whose text embeds the secret
-    /// in Rust's Debug-escaped form — confirming the shape `redact_secrets_in_str`
-    /// must handle is not just a synthetic string but an actual render error.
-    /// Runs that error text through `redact_secrets_in_str` and asserts
-    /// neither the raw secret pieces (`prefix`/`suffix`) nor its
-    /// Debug-escaped `\u{1b}` form survive.
+    /// Formerly rendered a real Tera error. Since Tera 2 a template error is
+    /// value-free (spec 2026-10-06 § 3.2) and never brings a value to this
+    /// scrub, so the shapes Tera's raw text uses for `round`'s rejected
+    /// `method` — Tera 2 quotes it verbatim, Tera 1 Debug-escaped it — are
+    /// synthetic input here: a secret containing U+001B (ESC) must be masked
+    /// in both, leaving neither `prefix`/`suffix` nor the Debug-escaped
+    /// `\u{1b}`.
     #[test]
-    fn redact_secrets_in_str_masks_tera_round_filter_debug_error() {
+    fn redact_secrets_in_str_masks_round_method_error_shapes() {
         let secret = "prefix\u{1b}suffix";
-        let context = serde_json::json!({"secret": {"TOKEN": secret}});
-        let err = stroem_common::template::render_template(
-            "{{ 1 | round(method=secret.TOKEN) }}",
-            &context,
-        )
-        .expect_err("an invalid `method` value must fail rendering");
-        let err_text = format!("{err:#}");
+        let debug_quoted = format!("{secret:?}");
+        let text = format!(
+            "Invalid argument for `method`: {secret}. Only `ceil` and `floor` are allowed. \
+             Filter `round` received an incorrect value for argument `method`: got `{debug_quoted}`"
+        );
         assert!(
-            err_text.contains("prefix") && err_text.contains("suffix"),
-            "test setup: the raw Tera error must actually embed the secret: {err_text}"
+            text.contains(secret) && text.contains("\\u{1b}"),
+            "test setup: both the raw and the Debug-escaped form are present: {text:?}"
         );
 
-        let out = redact_secrets_in_str(&err_text, &secrets(&[secret]));
+        let out = redact_secrets_in_str(&text, &secrets(&[secret]));
         assert!(!out.contains("prefix"), "{out}");
         assert!(!out.contains("suffix"), "{out}");
         assert!(!out.contains("\\u{1b}"), "{out}");
-        assert!(out.contains(REDACTED), "{out}");
+        assert_eq!(out.matches(REDACTED).count(), 2, "{out}");
     }
 
     #[test]

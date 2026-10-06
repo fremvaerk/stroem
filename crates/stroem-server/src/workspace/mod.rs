@@ -2306,6 +2306,74 @@ tasks:
         );
     }
 
+    /// Spec 2026-10-06 § 3.4.1: a load-time render failure publishes our own
+    /// contexts (config names) around a value-free template error. The
+    /// connection template quotes the upper-cased secret in Tera's RAW text
+    /// (asserted first, so the rest is not vacuous), but neither
+    /// `WorkspaceInfo.error` (API, MCP) nor a pinned load of the same file
+    /// (`PinStore::ensure`, and the withheld user-facing form) carries it.
+    #[tokio::test]
+    async fn load_time_render_error_never_carries_the_secret() {
+        const TPL: &str = "{{ secret.PW | upper | int }}";
+        const PW: &str = "load-canary-pw";
+        const PW_UPPER: &str = "LOAD-CANARY-PW";
+        assert!(
+            crate::workspace_set::tera_raw_detail_contains(
+                TPL,
+                &serde_json::json!({"secret": {"PW": PW}}),
+                PW_UPPER
+            ),
+            "fixture must leak through Tera's raw text, else this test is vacuous"
+        );
+        let yaml = format!("secrets:\n  PW: \"{PW}\"\nconnections:\n  db:\n    host: \"{TPL}\"\n");
+        let assert_clean = |text: &str| {
+            assert!(!text.contains(PW), "secret leaked: {text}");
+            assert!(!text.contains(PW_UPPER), "secret leaked: {text}");
+        };
+
+        // Live folder load → `WorkspaceInfo.error`, as the API returns it.
+        let temp = TempDir::new().unwrap();
+        let workflows_dir = temp.path().join(".workflows");
+        fs::create_dir(&workflows_dir).unwrap();
+        fs::write(workflows_dir.join("leaky.yaml"), &yaml).unwrap();
+        let mut defs = HashMap::new();
+        defs.insert(
+            "leaky".to_string(),
+            WorkspaceSourceDef::Folder {
+                triggers: true,
+                path: temp.path().to_str().unwrap().to_string(),
+            },
+        );
+        let mgr = WorkspaceManager::new(defs, HashMap::new(), HashMap::new()).await;
+        let infos = mgr.list_workspace_info().await;
+        assert_eq!(infos.len(), 1);
+        let error = infos[0].error.as_deref().expect("the load must fail");
+        assert!(
+            error.contains("Failed to render connection 'db' field 'host'"),
+            "{error}"
+        );
+        assert_clean(error);
+        assert_clean(&serde_json::to_string(&infos[0]).unwrap());
+
+        // Pinned load of the same file → `PinLoadFailed`, and its user form.
+        let (_r, url, c1) = bare_remote(&[("wf.yaml", &format!("{}{yaml}", workflow("v1")))]);
+        let (_d, mgr) = pin_manager("w", WorkspaceConfig::new(), &url);
+        let err = mgr.pins().ensure("w", &c1).await.unwrap_err();
+        assert!(matches!(err, PinError::PinLoadFailed { .. }), "{err:?}");
+        assert!(
+            err.to_string()
+                .contains("Failed to render connection 'db' field 'host'"),
+            "{err}"
+        );
+        assert_clean(&format!("{err} {err:?}"));
+        let pin = PinRef {
+            git_ref: "main".into(),
+            commit: c1,
+        };
+        let user = mgr.config_for_user("w", Some(&pin)).await.unwrap_err();
+        assert_clean(&format!("{user:#} {user:?}"));
+    }
+
     #[tokio::test]
     async fn test_workspace_info_error_field_skipped_when_none() {
         let temp = create_test_workspace_dir();

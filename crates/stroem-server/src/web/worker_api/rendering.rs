@@ -1553,15 +1553,25 @@ mod tests {
 
     /// Git-refs spec § 7.2: an owner input default that fails to render is
     /// owner-side; the withheld sentence carries the step's `action_name`
-    /// verbatim.
+    /// verbatim. The default quotes the owner's secret in Tera's raw text
+    /// (asserted), never in the error chain (spec 2026-10-06 § 3.2).
     #[test]
     fn test_prepare_step_action_input_owner_default_error_is_owner_side() {
         use crate::workspace_set::WorkspaceSet;
         use std::sync::Arc;
 
+        const TPL: &str = "{{ 1 | round(method=secret.T) }}";
+        assert!(
+            crate::workspace_set::tera_raw_detail_contains(
+                TPL,
+                &json!({"secret": {"T": "owner-value"}}),
+                "owner-value"
+            ),
+            "fixture must leak through Tera's raw text, else this test is vacuous"
+        );
         let mut remote = make_action("script");
         let mut note = make_input_field("string");
-        note.default = Some(json!("{{ secret.T | round }}"));
+        note.default = Some(json!(TPL));
         remote.input.insert("note".to_string(), note);
         let mut owner = WorkspaceConfig::default();
         owner.actions.insert("remote".to_string(), remote);
@@ -1606,6 +1616,10 @@ mod tests {
         let err = prepare_step_action_input(Some(json!({})), &prep).unwrap_err();
         assert!(
             format!("{err:#}").contains("Failed to merge action input defaults"),
+            "{err:#}"
+        );
+        assert!(
+            !format!("{err:#} {err:?}").contains("owner-value"),
             "{err:#}"
         );
         assert!(is_owner_side_prepare_error(&err), "{err:#}");

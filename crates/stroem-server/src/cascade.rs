@@ -659,10 +659,12 @@ pub fn run(
     }
     // Scrub secret values out of every failure message before the plan leaves
     // this function. `condition_context` puts the workspace secrets
-    // into the `when` / `for_each` context, and Tera quotes the offending value
-    // in filter and type errors — so an author error touching `{{ secret.* }}`
-    // would otherwise be persisted verbatim to `job_step.error_message` and
-    // `retry_history`. Only the failure path pays for this.
+    // into the `when` / `for_each` context, and Tera's raw text quotes the
+    // offending value in filter errors. The template error itself carries none
+    // of that text (spec 2026-10-06 § 3.2); this scrub is the second line, so
+    // that a value reaching a message any other way is never persisted verbatim
+    // to `job_step.error_message` and `retry_history`. Only the failure path
+    // pays for this.
     if let Some(cfg) = workspace_config {
         if changes.iter().any(|c| matches!(c, Change::Fail { .. })) {
             let secret_values = crate::workspace_set::collect_config_secret_values(cfg);
@@ -1285,20 +1287,28 @@ mod tests {
     }
 
     /// Security regression (2026-09-11): `condition_context` puts the
-    /// workspace secrets into the `when` context, and Tera quotes the offending
-    /// value in filter/type errors. The resulting `Change::Fail` error is
-    /// persisted to `job_step.error_message` and `retry_history`, so it must be
-    /// scrubbed before it leaves `run`.
+    /// workspace secrets into the `when` context, and Tera's raw text quotes
+    /// the offending value in filter errors (`round(method=…)` here, asserted
+    /// first). The resulting `Change::Fail` error is persisted to
+    /// `job_step.error_message` and `retry_history`, so it must carry no value:
+    /// the template error is value-free (spec 2026-10-06 § 3.2) and `run`
+    /// scrubs as the second line.
     #[test]
     fn when_condition_error_does_not_leak_secret_values() {
+        const TPL: &str = "{{ 1 | round(method=secret.db.host) }}";
+        assert!(
+            crate::workspace_set::tera_raw_detail_contains(
+                TPL,
+                &json!({"secret": {"db": {"host": "db.internal.prod"}}}),
+                "db.internal.prod"
+            ),
+            "fixture must leak through Tera's raw text, else this test is vacuous"
+        );
         let t = task(vec![("a", fs(&[])), ("e", fs(&["a"]))]);
         let mut w = ws();
         w.secrets
             .insert("db".to_string(), json!({"host": "db.internal.prod"}));
-        let rows = vec![
-            row("a", "completed"),
-            row_when("e", "pending", "{{ secret.db.host | round }}"),
-        ];
+        let rows = vec![row("a", "completed"), row_when("e", "pending", TPL)];
         let plan = run(
             &t,
             &job(None),

@@ -26,6 +26,10 @@ fn only_the_cli_and_template_error_mention_raw_detail() {
             || p.ends_with("stroem-common/src/template_error.rs")
             // test module (fixture proof, R8)
             || p.ends_with("stroem-common/src/tera_compat.rs")
+            // test modules (fixture proof, Task 9)
+            || p.ends_with("stroem-common/src/template.rs")
+            || p.ends_with("stroem-server/src/workspace_set.rs")
+            || p.ends_with("stroem-server/tests/common/tera_fixtures.rs")
             || p.ends_with("stroem-common/tests/raw_detail_guard.rs")
     };
     let offenders: Vec<_> = hits.iter().filter(|p| !allowed(p)).collect();

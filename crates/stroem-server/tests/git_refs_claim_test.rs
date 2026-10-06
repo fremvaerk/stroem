@@ -3,6 +3,8 @@
 
 mod common;
 use common::pinned::*;
+#[path = "common/tera_fixtures.rs"]
+mod tera_fixtures;
 
 use axum::http::StatusCode;
 use serde_json::{json, Value};
@@ -985,8 +987,9 @@ async fn claim_dropped_mid_pin_load_releases_the_step() -> anyhow::Result<()> {
 
 /// `billing` main (live): an action whose BODY wraps an owner secret in a
 /// filter chain that fails, and a plain `export` for the caller-input case.
-/// The `"` in the secret makes `json_encode | round` quote a doubly
-/// JSON-escaped form that no scrub matches.
+/// `upper | int` makes Tera's raw error quote the UPPER-CASED secret, a form
+/// no scrub matches (`tera_fixtures::quoting_upper_int`; Tera 1's
+/// `json_encode | round` double-JSON-escaped it instead).
 const WH_BILLING_MAIN: &str = r#"
 secrets:
   TOKEN: 'live"zq7-owner-secret'
@@ -999,7 +1002,7 @@ actions:
         type: string
   export-body:
     type: script
-    script: "echo {{ secret.TOKEN | json_encode | round }}"
+    script: "echo {{ secret.TOKEN | upper | int }}"
 "#;
 
 /// `billing` at tag `v4.1.0`: `TOKEN` has a value that exists ONLY at this
@@ -1024,7 +1027,7 @@ actions:
     input:
       token:
         type: string
-        default: "{{ secret.TOKEN | json_encode | round }}"
+        default: "{{ secret.TOKEN | upper | int }}"
   export-db:
     type: script
     script: echo db
@@ -1054,7 +1057,7 @@ tasks:
       s:
         action: billing.export
         input:
-          token: "{{ secret.CALLER_TOKEN | round }}"
+          token: "{{ 1 | round(method=secret.CALLER_TOKEN) }}"
   bad-caller-connection:
     flow:
       s:
@@ -1069,9 +1072,10 @@ tasks:
         ref: release/2.3
 "#;
 
-/// `etl` at `release/2.3`: a default that fails on an own secret. `TOKEN2`
-/// is defined at both commits, so the test does not depend on which config
-/// the owner role resolves against.
+/// `etl` at `release/2.3`: a default that fails on an own secret (Tera's raw
+/// error quotes it: `tera_fixtures::quoting_round_method`). `TOKEN2` is
+/// defined at both commits, so the test does not depend on which config the
+/// owner role resolves against.
 const WH_ETL_RELEASE: &str = r#"
 secrets:
   TOKEN2: own-secret-value
@@ -1082,7 +1086,7 @@ actions:
     input:
       v:
         type: string
-        default: "{{ secret.TOKEN2 | round }}"
+        default: "{{ 1 | round(method=secret.TOKEN2) }}"
 "#;
 
 async fn claim_withholding_fixture() -> anyhow::Result<PinnedFixture> {
@@ -1120,10 +1124,29 @@ fn claim_assert_no_secret(text: &str, fragment: &str) {
     assert!(!text.contains(fragment), "secret leaked: {text}");
 }
 
+/// Spec 2026-10-06 § 3.5: `yaml` really uses `template`, and Tera's RAW error
+/// for it quotes `leaked` — so the absence assertions are not vacuous.
+fn claim_assert_fixture_leaks(yaml: &str, template: &str, path: &str, value: &str, leaked: &str) {
+    assert!(yaml.contains(template), "{template} not in the fixture");
+    let mut ctx = json!({});
+    ctx["secret"][path] = json!(value);
+    assert!(
+        tera_fixtures::raw_detail_contains(template, &ctx, leaked),
+        "fixture must leak through Tera's raw text, else this test is vacuous"
+    );
+}
+
 /// The owner's input default at a ref fails on a secret that exists only at
 /// that commit: the fixed sentence everywhere, nothing of the value.
 #[tokio::test]
 async fn foreign_owner_default_render_error_is_withheld_at_claim() -> anyhow::Result<()> {
+    claim_assert_fixture_leaks(
+        WH_BILLING_TAGGED,
+        &tera_fixtures::quoting_upper_int("secret.TOKEN"),
+        "TOKEN",
+        "tag\"only-zq9-secret",
+        "TAG\"ONLY-ZQ9-SECRET",
+    );
     let fx = claim_withholding_fixture().await?;
     let expected = "rendering action 'export' of workspace 'billing' failed; details withheld";
     let (status, body, error, log) = claim_failure(&fx, "call-foreign-default").await;
@@ -1133,6 +1156,7 @@ async fn foreign_owner_default_render_error_is_withheld_at_claim() -> anyhow::Re
     assert!(log.contains(expected), "{log}");
     for text in [body.to_string(), error, log] {
         claim_assert_no_secret(&text, "zq9");
+        claim_assert_no_secret(&text, "ZQ9");
     }
     Ok(())
 }
@@ -1141,6 +1165,13 @@ async fn foreign_owner_default_render_error_is_withheld_at_claim() -> anyhow::Re
 /// owner secret: withheld the same way.
 #[tokio::test]
 async fn foreign_owner_body_render_error_is_withheld_at_claim() -> anyhow::Result<()> {
+    claim_assert_fixture_leaks(
+        WH_BILLING_MAIN,
+        &tera_fixtures::quoting_upper_int("secret.TOKEN"),
+        "TOKEN",
+        "live\"zq7-owner-secret",
+        "LIVE\"ZQ7-OWNER-SECRET",
+    );
     let fx = claim_withholding_fixture().await?;
     let expected = "rendering action 'export-body' of workspace 'billing' failed; details withheld";
     let (status, body, error, log) = claim_failure(&fx, "call-foreign-body").await;
@@ -1150,6 +1181,7 @@ async fn foreign_owner_body_render_error_is_withheld_at_claim() -> anyhow::Resul
     assert!(log.contains(expected), "{log}");
     for text in [body.to_string(), error, log] {
         claim_assert_no_secret(&text, "zq7");
+        claim_assert_no_secret(&text, "ZQ7");
     }
     Ok(())
 }
@@ -1158,6 +1190,13 @@ async fn foreign_owner_body_render_error_is_withheld_at_claim() -> anyhow::Resul
 /// in the caller's context: visible, scrubbed.
 #[tokio::test]
 async fn caller_input_render_error_stays_visible_and_scrubbed() -> anyhow::Result<()> {
+    claim_assert_fixture_leaks(
+        WH_ETL_MAIN,
+        &tera_fixtures::quoting_round_method("secret.CALLER_TOKEN"),
+        "CALLER_TOKEN",
+        "caller-secret-value",
+        "caller-secret-value",
+    );
     let fx = claim_withholding_fixture().await?;
     let (status, body, error, log) = claim_failure(&fx, "bad-caller-input").await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
@@ -1193,6 +1232,13 @@ async fn cross_owner_caller_connection_error_stays_visible() -> anyhow::Result<(
 /// visible, scrubbed.
 #[tokio::test]
 async fn own_workspace_ref_render_error_stays_visible_and_scrubbed() -> anyhow::Result<()> {
+    claim_assert_fixture_leaks(
+        WH_ETL_RELEASE,
+        &tera_fixtures::quoting_round_method("secret.TOKEN2"),
+        "TOKEN2",
+        "own-secret-value",
+        "own-secret-value",
+    );
     let fx = claim_withholding_fixture().await?;
     let (status, body, error, log) = claim_failure(&fx, "call-own-ref").await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
