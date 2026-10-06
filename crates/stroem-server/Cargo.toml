@@ -75,10 +75,10 @@ http = { workspace = true, optional = true }
 [dev-dependencies]
 tempfile = "3"
 stroem-test-support.workspace = true
-# Still needed directly: s3_integration_test.rs starts its own MinIO
-# container (unrelated to Postgres) via the bare `testcontainers` crate.
+# Still needed directly: the S3 tests (s3_integration_test.rs,
+# log_peak_alloc_test.rs) start their own MinIO container via
+# tests/common/minio.rs.
 testcontainers = { version = "0.27" }
-testcontainers-modules = { version = "0.15", features = ["minio"] }
 http = "1"
 http-body-util = "0.1"
 tokio-tungstenite = "0.30"

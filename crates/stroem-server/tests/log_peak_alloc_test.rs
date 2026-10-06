@@ -22,6 +22,10 @@ use stroem_server::log_storage::{archive_key, JobLogMeta, LogStorage};
 use tempfile::TempDir;
 use uuid::Uuid;
 
+#[cfg(feature = "s3")]
+#[path = "common/minio.rs"]
+mod minio;
+
 struct Counting;
 
 static CURRENT: AtomicUsize = AtomicUsize::new(0);
@@ -542,31 +546,9 @@ async fn run(large: bool) {
 #[cfg(feature = "s3")]
 async fn s3_cases(report: &mut Report, cfg: LogReadConfig) {
     use stroem_server::blob_storage::S3BlobArchive;
-    use testcontainers::runners::AsyncRunner;
-    use testcontainers::ImageExt;
-    use testcontainers_modules::minio::MinIO;
 
-    // Same image as s3_integration_test.rs (minio/minio is gone from Docker Hub and quay.io).
-    let container = MinIO::default()
-        .with_name("cgr.dev/chainguard/minio")
-        .with_tag("latest")
-        // The image declares no EXPOSE; host port 0 = a free port Docker picks.
-        .with_mapped_port(0, testcontainers::core::ContainerPort::Tcp(9000))
-        .start()
-        .await
-        .unwrap();
-    let port = container.get_host_port_ipv4(9000).await.unwrap();
-    let creds =
-        aws_sdk_s3::config::Credentials::new("minioadmin", "minioadmin", None, None, "test");
-    let client = aws_sdk_s3::Client::from_conf(
-        aws_sdk_s3::Config::builder()
-            .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
-            .region(aws_sdk_s3::config::Region::new("us-east-1"))
-            .endpoint_url(format!("http://127.0.0.1:{port}"))
-            .credentials_provider(creds)
-            .force_path_style(true)
-            .build(),
-    );
+    let (_container, endpoint) = minio::start().await.unwrap();
+    let client = minio::s3_client(&endpoint);
     client.create_bucket().bucket("peak").send().await.unwrap();
     let archive: Arc<dyn BlobArchive> = Arc::new(S3BlobArchive::from_client(client, "peak".into()));
     let live = TempDir::new().unwrap();
