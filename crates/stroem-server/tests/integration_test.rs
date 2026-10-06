@@ -13,8 +13,8 @@ use stroem_common::models::workflow::{
     HookDef, InputFieldDef, TaskDef, TriggerDef, WorkspaceConfig,
 };
 use stroem_db::{
-    create_pool, run_migrations, JobRepo, JobStepRepo, NewJobStep, TaskStateRepo, UserAuthLinkRepo,
-    UserRepo, WorkerRepo, WorkspaceStateRepo,
+    JobRepo, JobStepRepo, NewJobStep, TaskStateRepo, UserAuthLinkRepo, UserRepo, WorkerRepo,
+    WorkspaceStateRepo,
 };
 use stroem_server::auth::hash_password;
 use stroem_server::blob_storage::{BlobArchive, LocalBlobArchive};
@@ -29,8 +29,6 @@ use stroem_server::state_storage::StateStorage;
 use stroem_server::web::build_router;
 use stroem_server::workspace::WorkspaceManager;
 use tempfile::TempDir;
-use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::postgres::Postgres;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -1284,17 +1282,10 @@ fn test_workspace() -> WorkspaceConfig {
     workspace
 }
 
-async fn setup() -> Result<(
-    Router,
-    PgPool,
-    TempDir,
-    testcontainers::ContainerAsync<Postgres>,
-)> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+async fn setup() -> Result<(Router, PgPool, TempDir)> {
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let url = test_db.url;
 
     let temp_dir = TempDir::new()?;
     let log_dir = temp_dir.path().join("logs");
@@ -1340,7 +1331,7 @@ async fn setup() -> Result<(
     let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None);
     let router = build_router(state, CancellationToken::new());
 
-    Ok((router, pool, temp_dir, container))
+    Ok((router, pool, temp_dir))
 }
 
 /// A trivial `type: script` / `runner: local` action with all optional fields
@@ -1389,17 +1380,10 @@ fn trivial_script_action(script: &str) -> ActionDef {
 ///   `action` is the qualified reference `"B.remote"`.
 /// - Workspace `B` owns action `remote` (a trivial local script), pinned at a
 ///   known revision so the created step records `action_revision`.
-async fn setup_two_workspaces() -> Result<(
-    Router,
-    PgPool,
-    TempDir,
-    testcontainers::ContainerAsync<Postgres>,
-)> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+async fn setup_two_workspaces() -> Result<(Router, PgPool, TempDir)> {
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let url = test_db.url;
 
     let temp_dir = TempDir::new()?;
     let log_dir = temp_dir.path().join("logs");
@@ -1560,7 +1544,7 @@ async fn setup_two_workspaces() -> Result<(
     let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None);
     let router = build_router(state, CancellationToken::new());
 
-    Ok((router, pool, temp_dir, container))
+    Ok((router, pool, temp_dir))
 }
 
 /// Three workspaces for cross-workspace CONNECTION tests.
@@ -1580,17 +1564,10 @@ async fn setup_two_workspaces() -> Result<(
 ///         action `child-task` type:task -> use-shared, input conn: type owner.clickhouse (no default)
 ///         task `task-step-bad` step run (when: "true"): action child-task, input conn: "owner.private-conn"
 ///         caller has a local type `clickhouse` (for bad-type) and NO connections.
-async fn setup_shared_connections() -> Result<(
-    Router,
-    PgPool,
-    TempDir,
-    testcontainers::ContainerAsync<Postgres>,
-)> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+async fn setup_shared_connections() -> Result<(Router, PgPool, TempDir)> {
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let url = test_db.url;
     let temp_dir = TempDir::new()?;
     let log_dir = temp_dir.path().join("logs");
     std::fs::create_dir_all(&log_dir)?;
@@ -1917,12 +1894,12 @@ async fn setup_shared_connections() -> Result<(
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
     let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None);
     let router = build_router(state, CancellationToken::new());
-    Ok((router, pool, temp_dir, container))
+    Ok((router, pool, temp_dir))
 }
 
 #[tokio::test]
 async fn test_execute_with_shared_foreign_connection_resolves_values() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup_shared_connections().await?;
+    let (router, pool, _tmp) = setup_shared_connections().await?;
     let response = router
         .oneshot(api_request(
             "POST",
@@ -1942,7 +1919,7 @@ async fn test_execute_with_shared_foreign_connection_resolves_values() -> Result
 
 #[tokio::test]
 async fn test_execute_with_unshared_foreign_connection_is_400() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_shared_connections().await?;
+    let (router, _pool, _tmp) = setup_shared_connections().await?;
     let response = router
         .oneshot(api_request(
             "POST",
@@ -1958,7 +1935,7 @@ async fn test_execute_with_unshared_foreign_connection_is_400() -> Result<()> {
 
 #[tokio::test]
 async fn test_execute_with_two_hop_connection_declaring_foreign_type() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup_shared_connections().await?;
+    let (router, pool, _tmp) = setup_shared_connections().await?;
     let response = router
         .oneshot(api_request(
             "POST",
@@ -1978,7 +1955,7 @@ async fn test_execute_with_two_hop_connection_declaring_foreign_type() -> Result
 
 #[tokio::test]
 async fn test_execute_local_type_with_foreign_connection_is_400_mismatch() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_shared_connections().await?;
+    let (router, _pool, _tmp) = setup_shared_connections().await?;
     let response = router
         .oneshot(api_request(
             "POST",
@@ -1994,7 +1971,7 @@ async fn test_execute_local_type_with_foreign_connection_is_400_mismatch() -> Re
 
 #[tokio::test]
 async fn test_execute_unknown_workspace_prefix_is_400() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_shared_connections().await?;
+    let (router, _pool, _tmp) = setup_shared_connections().await?;
     let response = router
         .oneshot(api_request(
             "POST",
@@ -2010,7 +1987,7 @@ async fn test_execute_unknown_workspace_prefix_is_400() -> Result<()> {
 
 #[tokio::test]
 async fn test_literal_flow_step_ref_to_unshared_connection_is_400_at_creation() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_shared_connections().await?;
+    let (router, _pool, _tmp) = setup_shared_connections().await?;
     let response = router
         .oneshot(api_request(
             "POST",
@@ -2024,7 +2001,7 @@ async fn test_literal_flow_step_ref_to_unshared_connection_is_400_at_creation() 
 
 #[tokio::test]
 async fn test_templated_flow_step_ref_fails_step_at_claim_not_creation() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup_shared_connections().await?;
+    let (router, pool, _tmp) = setup_shared_connections().await?;
     // Creation succeeds: the value is a template.
     let response = router
         .clone()
@@ -2088,7 +2065,7 @@ async fn test_templated_flow_step_ref_fails_step_at_claim_not_creation() -> Resu
 #[tokio::test]
 async fn test_cross_workspace_action_caller_bare_unshared_name_fails_at_creation_precheck(
 ) -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_shared_connections().await?;
+    let (router, _pool, _tmp) = setup_shared_connections().await?;
     let response = router
         .clone()
         .oneshot(api_request(
@@ -2137,7 +2114,7 @@ async fn test_execute_task_rejects_legacy_continue_when_skipped_at_creation() ->
         r#"      a: { action: noop }
       b: { action: noop, depends_on: [a], continue_when_skipped: true }"#,
     );
-    let (router, _pool, _tmp, _container) = setup_with_workspace(workspace).await?;
+    let (router, _pool, _tmp) = setup_with_workspace(workspace).await?;
 
     let response = router
         .oneshot(api_request(
@@ -2162,7 +2139,7 @@ async fn test_execute_task_rejects_malformed_depends_on_tree_at_creation() -> Re
         r#"      a: { action: noop }
       b: { action: noop, depends_on: [{ all: [] }] }"#,
     );
-    let (router, _pool, _tmp, _container) = setup_with_workspace(workspace).await?;
+    let (router, _pool, _tmp) = setup_with_workspace(workspace).await?;
 
     let response = router
         .oneshot(api_request(
@@ -2181,7 +2158,7 @@ async fn test_execute_task_rejects_malformed_depends_on_tree_at_creation() -> Re
 async fn test_cross_workspace_action_owner_default_resolves_ungated() -> Result<()> {
     // B.remote's own default `prod` (UNSHARED in B) must still resolve at claim
     // time — the owner reading its own config is not gated.
-    let (router, _pool, _tmp, _container) = setup_two_workspaces().await?;
+    let (router, _pool, _tmp) = setup_two_workspaces().await?;
 
     let response = router
         .clone()
@@ -2227,7 +2204,7 @@ async fn test_templated_shared_foreign_connection_resolves_at_claim() -> Result<
     // (`"{{ input.pick }}"`), not a literal, so it is not pre-checked at job
     // creation; it resolves against the SHARED owner connection when the
     // step is claimed.
-    let (router, _pool, _tmp, _container) = setup_shared_connections().await?;
+    let (router, _pool, _tmp) = setup_shared_connections().await?;
 
     let response = router
         .clone()
@@ -2280,7 +2257,7 @@ async fn test_task_step_bad_connection_fails_step_not_swallowed() -> Result<()> 
     // — a `when`-guarded step is never pre-checked, only checked once
     // actually promoted/dispatched), so the resolution failure can only
     // surface from `handle_task_steps` itself.
-    let (router, pool, _tmp, _container) = setup_shared_connections().await?;
+    let (router, pool, _tmp) = setup_shared_connections().await?;
 
     let response = router
         .oneshot(api_request(
@@ -2321,7 +2298,7 @@ async fn test_task_step_bad_connection_fails_step_not_swallowed() -> Result<()> 
 
 #[tokio::test]
 async fn test_task_detail_lists_shared_foreign_connections_only() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_shared_connections().await?;
+    let (router, _pool, _tmp) = setup_shared_connections().await?;
     let response = router
         .oneshot(api_request(
             "GET",
@@ -2341,7 +2318,7 @@ async fn test_task_detail_lists_shared_foreign_connections_only() -> Result<()> 
 
 #[tokio::test]
 async fn test_job_detail_redacts_foreign_connection_secrets() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_shared_connections().await?;
+    let (router, _pool, _tmp) = setup_shared_connections().await?;
 
     // use-shared resolves owner.shared-conn at creation → job.input holds
     // {"conn": {"host": "shared.host", "token": "owner-token-secret-value"}}
@@ -2386,7 +2363,7 @@ async fn test_job_detail_redacts_secret_from_foreign_type_default() -> Result<()
     // the resolver fills it in from the type's own `default:` at job
     // creation. That value must still be masked in job detail even though it
     // never appears literally on any connection.
-    let (router, _pool, _tmp, _container) = setup_shared_connections().await?;
+    let (router, _pool, _tmp) = setup_shared_connections().await?;
 
     let response = router
         .clone()
@@ -2540,17 +2517,10 @@ fn test_workspace_with_missing_connection() -> WorkspaceConfig {
 
 /// Variant of `setup()` whose workspace contains the "needs-conn" task from
 /// `test_workspace_with_missing_connection()`.
-async fn setup_with_task_needing_missing_connection() -> Result<(
-    Router,
-    PgPool,
-    TempDir,
-    testcontainers::ContainerAsync<Postgres>,
-)> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+async fn setup_with_task_needing_missing_connection() -> Result<(Router, PgPool, TempDir)> {
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let url = test_db.url;
 
     let temp_dir = TempDir::new()?;
     let log_dir = temp_dir.path().join("logs");
@@ -2596,7 +2566,7 @@ async fn setup_with_task_needing_missing_connection() -> Result<(
     let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None);
     let router = build_router(state, CancellationToken::new());
 
-    Ok((router, pool, temp_dir, container))
+    Ok((router, pool, temp_dir))
 }
 
 /// Register a test worker in the DB and return its UUID.
@@ -2741,7 +2711,7 @@ fn log_lines_body(step_name: &str, lines: &[(&str, &str)]) -> Value {
 
 #[tokio::test]
 async fn test_execute_task_creates_job_and_steps() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     let response = router
         .oneshot(api_request(
@@ -2775,7 +2745,7 @@ async fn test_execute_task_creates_job_and_steps() -> Result<()> {
 
 #[tokio::test]
 async fn test_cross_workspace_action_stamps_owner_on_step() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup_two_workspaces().await?;
+    let (router, pool, _tmp) = setup_two_workspaces().await?;
 
     let response = router
         .oneshot(api_request(
@@ -2809,7 +2779,7 @@ async fn test_cross_workspace_action_stamps_owner_on_step() -> Result<()> {
 
 #[tokio::test]
 async fn test_cross_workspace_claim_returns_owner_workspace_and_revision() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_two_workspaces().await?;
+    let (router, _pool, _tmp) = setup_two_workspaces().await?;
 
     // Execute A/caller — creates a job whose `run` step is owned by B@rev-b-1.
     let response = router
@@ -2872,17 +2842,10 @@ async fn test_cross_workspace_claim_returns_owner_workspace_and_revision() -> Re
 // (`"prod"`) instead of the resolved values object. The fix gates
 // `action_workspace` on the DB column (the true cross-workspace signal), so a LOCAL
 // step gets `None` and the FULL dotted key is used.
-async fn setup_with_library_dotted_action() -> Result<(
-    Router,
-    PgPool,
-    TempDir,
-    testcontainers::ContainerAsync<Postgres>,
-)> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+async fn setup_with_library_dotted_action() -> Result<(Router, PgPool, TempDir)> {
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let url = test_db.url;
 
     let temp_dir = TempDir::new()?;
     let log_dir = temp_dir.path().join("logs");
@@ -3006,12 +2969,12 @@ async fn setup_with_library_dotted_action() -> Result<(
     let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None);
     let router = build_router(state, CancellationToken::new());
 
-    Ok((router, pool, temp_dir, container))
+    Ok((router, pool, temp_dir))
 }
 
 #[tokio::test]
 async fn test_local_dotted_library_action_resolves_connection_on_claim() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup_with_library_dotted_action().await?;
+    let (router, pool, _tmp) = setup_with_library_dotted_action().await?;
 
     // Execute the task — creates a LOCAL job (`action_workspace` column NULL).
     let response = router
@@ -3080,7 +3043,7 @@ async fn test_local_dotted_library_action_resolves_connection_on_claim() -> Resu
 
 #[tokio::test]
 async fn test_execute_task_missing_connection_returns_400() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_with_task_needing_missing_connection().await?;
+    let (router, _pool, _tmp) = setup_with_task_needing_missing_connection().await?;
 
     let response = router
         .oneshot(
@@ -3116,7 +3079,7 @@ async fn test_execute_task_missing_connection_returns_400() -> Result<()> {
 
 #[tokio::test]
 async fn test_execute_task_cross_workspace_unknown_action_returns_400() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_two_workspaces().await?;
+    let (router, _pool, _tmp) = setup_two_workspaces().await?;
 
     // `caller-bad-action` references `B.nonexistent`: workspace B exists, but
     // has no action named `nonexistent`. This must be a 400 (precise user
@@ -3785,18 +3748,10 @@ struct CrossTaskOpts {
 
 async fn setup_cross_task_workspaces(
     opts: CrossTaskOpts,
-) -> Result<(
-    Router,
-    PgPool,
-    Arc<WorkspaceManager>,
-    TempDir,
-    testcontainers::ContainerAsync<Postgres>,
-)> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+) -> Result<(Router, PgPool, Arc<WorkspaceManager>, TempDir)> {
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let url = test_db.url;
 
     let temp_dir = TempDir::new()?;
     let log_dir = temp_dir.path().join("logs");
@@ -3900,7 +3855,7 @@ async fn setup_cross_task_workspaces(
     let mgr_handle = Arc::clone(&state.workspaces);
     let router = build_router(state, CancellationToken::new());
 
-    Ok((router, pool, mgr_handle, temp_dir, container))
+    Ok((router, pool, mgr_handle, temp_dir))
 }
 
 async fn xws_login(router: &Router, email: &str) -> Result<String> {
@@ -3978,8 +3933,7 @@ async fn xws_mcp_initialize(router: &Router) -> Result<Option<String>> {
 
 #[tokio::test]
 async fn test_xws_task_form_a_creates_child_in_owner_workspace() -> Result<()> {
-    let (router, pool, _mgr, _tmp, _c) =
-        setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
+    let (router, pool, _mgr, _tmp) = setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
     let resp = router
         .clone()
         .oneshot(api_request(
@@ -4073,8 +4027,7 @@ async fn test_xws_task_form_a_creates_child_in_owner_workspace() -> Result<()> {
 
 #[tokio::test]
 async fn test_xws_task_form_b_uses_persisted_action_defaults() -> Result<()> {
-    let (router, pool, mgr, _tmp, _c) =
-        setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
+    let (router, pool, mgr, _tmp) = setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
 
     let resp = router
         .clone()
@@ -4183,8 +4136,7 @@ async fn test_xws_task_form_b_uses_persisted_action_defaults() -> Result<()> {
 
 #[tokio::test]
 async fn test_xws_task_owner_task_qualified_to_third_workspace() -> Result<()> {
-    let (router, pool, _mgr, _tmp, _c) =
-        setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
+    let (router, pool, _mgr, _tmp) = setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
     let resp = router
         .oneshot(api_request(
             "POST",
@@ -4206,8 +4158,7 @@ async fn test_xws_task_owner_task_qualified_to_third_workspace() -> Result<()> {
 
 #[tokio::test]
 async fn test_xws_task_name_collision_runs_owner_task() -> Result<()> {
-    let (router, pool, _mgr, _tmp, _c) =
-        setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
+    let (router, pool, _mgr, _tmp) = setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
     let resp = router
         .oneshot(api_request(
             "POST",
@@ -4231,8 +4182,7 @@ async fn test_xws_task_name_collision_runs_owner_task() -> Result<()> {
 
 #[tokio::test]
 async fn test_xws_task_same_workspace_child_inherits_parent_revision() -> Result<()> {
-    let (router, pool, _mgr, _tmp, _c) =
-        setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
+    let (router, pool, _mgr, _tmp) = setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
     let resp = router
         .oneshot(api_request(
             "POST",
@@ -4260,8 +4210,7 @@ async fn test_xws_task_same_workspace_child_inherits_parent_revision() -> Result
 
 #[tokio::test]
 async fn test_xws_task_execute_errors() -> Result<()> {
-    let (router, _pool, mgr, _tmp, _c) =
-        setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
+    let (router, _pool, mgr, _tmp) = setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
 
     let resp = router
         .clone()
@@ -4332,8 +4281,7 @@ async fn test_xws_task_execute_errors() -> Result<()> {
 /// 3/4 ever existed.
 #[tokio::test]
 async fn test_xws_task_chain_missing_grandchild_is_200_then_failed_step() -> Result<()> {
-    let (router, pool, mgr, _tmp, _c) =
-        setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
+    let (router, pool, mgr, _tmp) = setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
 
     let mut c_mut = xws_build_ws_c();
     c_mut.tasks.remove("build");
@@ -4371,8 +4319,7 @@ async fn test_xws_task_chain_missing_grandchild_is_200_then_failed_step() -> Res
 
 #[tokio::test]
 async fn test_xws_task_owner_task_removed_before_dispatch_fails_step() -> Result<()> {
-    let (router, pool, mgr, _tmp, _c) =
-        setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
+    let (router, pool, mgr, _tmp) = setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
 
     let resp = router
         .clone()
@@ -4453,8 +4400,7 @@ async fn test_xws_task_owner_task_removed_before_dispatch_fails_step() -> Result
 /// pre-round-3 version of this test asserted.
 #[tokio::test]
 async fn test_xws_task_secret_scrub_covers_owner_default_error() -> Result<()> {
-    let (router, pool, _mgr, _tmp, _c) =
-        setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
+    let (router, pool, _mgr, _tmp) = setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
 
     let resp = router
         .clone()
@@ -4542,8 +4488,7 @@ async fn test_xws_task_secret_scrub_covers_owner_default_error() -> Result<()> {
 /// `get_job_status` text.
 #[tokio::test]
 async fn test_xws_task_secret_scrub_covers_array_valued_owner_default() -> Result<()> {
-    let (router, pool, _mgr, _tmp, _c) =
-        setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
+    let (router, pool, _mgr, _tmp) = setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
 
     let raw_secret = "has\"quote\\and-slash";
     let escaped_secret = serde_json::to_string(raw_secret)?; // includes the surrounding quotes
@@ -4639,8 +4584,7 @@ async fn test_xws_task_secret_scrub_covers_array_valued_owner_default() -> Resul
 /// REST job detail, the job log, or MCP's `get_job_status` text.
 #[tokio::test]
 async fn test_xws_task_secret_scrub_covers_debug_escaped_owner_default() -> Result<()> {
-    let (router, pool, _mgr, _tmp, _c) =
-        setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
+    let (router, pool, _mgr, _tmp) = setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
 
     let raw_secret = "prefix\u{1b}suffix";
     let debug_escaped = format!("{raw_secret:?}");
@@ -4737,8 +4681,7 @@ async fn test_xws_task_secret_scrub_covers_debug_escaped_owner_default() -> Resu
 /// with its dependents cascaded as before.
 #[tokio::test]
 async fn test_xws_task_secret_scrub_withholds_owner_side_render_errors() -> Result<()> {
-    let (router, pool, _mgr, _tmp, _c) =
-        setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
+    let (router, pool, _mgr, _tmp) = setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
 
     let resp = router
         .clone()
@@ -4822,8 +4765,7 @@ async fn test_xws_task_secret_scrub_withholds_owner_side_render_errors() -> Resu
 /// scrubbed (`••••••` present), not withheld.
 #[tokio::test]
 async fn test_xws_task_secret_scrub_same_workspace_still_masks() -> Result<()> {
-    let (router, pool, _mgr, _tmp, _c) =
-        setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
+    let (router, pool, _mgr, _tmp) = setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
 
     let resp = router
         .oneshot(api_request(
@@ -4856,8 +4798,7 @@ async fn test_xws_task_secret_scrub_same_workspace_still_masks() -> Result<()> {
 /// ActionDefault-bucket case, which IS withheld.
 #[tokio::test]
 async fn test_xws_task_form_b_caller_literal_never_withheld() -> Result<()> {
-    let (router, pool, _mgr, _tmp, _c) =
-        setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
+    let (router, pool, _mgr, _tmp) = setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
 
     let resp = router
         .oneshot(api_request(
@@ -4887,8 +4828,7 @@ async fn test_xws_task_form_b_caller_literal_never_withheld() -> Result<()> {
 /// creator instead of the provenance resolver.
 #[tokio::test]
 async fn test_xws_task_secret_scrub_withholds_task_default_chain_error() -> Result<()> {
-    let (router, pool, _mgr, _tmp, _c) =
-        setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
+    let (router, pool, _mgr, _tmp) = setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
 
     let resp = router
         .oneshot(api_request(
@@ -4915,8 +4855,7 @@ async fn test_xws_task_secret_scrub_withholds_task_default_chain_error() -> Resu
 
 #[tokio::test]
 async fn test_xws_task_provenance_through_http() -> Result<()> {
-    let (router, pool, _mgr, _tmp, _c) =
-        setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
+    let (router, pool, _mgr, _tmp) = setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
 
     // A literal connection NAME resolves via caller-then-owner-shared
     // provenance (A has no `b-shared`; B's is shared, so it's used).
@@ -5045,8 +4984,7 @@ async fn test_xws_task_provenance_through_http() -> Result<()> {
 
 #[tokio::test]
 async fn test_xws_task_persisted_library_action_stays_local() -> Result<()> {
-    let (router, pool, _mgr, _tmp, _c) =
-        setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
+    let (router, pool, _mgr, _tmp) = setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
     let resp = router
         .oneshot(api_request(
             "POST",
@@ -5070,8 +5008,7 @@ async fn test_xws_task_persisted_library_action_stays_local() -> Result<()> {
 
 #[tokio::test]
 async fn test_xws_task_two_pass_default_is_pinned_behaviour() -> Result<()> {
-    let (router, pool, _mgr, _tmp, _c) =
-        setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
+    let (router, pool, _mgr, _tmp) = setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
     let resp = router
         .oneshot(api_request(
             "POST",
@@ -5111,7 +5048,7 @@ async fn test_xws_task_child_detail_is_owner_acl_404() -> Result<()> {
             users: vec![],
         }],
     };
-    let (router, pool, _mgr, _tmp, _c) = setup_cross_task_workspaces(CrossTaskOpts {
+    let (router, pool, _mgr, _tmp) = setup_cross_task_workspaces(CrossTaskOpts {
         acl: Some(acl),
         auth: true,
     })
@@ -5193,8 +5130,7 @@ async fn test_xws_task_child_detail_is_owner_acl_404() -> Result<()> {
 
 #[tokio::test]
 async fn test_xws_task_hooks() -> Result<()> {
-    let (router, pool, _mgr, _tmp, _c) =
-        setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
+    let (router, pool, _mgr, _tmp) = setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
 
     // 1) Failing B's `deploy` child fires ITS OWN `on_error` hook (a job in
     //    B); A's workspace-level `on_error` is never consulted; a
@@ -5359,7 +5295,7 @@ async fn test_xws_task_hooks() -> Result<()> {
 
 #[tokio::test]
 async fn test_worker_register_and_claim() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     // Create a job first
     let job_id = JobRepo::create(
@@ -5444,7 +5380,7 @@ async fn test_worker_register_and_claim() -> Result<()> {
 
 #[tokio::test]
 async fn test_claim_renders_job_revision_in_action_spec_and_image() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     let job_id = JobRepo::create(
         &pool,
@@ -5532,7 +5468,7 @@ async fn test_claim_renders_job_revision_in_action_spec_and_image() -> Result<()
 
 #[tokio::test]
 async fn test_step_output_flows_to_next_step() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     // Execute greet-and-shout task
     let response = router
@@ -5609,7 +5545,7 @@ async fn test_step_output_flows_to_next_step() -> Result<()> {
 
 #[tokio::test]
 async fn test_step_failure_marks_job_failed() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     // Execute single-step task
     let response = router
@@ -5652,7 +5588,7 @@ async fn test_step_failure_marks_job_failed() -> Result<()> {
 
 #[tokio::test]
 async fn test_step_failure_blocks_dependents() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     // Execute 2-step task
     let response = router
@@ -5715,7 +5651,7 @@ async fn test_step_failure_blocks_dependents() -> Result<()> {
 
 #[tokio::test]
 async fn test_orchestrator_linear_flow() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     // Execute 3-step linear task
     let response = router
@@ -5799,7 +5735,7 @@ async fn test_orchestrator_linear_flow() -> Result<()> {
 
 #[tokio::test]
 async fn test_orchestrator_diamond_dag() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     let response = router
         .clone()
@@ -5900,7 +5836,7 @@ async fn test_orchestrator_diamond_dag() -> Result<()> {
 
 #[tokio::test]
 async fn test_log_append_and_retrieve() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     let job_id = JobRepo::create(
         &pool,
@@ -5961,7 +5897,7 @@ async fn test_log_append_and_retrieve() -> Result<()> {
 
 #[tokio::test]
 async fn test_worker_auth_required() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     // Call worker endpoint without auth header
     let request = Request::builder()
@@ -5983,7 +5919,7 @@ async fn test_worker_auth_required() -> Result<()> {
 
 #[tokio::test]
 async fn test_worker_auth_invalid_token() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     let request = Request::builder()
         .method("POST")
@@ -6005,7 +5941,7 @@ async fn test_worker_auth_invalid_token() -> Result<()> {
 
 #[tokio::test]
 async fn test_list_tasks_from_workspace() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     let response = router
         .oneshot(api_get("/api/workspaces/default/tasks"))
@@ -6027,7 +5963,7 @@ async fn test_list_tasks_from_workspace() -> Result<()> {
 
 #[tokio::test]
 async fn test_get_job_with_steps() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     // Create and execute job
     let response = router
@@ -6069,7 +6005,7 @@ async fn test_get_job_with_steps() -> Result<()> {
 
 #[tokio::test]
 async fn test_orchestrator_with_failure_db() -> Result<()> {
-    let (_router, pool, _tmp, _container) = setup().await?;
+    let (_router, pool, _tmp) = setup().await?;
 
     let mut flow = HashMap::new();
     flow.insert(
@@ -6166,7 +6102,7 @@ async fn test_orchestrator_with_failure_db() -> Result<()> {
 
 #[tokio::test]
 async fn test_orchestrator_linear_flow_db() -> Result<()> {
-    let (_router, pool, _tmp, _container) = setup().await?;
+    let (_router, pool, _tmp) = setup().await?;
 
     let mut flow = HashMap::new();
     flow.insert(
@@ -6380,7 +6316,7 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
 
 #[tokio::test]
 async fn test_execute_nonexistent_task() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     let response = router
         .oneshot(api_request(
@@ -6399,7 +6335,7 @@ async fn test_execute_nonexistent_task() -> Result<()> {
 
 #[tokio::test]
 async fn test_get_task_detail() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     let response = router
         .clone()
@@ -6428,11 +6364,9 @@ async fn test_get_task_detail() -> Result<()> {
 
 #[tokio::test]
 async fn test_task_detail_connections() -> Result<()> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let url = test_db.url;
 
     let temp_dir = TempDir::new()?;
     let log_dir = temp_dir.path().join("logs");
@@ -6797,7 +6731,7 @@ async fn test_task_detail_connections() -> Result<()> {
 
 #[tokio::test]
 async fn test_list_jobs() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     // Initially empty
     let response = router.clone().oneshot(api_get("/api/jobs")).await?;
@@ -6848,7 +6782,7 @@ async fn test_list_jobs() -> Result<()> {
 
 #[tokio::test]
 async fn test_worker_heartbeat() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     // Register worker
     let response = router
@@ -6882,7 +6816,7 @@ async fn test_worker_heartbeat() -> Result<()> {
 
 #[tokio::test]
 async fn test_worker_start_step() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     // Execute task
     let response = router
@@ -6951,7 +6885,7 @@ async fn test_worker_start_step() -> Result<()> {
 
 #[tokio::test]
 async fn test_job_started_at_visible_in_api() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     // Execute task
     let response = router
@@ -7030,7 +6964,7 @@ async fn test_job_started_at_visible_in_api() -> Result<()> {
 
 #[tokio::test]
 async fn test_worker_complete_job() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     // Create job directly
     let job_id = JobRepo::create(
@@ -7070,7 +7004,7 @@ async fn test_worker_complete_job() -> Result<()> {
 
 #[tokio::test]
 async fn test_docker_action_type_flow() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     // Execute docker-build-task
     let response = router
@@ -7123,7 +7057,7 @@ async fn test_docker_action_type_flow() -> Result<()> {
 
 #[tokio::test]
 async fn test_capability_mismatch_no_claim() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     // Execute docker-build-task
     let response = router
@@ -7167,7 +7101,7 @@ async fn test_capability_mismatch_no_claim() -> Result<()> {
 
 #[tokio::test]
 async fn test_multi_capability_worker() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     // Create one script job and one docker job
     let response = router
@@ -7251,7 +7185,7 @@ async fn test_multi_capability_worker() -> Result<()> {
 
 #[tokio::test]
 async fn test_exit_code_zero_with_error() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     let response = router
         .clone()
@@ -7289,7 +7223,7 @@ async fn test_exit_code_zero_with_error() -> Result<()> {
 
 #[tokio::test]
 async fn test_exit_code_nonzero_no_error_message() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     let response = router
         .clone()
@@ -7327,7 +7261,7 @@ async fn test_exit_code_nonzero_no_error_message() -> Result<()> {
 
 #[tokio::test]
 async fn test_complete_step_success_no_output() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     let response = router
         .clone()
@@ -7367,7 +7301,7 @@ async fn test_complete_step_success_no_output() -> Result<()> {
 
 #[tokio::test]
 async fn test_mixed_static_and_template_input() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     // Execute mixed-input task
     let response = router
@@ -7440,7 +7374,7 @@ async fn test_mixed_static_and_template_input() -> Result<()> {
 
 #[tokio::test]
 async fn test_first_step_template_rendering() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     // Execute hello-world - first step has template input {{ input.name }}
     let response = router
@@ -7487,7 +7421,7 @@ async fn test_first_step_template_rendering() -> Result<()> {
 
 #[tokio::test]
 async fn test_dependency_with_null_output() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     // Execute greet-and-shout (shout depends on greet.output.greeting)
     let response = router
@@ -7584,7 +7518,7 @@ async fn test_dependency_with_null_output() -> Result<()> {
 
 #[tokio::test]
 async fn test_invalid_uuid_in_path() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     // Invalid UUID for complete_step
     let response = router
@@ -7618,7 +7552,7 @@ async fn test_invalid_uuid_in_path() -> Result<()> {
 
 #[tokio::test]
 async fn test_auth_no_bearer_prefix() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     // Use "Token" prefix instead of "Bearer"
     let request = Request::builder()
@@ -7646,7 +7580,7 @@ async fn test_auth_no_bearer_prefix() -> Result<()> {
 
 #[tokio::test]
 async fn test_complete_step_nonexistent_job() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     let fake_id = Uuid::new_v4();
     let response = router
@@ -7666,7 +7600,7 @@ async fn test_complete_step_nonexistent_job() -> Result<()> {
 
 #[tokio::test]
 async fn test_wide_fan_in_three_deps() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     let response = router
         .clone()
@@ -7755,7 +7689,7 @@ async fn test_wide_fan_in_three_deps() -> Result<()> {
 
 #[tokio::test]
 async fn test_heartbeat_invalid_worker_id() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     let response = router
         .oneshot(worker_request(
@@ -7773,7 +7707,7 @@ async fn test_heartbeat_invalid_worker_id() -> Result<()> {
 
 #[tokio::test]
 async fn test_action_env_rendering_at_claim() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     // Execute backup-task with input host=localhost
     let response = router
@@ -7822,7 +7756,7 @@ async fn test_action_env_rendering_at_claim() -> Result<()> {
 
 #[tokio::test]
 async fn test_secret_reference_in_env() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     // Execute backup-task
     let response = router
@@ -7869,7 +7803,7 @@ async fn test_secret_reference_in_env() -> Result<()> {
 
 #[tokio::test]
 async fn test_nested_secret_reference_in_env() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     // Execute backup-task
     let response = router
@@ -7926,7 +7860,7 @@ async fn test_nested_secret_reference_in_env() -> Result<()> {
 
 #[tokio::test]
 async fn test_script_rendering_at_claim() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     // Execute backup-task - the action has script: "pg_dump -h {{ input.host }}"
     let response = router
@@ -7972,7 +7906,7 @@ async fn test_script_rendering_at_claim() -> Result<()> {
 
 #[tokio::test]
 async fn test_script_rendering_failure_fails_step_inline() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     // Create a job with a step whose script references a non-existent variable
     let job_id = JobRepo::create(
@@ -8077,7 +8011,7 @@ async fn test_script_rendering_failure_fails_step_inline() -> Result<()> {
 
 #[tokio::test]
 async fn test_env_rendering_failure_fails_step() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     // Create a job with a step whose env references a non-existent variable
     let job_id = JobRepo::create(
@@ -8174,7 +8108,7 @@ async fn test_env_rendering_failure_fails_step() -> Result<()> {
 
 #[tokio::test]
 async fn test_script_rendering_failure_fails_step() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     let job_id = JobRepo::create(
         &pool,
@@ -8270,7 +8204,7 @@ async fn test_script_rendering_failure_fails_step() -> Result<()> {
 
 #[tokio::test]
 async fn test_manifest_rendering_failure_fails_step() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     let job_id = JobRepo::create(
         &pool,
@@ -8373,7 +8307,7 @@ async fn test_manifest_rendering_failure_fails_step() -> Result<()> {
 
 #[tokio::test]
 async fn test_image_rendering_failure_fails_step() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     let job_id = JobRepo::create(
         &pool,
@@ -8474,7 +8408,7 @@ async fn test_image_rendering_failure_fails_step() -> Result<()> {
 
 #[tokio::test]
 async fn test_render_failure_propagates_to_downstream_steps() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     // Execute greet-and-shout: greet (no output) → shout (depends on greet.output.greeting)
     // We complete greet with NO output so that shout's template can't resolve.
@@ -8553,11 +8487,9 @@ async fn test_render_failure_propagates_to_downstream_steps() -> Result<()> {
 
 #[tokio::test]
 async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let url = test_db.url;
 
     let temp_dir = tempfile::TempDir::new()?;
     let log_dir = temp_dir.path().join("logs");
@@ -8802,11 +8734,9 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
 
 #[tokio::test]
 async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let url = test_db.url;
 
     let temp_dir = tempfile::TempDir::new()?;
     let log_dir = temp_dir.path().join("logs");
@@ -9103,7 +9033,7 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
 
 #[tokio::test]
 async fn test_env_and_input_rendering_together() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     // Execute backup-task
     let response = router
@@ -9159,7 +9089,7 @@ async fn test_env_and_input_rendering_together() -> Result<()> {
 
 #[tokio::test]
 async fn test_secret_not_leaked_in_job_output() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     // Execute backup-task
     let response = router
@@ -9199,17 +9129,10 @@ const AUTH_REFRESH_SECRET: &str = "test-refresh-secret-key";
 const AUTH_USER_EMAIL: &str = "admin@test.com";
 const AUTH_USER_PASSWORD: &str = "test-password-123";
 
-async fn setup_with_auth() -> Result<(
-    Router,
-    PgPool,
-    TempDir,
-    testcontainers::ContainerAsync<Postgres>,
-)> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+async fn setup_with_auth() -> Result<(Router, PgPool, TempDir)> {
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let url = test_db.url;
 
     let temp_dir = TempDir::new()?;
     let log_dir = temp_dir.path().join("logs");
@@ -9275,14 +9198,14 @@ async fn setup_with_auth() -> Result<(
     let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None);
     let router = build_router(state, CancellationToken::new());
 
-    Ok((router, pool, temp_dir, container))
+    Ok((router, pool, temp_dir))
 }
 
 // ─── Test 40: Login success ───────────────────────────────────────────
 
 #[tokio::test]
 async fn test_auth_login_success() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+    let (router, _pool, _tmp) = setup_with_auth().await?;
 
     let response = router
         .oneshot(api_request(
@@ -9305,7 +9228,7 @@ async fn test_auth_login_success() -> Result<()> {
 
 #[tokio::test]
 async fn test_auth_login_wrong_password() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+    let (router, _pool, _tmp) = setup_with_auth().await?;
 
     let response = router
         .oneshot(api_request(
@@ -9323,7 +9246,7 @@ async fn test_auth_login_wrong_password() -> Result<()> {
 
 #[tokio::test]
 async fn test_auth_login_nonexistent_email() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+    let (router, _pool, _tmp) = setup_with_auth().await?;
 
     let response = router
         .oneshot(api_request(
@@ -9341,7 +9264,7 @@ async fn test_auth_login_nonexistent_email() -> Result<()> {
 
 #[tokio::test]
 async fn test_auth_refresh_success() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+    let (router, _pool, _tmp) = setup_with_auth().await?;
 
     // Login first
     let response = router
@@ -9389,7 +9312,7 @@ async fn test_auth_refresh_success() -> Result<()> {
 
 #[tokio::test]
 async fn test_auth_refresh_invalid_token() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+    let (router, _pool, _tmp) = setup_with_auth().await?;
 
     let response = router
         .oneshot(api_request(
@@ -9407,7 +9330,7 @@ async fn test_auth_refresh_invalid_token() -> Result<()> {
 
 #[tokio::test]
 async fn test_auth_logout() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+    let (router, _pool, _tmp) = setup_with_auth().await?;
 
     // Login
     let response = router
@@ -9451,7 +9374,7 @@ async fn test_auth_logout() -> Result<()> {
 
 #[tokio::test]
 async fn test_auth_me_with_valid_token() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+    let (router, _pool, _tmp) = setup_with_auth().await?;
 
     // Login
     let response = router
@@ -9485,7 +9408,7 @@ async fn test_auth_me_with_valid_token() -> Result<()> {
 
 #[tokio::test]
 async fn test_auth_me_without_token() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+    let (router, _pool, _tmp) = setup_with_auth().await?;
 
     let response = router.oneshot(api_get("/api/auth/me")).await?;
     assert_eq!(response.status(), 401);
@@ -9497,7 +9420,7 @@ async fn test_auth_me_without_token() -> Result<()> {
 
 #[tokio::test]
 async fn test_protected_routes_require_auth() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+    let (router, _pool, _tmp) = setup_with_auth().await?;
 
     // /api/workspaces/default/tasks requires auth when auth is enabled
     let response = router
@@ -9512,7 +9435,7 @@ async fn test_protected_routes_require_auth() -> Result<()> {
 
 #[tokio::test]
 async fn test_login_when_auth_not_configured() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     let response = router
         .oneshot(api_request(
@@ -9530,7 +9453,7 @@ async fn test_login_when_auth_not_configured() -> Result<()> {
 
 #[tokio::test]
 async fn test_ws_backfill_existing_logs() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     let job_id = JobRepo::create(
         &pool,
@@ -9598,7 +9521,7 @@ async fn test_ws_backfill_existing_logs() -> Result<()> {
 
 #[tokio::test]
 async fn test_ws_live_log_streaming() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     let job_id = JobRepo::create(
         &pool,
@@ -9658,7 +9581,7 @@ async fn test_ws_live_log_streaming() -> Result<()> {
 
 #[tokio::test]
 async fn test_ws_backfill_plus_live() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     let job_id = JobRepo::create(
         &pool,
@@ -9737,7 +9660,7 @@ async fn test_ws_backfill_plus_live() -> Result<()> {
 
 #[tokio::test]
 async fn test_job_output_from_terminal_step() -> Result<()> {
-    let (_router, pool, _tmp, _container) = setup().await?;
+    let (_router, pool, _tmp) = setup().await?;
 
     // 2-step linear: step1 → step2 (step2 is terminal)
     let mut flow = HashMap::new();
@@ -9893,7 +9816,7 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
 
 #[tokio::test]
 async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
-    let (_router, pool, _tmp, _container) = setup().await?;
+    let (_router, pool, _tmp) = setup().await?;
 
     // 2-step linear: step1 → step2 (step2 is terminal)
     let mut flow = HashMap::new();
@@ -10049,7 +9972,7 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
 
 #[tokio::test]
 async fn test_job_output_multiple_terminal_steps() -> Result<()> {
-    let (_router, pool, _tmp, _container) = setup().await?;
+    let (_router, pool, _tmp) = setup().await?;
 
     // Diamond without join: step1 → step2, step1 → step3
     // step2 and step3 are both terminal
@@ -10261,7 +10184,7 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
 
 #[tokio::test]
 async fn test_jsonl_logs_contain_stderr_stream() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     let job_id = JobRepo::create(
         &pool,
@@ -10337,7 +10260,7 @@ async fn test_jsonl_logs_contain_stderr_stream() -> Result<()> {
 
 #[tokio::test]
 async fn test_failing_job_status_with_jsonl_logs() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     let job_id = JobRepo::create(
         &pool,
@@ -10444,7 +10367,7 @@ async fn test_failing_job_status_with_jsonl_logs() -> Result<()> {
 
 #[tokio::test]
 async fn test_fail_in_chain_stops_job() -> Result<()> {
-    let (_router, pool, _tmp, _container) = setup().await?;
+    let (_router, pool, _tmp) = setup().await?;
     let worker_id = register_test_worker(&pool).await;
 
     let task = {
@@ -10623,7 +10546,7 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
 
 #[tokio::test]
 async fn test_step_failure_skips_dependents() -> Result<()> {
-    let (_router, pool, _tmp, _container) = setup().await?;
+    let (_router, pool, _tmp) = setup().await?;
     let worker_id = register_test_worker(&pool).await;
 
     let task = {
@@ -10781,7 +10704,7 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
 
 #[tokio::test]
 async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
-    let (_router, pool, _tmp, _container) = setup().await?;
+    let (_router, pool, _tmp) = setup().await?;
     let worker_id = register_test_worker(&pool).await;
 
     let task = {
@@ -10946,7 +10869,7 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
 
 #[tokio::test]
 async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
-    let (_router, pool, _tmp, _container) = setup().await?;
+    let (_router, pool, _tmp) = setup().await?;
     let worker_id = register_test_worker(&pool).await;
 
     // step1: continue_on_failure=true, no deps -> will fail
@@ -11110,7 +11033,7 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
 
 #[tokio::test]
 async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
-    let (_router, pool, _tmp, _container) = setup().await?;
+    let (_router, pool, _tmp) = setup().await?;
     let worker_id = register_test_worker(&pool).await;
 
     // step1: continue_on_failure=true -> will fail (tolerable)
@@ -11270,7 +11193,7 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
 
 #[tokio::test]
 async fn test_cascading_skip() -> Result<()> {
-    let (_router, pool, _tmp, _container) = setup().await?;
+    let (_router, pool, _tmp) = setup().await?;
     let worker_id = register_test_worker(&pool).await;
 
     let task = {
@@ -11564,12 +11487,7 @@ fn test_workspace_ops() -> WorkspaceConfig {
 }
 
 /// Setup with two workspaces: "default" and "ops"
-async fn setup_multi_workspace() -> Result<(
-    Router,
-    PgPool,
-    TempDir,
-    testcontainers::ContainerAsync<Postgres>,
-)> {
+async fn setup_multi_workspace() -> Result<(Router, PgPool, TempDir)> {
     setup_multi_workspace_with(&[]).await
 }
 
@@ -11577,17 +11495,10 @@ async fn setup_multi_workspace() -> Result<(
 /// suppressed as if the server config had `workspaces.<name>.triggers: false`.
 async fn setup_multi_workspace_with(
     triggers_disabled: &[&str],
-) -> Result<(
-    Router,
-    PgPool,
-    TempDir,
-    testcontainers::ContainerAsync<Postgres>,
-)> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+) -> Result<(Router, PgPool, TempDir)> {
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let url = test_db.url;
 
     let temp_dir = TempDir::new()?;
     let log_dir = temp_dir.path().join("logs");
@@ -11689,7 +11600,7 @@ async fn setup_multi_workspace_with(
     let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None);
     let router = build_router(state, CancellationToken::new());
 
-    Ok((router, pool, temp_dir, container))
+    Ok((router, pool, temp_dir))
 }
 
 // ─── Multi-workspace: List workspaces ───────────────────────────────
@@ -11699,7 +11610,7 @@ async fn setup_multi_workspace_with(
 /// listed, and manual execution is unaffected.
 #[tokio::test]
 async fn test_workspace_triggers_disabled_reported_and_webhook_hidden() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_multi_workspace_with(&["default"]).await?;
+    let (router, _pool, _tmp) = setup_multi_workspace_with(&["default"]).await?;
 
     // Flag surfaces on the workspace list; the other workspace is untouched.
     let response = router.clone().oneshot(api_get("/api/workspaces")).await?;
@@ -11744,7 +11655,7 @@ async fn test_workspace_triggers_disabled_reported_and_webhook_hidden() -> Resul
 
 #[tokio::test]
 async fn test_list_workspaces() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_multi_workspace().await?;
+    let (router, _pool, _tmp) = setup_multi_workspace().await?;
 
     let response = router.oneshot(api_get("/api/workspaces")).await?;
     assert_eq!(response.status(), 200);
@@ -11777,7 +11688,7 @@ async fn test_list_workspaces() -> Result<()> {
 
 #[tokio::test]
 async fn test_refresh_workspace_success() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_multi_workspace().await?;
+    let (router, _pool, _tmp) = setup_multi_workspace().await?;
 
     let req = Request::builder()
         .method("POST")
@@ -11794,7 +11705,7 @@ async fn test_refresh_workspace_success() -> Result<()> {
 
 #[tokio::test]
 async fn test_refresh_workspace_unknown_returns_404() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_multi_workspace().await?;
+    let (router, _pool, _tmp) = setup_multi_workspace().await?;
 
     let req = Request::builder()
         .method("POST")
@@ -11808,7 +11719,7 @@ async fn test_refresh_workspace_unknown_returns_404() -> Result<()> {
 
 #[tokio::test]
 async fn test_refresh_workspace_cooldown_returns_429_with_retry_after() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_multi_workspace().await?;
+    let (router, _pool, _tmp) = setup_multi_workspace().await?;
 
     // First refresh succeeds and primes the cooldown timestamp.
     let req = Request::builder()
@@ -11853,20 +11764,13 @@ const ACL_USER_PASSWORD: &str = "test-password-123";
 /// - `admin@test.com` (admin flag set → bypasses ACL)
 /// - `viewer@test.com` (group `viewers` → View on `default` only)
 /// - `nobody@test.com` (no groups, no rules → ACL default Deny)
-async fn setup_with_auth_and_acl() -> Result<(
-    Router,
-    PgPool,
-    TempDir,
-    testcontainers::ContainerAsync<Postgres>,
-)> {
+async fn setup_with_auth_and_acl() -> Result<(Router, PgPool, TempDir)> {
     use stroem_db::UserGroupRepo;
     use stroem_server::config::{AclAction, AclConfig, AclRule};
 
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let url = test_db.url;
 
     let temp_dir = TempDir::new()?;
     let log_dir = temp_dir.path().join("logs");
@@ -12007,7 +11911,7 @@ async fn setup_with_auth_and_acl() -> Result<(
     let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None);
     let router = build_router(state, CancellationToken::new());
 
-    Ok((router, pool, temp_dir, container))
+    Ok((router, pool, temp_dir))
 }
 
 async fn acl_login(router: &Router, email: &str) -> Result<String> {
@@ -12035,7 +11939,7 @@ fn authed_post_empty(uri: &str, token: &str) -> Request<Body> {
 
 #[tokio::test]
 async fn test_refresh_admin_can_refresh_any_workspace() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_with_auth_and_acl().await?;
+    let (router, _pool, _tmp) = setup_with_auth_and_acl().await?;
     let token = acl_login(&router, ACL_ADMIN_EMAIL).await?;
 
     let response = router
@@ -12055,7 +11959,7 @@ async fn test_refresh_admin_can_refresh_any_workspace() -> Result<()> {
 
 #[tokio::test]
 async fn test_refresh_viewer_can_refresh_visible_workspace() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_with_auth_and_acl().await?;
+    let (router, _pool, _tmp) = setup_with_auth_and_acl().await?;
     let token = acl_login(&router, ACL_VIEWER_EMAIL).await?;
 
     let response = router
@@ -12076,7 +11980,7 @@ async fn test_refresh_acl_hidden_workspace_returns_same_404_as_nonexistent() -> 
     // a 404 for a non-existent workspace name. Without this guarantee, an
     // authenticated low-privilege caller can enumerate workspace names by
     // observing differing responses.
-    let (router, _pool, _tmp, _container) = setup_with_auth_and_acl().await?;
+    let (router, _pool, _tmp) = setup_with_auth_and_acl().await?;
     let token = acl_login(&router, ACL_VIEWER_EMAIL).await?;
 
     // `ops` exists but the viewer's group has no rule for it.
@@ -12121,7 +12025,7 @@ async fn test_refresh_acl_hidden_workspace_returns_same_404_as_nonexistent() -> 
 
 #[tokio::test]
 async fn test_refresh_user_without_groups_gets_404_on_all_workspaces() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_with_auth_and_acl().await?;
+    let (router, _pool, _tmp) = setup_with_auth_and_acl().await?;
     let token = acl_login(&router, ACL_NOBODY_EMAIL).await?;
 
     // Even though both workspaces exist, the `nobody` user has zero
@@ -12149,7 +12053,7 @@ async fn test_refresh_unauthenticated_request_when_auth_enabled() -> Result<()> 
     // Sanity: with auth enabled, an unauthenticated POST must fail with 401
     // before reaching the handler — confirms the route is correctly mounted
     // under the protected router.
-    let (router, _pool, _tmp, _container) = setup_with_auth_and_acl().await?;
+    let (router, _pool, _tmp) = setup_with_auth_and_acl().await?;
 
     let req = Request::builder()
         .method("POST")
@@ -12194,7 +12098,7 @@ async fn seed_restart_source_job(pool: &PgPool) -> Result<Uuid> {
 async fn test_restart_view_only_user_gets_403() -> Result<()> {
     // Restart creates a job, so it needs Run — View is not enough, and the
     // refusal must be 403 (the task is visible), not 404.
-    let (router, pool, _tmp, _container) = setup_with_auth_and_acl().await?;
+    let (router, pool, _tmp) = setup_with_auth_and_acl().await?;
     let job_id = seed_restart_source_job(&pool).await?;
     let token = acl_login(&router, ACL_VIEWER_EMAIL).await?;
 
@@ -12220,7 +12124,7 @@ async fn test_restart_view_only_user_gets_403() -> Result<()> {
 #[tokio::test]
 async fn test_restart_denied_user_gets_404() -> Result<()> {
     // A user the ACL denies must not learn that the job exists.
-    let (router, pool, _tmp, _container) = setup_with_auth_and_acl().await?;
+    let (router, pool, _tmp) = setup_with_auth_and_acl().await?;
     let job_id = seed_restart_source_job(&pool).await?;
     let token = acl_login(&router, ACL_NOBODY_EMAIL).await?;
 
@@ -12237,7 +12141,7 @@ async fn test_restart_denied_user_gets_404() -> Result<()> {
 
 #[tokio::test]
 async fn test_restart_unauthenticated_when_auth_enabled() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup_with_auth_and_acl().await?;
+    let (router, pool, _tmp) = setup_with_auth_and_acl().await?;
     let job_id = seed_restart_source_job(&pool).await?;
 
     let req = Request::builder()
@@ -12255,7 +12159,7 @@ async fn test_restart_unauthenticated_when_auth_enabled() -> Result<()> {
 
 #[tokio::test]
 async fn test_workspace_task_isolation() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_multi_workspace().await?;
+    let (router, _pool, _tmp) = setup_multi_workspace().await?;
 
     // List tasks in "default" workspace
     let response = router
@@ -12296,7 +12200,7 @@ async fn test_workspace_task_isolation() -> Result<()> {
 
 #[tokio::test]
 async fn test_execute_task_in_specific_workspace() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup_multi_workspace().await?;
+    let (router, pool, _tmp) = setup_multi_workspace().await?;
 
     // Execute deploy-app in "ops" workspace
     let response = router
@@ -12323,7 +12227,7 @@ async fn test_execute_task_in_specific_workspace() -> Result<()> {
 
 #[tokio::test]
 async fn test_execute_task_wrong_workspace_404() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_multi_workspace().await?;
+    let (router, _pool, _tmp) = setup_multi_workspace().await?;
 
     // Try to execute "deploy-app" in "default" workspace (it's in "ops")
     let response = router
@@ -12353,7 +12257,7 @@ async fn test_execute_task_wrong_workspace_404() -> Result<()> {
 
 #[tokio::test]
 async fn test_nonexistent_workspace_404() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_multi_workspace().await?;
+    let (router, _pool, _tmp) = setup_multi_workspace().await?;
 
     // List tasks in nonexistent workspace
     let response = router
@@ -12386,7 +12290,7 @@ async fn test_nonexistent_workspace_404() -> Result<()> {
 
 #[tokio::test]
 async fn test_worker_claim_has_workspace_field() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup_multi_workspace().await?;
+    let (router, pool, _tmp) = setup_multi_workspace().await?;
 
     // Create a job in the "ops" workspace
     let job_id = JobRepo::create(
@@ -12469,7 +12373,7 @@ async fn test_worker_claim_has_workspace_field() -> Result<()> {
 
 #[tokio::test]
 async fn test_jobs_show_workspace_field() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_multi_workspace().await?;
+    let (router, _pool, _tmp) = setup_multi_workspace().await?;
 
     // Create jobs in both workspaces
     let resp1 = router
@@ -12518,11 +12422,9 @@ async fn test_jobs_show_workspace_field() -> Result<()> {
 #[tokio::test]
 async fn test_workspace_tarball_download() -> Result<()> {
     // Use folder-based setup so tarball has real files
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let url = test_db.url;
 
     let temp_dir = TempDir::new()?;
     let log_dir = temp_dir.path().join("logs");
@@ -12635,7 +12537,7 @@ async fn test_workspace_tarball_download() -> Result<()> {
 
 #[tokio::test]
 async fn test_workspace_tarball_nonexistent_404() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     let req = Request::builder()
         .method("GET")
@@ -12654,7 +12556,7 @@ async fn test_workspace_tarball_nonexistent_404() -> Result<()> {
 /// today's 404 (the PinStore branch is for git workspaces only).
 #[tokio::test]
 async fn test_folder_workspace_superseded_revision_still_404() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
     let req = Request::builder()
         .method("GET")
         .uri(format!(
@@ -12675,7 +12577,7 @@ async fn test_folder_workspace_superseded_revision_still_404() -> Result<()> {
 
 #[tokio::test]
 async fn test_get_task_detail_workspace_scoped() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_multi_workspace().await?;
+    let (router, _pool, _tmp) = setup_multi_workspace().await?;
 
     // Get task detail from "ops" workspace
     let response = router
@@ -12699,7 +12601,7 @@ async fn test_get_task_detail_workspace_scoped() -> Result<()> {
 
 #[tokio::test]
 async fn test_workspace_info_includes_revision() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_multi_workspace().await?;
+    let (router, _pool, _tmp) = setup_multi_workspace().await?;
 
     let response = router.oneshot(api_get("/api/workspaces")).await?;
     assert_eq!(response.status(), 200);
@@ -12718,11 +12620,9 @@ async fn test_workspace_info_includes_revision() -> Result<()> {
 
 #[tokio::test]
 async fn test_tarball_mismatched_etag_returns_200() -> Result<()> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let url = test_db.url;
 
     let temp_dir = TempDir::new()?;
     let log_dir = temp_dir.path().join("logs");
@@ -12814,11 +12714,9 @@ async fn test_tarball_mismatched_etag_returns_200() -> Result<()> {
 
 #[tokio::test]
 async fn test_tarball_bare_etag_matches() -> Result<()> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let url = test_db.url;
 
     let temp_dir = TempDir::new()?;
     let log_dir = temp_dir.path().join("logs");
@@ -12923,11 +12821,9 @@ async fn test_tarball_bare_etag_matches() -> Result<()> {
 
 #[tokio::test]
 async fn test_tarball_stale_etag_after_workspace_change() -> Result<()> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let url = test_db.url;
 
     let temp_dir = TempDir::new()?;
     let log_dir = temp_dir.path().join("logs");
@@ -13073,11 +12969,9 @@ async fn test_tarball_stale_etag_after_workspace_change() -> Result<()> {
 
 #[tokio::test]
 async fn test_tarball_etag_header_format() -> Result<()> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let url = test_db.url;
 
     let temp_dir = TempDir::new()?;
     let log_dir = temp_dir.path().join("logs");
@@ -13196,7 +13090,7 @@ async fn test_tarball_etag_header_format() -> Result<()> {
 
 #[tokio::test]
 async fn test_list_jobs_with_workspace_filter() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_multi_workspace().await?;
+    let (router, _pool, _tmp) = setup_multi_workspace().await?;
 
     // Create a job in "default" workspace
     let resp = router
@@ -13267,7 +13161,7 @@ async fn test_list_jobs_with_workspace_filter() -> Result<()> {
 
 #[tokio::test]
 async fn test_list_jobs_workspace_filter_nonexistent() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_multi_workspace().await?;
+    let (router, _pool, _tmp) = setup_multi_workspace().await?;
 
     // Create a job in "default" so there's at least one job in the system
     let resp = router
@@ -13300,7 +13194,7 @@ async fn test_list_jobs_workspace_filter_nonexistent() -> Result<()> {
 
 #[tokio::test]
 async fn test_worker_claim_across_workspaces() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup_multi_workspace().await?;
+    let (router, pool, _tmp) = setup_multi_workspace().await?;
 
     // Create a job in "default" workspace via DB
     let job_id_default = JobRepo::create(
@@ -13487,7 +13381,7 @@ async fn test_worker_claim_across_workspaces() -> Result<()> {
 
 #[tokio::test]
 async fn test_list_jobs_shows_workspace_field() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_multi_workspace().await?;
+    let (router, _pool, _tmp) = setup_multi_workspace().await?;
 
     // Create jobs in both workspaces via API
     let resp = router
@@ -13538,7 +13432,7 @@ async fn test_list_jobs_shows_workspace_field() -> Result<()> {
 
 #[tokio::test]
 async fn test_list_tasks_includes_folder() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     let response = router
         .oneshot(api_get("/api/workspaces/default/tasks"))
@@ -13569,7 +13463,7 @@ async fn test_list_tasks_includes_folder() -> Result<()> {
 
 #[tokio::test]
 async fn test_create_job_for_task_trigger_source() -> Result<()> {
-    let (_router, pool, _tmp, _container) = setup().await?;
+    let (_router, pool, _tmp) = setup().await?;
 
     let workspace = test_workspace();
     let input = json!({"name": "Scheduler"});
@@ -13612,7 +13506,7 @@ async fn test_create_job_for_task_trigger_source() -> Result<()> {
 
 #[tokio::test]
 async fn test_create_job_for_task_multi_step() -> Result<()> {
-    let (_router, pool, _tmp, _container) = setup().await?;
+    let (_router, pool, _tmp) = setup().await?;
 
     let workspace = test_workspace();
     let input = json!({"name": "Test"});
@@ -13650,7 +13544,7 @@ async fn test_create_job_for_task_multi_step() -> Result<()> {
 
 #[tokio::test]
 async fn test_create_job_for_task_missing_task() -> Result<()> {
-    let (_router, pool, _tmp, _container) = setup().await?;
+    let (_router, pool, _tmp) = setup().await?;
 
     let workspace = test_workspace();
 
@@ -13684,7 +13578,7 @@ async fn test_create_job_for_task_missing_task() -> Result<()> {
 
 #[tokio::test]
 async fn test_create_job_for_task_missing_action() -> Result<()> {
-    let (_router, pool, _tmp, _container) = setup().await?;
+    let (_router, pool, _tmp) = setup().await?;
 
     // Build a workspace with a task that references a non-existent action
     let mut workspace = WorkspaceConfig::default();
@@ -13757,7 +13651,7 @@ async fn test_create_job_for_task_missing_action() -> Result<()> {
 
 #[tokio::test]
 async fn test_config_returns_oidc_providers_empty() -> Result<()> {
-    let (router, _pool, _temp, _container) = setup().await?;
+    let (router, _pool, _temp) = setup().await?;
 
     let res = router.oneshot(api_get("/api/config")).await?;
 
@@ -13772,7 +13666,7 @@ async fn test_config_returns_oidc_providers_empty() -> Result<()> {
 
 #[tokio::test]
 async fn test_oidc_start_unknown_provider() -> Result<()> {
-    let (router, _pool, _temp, _container) = setup().await?;
+    let (router, _pool, _temp) = setup().await?;
 
     let res = router
         .oneshot(api_get("/api/auth/oidc/nonexistent"))
@@ -13785,7 +13679,7 @@ async fn test_oidc_start_unknown_provider() -> Result<()> {
 
 #[tokio::test]
 async fn test_auth_link_create_and_get() -> Result<()> {
-    let (_router, pool, _temp, _container) = setup().await?;
+    let (_router, pool, _temp) = setup().await?;
 
     let user_id = Uuid::new_v4();
     UserRepo::create(&pool, user_id, "oidc@test.com", None, Some("OIDC User")).await?;
@@ -13804,7 +13698,7 @@ async fn test_auth_link_create_and_get() -> Result<()> {
 
 #[tokio::test]
 async fn test_auth_link_nonexistent() -> Result<()> {
-    let (_router, pool, _temp, _container) = setup().await?;
+    let (_router, pool, _temp) = setup().await?;
 
     let link =
         UserAuthLinkRepo::get_by_provider_and_external_id(&pool, "google", "no-such-id").await?;
@@ -13815,7 +13709,7 @@ async fn test_auth_link_nonexistent() -> Result<()> {
 
 #[tokio::test]
 async fn test_auth_link_multiple_providers_same_user() -> Result<()> {
-    let (_router, pool, _temp, _container) = setup().await?;
+    let (_router, pool, _temp) = setup().await?;
 
     let user_id = Uuid::new_v4();
     UserRepo::create(&pool, user_id, "multi@test.com", None, None).await?;
@@ -13838,7 +13732,7 @@ async fn test_auth_link_multiple_providers_same_user() -> Result<()> {
 
 #[tokio::test]
 async fn test_provision_creates_new_user() -> Result<()> {
-    let (_router, pool, _temp, _container) = setup().await?;
+    let (_router, pool, _temp) = setup().await?;
 
     let user = stroem_server::oidc::provision_user(
         &pool,
@@ -13868,7 +13762,7 @@ async fn test_provision_creates_new_user() -> Result<()> {
 /// won't duplicate memberships.
 #[tokio::test]
 async fn test_provision_new_user_gets_default_groups() -> Result<()> {
-    let (_router, pool, _temp, _container) = setup().await?;
+    let (_router, pool, _temp) = setup().await?;
 
     let defaults = vec!["employees".to_string(), "read-only".to_string()];
 
@@ -13894,7 +13788,7 @@ async fn test_provision_new_user_gets_default_groups() -> Result<()> {
 /// would find it re-added on every login.
 #[tokio::test]
 async fn test_provision_existing_user_keeps_own_groups() -> Result<()> {
-    let (_router, pool, _temp, _container) = setup().await?;
+    let (_router, pool, _temp) = setup().await?;
 
     // Pre-existing user with a curated group set (imagine an admin
     // pruned "read-only" via the UI).
@@ -13933,7 +13827,7 @@ async fn test_provision_existing_user_keeps_own_groups() -> Result<()> {
 
 #[tokio::test]
 async fn test_provision_links_existing_email_user() -> Result<()> {
-    let (_router, pool, _temp, _container) = setup().await?;
+    let (_router, pool, _temp) = setup().await?;
 
     // Create existing user with password
     let existing_id = Uuid::new_v4();
@@ -13970,7 +13864,7 @@ async fn test_provision_links_existing_email_user() -> Result<()> {
 
 #[tokio::test]
 async fn test_provision_returns_linked_user() -> Result<()> {
-    let (_router, pool, _temp, _container) = setup().await?;
+    let (_router, pool, _temp) = setup().await?;
 
     // Create user and link
     let user_id = Uuid::new_v4();
@@ -13996,11 +13890,9 @@ async fn test_provision_returns_linked_user() -> Result<()> {
 
 #[tokio::test]
 async fn test_config_returns_oidc_providers_with_auth() -> Result<()> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let url = test_db.url;
 
     let temp_dir = TempDir::new()?;
     let log_dir = temp_dir.path().join("logs");
@@ -14065,7 +13957,7 @@ async fn test_config_returns_oidc_providers_with_auth() -> Result<()> {
 
 #[tokio::test]
 async fn test_config_returns_has_internal_auth_default() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+    let (router, _pool, _tmp) = setup_with_auth().await?;
 
     let res = router.oneshot(api_get("/api/config")).await?;
     assert_eq!(res.status(), 200);
@@ -14081,11 +13973,9 @@ async fn test_config_returns_has_internal_auth_default() -> Result<()> {
 async fn test_config_returns_has_internal_auth_true() -> Result<()> {
     use stroem_server::config::ProviderConfig;
 
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let url = test_db.url;
 
     let temp_dir = TempDir::new()?;
     let log_dir = temp_dir.path().join("logs");
@@ -14160,11 +14050,9 @@ async fn test_config_returns_has_internal_auth_true() -> Result<()> {
 async fn test_config_returns_has_internal_auth_false_oidc_only() -> Result<()> {
     use stroem_server::config::ProviderConfig;
 
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let url = test_db.url;
 
     let temp_dir = TempDir::new()?;
     let log_dir = temp_dir.path().join("logs");
@@ -14476,11 +14364,7 @@ fn hook_test_state_with_default_step_timeout(
 /// Before, `fire_single_hook` hand-built the row with those fields `None`.
 #[tokio::test]
 async fn test_hook_job_step_gets_action_retry_and_default_timeout() -> Result<()> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+    let pool = stroem_test_support::test_pool().await;
 
     let mut workspace = hook_test_workspace();
     // Give the hook action (`notify`) a retry config.
@@ -14590,11 +14474,7 @@ async fn test_hook_job_step_gets_action_retry_and_default_timeout() -> Result<()
 
 #[tokio::test]
 async fn test_hook_fires_on_job_success() -> Result<()> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+    let pool = stroem_test_support::test_pool().await;
 
     let mut workspace = hook_test_workspace();
 
@@ -14718,11 +14598,7 @@ async fn test_hook_fires_on_job_success() -> Result<()> {
 
 #[tokio::test]
 async fn test_hook_fires_on_job_failure() -> Result<()> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+    let pool = stroem_test_support::test_pool().await;
 
     let mut workspace = hook_test_workspace();
 
@@ -14825,11 +14701,7 @@ async fn test_hook_fires_on_job_failure() -> Result<()> {
 
 #[tokio::test]
 async fn test_hook_not_fired_for_hook_job() -> Result<()> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+    let pool = stroem_test_support::test_pool().await;
 
     let mut workspace = hook_test_workspace();
 
@@ -14913,11 +14785,7 @@ async fn test_hook_not_fired_for_hook_job() -> Result<()> {
 
 #[tokio::test]
 async fn test_hook_input_contains_context() -> Result<()> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+    let pool = stroem_test_support::test_pool().await;
 
     let mut workspace = hook_test_workspace();
 
@@ -15015,11 +14883,7 @@ async fn test_hook_input_contains_context() -> Result<()> {
 
 #[tokio::test]
 async fn test_hook_error_message_all_failures() -> Result<()> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+    let pool = stroem_test_support::test_pool().await;
 
     let mut workspace = hook_test_workspace();
 
@@ -15164,11 +15028,7 @@ async fn test_hook_error_message_all_failures() -> Result<()> {
 /// on_success hook still receives error_message when all failures are tolerable
 #[tokio::test]
 async fn test_hook_on_success_with_tolerable_failures() -> Result<()> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+    let pool = stroem_test_support::test_pool().await;
 
     let mut workspace = hook_test_workspace();
 
@@ -15309,11 +15169,7 @@ async fn test_hook_on_success_with_tolerable_failures() -> Result<()> {
 /// Multiline error messages (e.g. Python tracebacks) are preserved in hook context
 #[tokio::test]
 async fn test_hook_multiline_error_message() -> Result<()> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+    let pool = stroem_test_support::test_pool().await;
 
     let mut workspace = hook_test_workspace();
 
@@ -15435,11 +15291,7 @@ async fn test_hook_multiline_error_message() -> Result<()> {
 /// because the task didn't exist in the workspace).
 #[tokio::test]
 async fn test_hook_job_completes_through_orchestrator() -> Result<()> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+    let pool = stroem_test_support::test_pool().await;
 
     let mut workspace = hook_test_workspace();
 
@@ -15818,11 +15670,7 @@ fn task_action_test_workspace() -> WorkspaceConfig {
 
 #[tokio::test]
 async fn test_task_action_creates_child_job() -> Result<()> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+    let pool = stroem_test_support::test_pool().await;
 
     let workspace = task_action_test_workspace();
 
@@ -15916,8 +15764,7 @@ async fn test_task_action_creates_child_job() -> Result<()> {
 /// step that created it — the UI's "child of <job> at step <step>" link.
 #[tokio::test]
 async fn test_child_job_detail_carries_parent_job_and_step() -> Result<()> {
-    let (router, pool, _mgr, _tmp, _c) =
-        setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
+    let (router, pool, _mgr, _tmp) = setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
     let resp = router
         .clone()
         .oneshot(api_request(
@@ -15957,11 +15804,7 @@ async fn test_child_job_detail_carries_parent_job_and_step() -> Result<()> {
 
 #[tokio::test]
 async fn test_task_action_child_completion_updates_parent() -> Result<()> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+    let pool = stroem_test_support::test_pool().await;
 
     let workspace = task_action_test_workspace();
 
@@ -16089,11 +15932,7 @@ async fn test_task_action_child_completion_updates_parent() -> Result<()> {
 
 #[tokio::test]
 async fn test_task_action_not_claimed_by_worker() -> Result<()> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+    let pool = stroem_test_support::test_pool().await;
 
     let _workspace = task_action_test_workspace();
 
@@ -16157,11 +15996,7 @@ async fn test_task_action_not_claimed_by_worker() -> Result<()> {
 
 #[tokio::test]
 async fn test_task_action_input_rendered() -> Result<()> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+    let pool = stroem_test_support::test_pool().await;
 
     let mut workspace = task_action_test_workspace();
 
@@ -16295,11 +16130,7 @@ async fn test_task_action_input_rendered() -> Result<()> {
 
 #[tokio::test]
 async fn test_task_action_in_hook() -> Result<()> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+    let pool = stroem_test_support::test_pool().await;
 
     let mut workspace = task_action_test_workspace();
 
@@ -16437,11 +16268,7 @@ tasks:
 
 #[tokio::test]
 async fn test_task_action_child_failure_fails_parent_step() -> Result<()> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+    let pool = stroem_test_support::test_pool().await;
 
     let mut workspace = task_action_test_workspace();
 
@@ -16630,17 +16457,10 @@ async fn test_task_action_child_failure_fails_parent_step() -> Result<()> {
 // ─── Recovery sweeper tests ─────────────────────────────────────────────
 
 /// Helper: create an AppState with recovery config.
-async fn setup_recovery() -> Result<(
-    AppState,
-    PgPool,
-    TempDir,
-    testcontainers::ContainerAsync<Postgres>,
-)> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+async fn setup_recovery() -> Result<(AppState, PgPool, TempDir)> {
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let url = test_db.url;
 
     let temp_dir = TempDir::new()?;
     let log_dir = temp_dir.path().join("logs");
@@ -16689,7 +16509,7 @@ async fn setup_recovery() -> Result<(
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
     let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None);
 
-    Ok((state, pool, temp_dir, container))
+    Ok((state, pool, temp_dir))
 }
 
 /// Helper: set a worker's heartbeat to a time in the past.
@@ -16706,7 +16526,7 @@ async fn set_worker_heartbeat_past(pool: &PgPool, worker_id: Uuid, seconds_ago: 
 
 #[tokio::test]
 async fn test_recovery_marks_stale_worker_inactive() -> Result<()> {
-    let (_state, pool, _tmp, _container) = setup_recovery().await?;
+    let (_state, pool, _tmp) = setup_recovery().await?;
 
     let worker_id = register_test_worker(&pool).await;
 
@@ -16732,7 +16552,7 @@ async fn test_recovery_marks_stale_worker_inactive() -> Result<()> {
 
 #[tokio::test]
 async fn test_recovery_ignores_active_workers() -> Result<()> {
-    let (_state, pool, _tmp, _container) = setup_recovery().await?;
+    let (_state, pool, _tmp) = setup_recovery().await?;
 
     let worker_id = register_test_worker(&pool).await;
 
@@ -16748,7 +16568,7 @@ async fn test_recovery_ignores_active_workers() -> Result<()> {
 
 #[tokio::test]
 async fn test_recovery_worker_reactivation_on_heartbeat() -> Result<()> {
-    let (_state, pool, _tmp, _container) = setup_recovery().await?;
+    let (_state, pool, _tmp) = setup_recovery().await?;
 
     let worker_id = register_test_worker(&pool).await;
 
@@ -16777,7 +16597,7 @@ async fn test_recovery_worker_reactivation_on_heartbeat() -> Result<()> {
 async fn test_trigger_fire_on_unavailable_workspace_has_no_side_effects() -> Result<()> {
     use stroem_common::models::workflow::{ConcurrencyPolicy, TriggerDef};
 
-    let (state, pool, _tmp, _container) = setup_recovery().await?;
+    let (state, pool, _tmp) = setup_recovery().await?;
     let workspace_config = state.get_workspace("default").await.unwrap();
 
     for (trigger, policy) in [
@@ -16847,7 +16667,7 @@ async fn test_trigger_fire_on_unavailable_workspace_has_no_side_effects() -> Res
 async fn test_force_refresh_while_busy_fires_only_from_a_healthy_snapshot() -> Result<()> {
     use stroem_common::models::workflow::{ConcurrencyPolicy, TriggerDef};
 
-    let (state, pool, _tmp, _container) = setup_recovery().await?;
+    let (state, pool, _tmp) = setup_recovery().await?;
     let mut cfg = (*state.get_workspace("default").await.unwrap()).clone();
     cfg.triggers.insert(
         "refresh-busy".to_string(),
@@ -16901,7 +16721,7 @@ async fn test_force_refresh_while_busy_fires_only_from_a_healthy_snapshot() -> R
 async fn test_trigger_fire_revalidates_against_current_config() -> Result<()> {
     use stroem_common::models::workflow::{ConcurrencyPolicy, TriggerDef};
 
-    let (state, pool, _tmp, _container) = setup_recovery().await?;
+    let (state, pool, _tmp) = setup_recovery().await?;
     let workspace_config = state.get_workspace("default").await.unwrap();
     let trigger = |enabled: bool, task: &str| TriggerDef::Scheduler {
         git_ref: None,
@@ -17016,7 +16836,7 @@ async fn test_trigger_fire_revalidates_against_current_config() -> Result<()> {
 
 #[tokio::test]
 async fn test_recovery_fails_stale_step() -> Result<()> {
-    let (state, pool, _tmp, _container) = setup_recovery().await?;
+    let (state, pool, _tmp) = setup_recovery().await?;
 
     // Create a job
     let workspace_config = state.get_workspace("default").await.unwrap();
@@ -17077,7 +16897,7 @@ async fn test_recovery_fails_stale_step() -> Result<()> {
 
 #[tokio::test]
 async fn test_recovery_orchestrates_multi_step_job() -> Result<()> {
-    let (state, pool, _tmp, _container) = setup_recovery().await?;
+    let (state, pool, _tmp) = setup_recovery().await?;
 
     // Create a multi-step job: step1 → step2 → step3
     let workspace_config = state.get_workspace("default").await.unwrap();
@@ -17131,7 +16951,7 @@ async fn test_recovery_orchestrates_multi_step_job() -> Result<()> {
 
 #[tokio::test]
 async fn test_recovery_get_running_steps_for_workers_empty() -> Result<()> {
-    let (_state, pool, _tmp, _container) = setup_recovery().await?;
+    let (_state, pool, _tmp) = setup_recovery().await?;
 
     // Empty worker list returns empty steps
     let steps = JobStepRepo::get_running_steps_for_workers(&pool, &[]).await?;
@@ -17147,11 +16967,9 @@ async fn test_recovery_get_running_steps_for_workers_empty() -> Result<()> {
 #[tokio::test]
 async fn test_recovery_propagates_to_parent() -> Result<()> {
     // Use task_action_test_workspace which has deploy(build → run-cleanup) with type:task
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let url = test_db.url;
 
     let temp_dir = TempDir::new()?;
     let log_dir = temp_dir.path().join("logs");
@@ -17296,7 +17114,7 @@ async fn test_recovery_propagates_to_parent() -> Result<()> {
 
 #[tokio::test]
 async fn test_execute_task_without_auth_sets_source_api() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     let response = router
         .oneshot(api_request(
@@ -17321,7 +17139,7 @@ async fn test_execute_task_without_auth_sets_source_api() -> Result<()> {
 
 #[tokio::test]
 async fn test_execute_task_with_valid_auth_sets_source_user() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup_with_auth().await?;
+    let (router, pool, _tmp) = setup_with_auth().await?;
 
     let token = stroem_server::auth::create_access_token(
         &Uuid::new_v4().to_string(),
@@ -17356,7 +17174,7 @@ async fn test_execute_task_with_valid_auth_sets_source_user() -> Result<()> {
 
 #[tokio::test]
 async fn test_execute_task_with_invalid_token_returns_401() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+    let (router, _pool, _tmp) = setup_with_auth().await?;
 
     let request = Request::builder()
         .method("POST")
@@ -17378,7 +17196,7 @@ async fn test_execute_task_with_invalid_token_returns_401() -> Result<()> {
 
 #[tokio::test]
 async fn test_execute_task_no_token_when_auth_enabled_returns_401() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+    let (router, _pool, _tmp) = setup_with_auth().await?;
 
     let response = router
         .oneshot(api_request(
@@ -17397,7 +17215,7 @@ async fn test_execute_task_no_token_when_auth_enabled_returns_401() -> Result<()
 
 #[tokio::test]
 async fn test_auth_middleware_protects_jobs_endpoint() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+    let (router, _pool, _tmp) = setup_with_auth().await?;
 
     let response = router.oneshot(api_get("/api/jobs")).await?;
     assert_eq!(response.status(), 401);
@@ -17407,7 +17225,7 @@ async fn test_auth_middleware_protects_jobs_endpoint() -> Result<()> {
 
 #[tokio::test]
 async fn test_auth_middleware_protects_workers_endpoint() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+    let (router, _pool, _tmp) = setup_with_auth().await?;
 
     let response = router.oneshot(api_get("/api/workers")).await?;
     assert_eq!(response.status(), 401);
@@ -17417,7 +17235,7 @@ async fn test_auth_middleware_protects_workers_endpoint() -> Result<()> {
 
 #[tokio::test]
 async fn test_auth_middleware_protects_workspaces_endpoint() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+    let (router, _pool, _tmp) = setup_with_auth().await?;
 
     let response = router.oneshot(api_get("/api/workspaces")).await?;
     assert_eq!(response.status(), 401);
@@ -17427,7 +17245,7 @@ async fn test_auth_middleware_protects_workspaces_endpoint() -> Result<()> {
 
 #[tokio::test]
 async fn test_auth_middleware_allows_with_valid_token() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+    let (router, _pool, _tmp) = setup_with_auth().await?;
 
     let token = stroem_server::auth::create_access_token(
         &Uuid::new_v4().to_string(),
@@ -17451,7 +17269,7 @@ async fn test_auth_middleware_allows_with_valid_token() -> Result<()> {
 
 #[tokio::test]
 async fn test_auth_middleware_rejects_invalid_token() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+    let (router, _pool, _tmp) = setup_with_auth().await?;
 
     let request = Request::builder()
         .method("GET")
@@ -17468,7 +17286,7 @@ async fn test_auth_middleware_rejects_invalid_token() -> Result<()> {
 
 #[tokio::test]
 async fn test_public_routes_accessible_without_auth() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+    let (router, _pool, _tmp) = setup_with_auth().await?;
 
     let response = router.oneshot(api_get("/api/config")).await?;
     assert_eq!(response.status(), 200);
@@ -17478,7 +17296,7 @@ async fn test_public_routes_accessible_without_auth() -> Result<()> {
 
 #[tokio::test]
 async fn test_no_auth_configured_all_routes_open() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     let response = router.clone().oneshot(api_get("/api/jobs")).await?;
     assert_eq!(response.status(), 200);
@@ -17498,7 +17316,7 @@ async fn test_no_auth_configured_all_routes_open() -> Result<()> {
 
 #[tokio::test]
 async fn test_worker_id_in_job_detail() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     // Create a job
     let response = router
@@ -17547,7 +17365,7 @@ async fn test_worker_id_in_job_detail() -> Result<()> {
 
 #[tokio::test]
 async fn test_auth_middleware_protects_worker_detail_endpoint() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup_with_auth().await?;
+    let (router, pool, _tmp) = setup_with_auth().await?;
 
     let worker_id = register_test_worker(&pool).await;
     let response = router
@@ -17560,7 +17378,7 @@ async fn test_auth_middleware_protects_worker_detail_endpoint() -> Result<()> {
 
 #[tokio::test]
 async fn test_get_worker_invalid_uuid() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     let response = router.oneshot(api_get("/api/workers/not-a-uuid")).await?;
     assert_eq!(response.status(), 400);
@@ -17572,7 +17390,7 @@ async fn test_get_worker_invalid_uuid() -> Result<()> {
 
 #[tokio::test]
 async fn test_get_worker_not_found() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     let random_id = Uuid::new_v4();
     let response = router
@@ -17585,7 +17403,7 @@ async fn test_get_worker_not_found() -> Result<()> {
 
 #[tokio::test]
 async fn test_get_worker_success() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     let worker_id = register_test_worker(&pool).await;
 
@@ -17617,7 +17435,7 @@ async fn test_get_worker_success() -> Result<()> {
 
 #[tokio::test]
 async fn test_get_worker_with_steps() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     let worker_id = register_test_worker(&pool).await;
 
@@ -17708,7 +17526,7 @@ async fn test_get_worker_with_steps() -> Result<()> {
 
 #[tokio::test]
 async fn test_list_triggers() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     let response = router
         .oneshot(api_get("/api/workspaces/default/triggers"))
@@ -17753,7 +17571,7 @@ async fn test_list_triggers() -> Result<()> {
 
 #[tokio::test]
 async fn test_list_triggers_nonexistent_workspace() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     let response = router
         .oneshot(api_get("/api/workspaces/nonexistent/triggers"))
@@ -17765,7 +17583,7 @@ async fn test_list_triggers_nonexistent_workspace() -> Result<()> {
 
 #[tokio::test]
 async fn test_task_list_has_triggers_field() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     let response = router
         .oneshot(api_get("/api/workspaces/default/tasks"))
@@ -17792,7 +17610,7 @@ async fn test_task_list_has_triggers_field() -> Result<()> {
 
 #[tokio::test]
 async fn test_task_detail_includes_triggers() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     // hello-world has the nightly trigger
     let response = router
@@ -17827,7 +17645,7 @@ async fn test_task_detail_includes_triggers() -> Result<()> {
 
 #[tokio::test]
 async fn test_workspace_info_includes_triggers_count() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     let response = router.oneshot(api_get("/api/workspaces")).await?;
     assert_eq!(response.status(), 200);
@@ -17844,7 +17662,7 @@ async fn test_workspace_info_includes_triggers_count() -> Result<()> {
 
 #[tokio::test]
 async fn test_webhook_post_json_creates_job() -> Result<()> {
-    let (router, _pool, _temp_dir, _container) = setup().await?;
+    let (router, _pool, _temp_dir) = setup().await?;
 
     let request = Request::builder()
         .method("POST")
@@ -17866,7 +17684,7 @@ async fn test_webhook_post_json_creates_job() -> Result<()> {
 
 #[tokio::test]
 async fn test_webhook_post_plaintext_body_as_string() -> Result<()> {
-    let (router, _pool, _temp_dir, _container) = setup().await?;
+    let (router, _pool, _temp_dir) = setup().await?;
 
     let request = Request::builder()
         .method("POST")
@@ -17883,7 +17701,7 @@ async fn test_webhook_post_plaintext_body_as_string() -> Result<()> {
 
 #[tokio::test]
 async fn test_webhook_get_creates_job() -> Result<()> {
-    let (router, _pool, _temp_dir, _container) = setup().await?;
+    let (router, _pool, _temp_dir) = setup().await?;
 
     let request = Request::builder()
         .method("GET")
@@ -17904,7 +17722,7 @@ async fn test_webhook_get_creates_job() -> Result<()> {
 
 #[tokio::test]
 async fn test_webhook_secret_via_header() -> Result<()> {
-    let (router, _pool, _temp_dir, _container) = setup().await?;
+    let (router, _pool, _temp_dir) = setup().await?;
 
     let request = Request::builder()
         .method("POST")
@@ -17922,7 +17740,7 @@ async fn test_webhook_secret_via_header() -> Result<()> {
 
 #[tokio::test]
 async fn test_webhook_invalid_secret_401() -> Result<()> {
-    let (router, _pool, _temp_dir, _container) = setup().await?;
+    let (router, _pool, _temp_dir) = setup().await?;
 
     let request = Request::builder()
         .method("POST")
@@ -17939,7 +17757,7 @@ async fn test_webhook_invalid_secret_401() -> Result<()> {
 
 #[tokio::test]
 async fn test_webhook_missing_secret_401() -> Result<()> {
-    let (router, _pool, _temp_dir, _container) = setup().await?;
+    let (router, _pool, _temp_dir) = setup().await?;
 
     let request = Request::builder()
         .method("POST")
@@ -17956,7 +17774,7 @@ async fn test_webhook_missing_secret_401() -> Result<()> {
 
 #[tokio::test]
 async fn test_webhook_no_secret_public() -> Result<()> {
-    let (router, _pool, _temp_dir, _container) = setup().await?;
+    let (router, _pool, _temp_dir) = setup().await?;
 
     let request = Request::builder()
         .method("POST")
@@ -17973,7 +17791,7 @@ async fn test_webhook_no_secret_public() -> Result<()> {
 
 #[tokio::test]
 async fn test_webhook_disabled_404() -> Result<()> {
-    let (router, _pool, _temp_dir, _container) = setup().await?;
+    let (router, _pool, _temp_dir) = setup().await?;
 
     let request = Request::builder()
         .method("POST")
@@ -17990,7 +17808,7 @@ async fn test_webhook_disabled_404() -> Result<()> {
 
 #[tokio::test]
 async fn test_webhook_nonexistent_404() -> Result<()> {
-    let (router, _pool, _temp_dir, _container) = setup().await?;
+    let (router, _pool, _temp_dir) = setup().await?;
 
     let request = Request::builder()
         .method("POST")
@@ -18007,7 +17825,7 @@ async fn test_webhook_nonexistent_404() -> Result<()> {
 
 #[tokio::test]
 async fn test_webhook_source_type_tracking() -> Result<()> {
-    let (router, pool, _temp_dir, _container) = setup().await?;
+    let (router, pool, _temp_dir) = setup().await?;
 
     let request = Request::builder()
         .method("POST")
@@ -18031,7 +17849,7 @@ async fn test_webhook_source_type_tracking() -> Result<()> {
 
 #[tokio::test]
 async fn test_webhook_input_merging() -> Result<()> {
-    let (router, pool, _temp_dir, _container) = setup().await?;
+    let (router, pool, _temp_dir) = setup().await?;
 
     // The github-push trigger has default input { environment: "staging" }
     let request = Request::builder()
@@ -18108,7 +17926,7 @@ fn authed_delete(uri: &str, token: &str) -> Request<Body> {
 
 #[tokio::test]
 async fn test_api_key_create_and_list() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+    let (router, _pool, _tmp) = setup_with_auth().await?;
     let (token, _user_id) = login_and_get_token(&router).await?;
 
     // Create an API key
@@ -18147,7 +17965,7 @@ async fn test_api_key_create_and_list() -> Result<()> {
 
 #[tokio::test]
 async fn test_api_key_create_with_expiry() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+    let (router, _pool, _tmp) = setup_with_auth().await?;
     let (token, _user_id) = login_and_get_token(&router).await?;
 
     let response = router
@@ -18168,7 +17986,7 @@ async fn test_api_key_create_with_expiry() -> Result<()> {
 
 #[tokio::test]
 async fn test_api_key_used_as_bearer_token() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+    let (router, _pool, _tmp) = setup_with_auth().await?;
     let (token, _user_id) = login_and_get_token(&router).await?;
 
     // Create API key
@@ -18196,7 +18014,7 @@ async fn test_api_key_used_as_bearer_token() -> Result<()> {
 
 #[tokio::test]
 async fn test_api_key_deleted_returns_401() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+    let (router, _pool, _tmp) = setup_with_auth().await?;
     let (token, _user_id) = login_and_get_token(&router).await?;
 
     // Create API key
@@ -18242,7 +18060,7 @@ async fn test_api_key_deleted_returns_401() -> Result<()> {
 
 #[tokio::test]
 async fn test_api_key_expired_returns_401() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup_with_auth().await?;
+    let (router, pool, _tmp) = setup_with_auth().await?;
     let (token, _user_id) = login_and_get_token(&router).await?;
 
     // Create API key via the API
@@ -18286,7 +18104,7 @@ async fn test_api_key_expired_returns_401() -> Result<()> {
 
 #[tokio::test]
 async fn test_api_key_invalid_returns_401() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+    let (router, _pool, _tmp) = setup_with_auth().await?;
 
     let response = router
         .clone()
@@ -18299,7 +18117,7 @@ async fn test_api_key_invalid_returns_401() -> Result<()> {
 
 #[tokio::test]
 async fn test_api_key_empty_name_rejected() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+    let (router, _pool, _tmp) = setup_with_auth().await?;
     let (token, _user_id) = login_and_get_token(&router).await?;
 
     let response = router
@@ -18318,7 +18136,7 @@ async fn test_api_key_empty_name_rejected() -> Result<()> {
 
 #[tokio::test]
 async fn test_api_key_jwt_still_works() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+    let (router, _pool, _tmp) = setup_with_auth().await?;
     let (token, _user_id) = login_and_get_token(&router).await?;
 
     // JWT should still work alongside API keys
@@ -18333,7 +18151,7 @@ async fn test_api_key_jwt_still_works() -> Result<()> {
 
 #[tokio::test]
 async fn test_api_key_delete_nonexistent_returns_404() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+    let (router, _pool, _tmp) = setup_with_auth().await?;
     let (token, _user_id) = login_and_get_token(&router).await?;
 
     let response = router
@@ -18347,7 +18165,7 @@ async fn test_api_key_delete_nonexistent_returns_404() -> Result<()> {
 
 #[tokio::test]
 async fn test_api_key_cannot_manage_keys() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+    let (router, _pool, _tmp) = setup_with_auth().await?;
     let (token, _user_id) = login_and_get_token(&router).await?;
 
     // Create an API key via JWT
@@ -18406,7 +18224,7 @@ async fn test_api_key_cannot_manage_keys() -> Result<()> {
 
 #[tokio::test]
 async fn test_api_key_negative_expiry_rejected() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+    let (router, _pool, _tmp) = setup_with_auth().await?;
     let (token, _user_id) = login_and_get_token(&router).await?;
 
     let response = router
@@ -18438,7 +18256,7 @@ async fn test_api_key_negative_expiry_rejected() -> Result<()> {
 
 #[tokio::test]
 async fn test_list_jobs_with_status_filter() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     // Create 3 jobs
     for _ in 0..3 {
@@ -18495,7 +18313,7 @@ async fn test_list_jobs_with_status_filter() -> Result<()> {
 
 #[tokio::test]
 async fn test_list_jobs_invalid_status_returns_400() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     let response = router.oneshot(api_get("/api/jobs?status=bogus")).await?;
     assert_eq!(response.status(), 400);
@@ -18509,7 +18327,7 @@ async fn test_list_jobs_invalid_status_returns_400() -> Result<()> {
 
 #[tokio::test]
 async fn test_list_jobs_status_with_workspace_filter() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup_multi_workspace().await?;
+    let (router, pool, _tmp) = setup_multi_workspace().await?;
 
     // Create job in "default" workspace
     let response = router
@@ -18568,7 +18386,7 @@ async fn test_list_jobs_status_with_workspace_filter() -> Result<()> {
 
 #[tokio::test]
 async fn test_ws_auth_rejects_without_token() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup_with_auth().await?;
+    let (router, pool, _tmp) = setup_with_auth().await?;
 
     let job_id = JobRepo::create(
         &pool,
@@ -18609,7 +18427,7 @@ async fn test_ws_auth_rejects_without_token() -> Result<()> {
 
 #[tokio::test]
 async fn test_ws_auth_accepts_jwt_via_query_param() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup_with_auth().await?;
+    let (router, pool, _tmp) = setup_with_auth().await?;
 
     let job_id = JobRepo::create(
         &pool,
@@ -18651,7 +18469,7 @@ async fn test_ws_auth_accepts_jwt_via_query_param() -> Result<()> {
 
 #[tokio::test]
 async fn test_ws_auth_accepts_api_key_via_query_param() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup_with_auth().await?;
+    let (router, pool, _tmp) = setup_with_auth().await?;
 
     let job_id = JobRepo::create(
         &pool,
@@ -18706,7 +18524,7 @@ async fn test_ws_auth_accepts_api_key_via_query_param() -> Result<()> {
 
 #[tokio::test]
 async fn test_ws_auth_rejects_invalid_token() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup_with_auth().await?;
+    let (router, pool, _tmp) = setup_with_auth().await?;
 
     let job_id = JobRepo::create(
         &pool,
@@ -18746,7 +18564,7 @@ async fn test_ws_auth_rejects_invalid_token() -> Result<()> {
 #[tokio::test]
 async fn test_ws_no_auth_allows_without_token() -> Result<()> {
     // When auth is NOT configured, WebSocket should work without any token
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     let job_id = JobRepo::create(
         &pool,
@@ -18785,7 +18603,7 @@ async fn test_ws_no_auth_allows_without_token() -> Result<()> {
 
 #[tokio::test]
 async fn test_ws_skip_backfill_suppresses_existing_logs() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     let job_id = JobRepo::create(
         &pool,
@@ -18866,7 +18684,7 @@ async fn test_ws_skip_backfill_suppresses_existing_logs() -> Result<()> {
 
 #[tokio::test]
 async fn test_ws_without_skip_backfill_sends_existing_logs() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     let job_id = JobRepo::create(
         &pool,
@@ -18932,11 +18750,9 @@ async fn test_ws_without_skip_backfill_sends_existing_logs() -> Result<()> {
 /// object from the job-level input.
 #[tokio::test]
 async fn test_connection_input_passthrough_at_claim() -> Result<()> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let url = test_db.url;
 
     let temp_dir = TempDir::new()?;
     let log_dir = temp_dir.path().join("logs");
@@ -19202,17 +19018,10 @@ async fn test_connection_input_passthrough_at_claim() -> Result<()> {
 ///
 /// The trigger has a 1-second timeout so that tests can exercise the timeout
 /// path without waiting for the default 30 seconds.
-async fn setup_sync_webhook() -> Result<(
-    Router,
-    PgPool,
-    TempDir,
-    testcontainers::ContainerAsync<Postgres>,
-)> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+async fn setup_sync_webhook() -> Result<(Router, PgPool, TempDir)> {
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let url = test_db.url;
 
     let temp_dir = TempDir::new()?;
     let log_dir = temp_dir.path().join("logs");
@@ -19355,7 +19164,7 @@ async fn setup_sync_webhook() -> Result<(
     let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None);
     let router = build_router(state, CancellationToken::new());
 
-    Ok((router, pool, temp_dir, container))
+    Ok((router, pool, temp_dir))
 }
 
 /// When a sync-mode webhook fires and the job does not complete within the
@@ -19366,7 +19175,7 @@ async fn setup_sync_webhook() -> Result<(
 /// neither `rx.recv()` resolves nor the job completes before the deadline.
 #[tokio::test]
 async fn test_sync_webhook_timeout_returns_202_with_running_status() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_sync_webhook().await?;
+    let (router, _pool, _tmp) = setup_sync_webhook().await?;
 
     // POST to the sync webhook — no worker is running, so the job will stay
     // in "pending" state and the 1-second timeout will elapse.
@@ -19419,7 +19228,7 @@ async fn test_sync_webhook_timeout_returns_202_with_running_status() -> Result<(
 #[tokio::test]
 async fn test_async_webhook_returns_200_immediately() -> Result<()> {
     // Use the standard test workspace which has `public-hook` (async, no secret).
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     let response = router
         .oneshot(
@@ -19457,7 +19266,7 @@ async fn test_async_webhook_returns_200_immediately() -> Result<()> {
 
 #[tokio::test]
 async fn test_recovery_marks_stale_worker_steps_as_failed_via_api() -> Result<()> {
-    let (state, pool, _tmp, _container) = setup_recovery().await?;
+    let (state, pool, _tmp) = setup_recovery().await?;
     let router = build_router(state.clone(), CancellationToken::new());
 
     // Execute single-step task
@@ -19544,7 +19353,7 @@ async fn test_recovery_marks_stale_worker_steps_as_failed_via_api() -> Result<()
 
 #[tokio::test]
 async fn test_recovery_does_not_affect_active_workers_via_api() -> Result<()> {
-    let (state, pool, _tmp, _container) = setup_recovery().await?;
+    let (state, pool, _tmp) = setup_recovery().await?;
     let router = build_router(state.clone(), CancellationToken::new());
 
     // Execute single-step task
@@ -19612,7 +19421,7 @@ async fn test_recovery_does_not_affect_active_workers_via_api() -> Result<()> {
 
 #[tokio::test]
 async fn test_recovery_handles_multi_step_job_via_api() -> Result<()> {
-    let (state, pool, _tmp, _container) = setup_recovery().await?;
+    let (state, pool, _tmp) = setup_recovery().await?;
     let router = build_router(state.clone(), CancellationToken::new());
 
     // Execute the 2-step task: greet → shout
@@ -19722,7 +19531,7 @@ async fn test_recovery_handles_multi_step_job_via_api() -> Result<()> {
 
 #[tokio::test]
 async fn test_recovery_worker_reactivation_on_heartbeat_via_api() -> Result<()> {
-    let (state, pool, _tmp, _container) = setup_recovery().await?;
+    let (state, pool, _tmp) = setup_recovery().await?;
     let router = build_router(state.clone(), CancellationToken::new());
 
     // Register worker via API
@@ -19872,11 +19681,9 @@ async fn setup_scheduler_workspace(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_scheduler_fires_cron_trigger() -> Result<()> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let url = test_db.url;
 
     let workspace = setup_scheduler_workspace(
         "every-second",
@@ -19965,11 +19772,9 @@ async fn test_scheduler_fires_cron_trigger() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_scheduler_disabled_trigger_does_not_fire() -> Result<()> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let url = test_db.url;
 
     let workspace = setup_scheduler_workspace(
         "disabled-trigger",
@@ -20036,11 +19841,9 @@ async fn test_scheduler_disabled_trigger_does_not_fire() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_scheduler_passes_trigger_input_to_job() -> Result<()> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let url = test_db.url;
 
     let mut trigger_input = HashMap::new();
     trigger_input.insert("env".to_string(), json!("staging"));
@@ -20195,7 +19998,7 @@ async fn test_scheduler_clean_shutdown() -> Result<()> {
 
 #[tokio::test]
 async fn test_multi_workspace_job_execution() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup_multi_workspace().await?;
+    let (router, pool, _tmp) = setup_multi_workspace().await?;
 
     // Execute a task in "default" workspace
     let resp = router
@@ -20258,7 +20061,7 @@ async fn test_multi_workspace_job_execution() -> Result<()> {
 
 #[tokio::test]
 async fn test_multi_workspace_worker_claims_from_correct_workspace() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup_multi_workspace().await?;
+    let (router, pool, _tmp) = setup_multi_workspace().await?;
 
     // Create a step in "default" workspace directly
     let job_id_default = JobRepo::create(
@@ -20439,7 +20242,7 @@ async fn test_multi_workspace_worker_claims_from_correct_workspace() -> Result<(
 
 #[tokio::test]
 async fn test_multi_workspace_job_listing_filters_by_workspace() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_multi_workspace().await?;
+    let (router, _pool, _tmp) = setup_multi_workspace().await?;
 
     // Create two jobs in "default"
     for _ in 0..2 {
@@ -20509,11 +20312,9 @@ async fn test_multi_workspace_job_listing_filters_by_workspace() -> Result<()> {
 
 #[tokio::test]
 async fn test_multi_workspace_tarball_download() -> Result<()> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let url = test_db.url;
 
     let temp_dir = TempDir::new()?;
     let log_dir = temp_dir.path().join("logs");
@@ -20639,7 +20440,7 @@ async fn test_multi_workspace_tarball_download() -> Result<()> {
 
 #[tokio::test]
 async fn test_multi_workspace_task_not_found_in_wrong_workspace() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_multi_workspace().await?;
+    let (router, _pool, _tmp) = setup_multi_workspace().await?;
 
     // "hello-world" lives in "default" — executing via "ops" route must 404
     let resp = router
@@ -20682,7 +20483,7 @@ async fn test_multi_workspace_task_not_found_in_wrong_workspace() -> Result<()> 
 
 #[tokio::test]
 async fn test_worker_register_with_version_stored_in_db() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     // Register worker WITH a version field
     let response = router
@@ -20707,7 +20508,7 @@ async fn test_worker_register_with_version_stored_in_db() -> Result<()> {
 
 #[tokio::test]
 async fn test_worker_register_without_version_stores_null() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     // Register worker WITHOUT a version field (legacy backward-compat behaviour)
     let response = router
@@ -20732,7 +20533,7 @@ async fn test_worker_register_without_version_stores_null() -> Result<()> {
 
 #[tokio::test]
 async fn test_list_workers_response_includes_version() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     // Register a worker with a known version
     let response = router
@@ -20759,7 +20560,7 @@ async fn test_list_workers_response_includes_version() -> Result<()> {
 
 #[tokio::test]
 async fn test_get_config_returns_version_field() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     let response = router.oneshot(api_get("/api/config")).await?;
     assert_eq!(response.status(), StatusCode::OK);
@@ -20779,17 +20580,10 @@ async fn test_get_config_returns_version_field() -> Result<()> {
 /// Helper: create a recovery AppState with a custom unmatched_step_timeout_secs.
 async fn setup_recovery_with_unmatched_timeout(
     timeout_secs: u64,
-) -> Result<(
-    AppState,
-    PgPool,
-    TempDir,
-    testcontainers::ContainerAsync<Postgres>,
-)> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+) -> Result<(AppState, PgPool, TempDir)> {
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let url = test_db.url;
 
     let temp_dir = TempDir::new()?;
     let log_dir = temp_dir.path().join("logs");
@@ -20838,7 +20632,7 @@ async fn setup_recovery_with_unmatched_timeout(
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
     let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None);
 
-    Ok((state, pool, temp_dir, container))
+    Ok((state, pool, temp_dir))
 }
 
 /// Helper: override a step's required_tags and backdate its ready_at.
@@ -20888,7 +20682,7 @@ async fn set_step_ability_and_backdate(
 
 #[tokio::test]
 async fn test_recovery_fails_unmatched_ready_step() -> Result<()> {
-    let (state, pool, _tmp, _container) = setup_recovery_with_unmatched_timeout(1).await?;
+    let (state, pool, _tmp) = setup_recovery_with_unmatched_timeout(1).await?;
 
     // Register a worker with ["script"] tags — it cannot run ["gpu"] steps
     let _worker_id = register_test_worker(&pool).await;
@@ -20946,7 +20740,7 @@ async fn test_recovery_fails_unmatched_ready_step() -> Result<()> {
 
 #[tokio::test]
 async fn test_recovery_does_not_fail_matched_ready_step() -> Result<()> {
-    let (state, pool, _tmp, _container) = setup_recovery_with_unmatched_timeout(1).await?;
+    let (state, pool, _tmp) = setup_recovery_with_unmatched_timeout(1).await?;
 
     // Register a worker with ["script"] tags
     let _worker_id = register_test_worker(&pool).await;
@@ -20988,7 +20782,7 @@ async fn test_recovery_does_not_fail_matched_ready_step() -> Result<()> {
 
 #[tokio::test]
 async fn test_recovery_does_not_fail_recent_unmatched_step() -> Result<()> {
-    let (state, pool, _tmp, _container) = setup_recovery_with_unmatched_timeout(60).await?;
+    let (state, pool, _tmp) = setup_recovery_with_unmatched_timeout(60).await?;
 
     // Register a worker with ["script"] tags
     let _worker_id = register_test_worker(&pool).await;
@@ -21029,7 +20823,7 @@ async fn test_recovery_does_not_fail_recent_unmatched_step() -> Result<()> {
 
 #[tokio::test]
 async fn test_recovery_fails_unmatched_step_with_no_workers() -> Result<()> {
-    let (state, pool, _tmp, _container) = setup_recovery_with_unmatched_timeout(1).await?;
+    let (state, pool, _tmp) = setup_recovery_with_unmatched_timeout(1).await?;
 
     // Do NOT register any worker
     let workspace_config = state.get_workspace("default").await.unwrap();
@@ -21069,7 +20863,7 @@ async fn test_recovery_fails_unmatched_step_with_no_workers() -> Result<()> {
 
 #[tokio::test]
 async fn test_recovery_fails_unmatched_step_with_inactive_worker() -> Result<()> {
-    let (state, pool, _tmp, _container) = setup_recovery_with_unmatched_timeout(1).await?;
+    let (state, pool, _tmp) = setup_recovery_with_unmatched_timeout(1).await?;
 
     // Register a worker with ["script"] tags, then mark it inactive
     let worker_id = register_test_worker(&pool).await;
@@ -21111,7 +20905,7 @@ async fn test_recovery_fails_unmatched_step_with_inactive_worker() -> Result<()>
 
 #[tokio::test]
 async fn test_recovery_does_not_fail_task_type_step() -> Result<()> {
-    let (state, pool, _tmp, _container) = setup_recovery_with_unmatched_timeout(1).await?;
+    let (state, pool, _tmp) = setup_recovery_with_unmatched_timeout(1).await?;
 
     // No workers registered — but task-type steps should be excluded
 
@@ -21147,7 +20941,7 @@ async fn test_recovery_does_not_fail_task_type_step() -> Result<()> {
 
 #[tokio::test]
 async fn test_recovery_does_not_fail_empty_tags_step() -> Result<()> {
-    let (state, pool, _tmp, _container) = setup_recovery_with_unmatched_timeout(1).await?;
+    let (state, pool, _tmp) = setup_recovery_with_unmatched_timeout(1).await?;
 
     // Register a worker — any active worker should match empty required_tags
     let _worker_id = register_test_worker(&pool).await;
@@ -21257,7 +21051,7 @@ fn when_test_workspace_with_flow(
 /// same cascade (R2/R1).
 #[tokio::test]
 async fn test_create_job_for_task_root_when_false_skips_at_creation() -> Result<()> {
-    let (_router, pool, _tmp, _container) = setup().await?;
+    let (_router, pool, _tmp) = setup().await?;
 
     let mut flow = HashMap::new();
     flow.insert(
@@ -21341,7 +21135,7 @@ async fn test_create_job_for_task_root_when_false_skips_at_creation() -> Result<
 /// must be promoted to `ready` by the post-creation promote loop.
 #[tokio::test]
 async fn test_create_job_for_task_root_when_true_becomes_ready() -> Result<()> {
-    let (_router, pool, _tmp, _container) = setup().await?;
+    let (_router, pool, _tmp) = setup().await?;
 
     let mut flow = HashMap::new();
     flow.insert(
@@ -21395,7 +21189,7 @@ async fn test_create_job_for_task_root_when_true_becomes_ready() -> Result<()> {
 /// post-creation promote loop.  No child job must be spawned for it.
 #[tokio::test]
 async fn test_create_job_for_task_step_type_task_with_when_false_is_skipped() -> Result<()> {
-    let (_router, pool, _tmp, _container) = setup().await?;
+    let (_router, pool, _tmp) = setup().await?;
 
     let mut workspace = WorkspaceConfig::default();
 
@@ -21604,7 +21398,7 @@ async fn test_create_job_for_task_step_type_task_with_when_false_is_skipped() ->
 /// and API consumers can display the condition expression.
 #[tokio::test]
 async fn test_job_detail_api_exposes_when_condition() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     let mut flow = HashMap::new();
     flow.insert(
@@ -21722,7 +21516,7 @@ async fn fire_webhook(router: Router, uri: &str) -> Uuid {
 // Test 1: malformed UUID in the job_id path segment → 400
 #[tokio::test]
 async fn test_webhook_job_status_malformed_uuid() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     let request = Request::builder()
         .method("GET")
@@ -21748,7 +21542,7 @@ async fn test_webhook_job_status_malformed_uuid() -> Result<()> {
 // Test 2: webhook name does not exist → 404
 #[tokio::test]
 async fn test_webhook_job_status_unknown_webhook() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     let job_id = Uuid::new_v4();
     let request = Request::builder()
@@ -21770,7 +21564,7 @@ async fn test_webhook_job_status_unknown_webhook() -> Result<()> {
 // Test 3: webhook exists but job UUID is not in the DB → 404
 #[tokio::test]
 async fn test_webhook_job_status_unknown_job_id() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     let random_id = Uuid::new_v4();
     let request = Request::builder()
@@ -21792,7 +21586,7 @@ async fn test_webhook_job_status_unknown_job_id() -> Result<()> {
 // Test 4: IDOR — job created via the API (source_type = "api") is not visible via webhook status endpoint → 404
 #[tokio::test]
 async fn test_webhook_job_status_idor_api_sourced_job() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     // Create a job through the normal API endpoint (source_type = "api")
     let response = router
@@ -21827,7 +21621,7 @@ async fn test_webhook_job_status_idor_api_sourced_job() -> Result<()> {
 // Test 5: IDOR — job created by webhook A is not visible via webhook B's status endpoint → 404
 #[tokio::test]
 async fn test_webhook_job_status_idor_different_webhook() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     // Fire public-hook to create a job
     let job_id = fire_webhook(router.clone(), "/hooks/public-hook").await;
@@ -21855,7 +21649,7 @@ async fn test_webhook_job_status_idor_different_webhook() -> Result<()> {
 // Test 6: secret-protected webhook, no secret provided → 401
 #[tokio::test]
 async fn test_webhook_job_status_secret_required_but_missing() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     let job_id = Uuid::new_v4();
     // Request without any secret for the secret-protected github-push webhook
@@ -21878,7 +21672,7 @@ async fn test_webhook_job_status_secret_required_but_missing() -> Result<()> {
 // Test 7: secret-protected webhook, secret supplied via query param → 200 (or 404 for missing job)
 #[tokio::test]
 async fn test_webhook_job_status_secret_via_query_param() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     // First create a real job via the webhook so we have a valid job_id
     let job_id = fire_webhook(router.clone(), "/hooks/github-push?secret=whsec_test123").await;
@@ -21919,7 +21713,7 @@ async fn test_webhook_job_status_secret_via_query_param() -> Result<()> {
 // Test 8: secret-protected webhook, secret supplied via Authorization: Bearer header → 200
 #[tokio::test]
 async fn test_webhook_job_status_secret_via_bearer() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     // Create a job via the webhook (with secret in query param for the fire)
     let job_id = fire_webhook(router.clone(), "/hooks/github-push?secret=whsec_test123").await;
@@ -21948,7 +21742,7 @@ async fn test_webhook_job_status_secret_via_bearer() -> Result<()> {
 // Test 9: fire webhook, immediately check status without wait param → returns current status
 #[tokio::test]
 async fn test_webhook_job_status_default_no_wait() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     // Fire public-hook (no secret required)
     let job_id = fire_webhook(router.clone(), "/hooks/public-hook").await;
@@ -21996,7 +21790,7 @@ async fn test_webhook_job_status_default_no_wait() -> Result<()> {
 // returns immediately with terminal status (race-guard path: job already terminal at subscribe time)
 #[tokio::test]
 async fn test_webhook_job_status_wait_on_terminal_job() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     // Fire public-hook to create a job.
     // The `hello-world` task requires `name` in its step template; since public-hook
@@ -22072,7 +21866,7 @@ async fn test_webhook_job_status_wait_on_terminal_job() -> Result<()> {
 // Test 11: fire webhook, cancel the job, then GET with wait=true → returns immediately with "cancelled"
 #[tokio::test]
 async fn test_webhook_job_status_cancelled_treated_as_terminal() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     // Fire public-hook to create a job
     let job_id = fire_webhook(router.clone(), "/hooks/public-hook").await;
@@ -22133,11 +21927,9 @@ async fn test_webhook_job_status_cancelled_treated_as_terminal() -> Result<()> {
 /// revision string so the assertion is stable regardless of file-system state.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_scheduler_triggered_job_stores_revision() -> Result<()> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let url = test_db.url;
 
     // Build a scheduler workspace with a trigger that fires every second.
     let workspace = setup_scheduler_workspace(
@@ -22262,7 +22054,7 @@ async fn test_scheduler_triggered_job_stores_revision() -> Result<()> {
 #[tokio::test]
 async fn test_webhook_triggered_job_stores_revision() -> Result<()> {
     // setup_multi_workspace uses InMemSource whose revision() returns "test-rev"
-    let (router, pool, _tmp, _container) = setup_multi_workspace().await?;
+    let (router, pool, _tmp) = setup_multi_workspace().await?;
 
     // Fire the "public-hook" webhook (no secret, targets hello-world in "default")
     let request = Request::builder()
@@ -22314,7 +22106,7 @@ async fn test_webhook_triggered_job_stores_revision() -> Result<()> {
 
 #[tokio::test]
 async fn test_healthz_returns_structured_json() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     // GET /healthz is now the unauthenticated k8s probe: returns only
     // {"status": "ok"|"unhealthy", "db": "ok"|"error"} — no leader/task detail.
@@ -22452,11 +22244,7 @@ fn revision_test_state(pool: PgPool, workspace: WorkspaceConfig) -> AppState {
 /// 4. Assert the hook job carries the same revision.
 #[tokio::test]
 async fn test_hook_job_inherits_revision() -> Result<()> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+    let pool = stroem_test_support::test_pool().await;
 
     let mut workspace = hook_test_workspace();
 
@@ -22571,11 +22359,7 @@ async fn test_hook_job_inherits_revision() -> Result<()> {
 ///    carry `"test-rev"` as their revision.
 #[tokio::test]
 async fn test_sub_job_inherits_revision_via_orchestration() -> Result<()> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+    let pool = stroem_test_support::test_pool().await;
 
     let mut workspace = task_action_test_workspace();
 
@@ -22666,7 +22450,7 @@ async fn test_sub_job_inherits_revision_via_orchestration() -> Result<()> {
 /// the workspace source reports a revision string.
 #[tokio::test]
 async fn test_job_revision_in_api_detail_response() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_multi_workspace().await?;
+    let (router, _pool, _tmp) = setup_multi_workspace().await?;
 
     // Create a job via the "default" workspace (InMemSource returns "test-rev")
     let resp = router
@@ -22701,7 +22485,7 @@ async fn test_job_revision_in_api_detail_response() -> Result<()> {
 /// item when the workspace source reports a revision string.
 #[tokio::test]
 async fn test_job_revision_in_api_list_response() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_multi_workspace().await?;
+    let (router, _pool, _tmp) = setup_multi_workspace().await?;
 
     // Create a job
     let resp = router
@@ -22737,7 +22521,7 @@ async fn test_job_revision_in_api_list_response() -> Result<()> {
 /// backed by `InMemorySource` that always returns `None`).
 #[tokio::test]
 async fn test_job_revision_null_when_no_workspace_revision() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     // Create a job — the workspace has no revision
     let resp = router
@@ -23040,19 +22824,10 @@ fn test_workspace_with_root_approval() -> WorkspaceConfig {
 }
 
 /// Spin up a router backed by `workspace` against a fresh Postgres container.
-async fn setup_with_workspace(
-    workspace: WorkspaceConfig,
-) -> Result<(
-    Router,
-    PgPool,
-    TempDir,
-    testcontainers::ContainerAsync<Postgres>,
-)> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+async fn setup_with_workspace(workspace: WorkspaceConfig) -> Result<(Router, PgPool, TempDir)> {
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let url = test_db.url;
 
     let temp_dir = TempDir::new()?;
     let log_dir = temp_dir.path().join("logs");
@@ -23097,7 +22872,7 @@ async fn setup_with_workspace(
     let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None);
     let router = build_router(state, CancellationToken::new());
 
-    Ok((router, pool, temp_dir, container))
+    Ok((router, pool, temp_dir))
 }
 
 /// Like `setup_with_workspace`, but returns the `AppState` directly instead of
@@ -23105,17 +22880,10 @@ async fn setup_with_workspace(
 /// `settlement` entries directly rather than going through HTTP.
 async fn setup_state_with_workspace(
     workspace: WorkspaceConfig,
-) -> Result<(
-    AppState,
-    PgPool,
-    TempDir,
-    testcontainers::ContainerAsync<Postgres>,
-)> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+) -> Result<(AppState, PgPool, TempDir)> {
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let url = test_db.url;
 
     let temp_dir = TempDir::new()?;
     let log_dir = temp_dir.path().join("logs");
@@ -23159,15 +22927,14 @@ async fn setup_state_with_workspace(
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
     let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None);
 
-    Ok((state, pool, temp_dir, container))
+    Ok((state, pool, temp_dir))
 }
 
 // ─── Test: approval step reaches suspended after its dependency completes ─────
 
 #[tokio::test]
 async fn test_approval_step_reaches_suspended() -> Result<()> {
-    let (router, pool, _tmp, _container) =
-        setup_with_workspace(test_workspace_with_approval()).await?;
+    let (router, pool, _tmp) = setup_with_workspace(test_workspace_with_approval()).await?;
 
     // Create the deploy-flow job
     let resp = router
@@ -23245,8 +23012,7 @@ async fn test_approval_step_reaches_suspended() -> Result<()> {
 
 #[tokio::test]
 async fn test_approval_approve_continues_flow() -> Result<()> {
-    let (router, pool, _tmp, _container) =
-        setup_with_workspace(test_workspace_with_approval()).await?;
+    let (router, pool, _tmp) = setup_with_workspace(test_workspace_with_approval()).await?;
 
     // Create job and complete greet step to get review into suspended state
     let resp = router
@@ -23328,8 +23094,7 @@ async fn test_approval_approve_continues_flow() -> Result<()> {
 
 #[tokio::test]
 async fn test_approval_reject_fails_job() -> Result<()> {
-    let (router, pool, _tmp, _container) =
-        setup_with_workspace(test_workspace_with_approval()).await?;
+    let (router, pool, _tmp) = setup_with_workspace(test_workspace_with_approval()).await?;
 
     // Create job and advance to suspended review step
     let resp = router
@@ -23419,8 +23184,7 @@ async fn test_approval_reject_fails_job() -> Result<()> {
 /// failure write, i.e. before anything said the step was rejected).
 #[tokio::test]
 async fn test_approval_reject_logs_rejection_before_retry() -> Result<()> {
-    let (router, pool, _tmp, _container) =
-        setup_with_workspace(test_workspace_with_approval()).await?;
+    let (router, pool, _tmp) = setup_with_workspace(test_workspace_with_approval()).await?;
 
     let resp = router
         .clone()
@@ -23509,8 +23273,7 @@ async fn test_approval_reject_logs_rejection_before_retry() -> Result<()> {
 
 #[tokio::test]
 async fn test_approval_returns_409_for_non_suspended_step() -> Result<()> {
-    let (router, pool, _tmp, _container) =
-        setup_with_workspace(test_workspace_with_approval()).await?;
+    let (router, pool, _tmp) = setup_with_workspace(test_workspace_with_approval()).await?;
 
     // Create job — greet is ready (not suspended)
     let resp = router
@@ -23558,8 +23321,7 @@ async fn test_approval_returns_409_for_non_suspended_step() -> Result<()> {
 
 #[tokio::test]
 async fn test_approval_root_step_suspends_immediately() -> Result<()> {
-    let (router, pool, _tmp, _container) =
-        setup_with_workspace(test_workspace_with_root_approval()).await?;
+    let (router, pool, _tmp) = setup_with_workspace(test_workspace_with_root_approval()).await?;
 
     // Create the gated-task job — the single approval step has no dependencies
     // so create_job_for_task calls handle_approval_steps immediately after creation
@@ -23613,8 +23375,7 @@ async fn test_approval_root_step_suspends_immediately() -> Result<()> {
 
 #[tokio::test]
 async fn test_cancel_job_with_suspended_step() -> Result<()> {
-    let (router, pool, _tmp, _container) =
-        setup_with_workspace(test_workspace_with_approval()).await?;
+    let (router, pool, _tmp) = setup_with_workspace(test_workspace_with_approval()).await?;
 
     // Create job and complete greet to reach suspended review
     let resp = router
@@ -23689,8 +23450,7 @@ async fn test_cancel_job_with_suspended_step() -> Result<()> {
 
 #[tokio::test]
 async fn test_approval_message_in_api_response() -> Result<()> {
-    let (router, pool, _tmp, _container) =
-        setup_with_workspace(test_workspace_with_approval()).await?;
+    let (router, pool, _tmp) = setup_with_workspace(test_workspace_with_approval()).await?;
 
     // Create job and complete greet to reach suspended review
     let resp = router
@@ -23758,8 +23518,7 @@ async fn test_approval_message_in_api_response() -> Result<()> {
 
 #[tokio::test]
 async fn test_approval_reject_default_reason() -> Result<()> {
-    let (router, pool, _tmp, _container) =
-        setup_with_workspace(test_workspace_with_approval()).await?;
+    let (router, pool, _tmp) = setup_with_workspace(test_workspace_with_approval()).await?;
 
     // Create job and advance to suspended review step
     let resp = router
@@ -23819,8 +23578,7 @@ async fn test_approval_reject_default_reason() -> Result<()> {
 
 #[tokio::test]
 async fn test_approval_404_for_missing_step() -> Result<()> {
-    let (router, _pool, _tmp, _container) =
-        setup_with_workspace(test_workspace_with_approval()).await?;
+    let (router, _pool, _tmp) = setup_with_workspace(test_workspace_with_approval()).await?;
 
     // Create job
     let resp = router
@@ -23856,8 +23614,7 @@ async fn test_approval_404_for_missing_step() -> Result<()> {
 
 #[tokio::test]
 async fn test_approval_approve_with_custom_input() -> Result<()> {
-    let (router, pool, _tmp, _container) =
-        setup_with_workspace(test_workspace_with_root_approval()).await?;
+    let (router, pool, _tmp) = setup_with_workspace(test_workspace_with_root_approval()).await?;
 
     // Create the gated-task job — gate is suspended immediately
     let resp = router
@@ -24060,18 +23817,10 @@ fn event_source_workspace() -> WorkspaceConfig {
 }
 
 /// Set up a server+DB with the event_source_workspace loaded under "default".
-async fn setup_event_source() -> Result<(
-    Router,
-    AppState,
-    PgPool,
-    TempDir,
-    testcontainers::ContainerAsync<Postgres>,
-)> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+async fn setup_event_source() -> Result<(Router, AppState, PgPool, TempDir)> {
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let url = test_db.url;
 
     let temp_dir = TempDir::new()?;
     let log_dir = temp_dir.path().join("logs");
@@ -24117,14 +23866,14 @@ async fn setup_event_source() -> Result<(
     let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None);
     let router = build_router(state.clone(), tokio_util::sync::CancellationToken::new());
 
-    Ok((router, state, pool, temp_dir, container))
+    Ok((router, state, pool, temp_dir))
 }
 
 // ─── emit endpoint: happy path ─────────────────────────────────────────────
 
 #[tokio::test]
 async fn test_emit_endpoint_happy_path() -> Result<()> {
-    let (router, _state, pool, _tmp, _container) = setup_event_source().await?;
+    let (router, _state, pool, _tmp) = setup_event_source().await?;
 
     let response = router
         .oneshot(worker_request(
@@ -24163,7 +23912,7 @@ async fn test_emit_endpoint_happy_path() -> Result<()> {
 
 #[tokio::test]
 async fn test_emit_endpoint_unknown_workspace_returns_404() -> Result<()> {
-    let (router, _state, _pool, _tmp, _container) = setup_event_source().await?;
+    let (router, _state, _pool, _tmp) = setup_event_source().await?;
 
     let response = router
         .oneshot(worker_request(
@@ -24191,7 +23940,7 @@ async fn test_emit_endpoint_unknown_workspace_returns_404() -> Result<()> {
 
 #[tokio::test]
 async fn test_emit_endpoint_auth_required() -> Result<()> {
-    let (router, _state, _pool, _tmp, _container) = setup_event_source().await?;
+    let (router, _state, _pool, _tmp) = setup_event_source().await?;
 
     // Send request without the worker Bearer token
     let request = Request::builder()
@@ -24223,7 +23972,7 @@ async fn test_emit_endpoint_auth_required() -> Result<()> {
 
 #[tokio::test]
 async fn test_emit_endpoint_invalid_source_id() -> Result<()> {
-    let (router, _state, _pool, _tmp, _container) = setup_event_source().await?;
+    let (router, _state, _pool, _tmp) = setup_event_source().await?;
 
     // "unknown-trigger" does not exist in the workspace config
     let response = router
@@ -24274,7 +24023,7 @@ async fn run_one_reconcile(state: AppState) {
 /// Verify the event_source workspace is set up correctly.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_event_source_workspace_setup_diagnostic() -> Result<()> {
-    let (_router, state, pool, _tmp, _container) = setup_event_source().await?;
+    let (_router, state, pool, _tmp) = setup_event_source().await?;
 
     // Verify workspace names
     let names = state.workspaces.names();
@@ -24317,7 +24066,7 @@ async fn test_event_source_workspace_setup_diagnostic() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_reconcile_creates_job_for_new_trigger() -> Result<()> {
-    let (_router, state, pool, _tmp, _container) = setup_event_source().await?;
+    let (_router, state, pool, _tmp) = setup_event_source().await?;
 
     // No event source jobs should exist before reconcile
     let before: (i64,) =
@@ -24346,7 +24095,7 @@ async fn test_reconcile_creates_job_for_new_trigger() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_reconcile_skips_unchanged_trigger() -> Result<()> {
-    let (_router, state, pool, _tmp, _container) = setup_event_source().await?;
+    let (_router, state, pool, _tmp) = setup_event_source().await?;
 
     // First pass — creates the job
     run_one_reconcile(state.clone()).await;
@@ -24382,7 +24131,7 @@ async fn test_reconcile_skips_unchanged_trigger() -> Result<()> {
 async fn test_reconcile_replaces_job_when_config_changes() -> Result<()> {
     use stroem_common::models::workflow::RestartPolicy;
 
-    let (_router, state, pool, _tmp, _container) = setup_event_source().await?;
+    let (_router, state, pool, _tmp) = setup_event_source().await?;
 
     // First reconcile — creates the initial job
     run_one_reconcile(state.clone()).await;
@@ -24458,7 +24207,7 @@ async fn test_reconcile_replaces_job_when_config_changes() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_reconcile_cancels_job_for_removed_trigger() -> Result<()> {
-    let (_router, state, pool, _tmp, _container) = setup_event_source().await?;
+    let (_router, state, pool, _tmp) = setup_event_source().await?;
 
     // First reconcile — creates the job
     run_one_reconcile(state.clone()).await;
@@ -24505,7 +24254,7 @@ async fn test_reconcile_cancels_job_for_removed_trigger() -> Result<()> {
 
 #[tokio::test]
 async fn test_emit_endpoint_source_id_workspace_mismatch() -> Result<()> {
-    let (router, _state, _pool, _tmp, _container) = setup_event_source().await?;
+    let (router, _state, _pool, _tmp) = setup_event_source().await?;
 
     // source_id belongs to "other-ws" but the workspace field says "default"
     let response = router
@@ -24534,7 +24283,7 @@ async fn test_emit_endpoint_source_id_workspace_mismatch() -> Result<()> {
 
 #[tokio::test]
 async fn test_emit_endpoint_wrong_target_task() -> Result<()> {
-    let (router, _state, _pool, _tmp, _container) = setup_event_source().await?;
+    let (router, _state, _pool, _tmp) = setup_event_source().await?;
 
     // The trigger "my-source" targets "process-event"; "wrong-task" is not the
     // configured target_task so the emit endpoint must reject it.
@@ -24587,11 +24336,9 @@ fn disabled_event_source_workspace() -> WorkspaceConfig {
 
 #[tokio::test]
 async fn test_emit_endpoint_disabled_trigger() -> Result<()> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let url = test_db.url;
 
     let temp_dir = TempDir::new()?;
     let log_dir = temp_dir.path().join("logs");
@@ -24663,7 +24410,7 @@ async fn test_emit_endpoint_disabled_trigger() -> Result<()> {
 
 #[tokio::test]
 async fn test_emit_endpoint_malformed_source_id() -> Result<()> {
-    let (router, _state, _pool, _tmp, _container) = setup_event_source().await?;
+    let (router, _state, _pool, _tmp) = setup_event_source().await?;
 
     // "noseparator" has no '/' so parsing into (workspace, trigger_name) fails.
     let response = router
@@ -24715,17 +24462,10 @@ fn event_source_workspace_with_policy(
 /// Set up state and pool with a given workspace config.
 async fn setup_event_source_with_workspace(
     workspace: WorkspaceConfig,
-) -> Result<(
-    AppState,
-    PgPool,
-    TempDir,
-    testcontainers::ContainerAsync<Postgres>,
-)> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+) -> Result<(AppState, PgPool, TempDir)> {
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let url = test_db.url;
 
     let temp_dir = TempDir::new()?;
     let log_dir = temp_dir.path().join("logs");
@@ -24733,12 +24473,7 @@ async fn setup_event_source_with_workspace(
 
     let config = ServerConfig {
         listen: "127.0.0.1:0".to_string(),
-        db: DbConfig {
-            url: format!(
-                "postgres://postgres:postgres@localhost:{}/postgres",
-                container.get_host_port_ipv4(5432).await?
-            ),
-        },
+        db: DbConfig { url },
         log_storage: LogStorageConfig {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
@@ -24774,7 +24509,7 @@ async fn setup_event_source_with_workspace(
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
     let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None);
 
-    Ok((state, pool, temp_dir, container))
+    Ok((state, pool, temp_dir))
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -24782,7 +24517,7 @@ async fn test_reconcile_restarts_completed_job_with_always_policy() -> Result<()
     use stroem_common::models::workflow::RestartPolicy;
 
     let workspace = event_source_workspace_with_policy(RestartPolicy::Always);
-    let (state, pool, _tmp, _container) = setup_event_source_with_workspace(workspace).await?;
+    let (state, pool, _tmp) = setup_event_source_with_workspace(workspace).await?;
 
     // First reconcile — creates the initial consumer job.
     run_one_reconcile(state.clone()).await;
@@ -24838,7 +24573,7 @@ async fn test_reconcile_restarts_failed_job_with_on_failure_policy() -> Result<(
     use stroem_common::models::workflow::RestartPolicy;
 
     let workspace = event_source_workspace_with_policy(RestartPolicy::OnFailure);
-    let (state, pool, _tmp, _container) = setup_event_source_with_workspace(workspace).await?;
+    let (state, pool, _tmp) = setup_event_source_with_workspace(workspace).await?;
 
     // First reconcile.
     run_one_reconcile(state.clone()).await;
@@ -24890,7 +24625,7 @@ async fn test_reconcile_does_not_restart_completed_job_with_on_failure_policy() 
     use stroem_common::models::workflow::RestartPolicy;
 
     let workspace = event_source_workspace_with_policy(RestartPolicy::OnFailure);
-    let (state, pool, _tmp, _container) = setup_event_source_with_workspace(workspace).await?;
+    let (state, pool, _tmp) = setup_event_source_with_workspace(workspace).await?;
 
     run_one_reconcile(state.clone()).await;
 
@@ -24930,7 +24665,7 @@ async fn test_reconcile_does_not_restart_with_never_policy() -> Result<()> {
     use stroem_common::models::workflow::RestartPolicy;
 
     let workspace = event_source_workspace_with_policy(RestartPolicy::Never);
-    let (state, pool, _tmp, _container) = setup_event_source_with_workspace(workspace).await?;
+    let (state, pool, _tmp) = setup_event_source_with_workspace(workspace).await?;
 
     run_one_reconcile(state.clone()).await;
 
@@ -25070,7 +24805,7 @@ async fn test_step_retry_resets_failed_step() -> Result<()> {
         jitter: false,
     };
     let workspace = retry_workspace(retry_cfg);
-    let (router, pool, _tmp, _container) = setup_with_workspace(workspace.clone()).await?;
+    let (router, pool, _tmp) = setup_with_workspace(workspace.clone()).await?;
 
     let job_id = create_job_for_task(
         &pool,
@@ -25162,7 +24897,7 @@ async fn test_step_retry_window_never_skips_dependents() -> Result<()> {
         jitter: false,
     };
     let workspace = retry_workspace(retry_cfg);
-    let (router, pool, _tmp, _container) = setup_with_workspace(workspace.clone()).await?;
+    let (router, pool, _tmp) = setup_with_workspace(workspace.clone()).await?;
     let task = workspace.tasks.get("retry-task").unwrap().clone();
 
     let job_id = create_job_for_task(
@@ -25306,20 +25041,79 @@ async fn install_retry_gate(pool: &PgPool) -> Result<()> {
 /// Block until exactly one backend is waiting on the retry gate, i.e. the
 /// failure transaction has reached (and is parked in) its retry UPDATE while
 /// still holding the step row locked with the pre-failure status committed.
+/// Counts backends waiting on the gate's advisory lock. Scoped to the
+/// CALLER's own database — `pg_locks` is server-wide, and every test now
+/// shares one physical Postgres server (one container per test binary), so
+/// an unscoped count can see a neighbouring test's advisory-lock waiter in a
+/// different database as if it were this test's own.
+async fn retry_gate_waiting_count(pool: &PgPool) -> Result<i64> {
+    let waiting: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' \
+         AND classid = 4242 AND objid = 1 AND NOT granted \
+         AND database = (SELECT oid FROM pg_database WHERE datname = current_database())",
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(waiting)
+}
+
 async fn await_retry_gate_blocked(pool: &PgPool) -> Result<()> {
     for _ in 0..200 {
-        let waiting: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' \
-             AND classid = 4242 AND objid = 1 AND NOT granted",
-        )
-        .fetch_one(pool)
-        .await?;
-        if waiting == 1 {
+        if retry_gate_waiting_count(pool).await? == 1 {
             return Ok(());
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     anyhow::bail!("failure transaction never reached the gated retry UPDATE");
+}
+
+/// `retry_gate_waiting_count` backs the gate `await_retry_gate_blocked` uses to
+/// detect the in-flight retry transaction. Every test binary now shares one
+/// physical Postgres server (one container per binary, per-test databases via
+/// `CREATE DATABASE ... TEMPLATE`), so `pg_locks` — a server-wide view — must
+/// not let a neighbouring test's advisory-lock waiter in a DIFFERENT database
+/// count as "waiting here"; that would make the gate return early before this
+/// test's own retry transaction has actually reached it.
+#[tokio::test(flavor = "multi_thread")]
+async fn retry_gate_waiting_count_ignores_other_database_waiters() -> Result<()> {
+    let db_a = stroem_test_support::test_db().await;
+    let db_b = stroem_test_support::test_db().await;
+
+    let mut holder = db_b.pool.acquire().await?;
+    sqlx::query("SELECT pg_advisory_lock(4242, 1)")
+        .execute(&mut *holder)
+        .await?;
+
+    let waiter_pool = db_b.pool.clone();
+    let waiter = tokio::spawn(async move {
+        let mut conn = waiter_pool.acquire().await.unwrap();
+        sqlx::query("SELECT pg_advisory_lock(4242, 1)")
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+    });
+
+    let mut waiting_in_b = 0;
+    for _ in 0..200 {
+        waiting_in_b = retry_gate_waiting_count(&db_b.pool).await?;
+        if waiting_in_b == 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert_eq!(waiting_in_b, 1, "waiter never parked in database B");
+
+    let waiting_in_a = retry_gate_waiting_count(&db_a.pool).await?;
+    assert_eq!(
+        waiting_in_a, 0,
+        "retry_gate_waiting_count leaked a waiter from a different database"
+    );
+
+    sqlx::query("SELECT pg_advisory_unlock(4242, 1)")
+        .execute(&mut *holder)
+        .await?;
+    waiter.await?;
+    Ok(())
 }
 
 /// A `NewJobStep` with the loop columns spelled out; `make_loop_step` covers the
@@ -25391,7 +25185,7 @@ async fn test_step_retry_window_closed_under_concurrent_cascade() -> Result<()> 
         jitter: false,
     };
     let workspace = retry_workspace(retry_cfg);
-    let (router, pool, _tmp, _container) = setup_with_workspace(workspace.clone()).await?;
+    let (router, pool, _tmp) = setup_with_workspace(workspace.clone()).await?;
     let task = workspace.tasks.get("retry-task").unwrap().clone();
 
     let job_id = create_job_for_task(
@@ -25545,7 +25339,7 @@ async fn test_step_retry_window_closed_for_loop_rollup() -> Result<()> {
         jitter: false,
     };
     let workspace = retry_workspace(retry_cfg.clone());
-    let (router, pool, _tmp, _container) = setup_with_workspace(workspace.clone()).await?;
+    let (router, pool, _tmp) = setup_with_workspace(workspace.clone()).await?;
 
     let job_id = create_job_for_task(
         &pool,
@@ -25755,7 +25549,7 @@ fn loop_rollup_workspace() -> WorkspaceConfig {
 async fn test_rollup_never_overwrites_terminal_placeholder_via_worker_completion() -> Result<()> {
     for terminal in ["failed", "cancelled"] {
         let workspace = loop_rollup_workspace();
-        let (router, pool, _tmp, _container) = setup_with_workspace(workspace.clone()).await?;
+        let (router, pool, _tmp) = setup_with_workspace(workspace.clone()).await?;
 
         let job_id = create_job_for_task(
             &pool,
@@ -25858,7 +25652,7 @@ async fn test_step_retry_scheduled_when_workspace_unavailable() -> Result<()> {
         jitter: false,
     };
     let workspace = retry_workspace(retry_cfg);
-    let (router, pool, _tmp, _container) = setup_with_workspace(workspace.clone()).await?;
+    let (router, pool, _tmp) = setup_with_workspace(workspace.clone()).await?;
     let job_id = create_job_for_task(
         &pool,
         &workspace,
@@ -25963,7 +25757,7 @@ async fn test_step_retry_max_retries_column_is_max_attempts_minus_one() -> Resul
         jitter: false,
     };
     let workspace = retry_workspace(retry_cfg);
-    let (_router, pool, _tmp, _container) = setup_with_workspace(workspace.clone()).await?;
+    let (_router, pool, _tmp) = setup_with_workspace(workspace.clone()).await?;
 
     let job_id = create_job_for_task(
         &pool,
@@ -26004,7 +25798,7 @@ async fn test_step_retry_exhausted_fails_job() -> Result<()> {
         jitter: false,
     };
     let workspace = retry_workspace(retry_cfg);
-    let (router, pool, _tmp, _container) = setup_with_workspace(workspace.clone()).await?;
+    let (router, pool, _tmp) = setup_with_workspace(workspace.clone()).await?;
 
     let job_id = create_job_for_task(
         &pool,
@@ -26115,7 +25909,7 @@ async fn test_step_retry_claim_respects_retry_at() -> Result<()> {
         jitter: false,
     };
     let workspace = retry_workspace(retry_cfg);
-    let (router, pool, _tmp, _container) = setup_with_workspace(workspace.clone()).await?;
+    let (router, pool, _tmp) = setup_with_workspace(workspace.clone()).await?;
 
     let job_id = create_job_for_task(
         &pool,
@@ -26356,7 +26150,7 @@ async fn test_step_retry_with_continue_on_failure() -> Result<()> {
         },
     );
 
-    let (router, pool, _tmp, _container) = setup_with_workspace(workspace.clone()).await?;
+    let (router, pool, _tmp) = setup_with_workspace(workspace.clone()).await?;
 
     let job_id = create_job_for_task(
         &pool,
@@ -26647,7 +26441,7 @@ fn task_retry_creation_failure_workspace(max_attempts: u32) -> WorkspaceConfig {
 async fn test_task_retry_creates_new_job_on_failure() -> Result<()> {
     // max_attempts: 2 -> job.max_retries = 1 (one retry allowed).
     let workspace = task_retry_workspace(2, false);
-    let (router, pool, _tmp, _container) = setup_with_workspace(workspace.clone()).await?;
+    let (router, pool, _tmp) = setup_with_workspace(workspace.clone()).await?;
 
     // Create the original job.
     let job_id = create_job_for_task(
@@ -26736,7 +26530,7 @@ async fn test_task_retry_creates_new_job_on_failure() -> Result<()> {
 #[tokio::test]
 async fn test_task_retry_is_persisted_at_creation_and_fires_on_worker_failure() -> Result<()> {
     let workspace = task_retry_workspace(2, false);
-    let (router, pool, _tmp, _container) = setup_with_workspace(workspace.clone()).await?;
+    let (router, pool, _tmp) = setup_with_workspace(workspace.clone()).await?;
 
     // Create the original job.
     let job_id = create_job_for_task(
@@ -26824,7 +26618,7 @@ async fn test_task_retry_is_persisted_at_creation_and_fires_on_worker_failure() 
 async fn test_task_retry_fires_for_a_job_that_fails_at_creation() -> Result<()> {
     // max_attempts: 2 -> job.max_retries = 1 (one retry allowed).
     let workspace = task_retry_creation_failure_workspace(2);
-    let (router, pool, _tmp, _container) = setup_with_workspace(workspace).await?;
+    let (router, pool, _tmp) = setup_with_workspace(workspace).await?;
 
     let response = router
         .clone()
@@ -26864,7 +26658,7 @@ async fn test_task_retry_fires_for_a_job_that_fails_at_creation() -> Result<()> 
 async fn test_retry_job_that_fails_at_creation_is_retried_again() -> Result<()> {
     // max_attempts: 3 -> job.max_retries = 2 (two retries allowed).
     let workspace = task_retry_creation_failure_workspace(3);
-    let (router, pool, _tmp, _container) = setup_with_workspace(workspace).await?;
+    let (router, pool, _tmp) = setup_with_workspace(workspace).await?;
 
     let response = router
         .clone()
@@ -26916,7 +26710,7 @@ async fn test_retry_job_that_fails_at_creation_is_retried_again() -> Result<()> 
 async fn test_task_retry_exhausted_fires_hooks() -> Result<()> {
     // One retry allowed, on_error hook configured.
     let workspace = task_retry_workspace(1, true);
-    let (router, pool, _tmp, _container) = setup_with_workspace(workspace.clone()).await?;
+    let (router, pool, _tmp) = setup_with_workspace(workspace.clone()).await?;
 
     // Create the original job.
     let orig_job_id = create_job_for_task(
@@ -27196,7 +26990,7 @@ async fn test_task_retry_child_job_no_retry() -> Result<()> {
         },
     );
 
-    let (router, pool, _tmp, _container) = setup_with_workspace(workspace.clone()).await?;
+    let (router, pool, _tmp) = setup_with_workspace(workspace.clone()).await?;
 
     // Create the parent job — handle_task_steps will immediately create the child job.
     let parent_job_id = create_job_for_task(
@@ -27286,7 +27080,7 @@ async fn test_task_retry_child_job_no_retry() -> Result<()> {
 async fn test_retry_edge_zero_max_retries_no_retry_job() -> Result<()> {
     // Workspace with on_error hook but max_retries = 0 on the job.
     let workspace = task_retry_workspace(1, true);
-    let (router, pool, _tmp, _container) = setup_with_workspace(workspace.clone()).await?;
+    let (router, pool, _tmp) = setup_with_workspace(workspace.clone()).await?;
 
     let job_id = create_job_for_task(
         &pool,
@@ -27368,7 +27162,7 @@ async fn test_step_retry_success_on_second_attempt() -> Result<()> {
         jitter: false,
     };
     let workspace = retry_workspace(retry_cfg);
-    let (router, pool, _tmp, _container) = setup_with_workspace(workspace.clone()).await?;
+    let (router, pool, _tmp) = setup_with_workspace(workspace.clone()).await?;
 
     let job_id = create_job_for_task(
         &pool,
@@ -27475,7 +27269,7 @@ async fn test_step_retry_success_on_second_attempt() -> Result<()> {
 async fn test_defaults_apply_when_task_has_no_timeout() -> Result<()> {
     use stroem_common::duration::HumanDuration as _HD;
     let _ = _HD(1); // silence unused-import warning when this file compiles
-    let (_router, pool, _tmp, _container) = setup().await?;
+    let (_router, pool, _tmp) = setup().await?;
 
     let workspace = test_workspace();
     let defaults = JobDefaults {
@@ -27520,7 +27314,7 @@ async fn test_defaults_apply_when_task_has_no_timeout() -> Result<()> {
 /// the DB columns stay `NULL` (i.e. unbounded — existing behaviour).
 #[tokio::test]
 async fn test_no_defaults_yields_null_timeout_columns() -> Result<()> {
-    let (_router, pool, _tmp, _container) = setup().await?;
+    let (_router, pool, _tmp) = setup().await?;
 
     let workspace = test_workspace();
 
@@ -27559,7 +27353,7 @@ async fn test_no_defaults_yields_null_timeout_columns() -> Result<()> {
 #[tokio::test]
 async fn test_explicit_task_timeout_overrides_default() -> Result<()> {
     use stroem_common::duration::HumanDuration;
-    let (_router, pool, _tmp, _container) = setup().await?;
+    let (_router, pool, _tmp) = setup().await?;
 
     let mut workspace = test_workspace();
     // Set an explicit task timeout that is NOT the same as the default below.
@@ -27599,7 +27393,7 @@ async fn test_explicit_task_timeout_overrides_default() -> Result<()> {
 #[tokio::test]
 async fn test_explicit_step_timeout_overrides_default() -> Result<()> {
     use stroem_common::duration::HumanDuration;
-    let (_router, pool, _tmp, _container) = setup().await?;
+    let (_router, pool, _tmp) = setup().await?;
 
     let mut workspace = test_workspace();
     // Mutate the existing `greet` flow step to set a timeout.
@@ -27642,7 +27436,7 @@ async fn test_explicit_step_timeout_overrides_default() -> Result<()> {
 /// regression that couples the two fields together.
 #[tokio::test]
 async fn test_only_step_default_set_job_timeout_is_null() -> Result<()> {
-    let (_router, pool, _tmp, _container) = setup().await?;
+    let (_router, pool, _tmp) = setup().await?;
 
     let workspace = test_workspace();
     let defaults = JobDefaults {
@@ -27684,7 +27478,7 @@ async fn test_only_step_default_set_job_timeout_is_null() -> Result<()> {
 async fn test_explicit_larger_task_timeout_beats_smaller_default() -> Result<()> {
     use stroem_common::duration::HumanDuration;
     use stroem_common::validation::MAX_JOB_TIMEOUT_SECS;
-    let (_router, pool, _tmp, _container) = setup().await?;
+    let (_router, pool, _tmp) = setup().await?;
 
     let mut workspace = test_workspace();
     workspace.tasks.get_mut("hello-world").unwrap().timeout =
@@ -27726,7 +27520,7 @@ async fn test_explicit_larger_task_timeout_beats_smaller_default() -> Result<()>
 #[tokio::test]
 async fn test_explicit_smaller_step_timeout_beats_larger_default() -> Result<()> {
     use stroem_common::duration::HumanDuration;
-    let (_router, pool, _tmp, _container) = setup().await?;
+    let (_router, pool, _tmp) = setup().await?;
 
     let mut workspace = test_workspace();
     workspace
@@ -27774,7 +27568,7 @@ async fn test_explicit_smaller_step_timeout_beats_larger_default() -> Result<()>
 /// give every instance a NULL timeout.
 #[tokio::test]
 async fn test_for_each_instances_inherit_step_default() -> Result<()> {
-    let (_router, pool, _tmp, _container) = setup().await?;
+    let (_router, pool, _tmp) = setup().await?;
 
     let mut workspace = test_workspace();
     // Mutate the `greet` step into a for_each placeholder with a literal array.
@@ -27823,7 +27617,7 @@ async fn test_for_each_instances_inherit_step_default() -> Result<()> {
 /// retry branch derives defaults from a different source.
 #[tokio::test]
 async fn test_retry_job_inherits_defaults() -> Result<()> {
-    let (_router, pool, _tmp, _container) = setup().await?;
+    let (_router, pool, _tmp) = setup().await?;
 
     let workspace = test_workspace();
     let defaults = JobDefaults {
@@ -27866,7 +27660,7 @@ async fn test_retry_job_inherits_defaults() -> Result<()> {
 /// dispatches the child, the child job should carry the default.
 #[tokio::test]
 async fn test_sub_task_inherits_defaults() -> Result<()> {
-    let (_router, pool, _tmp, _container) = setup().await?;
+    let (_router, pool, _tmp) = setup().await?;
 
     let mut workspace = task_action_test_workspace();
     // Make the `cleanup` task-action step ready immediately by dropping the
@@ -27986,7 +27780,7 @@ async fn test_task_step_dispatch_failure_cascades_and_fails_job() -> Result<()> 
         TaskDef { flow, ..base_task },
     );
 
-    let (router, pool, _tmp, _container) = setup_with_workspace(workspace).await?;
+    let (router, pool, _tmp) = setup_with_workspace(workspace).await?;
 
     let response = router
         .clone()
@@ -28096,7 +27890,7 @@ async fn test_task_step_unresolvable_task_ref_is_rejected_at_submit() -> Result<
         TaskDef { flow, ..base_task },
     );
 
-    let (router, _pool, _tmp, _container) = setup_with_workspace(workspace).await?;
+    let (router, _pool, _tmp) = setup_with_workspace(workspace).await?;
 
     let response = router
         .clone()
@@ -28159,7 +27953,7 @@ async fn test_creation_settle_honours_continue_on_failure() -> Result<()> {
         .tasks
         .insert("tolerant-root".to_string(), TaskDef { flow, ..base_task });
 
-    let (router, pool, _tmp, _container) = setup_with_workspace(workspace).await?;
+    let (router, pool, _tmp) = setup_with_workspace(workspace).await?;
     let response = router
         .clone()
         .oneshot(api_request(
@@ -28229,17 +28023,7 @@ async fn test_create_job_detailed_reports_terminal_at_creation() -> Result<()> {
         },
     );
 
-    let (pool, _container) = {
-        let container = Postgres::default().start().await?;
-        let port = container.get_host_port_ipv4(5432).await?;
-        let pool = create_pool(&format!(
-            "postgres://postgres:postgres@localhost:{}/postgres",
-            port
-        ))
-        .await?;
-        run_migrations(&pool).await?;
-        (pool, container)
-    };
+    let pool = stroem_test_support::test_pool().await;
     let mgr = WorkspaceManager::from_config("default", workspace.clone());
 
     let created = stroem_server::job_creator::create_job_for_task_detailed(
@@ -28315,7 +28099,7 @@ async fn test_all_skipped_job_at_creation_fires_workspace_hook() -> Result<()> {
         input: HashMap::new(),
     });
 
-    let (router, pool, _tmp, _container) = setup_with_workspace(workspace).await?;
+    let (router, pool, _tmp) = setup_with_workspace(workspace).await?;
     let response = router
         .oneshot(api_request(
             "POST",
@@ -28397,7 +28181,7 @@ async fn test_child_settled_at_creation_propagates_to_parent() -> Result<()> {
         .tasks
         .insert("parent".to_string(), TaskDef { flow, ..base_task });
 
-    let (router, pool, _tmp, _container) = setup_with_workspace(workspace).await?;
+    let (router, pool, _tmp) = setup_with_workspace(workspace).await?;
     let response = router
         .oneshot(api_request(
             "POST",
@@ -28509,7 +28293,7 @@ async fn test_grandchild_settled_at_creation_propagates_up_the_chain() -> Result
         },
     );
 
-    let (router, pool, _tmp, _container) = setup_with_workspace(workspace).await?;
+    let (router, pool, _tmp) = setup_with_workspace(workspace).await?;
     let response = router
         .oneshot(api_request(
             "POST",
@@ -28615,7 +28399,7 @@ async fn test_agent_task_tool_rejects_child_born_terminal() -> Result<()> {
         },
     );
 
-    let (router, pool, _tmp, _container) = setup_with_workspace(workspace).await?;
+    let (router, pool, _tmp) = setup_with_workspace(workspace).await?;
     let response = router
         .clone()
         .oneshot(api_request(
@@ -28762,7 +28546,7 @@ async fn test_agent_task_tool_rejects_nested_settled_child() -> Result<()> {
         },
     );
 
-    let (router, pool, _tmp, _container) = setup_with_workspace(workspace).await?;
+    let (router, pool, _tmp) = setup_with_workspace(workspace).await?;
     let response = router
         .clone()
         .oneshot(api_request(
@@ -28895,7 +28679,7 @@ async fn settled_agent_tool_child(
 #[tokio::test]
 async fn test_propagate_defers_agent_tool_child_before_registration() -> Result<()> {
     let workspace = agent_tool_test_workspace();
-    let (state, pool, _tmp, _container) = setup_state_with_workspace(workspace.clone()).await?;
+    let (state, pool, _tmp) = setup_state_with_workspace(workspace.clone()).await?;
 
     let created = stroem_server::job_creator::create_job_for_task_detailed(
         &state.workspaces,
@@ -28952,7 +28736,7 @@ async fn test_propagate_defers_agent_tool_child_before_registration() -> Result<
 #[tokio::test]
 async fn test_agent_save_state_replays_already_terminal_child() -> Result<()> {
     let workspace = agent_tool_test_workspace();
-    let (router, pool, _tmp, _container) = setup_with_workspace(workspace).await?;
+    let (router, pool, _tmp) = setup_with_workspace(workspace).await?;
 
     let response = router
         .clone()
@@ -29061,7 +28845,7 @@ async fn test_cancel_cascade_fires_parent_on_cancel_hook_exactly_once() -> Resul
         input: HashMap::new(),
     });
 
-    let (router, pool, _tmp, _container) = setup_with_workspace(workspace).await?;
+    let (router, pool, _tmp) = setup_with_workspace(workspace).await?;
     let response = router
         .clone()
         .oneshot(api_request(
@@ -29208,7 +28992,7 @@ async fn test_cancel_cascade_discriminates_exactly_once_claim_with_unclaimed_chi
         input: HashMap::new(),
     });
 
-    let (router, pool, _tmp, _container) = setup_with_workspace(workspace).await?;
+    let (router, pool, _tmp) = setup_with_workspace(workspace).await?;
     let response = router
         .clone()
         .oneshot(api_request(
@@ -29341,7 +29125,7 @@ async fn test_reconcile_settled_children_is_idempotent() -> Result<()> {
         .tasks
         .insert("parent".to_string(), TaskDef { flow, ..base_task });
 
-    let (state, pool, _tmp, _container) = setup_state_with_workspace(workspace.clone()).await?;
+    let (state, pool, _tmp) = setup_state_with_workspace(workspace.clone()).await?;
 
     let created = stroem_server::job_creator::create_job_for_task_detailed(
         &state.workspaces,
@@ -29475,7 +29259,7 @@ async fn test_hook_of_hook_does_not_recurse() -> Result<()> {
         input: HashMap::new(),
     });
 
-    let (router, pool, _tmp, _container) = setup_with_workspace(workspace).await?;
+    let (router, pool, _tmp) = setup_with_workspace(workspace).await?;
     let response = router
         .oneshot(api_request(
             "POST",
@@ -29537,7 +29321,7 @@ async fn test_terminal_handling_waits_for_live_steps_to_drain() -> Result<()> {
         input: HashMap::new(),
     });
 
-    let (router, pool, _tmp, _container) = setup_with_workspace(workspace).await?;
+    let (router, pool, _tmp) = setup_with_workspace(workspace).await?;
 
     let response = router
         .clone()
@@ -29697,7 +29481,7 @@ async fn test_approval_dispatch_failure_compensates_the_job() -> Result<()> {
         .tasks
         .insert("needs-approval".to_string(), TaskDef { flow, ..base_task });
 
-    let (state, pool, _tmp, _container) = setup_state_with_workspace(workspace.clone()).await?;
+    let (state, pool, _tmp) = setup_state_with_workspace(workspace.clone()).await?;
 
     // Fault injection: make the `mark_suspended` write fail, standing in for a
     // transient DB error between step promotion and suspension.
@@ -29824,7 +29608,7 @@ async fn test_indirect_hook_cycle_is_bounded() -> Result<()> {
         },
     );
 
-    let (state, pool, _tmp, _container) = setup_state_with_workspace(workspace.clone()).await?;
+    let (state, pool, _tmp) = setup_state_with_workspace(workspace.clone()).await?;
 
     let created = stroem_server::job_creator::create_job_for_task_detailed(
         &state.workspaces,
@@ -29962,7 +29746,7 @@ async fn test_parent_dispatch_failure_after_child_settles_still_runs_terminal_ac
         },
     );
 
-    let (router, pool, _tmp, _container) = setup_with_workspace(workspace).await?;
+    let (router, pool, _tmp) = setup_with_workspace(workspace).await?;
 
     let response = router
         .clone()
@@ -30131,7 +29915,7 @@ async fn test_parent_dispatch_error_escapes_but_approvals_still_dispatch() -> Re
         .tasks
         .insert("parent".to_string(), TaskDef { flow, ..base_task });
 
-    let (state, pool, _tmp, _container) = setup_state_with_workspace(workspace).await?;
+    let (state, pool, _tmp) = setup_state_with_workspace(workspace).await?;
     let router = build_router(state.clone(), CancellationToken::new());
 
     let response = router
@@ -30244,7 +30028,7 @@ async fn test_parent_dispatch_error_escapes_but_approvals_still_dispatch() -> Re
 // alone cannot detect.
 #[tokio::test]
 async fn test_claim_fails_agent_step_with_real_prompt_render_error() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     let job_id = JobRepo::create(
         &pool,
@@ -30424,7 +30208,7 @@ async fn test_claim_fails_agent_step_with_real_prompt_render_error() -> Result<(
 // that legitimately reference the loop variable.
 #[tokio::test]
 async fn test_claim_renders_each_item_in_agent_prompt_for_loop_instance() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     let job_id = JobRepo::create(
         &pool,
@@ -30522,7 +30306,7 @@ async fn test_claim_renders_each_item_in_agent_prompt_for_loop_instance() -> Res
 // source so the value never reaches the database.
 #[tokio::test]
 async fn test_claim_render_error_does_not_leak_secret_values() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
 
     // `db.internal.prod` is a literal secret value in the test workspace
     // (secrets.db.host), so it is one of the collected redaction values.
@@ -30633,7 +30417,7 @@ async fn test_claim_render_error_does_not_leak_secret_values() -> Result<()> {
 // is the one that fails if anyone binds the value as Value again.
 #[tokio::test]
 async fn test_state_json_round_trips_including_nul_escape() -> Result<()> {
-    let (_router, pool, _tmp, _container) = setup().await?;
+    let (_router, pool, _tmp) = setup().await?;
 
     let job_id = JobRepo::create(
         &pool,
@@ -30783,7 +30567,7 @@ async fn test_state_json_round_trips_including_nul_escape() -> Result<()> {
 #[tokio::test]
 async fn test_latest_snapshots_reads_persisted_sidecar_without_archive() -> Result<()> {
     use stroem_server::render_context::latest_snapshots;
-    let (_router, pool, _tmp, _container) = setup().await?;
+    let (_router, pool, _tmp) = setup().await?;
 
     // No rows at all.
     let none = latest_snapshots(&pool, "default", "hello-world", None, "test").await;
@@ -30880,17 +30664,10 @@ async fn test_latest_snapshots_lookup_error_yields_none() -> Result<()> {
 /// Same workspace as `setup()` (task `hello-world` included), but with
 /// `state_storage` configured against a local-filesystem archive so the
 /// worker and API state-upload endpoints are reachable instead of 404ing.
-async fn setup_with_state_storage() -> Result<(
-    Router,
-    PgPool,
-    TempDir,
-    testcontainers::ContainerAsync<Postgres>,
-)> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+async fn setup_with_state_storage() -> Result<(Router, PgPool, TempDir)> {
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let url = test_db.url;
 
     let temp_dir = TempDir::new()?;
     let log_dir = temp_dir.path().join("logs");
@@ -30947,7 +30724,7 @@ async fn setup_with_state_storage() -> Result<(
     );
     let router = build_router(state, CancellationToken::new());
 
-    Ok((router, pool, temp_dir, container))
+    Ok((router, pool, temp_dir))
 }
 
 /// Build a gzip tarball with a single root-level `state.json`.
@@ -30966,7 +30743,7 @@ fn tarball_with_state_json(sidecar: &serde_json::Value) -> Vec<u8> {
 
 #[tokio::test]
 async fn test_worker_task_state_upload_persists_state_json() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup_with_state_storage().await?;
+    let (router, pool, _tmp) = setup_with_state_storage().await?;
     let job_id = JobRepo::create(
         &pool,
         "default",
@@ -31008,7 +30785,7 @@ async fn test_worker_task_state_upload_persists_state_json() -> Result<()> {
 /// contents, decides whether the sidecar is parsed and persisted.
 #[tokio::test]
 async fn test_worker_task_state_upload_without_has_json_leaves_state_json_null() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup_with_state_storage().await?;
+    let (router, pool, _tmp) = setup_with_state_storage().await?;
     let job_id = JobRepo::create(
         &pool,
         "default",
@@ -31044,7 +30821,7 @@ async fn test_worker_task_state_upload_without_has_json_leaves_state_json_null()
 
 #[tokio::test]
 async fn test_worker_global_state_upload_persists_state_json() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup_with_state_storage().await?;
+    let (router, pool, _tmp) = setup_with_state_storage().await?;
     let job_id = JobRepo::create(
         &pool,
         "default",
@@ -31087,7 +30864,7 @@ async fn test_worker_global_state_upload_persists_state_json() -> Result<()> {
 /// for the global endpoint.
 #[tokio::test]
 async fn test_worker_global_state_upload_without_has_json_leaves_state_json_null() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup_with_state_storage().await?;
+    let (router, pool, _tmp) = setup_with_state_storage().await?;
     let job_id = JobRepo::create(
         &pool,
         "default",
@@ -31123,7 +30900,7 @@ async fn test_worker_global_state_upload_without_has_json_leaves_state_json_null
 
 #[tokio::test]
 async fn test_api_task_state_upload_persists_state_json() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup_with_state_storage().await?;
+    let (router, pool, _tmp) = setup_with_state_storage().await?;
 
     let sidecar = json!({"cursor": "abc", "n": "1"});
     let req = Request::builder()
@@ -31149,7 +30926,7 @@ async fn test_api_task_state_upload_persists_state_json() -> Result<()> {
 /// uploaded tarball carries no `state.json`.
 #[tokio::test]
 async fn test_api_task_state_upload_without_state_json_leaves_state_json_null() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup_with_state_storage().await?;
+    let (router, pool, _tmp) = setup_with_state_storage().await?;
 
     let req = Request::builder()
         .method("POST")
@@ -31170,7 +30947,7 @@ async fn test_api_task_state_upload_without_state_json_leaves_state_json_null() 
 
 #[tokio::test]
 async fn test_api_global_state_upload_persists_state_json() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup_with_state_storage().await?;
+    let (router, pool, _tmp) = setup_with_state_storage().await?;
 
     let sidecar = json!({"cursor": "xyz", "n": "2"});
     let req = Request::builder()
@@ -31196,7 +30973,7 @@ async fn test_api_global_state_upload_persists_state_json() -> Result<()> {
 /// uploaded tarball carries no `state.json`.
 #[tokio::test]
 async fn test_api_global_state_upload_without_state_json_leaves_state_json_null() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup_with_state_storage().await?;
+    let (router, pool, _tmp) = setup_with_state_storage().await?;
 
     let req = Request::builder()
         .method("POST")
@@ -31248,7 +31025,7 @@ async fn seed_task_state(pool: &PgPool, sidecar: serde_json::Value) -> Result<()
 
 #[tokio::test]
 async fn test_claim_renders_state_in_image_and_agent_prompt() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
     seed_task_state(&pool, json!({"tag": "v9", "topic": "cats"})).await?;
 
     let job_id = JobRepo::create(
@@ -31394,7 +31171,7 @@ async fn test_claim_renders_state_in_image_and_agent_prompt() -> Result<()> {
 // backend the worker cannot reach.
 #[tokio::test]
 async fn test_claim_omits_state_keys_when_state_storage_unconfigured() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
     seed_task_state(&pool, json!({"x": "seeded"})).await?;
 
     let job_id = JobRepo::create(
@@ -31483,7 +31260,7 @@ async fn test_claim_omits_state_keys_when_state_storage_unconfigured() -> Result
 // this branch.
 #[tokio::test]
 async fn test_claim_renders_state_from_archive_for_pre_047_row() -> Result<()> {
-    let (router, pool, tmp, _container) = setup_with_state_storage().await?;
+    let (router, pool, tmp) = setup_with_state_storage().await?;
 
     // Same on-disk archive the server's own StateStorage writes to, so blobs
     // stored here are the ones `claim_job` retrieves.
@@ -31762,7 +31539,7 @@ const EXPIRY_GUARD: &str = "{{ not state or state.days_remaining < 30 }}";
 #[tokio::test]
 async fn test_init_evaluates_root_when_against_task_state() -> Result<()> {
     use stroem_server::settlement::dispatch;
-    let (_router, pool, _tmp, _container) = setup().await?;
+    let (_router, pool, _tmp) = setup().await?;
     seed_task_state(&pool, json!({"days_remaining": 60})).await?;
 
     // A job whose only root step is guarded by the documented expiry guard.
@@ -31857,7 +31634,7 @@ async fn test_init_evaluates_root_when_against_task_state() -> Result<()> {
 
 #[tokio::test]
 async fn test_advance_evaluates_when_against_task_state() -> Result<()> {
-    let (_router, pool, _tmp, _container) = setup().await?;
+    let (_router, pool, _tmp) = setup().await?;
     seed_task_state(&pool, json!({"days_remaining": 60})).await?;
 
     // a -> renew, with the guard on `renew`: `a` is already completed, so the
@@ -31928,7 +31705,7 @@ async fn test_advance_evaluates_when_against_task_state() -> Result<()> {
 
 #[tokio::test]
 async fn test_task_dispatch_failure_path_evaluates_when_against_task_state() -> Result<()> {
-    let (_router, pool, _tmp, _container) = setup().await?;
+    let (_router, pool, _tmp) = setup().await?;
     // Two tasks, two snapshots, so both branches of the guard are
     // snapshot-driven rather than one being the absent-state default.
     seed_task_state(&pool, json!({"after": true})).await?;
@@ -32017,7 +31794,7 @@ async fn test_task_dispatch_failure_path_evaluates_when_against_task_state() -> 
 
 #[tokio::test]
 async fn test_log_tail_envelope_and_source_header() -> Result<()> {
-    let (router, pool, tmp, _container) = setup().await?;
+    let (router, pool, tmp) = setup().await?;
     let content = format!(
         "{}\n{}\n",
         jsonl_entry("build", "one"),
@@ -32039,7 +31816,7 @@ async fn test_log_tail_envelope_and_source_header() -> Result<()> {
 
 #[tokio::test]
 async fn test_log_tail_is_bounded_and_flags_truncation() -> Result<()> {
-    let (router, pool, tmp, _container) = setup().await?;
+    let (router, pool, tmp) = setup().await?;
     let content = big_log(20_000);
     let job_id = job_with_log(&pool, &tmp, &content).await?;
     let body = body_json(
@@ -32074,7 +31851,7 @@ async fn test_log_tail_is_bounded_and_flags_truncation() -> Result<()> {
 
 #[tokio::test]
 async fn test_log_full_streams_ndjson_equal_to_the_file() -> Result<()> {
-    let (router, pool, tmp, _container) = setup().await?;
+    let (router, pool, tmp) = setup().await?;
     let content = big_log(20_000);
     let job_id = job_with_log(&pool, &tmp, &content).await?;
     let response = router
@@ -32092,18 +31869,10 @@ async fn test_log_full_streams_ndjson_equal_to_the_file() -> Result<()> {
 /// Same workspace as `setup()` (task `hello-world` included), but with a
 /// `LogStorage` archive backend attached (a `LocalBlobArchive`) so a
 /// terminal job's archive path is reachable instead of always missing.
-async fn setup_with_log_archive() -> Result<(
-    Router,
-    PgPool,
-    TempDir,
-    Arc<dyn BlobArchive>,
-    testcontainers::ContainerAsync<Postgres>,
-)> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+async fn setup_with_log_archive() -> Result<(Router, PgPool, TempDir, Arc<dyn BlobArchive>)> {
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let url = test_db.url;
 
     let temp_dir = TempDir::new()?;
     let log_dir = temp_dir.path().join("logs");
@@ -32153,7 +31922,7 @@ async fn setup_with_log_archive() -> Result<(
     let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None);
     let router = build_router(state, CancellationToken::new());
 
-    Ok((router, pool, temp_dir, archive, container))
+    Ok((router, pool, temp_dir, archive))
 }
 
 #[tokio::test]
@@ -32162,7 +31931,7 @@ async fn test_log_full_archive_priming_failure_answers_empty_none() -> Result<()
     // exists but is not gzip (`open`/HEAD succeeds, the first range read +
     // gzip header fails during priming) must answer an empty 200 with
     // `source: none`, not a torn or hung body.
-    let (router, pool, _tmp, archive, _container) = setup_with_log_archive().await?;
+    let (router, pool, _tmp, archive) = setup_with_log_archive().await?;
     let job_id = JobRepo::create(
         &pool,
         "default",
@@ -32204,7 +31973,7 @@ async fn test_log_full_archive_priming_failure_answers_empty_none() -> Result<()
 
 #[tokio::test]
 async fn test_log_query_validation() -> Result<()> {
-    let (router, pool, tmp, _container) = setup().await?;
+    let (router, pool, tmp) = setup().await?;
     let job_id = job_with_log(&pool, &tmp, "x\n").await?;
     for q in [
         "tail_bytes=0",
@@ -32233,7 +32002,7 @@ async fn test_log_query_duplicate_param_is_json_bad_request() -> Result<()> {
     // A `Query<LogQuery>` extractor rejection (axum can't deserialize a
     // repeated key into one field) must answer our JSON 400, not axum's
     // plain-text one.
-    let (router, pool, tmp, _container) = setup().await?;
+    let (router, pool, tmp) = setup().await?;
     let job_id = job_with_log(&pool, &tmp, "x\n").await?;
     for path in [
         format!("/api/jobs/{job_id}/logs?tail_bytes=1&tail_bytes=2"),
@@ -32257,7 +32026,7 @@ async fn test_log_query_duplicate_param_is_json_bad_request() -> Result<()> {
 
 #[tokio::test]
 async fn test_step_logs_are_filtered_in_both_modes() -> Result<()> {
-    let (router, pool, tmp, _container) = setup().await?;
+    let (router, pool, tmp) = setup().await?;
     let (b, t, s) = (
         jsonl_entry("build", "b"),
         jsonl_entry("test", "t"),
@@ -32291,7 +32060,7 @@ async fn test_step_logs_are_filtered_in_both_modes() -> Result<()> {
 
 #[tokio::test]
 async fn test_ws_backfill_is_a_tail() -> Result<()> {
-    let (router, pool, tmp, _container) = setup().await?;
+    let (router, pool, tmp) = setup().await?;
     let content = big_log(20_000);
     let job_id = job_with_log(&pool, &tmp, &content).await?;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -32400,7 +32169,7 @@ async fn test_gate_caught_failure_completes_fires_on_success_no_retry() -> Resul
     // continue_on_failure so its failure doesn't count against the job
     // (spec 2026-10-01 §6/§9 — only the failing row's own flag decides).
     let ws = gate_workspace("", 2, true);
-    let (state, pool, _tmp, _c) = setup_state_with_workspace(ws.clone()).await?;
+    let (state, pool, _tmp) = setup_state_with_workspace(ws.clone()).await?;
     let job_id = create_job_for_task(
         &pool,
         &ws,
@@ -32464,7 +32233,7 @@ async fn test_gate_escaping_failure_with_retry_budget_retries_without_hook() -> 
     // old "every downstream path must catch it" structural walk — only
     // pred's own flag is ever consulted now).
     let ws = gate_workspace("      side: { action: ok, depends_on: [pred] }", 2, false);
-    let (state, pool, _tmp, _c) = setup_state_with_workspace(ws.clone()).await?;
+    let (state, pool, _tmp) = setup_state_with_workspace(ws.clone()).await?;
     let job_id = create_job_for_task(
         &pool,
         &ws,
@@ -32497,7 +32266,7 @@ async fn test_gate_escaping_failure_with_retry_budget_retries_without_hook() -> 
 #[tokio::test]
 async fn test_gate_escaping_failure_without_retry_budget_fires_on_error() -> Result<()> {
     let ws = gate_workspace("      side: { action: ok, depends_on: [pred] }", 1, false);
-    let (state, pool, _tmp, _c) = setup_state_with_workspace(ws.clone()).await?;
+    let (state, pool, _tmp) = setup_state_with_workspace(ws.clone()).await?;
     let job_id = create_job_for_task(
         &pool,
         &ws,
@@ -32546,7 +32315,7 @@ async fn test_gate_on_error_payload_marks_caught_and_uncaught_failures() -> Resu
     // failed_steps must report tolerated: true for the first and
     // tolerated: false for the second.
     let ws = gate_workspace("      pred2: { action: ok }", 1, true);
-    let (state, pool, _tmp, _c) = setup_state_with_workspace(ws.clone()).await?;
+    let (state, pool, _tmp) = setup_state_with_workspace(ws.clone()).await?;
     let job_id = create_job_for_task(
         &pool,
         &ws,
@@ -32602,7 +32371,7 @@ async fn test_gate_cancelled_step_keeps_job_cancelled() -> Result<()> {
     // but the job ends `cancelled` — on_cancel, no retry. `pred`'s own
     // continue_on_failure is irrelevant here (it's cancelled, not failed).
     let ws = gate_workspace("", 2, false);
-    let (state, pool, _tmp, _c) = setup_state_with_workspace(ws.clone()).await?;
+    let (state, pool, _tmp) = setup_state_with_workspace(ws.clone()).await?;
     let job_id = create_job_for_task(
         &pool,
         &ws,
@@ -32659,7 +32428,7 @@ tasks:
 
 #[tokio::test]
 async fn test_gate_approval_reject_caught_downstream_completes() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup_with_workspace(approval_gate_workspace()).await?;
+    let (router, pool, _tmp) = setup_with_workspace(approval_gate_workspace()).await?;
 
     let resp = router
         .clone()
@@ -32735,8 +32504,7 @@ tasks:
 
 #[tokio::test]
 async fn test_gate_step_retry_exhausted_caught_downstream_completes() -> Result<()> {
-    let (router, pool, _tmp, _container) =
-        setup_with_workspace(step_retry_gate_workspace()).await?;
+    let (router, pool, _tmp) = setup_with_workspace(step_retry_gate_workspace()).await?;
 
     let resp = router
         .clone()
@@ -32849,7 +32617,7 @@ tasks:
 async fn test_gate_failed_sequential_loop_untolerated_fails_job_despite_downstream_accept(
 ) -> Result<()> {
     let ws = sequential_loop_gate_workspace();
-    let (state, pool, _tmp, _c) = setup_state_with_workspace(ws.clone()).await?;
+    let (state, pool, _tmp) = setup_state_with_workspace(ws.clone()).await?;
     let job_id = create_job_for_task(
         &pool,
         &ws,
@@ -32921,7 +32689,7 @@ tasks:
 #[tokio::test]
 async fn test_gate_flagged_loop_instance_failure_reports_placeholder_flag() -> Result<()> {
     let ws = flagged_loop_gate_workspace();
-    let (state, pool, _tmp, _c) = setup_state_with_workspace(ws.clone()).await?;
+    let (state, pool, _tmp) = setup_state_with_workspace(ws.clone()).await?;
     let job_id = create_job_for_task(
         &pool,
         &ws,

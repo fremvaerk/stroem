@@ -4,7 +4,6 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::Duration;
-use stroem_db::{create_pool, run_migrations};
 use stroem_server::config::{
     DbConfig, LogStorageConfig, RecoveryConfig, RetentionConfig, ServerConfig, WorkspaceSourceDef,
 };
@@ -16,8 +15,6 @@ use stroem_worker::config::WorkerConfig;
 use stroem_worker::executor::StepExecutor;
 use stroem_worker::poller::run_worker;
 use tempfile::TempDir;
-use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::postgres::Postgres;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -31,7 +28,6 @@ pub struct TestEnv {
     worker_handle: Option<JoinHandle<Result<()>>>,
     http: reqwest::Client,
     _temp_dir: TempDir,
-    _container: testcontainers::ContainerAsync<Postgres>,
 }
 
 /// Ensure cancel signal is sent even if a test panics before calling shutdown().
@@ -177,12 +173,10 @@ impl TestEnv {
             .with_env_filter("warn")
             .try_init();
 
-        // 1. Start Postgres container
-        let container = Postgres::default().start().await?;
-        let port = container.get_host_port_ipv4(5432).await?;
-        let db_url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-        let pool = create_pool(&db_url).await?;
-        run_migrations(&pool).await?;
+        // 1. Get an isolated, migrated Postgres database
+        let test_db = stroem_test_support::test_db().await;
+        let pool = test_db.pool.clone();
+        let db_url = test_db.url;
 
         // 2. Create temp dir with workflow YAML
         let temp_dir = TempDir::new()?;
@@ -279,24 +273,34 @@ impl TestEnv {
         });
 
         // 9. Build worker config and spawn worker
-        let worker_config = WorkerConfig {
-            server_url: server_url.clone(),
-            worker_token: "e2e-test-token".to_string(),
-            worker_name: "e2e-worker".to_string(),
-            max_concurrent: 4,
-            poll_interval_secs: 1,
-            workspace_cache_dir: workspace_cache_dir.to_string_lossy().to_string(),
-            capabilities: vec!["script".to_string()],
-            tags: vec![],
-            exclusive: false,
-            runner_image: None,
-            docker: None,
-            kubernetes: None,
-            request_timeout_secs: None,
-            connect_timeout_secs: None,
-            max_retained_revisions: None,
-            agents: None,
-        };
+        //
+        // Built via JSON deserialization, not a struct literal: `agents` is
+        // `#[cfg(feature = "agent")]` on `WorkerConfig` itself, present or
+        // absent depending on workspace-wide feature unification (this
+        // crate's own `stroem-worker` dependency sets
+        // `default-features = false`, but a `cargo test --workspace` build
+        // can still turn it on via another crate) — a literal naming every
+        // field can only compile under one of the two configurations.
+        // `#[serde(default)]` on that field means omitting the key here
+        // works correctly whether or not it exists in this build.
+        let worker_config: WorkerConfig = serde_json::from_value(serde_json::json!({
+            "server_url": server_url.clone(),
+            "worker_token": "e2e-test-token",
+            "worker_name": "e2e-worker",
+            "max_concurrent": 4,
+            "poll_interval_secs": 1,
+            "workspace_cache_dir": workspace_cache_dir.to_string_lossy().to_string(),
+            "capabilities": ["script"],
+            "tags": [],
+            "exclusive": false,
+            "runner_image": null,
+            "docker": null,
+            "kubernetes": null,
+            "request_timeout_secs": null,
+            "connect_timeout_secs": null,
+            "max_retained_revisions": null,
+        }))
+        .context("build worker config")?;
 
         let worker_cancel = cancel_token.clone();
         let worker_handle = tokio::spawn(async move {
@@ -316,7 +320,6 @@ impl TestEnv {
             worker_handle: Some(worker_handle),
             http,
             _temp_dir: temp_dir,
-            _container: container,
         };
 
         // 10. Wait for server to be ready (health check)

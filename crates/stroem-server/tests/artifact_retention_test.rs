@@ -11,7 +11,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use stroem_common::models::workflow::WorkspaceConfig;
 use stroem_db::repos::job_artifact::{JobArtifactRepo, NewArtifactRow};
-use stroem_db::{create_pool, run_migrations};
 use stroem_server::blob_storage::{BlobArchive, LocalBlobArchive};
 use stroem_server::config::{
     ArtifactStorageConfig, DbConfig, LogStorageConfig, RetentionConfig, ServerConfig,
@@ -22,8 +21,6 @@ use stroem_server::state::AppState;
 use stroem_server::web::build_router;
 use stroem_server::workspace::WorkspaceManager;
 use tempfile::TempDir;
-use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::postgres::Postgres;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -39,17 +36,12 @@ struct TestApp {
     pool: PgPool,
     state: AppState,
     blob: Arc<dyn BlobArchive>,
-    _pg: testcontainers::ContainerAsync<Postgres>,
     _tmp: TempDir,
 }
 
-async fn spawn_pg() -> Result<(PgPool, testcontainers::ContainerAsync<Postgres>)> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
-    Ok((pool, container))
+async fn spawn_pg() -> Result<PgPool> {
+    let pool = stroem_test_support::test_pool().await;
+    Ok(pool)
 }
 
 async fn build_test_app_with_retention(job_days: u64) -> Result<TestApp> {
@@ -61,7 +53,7 @@ async fn build_test_app_with_retention_no_blob(job_days: u64) -> Result<TestApp>
 }
 
 async fn build_test_app_inner(job_days: u64, with_blob: bool) -> Result<TestApp> {
-    let (pool, _pg) = spawn_pg().await?;
+    let pool = spawn_pg().await?;
 
     let tmp = TempDir::new()?;
     let log_dir = tmp.path().join("logs");
@@ -126,7 +118,6 @@ async fn build_test_app_inner(job_days: u64, with_blob: bool) -> Result<TestApp>
         pool,
         state,
         blob: archive,
-        _pg,
         _tmp: tmp,
     })
 }

@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use stroem_common::models::workflow::{
     ActionDef, FlowStep, HookDef, InputFieldDef, TaskDef, WorkspaceConfig,
 };
-use stroem_db::{create_pool, run_migrations, JobRepo, JobStepRepo, UserRepo, WorkerRepo};
+use stroem_db::{JobRepo, JobStepRepo, UserRepo, WorkerRepo};
 use stroem_server::auth::hash_password;
 use stroem_server::config::{
     AclAction, AclConfig, AuthConfig, DbConfig, InitialUserConfig, JobDefaults, LogStorageConfig,
@@ -20,8 +20,6 @@ use stroem_server::state::AppState;
 use stroem_server::web::build_router;
 use stroem_server::workspace::WorkspaceManager;
 use tempfile::TempDir;
-use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::postgres::Postgres;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -317,17 +315,10 @@ fn mcp_test_workspace() -> WorkspaceConfig {
 
 // ─── Setup helpers ───────────────────────────────────────────────────────────
 
-async fn setup_with_mcp() -> Result<(
-    Router,
-    PgPool,
-    TempDir,
-    testcontainers::ContainerAsync<Postgres>,
-)> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+async fn setup_with_mcp() -> Result<(Router, PgPool, TempDir)> {
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let url = test_db.url;
 
     let temp_dir = TempDir::new()?;
     let log_dir = temp_dir.path().join("logs");
@@ -376,20 +367,13 @@ async fn setup_with_mcp() -> Result<(
     let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None);
     let router = build_router(state, CancellationToken::new());
 
-    Ok((router, pool, temp_dir, container))
+    Ok((router, pool, temp_dir))
 }
 
-async fn setup_mcp_disabled() -> Result<(
-    Router,
-    PgPool,
-    TempDir,
-    testcontainers::ContainerAsync<Postgres>,
-)> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+async fn setup_mcp_disabled() -> Result<(Router, PgPool, TempDir)> {
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let url = test_db.url;
 
     let temp_dir = TempDir::new()?;
     let log_dir = temp_dir.path().join("logs");
@@ -435,15 +419,10 @@ async fn setup_mcp_disabled() -> Result<(
     let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None);
     let router = build_router(state, CancellationToken::new());
 
-    Ok((router, pool, temp_dir, container))
+    Ok((router, pool, temp_dir))
 }
 
-async fn setup_with_auth_and_mcp() -> Result<(
-    Router,
-    PgPool,
-    TempDir,
-    testcontainers::ContainerAsync<Postgres>,
-)> {
+async fn setup_with_auth_and_mcp() -> Result<(Router, PgPool, TempDir)> {
     setup_with_auth_and_mcp_cfg(None, None).await
 }
 
@@ -453,17 +432,10 @@ async fn setup_with_auth_and_mcp() -> Result<(
 async fn setup_with_auth_and_mcp_cfg(
     acl: Option<AclConfig>,
     base_url: Option<String>,
-) -> Result<(
-    Router,
-    PgPool,
-    TempDir,
-    testcontainers::ContainerAsync<Postgres>,
-)> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+) -> Result<(Router, PgPool, TempDir)> {
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let url = test_db.url;
 
     let temp_dir = TempDir::new()?;
     let log_dir = temp_dir.path().join("logs");
@@ -532,7 +504,7 @@ async fn setup_with_auth_and_mcp_cfg(
     let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None);
     let router = build_router(state, CancellationToken::new());
 
-    Ok((router, pool, temp_dir, container))
+    Ok((router, pool, temp_dir))
 }
 
 // ─── Request helpers ─────────────────────────────────────────────────────────
@@ -627,7 +599,7 @@ async fn mcp_initialize(router: Router) -> (Router, Option<String>) {
 /// Test 1: tools/list returns all 10 expected tools.
 #[tokio::test]
 async fn test_mcp_tools_list_returns_all_10_tools() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_with_mcp().await?;
+    let (router, _pool, _tmp) = setup_with_mcp().await?;
 
     let (router, session_id) = mcp_initialize(router).await;
 
@@ -700,7 +672,7 @@ async fn test_mcp_tools_list_returns_all_10_tools() -> Result<()> {
 /// must NOT be a valid JSON-RPC 2.0 success envelope.
 #[tokio::test]
 async fn test_mcp_endpoint_disabled_returns_404() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_mcp_disabled().await?;
+    let (router, _pool, _tmp) = setup_mcp_disabled().await?;
 
     let init_body = json!({
         "jsonrpc": "2.0",
@@ -742,7 +714,7 @@ async fn test_mcp_endpoint_disabled_returns_404() -> Result<()> {
 /// Test 3: execute_task creates a job; get_job_status returns the job.
 #[tokio::test]
 async fn test_mcp_execute_and_check_status() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_with_mcp().await?;
+    let (router, _pool, _tmp) = setup_with_mcp().await?;
 
     let (router, session_id) = mcp_initialize(router).await;
 
@@ -822,7 +794,7 @@ async fn test_mcp_execute_and_check_status() -> Result<()> {
 /// `merge_defaults` treated the non-object value as empty.
 #[tokio::test]
 async fn test_mcp_execute_with_stringified_input() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup_with_mcp().await?;
+    let (router, pool, _tmp) = setup_with_mcp().await?;
 
     let (router, session_id) = mcp_initialize(router).await;
 
@@ -874,7 +846,7 @@ async fn test_mcp_execute_with_stringified_input() -> Result<()> {
 /// array) is rejected with an error rather than silently running with defaults.
 #[tokio::test]
 async fn test_mcp_execute_with_non_object_input_errors() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_with_mcp().await?;
+    let (router, _pool, _tmp) = setup_with_mcp().await?;
 
     let (router, session_id) = mcp_initialize(router).await;
 
@@ -908,7 +880,7 @@ async fn test_mcp_execute_with_non_object_input_errors() -> Result<()> {
 /// Test 4: list_tasks and list_workspaces return expected results.
 #[tokio::test]
 async fn test_mcp_list_tasks_and_workspaces() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_with_mcp().await?;
+    let (router, _pool, _tmp) = setup_with_mcp().await?;
 
     let (router, session_id) = mcp_initialize(router).await;
 
@@ -1017,7 +989,7 @@ async fn test_mcp_list_tasks_and_workspaces() -> Result<()> {
 /// Test 5: parameter validation returns errors for invalid inputs.
 #[tokio::test]
 async fn test_mcp_parameter_validation() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_with_mcp().await?;
+    let (router, _pool, _tmp) = setup_with_mcp().await?;
 
     let (router, session_id) = mcp_initialize(router).await;
 
@@ -1096,7 +1068,7 @@ async fn test_mcp_parameter_validation() -> Result<()> {
 /// Test 6: auth required — POST /mcp without token returns 401 when auth is enabled.
 #[tokio::test]
 async fn test_mcp_auth_required_when_enabled() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_with_auth_and_mcp().await?;
+    let (router, _pool, _tmp) = setup_with_auth_and_mcp().await?;
 
     let init_body = json!({
         "jsonrpc": "2.0",
@@ -1127,7 +1099,7 @@ async fn test_mcp_auth_required_when_enabled() -> Result<()> {
 /// ever seeing the consent screen.
 #[tokio::test]
 async fn test_mcp_login_jwt_rejected() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_with_auth_and_mcp().await?;
+    let (router, _pool, _tmp) = setup_with_auth_and_mcp().await?;
 
     let login_req = Request::builder()
         .method("POST")
@@ -1169,7 +1141,7 @@ async fn test_mcp_login_jwt_rejected() -> Result<()> {
 /// doesn't apply to it.
 #[tokio::test]
 async fn test_mcp_api_key_accepted() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup_with_auth_and_mcp().await?;
+    let (router, pool, _tmp) = setup_with_auth_and_mcp().await?;
 
     let user = stroem_db::UserRepo::get_by_email(&pool, AUTH_USER_EMAIL)
         .await?
@@ -1267,7 +1239,7 @@ async fn test_mcp_admin_derived_from_db_not_token() -> Result<()> {
         default: AclAction::Deny,
         rules: vec![],
     };
-    let (router, pool, _tmp, _container) =
+    let (router, pool, _tmp) =
         setup_with_auth_and_mcp_cfg(Some(acl), Some(ACL_BASE_URL.to_string())).await?;
 
     let user = UserRepo::get_by_email(&pool, AUTH_USER_EMAIL)
@@ -1319,7 +1291,7 @@ fn get_json_request(uri: &str, host: &str) -> Request<Body> {
 /// MCP clients use this to bootstrap the OAuth flow without any manual config.
 #[tokio::test]
 async fn test_mcp_401_includes_www_authenticate_with_resource_metadata() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_with_auth_and_mcp().await?;
+    let (router, _pool, _tmp) = setup_with_auth_and_mcp().await?;
 
     let init_body = json!({
         "jsonrpc": "2.0",
@@ -1361,7 +1333,7 @@ async fn test_mcp_401_includes_www_authenticate_with_resource_metadata() -> Resu
 /// Inspector all read this before initiating any auth dance.
 #[tokio::test]
 async fn test_protected_resource_metadata_endpoint() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_with_auth_and_mcp().await?;
+    let (router, _pool, _tmp) = setup_with_auth_and_mcp().await?;
 
     let response = router
         .oneshot(get_json_request(
@@ -1409,7 +1381,7 @@ async fn test_protected_resource_metadata_endpoint() -> Result<()> {
 /// list to decide which PKCE method to send.
 #[tokio::test]
 async fn test_authorization_server_metadata_endpoint() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_with_auth_and_mcp().await?;
+    let (router, _pool, _tmp) = setup_with_auth_and_mcp().await?;
 
     let response = router
         .oneshot(get_json_request(
@@ -1473,7 +1445,7 @@ async fn test_authorization_server_metadata_endpoint() -> Result<()> {
 /// metadata leakage from open dev servers.
 #[tokio::test]
 async fn test_oauth_metadata_not_mounted_without_auth() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_with_mcp().await?;
+    let (router, _pool, _tmp) = setup_with_mcp().await?;
 
     let response = router
         .clone()
@@ -1514,7 +1486,7 @@ async fn test_oauth_metadata_not_mounted_without_auth() -> Result<()> {
 /// Detailed behaviour is covered by `oauth_flow_test.rs`.
 #[tokio::test]
 async fn test_oauth_endpoints_are_mounted() -> Result<()> {
-    let (router, _pool, _tmp, _container) = setup_with_auth_and_mcp().await?;
+    let (router, _pool, _tmp) = setup_with_auth_and_mcp().await?;
 
     // /oauth/authorize without required query params must 400 (axum Query
     // extractor rejects), not 404.
@@ -1570,7 +1542,7 @@ async fn test_oauth_endpoints_are_mounted() -> Result<()> {
 /// Test 8: get_job_status includes the revision field when the job was created with one.
 #[tokio::test]
 async fn test_mcp_get_job_status_includes_revision() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup_with_mcp().await?;
+    let (router, pool, _tmp) = setup_with_mcp().await?;
 
     // Create a job directly with a known revision via JobRepo so we can control the
     // exact value without depending on WorkspaceManager::get_revision().
@@ -1626,7 +1598,7 @@ async fn test_mcp_get_job_status_includes_revision() -> Result<()> {
 /// Test 9: list_jobs includes the revision field for each job.
 #[tokio::test]
 async fn test_mcp_list_jobs_includes_revision() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup_with_mcp().await?;
+    let (router, pool, _tmp) = setup_with_mcp().await?;
 
     let workspace = mcp_test_workspace();
     let revision = "list-jobs-rev-xyz789";
@@ -1688,11 +1660,9 @@ async fn test_mcp_list_jobs_includes_revision() -> Result<()> {
 /// Test 10: jobs created via MCP have source_type "mcp"; on_success hooks fire correctly.
 #[tokio::test]
 async fn test_mcp_created_jobs_fire_hooks() -> Result<()> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let url = test_db.url;
 
     let workspace = mcp_test_workspace();
 
@@ -1747,12 +1717,7 @@ async fn test_mcp_created_jobs_fire_hooks() -> Result<()> {
     std::fs::create_dir_all(&log_dir)?;
     let config = ServerConfig {
         listen: "127.0.0.1:0".to_string(),
-        db: DbConfig {
-            url: format!(
-                "postgres://postgres:postgres@localhost:{}/postgres",
-                container.get_host_port_ipv4(5432).await?
-            ),
-        },
+        db: DbConfig { url },
         log_storage: LogStorageConfig {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
@@ -1809,7 +1774,7 @@ async fn test_mcp_created_jobs_fire_hooks() -> Result<()> {
 
 #[tokio::test]
 async fn test_mcp_get_job_logs_tail_bytes_and_truncation_trailer() -> Result<()> {
-    let (router, pool, tmp, _container) = setup_with_mcp().await?;
+    let (router, pool, tmp) = setup_with_mcp().await?;
     let job_id = JobRepo::create(
         &pool,
         "default",

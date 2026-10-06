@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use stroem_common::models::workflow::WorkspaceConfig;
-use stroem_db::{create_pool, run_migrations, JobRepo};
+use stroem_db::JobRepo;
 use stroem_server::config::{
     DbConfig, LogStorageConfig, RecoveryConfig, RetentionConfig, ServerConfig,
 };
@@ -17,8 +17,6 @@ use stroem_server::workspace::availability::ReloadSettings;
 use stroem_server::workspace::pins::{PinSource, PinStore, PinStoreConfig};
 use stroem_server::workspace::WorkspaceManager;
 use tempfile::TempDir;
-use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::postgres::Postgres;
 
 fn remote_with_two_commits() -> (TempDir, String, String, String) {
     let dir = TempDir::new().unwrap();
@@ -88,11 +86,9 @@ fn server_config(url: &str, log_dir: &std::path::Path) -> ServerConfig {
 
 #[tokio::test]
 async fn pin_eviction_keeps_commits_of_active_pinned_jobs_on_a_follower_too() -> Result<()> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let db_url = format!("postgres://postgres:postgres@localhost:{port}/postgres");
-    let pool = create_pool(&db_url).await?;
-    run_migrations(&pool).await?;
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let db_url = test_db.url;
     let tmp = TempDir::new()?;
 
     let (_remote, url, c1, c2) = remote_with_two_commits();

@@ -5412,7 +5412,7 @@ dependencies = [
 
 [[package]]
 name = "stroem-agent"
-version = "0.17.0"
+version = "0.17.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5430,7 +5430,7 @@ dependencies = [
 
 [[package]]
 name = "stroem-cli"
-version = "0.17.0"
+version = "0.17.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -5453,7 +5453,7 @@ dependencies = [
 
 [[package]]
 name = "stroem-common"
-version = "0.17.0"
+version = "0.17.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5473,16 +5473,16 @@ dependencies = [
 
 [[package]]
 name = "stroem-db"
-version = "0.17.0"
+version = "0.17.1"
 dependencies = [
  "anyhow",
  "chrono",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "sqlx",
  "stroem-common",
- "testcontainers",
- "testcontainers-modules",
+ "stroem-test-support",
  "tokio",
  "tracing",
  "uuid",
@@ -5490,7 +5490,7 @@ dependencies = [
 
 [[package]]
 name = "stroem-e2e"
-version = "0.17.0"
+version = "0.17.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -5500,10 +5500,9 @@ dependencies = [
  "stroem-common",
  "stroem-db",
  "stroem-server",
+ "stroem-test-support",
  "stroem-worker",
  "tempfile",
- "testcontainers",
- "testcontainers-modules",
  "tokio",
  "tokio-util",
  "tracing",
@@ -5513,7 +5512,7 @@ dependencies = [
 
 [[package]]
 name = "stroem-runner"
-version = "0.17.0"
+version = "0.17.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5535,7 +5534,7 @@ dependencies = [
 
 [[package]]
 name = "stroem-server"
-version = "0.17.0"
+version = "0.17.1"
 dependencies = [
  "anyhow",
  "argon2",
@@ -5581,6 +5580,7 @@ dependencies = [
  "stroem-agent",
  "stroem-common",
  "stroem-db",
+ "stroem-test-support",
  "subtle",
  "tar",
  "tempfile",
@@ -5601,8 +5601,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "stroem-test-support"
+version = "0.17.1"
+dependencies = [
+ "anyhow",
+ "sqlx",
+ "stroem-db",
+ "testcontainers",
+ "testcontainers-modules",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "stroem-worker"
-version = "0.17.0"
+version = "0.17.1"
 dependencies = [
  "anyhow",
  "async-trait",

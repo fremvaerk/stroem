@@ -2,8 +2,8 @@
 //!
 //! These tests exercise the core DAG execution logic — step promotion, skip
 //! propagation, and terminal-state detection — directly against a real
-//! Postgres database (via testcontainers), without going through the HTTP
-//! layer.  Each test spins up its own isolated container so they can run
+//! Postgres database (via `stroem_test_support`), without going through the
+//! HTTP layer. Each test gets its own isolated database so they can run
 //! fully in parallel.
 
 use anyhow::Result;
@@ -12,22 +12,13 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use stroem_common::depends_on::{AcceptSet, DependsOnEntry, Outcome, StepEntry};
 use stroem_common::models::workflow::{FlowStep, TaskDef, WorkspaceConfig};
-use stroem_db::{create_pool, run_migrations, JobRepo, JobStepRepo, NewJobStep, WorkerRepo};
-use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::postgres::Postgres;
+use stroem_db::{JobRepo, JobStepRepo, NewJobStep, WorkerRepo};
 use uuid::Uuid;
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-/// Start a fresh Postgres container, run all migrations, and return the pool.
-/// The container is returned too so it lives for the duration of the test.
-async fn setup_db() -> Result<(PgPool, testcontainers::ContainerAsync<Postgres>)> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
-    Ok((pool, container))
+async fn setup_db() -> Result<PgPool> {
+    Ok(stroem_test_support::test_pool().await)
 }
 
 /// Register a worker so that `mark_running` foreign-key checks pass.
@@ -248,7 +239,7 @@ async fn skip_reason(pool: &PgPool, job_id: Uuid, step: &str) -> Option<String> 
 /// closes the job as "completed".
 #[tokio::test]
 async fn test_linear_dag_step_promotion() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let mut flow = HashMap::new();
     flow.insert("a".to_string(), flow_step(vec![]));
@@ -307,7 +298,7 @@ async fn test_linear_dag_step_promotion() -> Result<()> {
 /// C must not be promoted until both A and B have completed.
 #[tokio::test]
 async fn test_parallel_dag_fan_in() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let mut flow = HashMap::new();
     flow.insert("a".to_string(), flow_step(vec![]));
@@ -362,7 +353,7 @@ async fn test_parallel_dag_fan_in() -> Result<()> {
 /// "failed".
 #[tokio::test]
 async fn test_failed_step_skips_dependents() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
     let worker_id = register_worker(&pool).await;
 
     let mut flow = HashMap::new();
@@ -398,7 +389,7 @@ async fn test_failed_step_skips_dependents() -> Result<()> {
 /// not run, and neither may anything after it.
 #[tokio::test]
 async fn test_failed_branch_stops_merge_with_completed_siblings() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
     let worker_id = register_worker(&pool).await;
 
     let mut flow = HashMap::new();
@@ -466,7 +457,7 @@ async fn test_failed_branch_stops_merge_with_completed_siblings() -> Result<()> 
 /// bearing on whether B runs; only B's own edge does.
 #[tokio::test]
 async fn test_continue_on_failure_promotes_dependent() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
     let worker_id = register_worker(&pool).await;
 
     let mut flow = HashMap::new();
@@ -512,7 +503,7 @@ async fn test_continue_on_failure_promotes_dependent() -> Result<()> {
 /// "completed" with the aggregated output.
 #[tokio::test]
 async fn test_all_steps_completed_job_completes() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let mut flow = HashMap::new();
     flow.insert("only".to_string(), flow_step(vec![]));
@@ -539,7 +530,7 @@ async fn test_all_steps_completed_job_completes() -> Result<()> {
 /// remain pending), the job must be "failed".
 #[tokio::test]
 async fn test_mix_completed_and_failed_job_fails() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
     let worker_id = register_worker(&pool).await;
 
     // Two independent steps: ok and bad.  bad has no continue_on_failure.
@@ -581,7 +572,7 @@ async fn test_mix_completed_and_failed_job_fails() -> Result<()> {
 /// hops away — must be skipped in a single orchestrator call.
 #[tokio::test]
 async fn test_cascading_skip_multi_level() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
     let worker_id = register_worker(&pool).await;
 
     // Chain: a → b → c
@@ -622,7 +613,7 @@ async fn test_cascading_skip_multi_level() -> Result<()> {
 /// end as "completed", not "failed".
 #[tokio::test]
 async fn test_all_tolerable_failures_job_completes() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
     let worker_id = register_worker(&pool).await;
 
     let mut flow = HashMap::new();
@@ -651,7 +642,7 @@ async fn test_all_tolerable_failures_job_completes() -> Result<()> {
 /// The join step must stay pending until both branches complete.
 #[tokio::test]
 async fn test_diamond_dag_join_waits_for_both_branches() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let mut flow = HashMap::new();
     flow.insert("root".to_string(), flow_step(vec![]));
@@ -711,7 +702,7 @@ async fn test_diamond_dag_join_waits_for_both_branches() -> Result<()> {
 /// `when: "{{ a.output.proceed }}"`) must be promoted to ready.
 #[tokio::test]
 async fn test_conditional_step_promoted_when_condition_true() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let mut flow = HashMap::new();
     flow.insert("a".to_string(), flow_step(vec![]));
@@ -758,7 +749,7 @@ async fn test_conditional_step_promoted_when_condition_true() -> Result<()> {
 /// `when: "{{ a.output.proceed }}"`) must be skipped and the job must complete.
 #[tokio::test]
 async fn test_conditional_step_skipped_when_condition_false() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let mut flow = HashMap::new();
     flow.insert("a".to_string(), flow_step(vec![]));
@@ -814,7 +805,7 @@ async fn test_conditional_step_skipped_when_condition_false() -> Result<()> {
 /// without needing a separate blocked-dependency pass (R3).
 #[tokio::test]
 async fn test_conditional_skip_cascades_to_downstream() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let mut flow = HashMap::new();
     flow.insert("a".to_string(), flow_step(vec![]));
@@ -871,7 +862,7 @@ async fn test_conditional_skip_cascades_to_downstream() -> Result<()> {
 /// must be skipped and the job must complete.
 #[tokio::test]
 async fn test_all_conditional_steps_false_job_completes() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let mut flow = HashMap::new();
     flow.insert("a".to_string(), flow_step(vec![]));
@@ -929,7 +920,7 @@ async fn test_all_conditional_steps_false_job_completes() -> Result<()> {
 /// (`skip_reason = "unreachable"`) even though its own `when` is truthy.
 #[tokio::test]
 async fn test_skipped_dep_treated_as_satisfied_with_truthy_when() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     // Job 1: C's edge to B accepts a skip — C proceeds.
     let mut flow = HashMap::new();
@@ -1048,7 +1039,7 @@ async fn test_skipped_dep_treated_as_satisfied_with_truthy_when() -> Result<()> 
 /// cascade pass: B → ready (truthy), C → skipped (falsy).
 #[tokio::test]
 async fn test_sibling_when_branches_truthy_and_falsy_evaluated_together() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let mut flow = HashMap::new();
     flow.insert("a".to_string(), flow_step(vec![]));
@@ -1110,7 +1101,7 @@ async fn test_sibling_when_branches_truthy_and_falsy_evaluated_together() -> Res
 /// must end as `failed`.
 #[tokio::test]
 async fn test_when_condition_error_marks_step_failed() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let mut flow = HashMap::new();
     flow.insert("a".to_string(), flow_step(vec![]));
@@ -1186,7 +1177,7 @@ async fn test_when_condition_error_marks_step_failed() -> Result<()> {
 ///  - Job completes (no failures, all remaining steps skipped).
 #[tokio::test]
 async fn test_all_deps_skipped_cascade_skip() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let mut flow = HashMap::new();
     flow.insert("a".to_string(), flow_step(vec![]));
@@ -1247,7 +1238,7 @@ async fn test_all_deps_skipped_cascade_skip() -> Result<()> {
 /// blocks D even though B completed, so D is omitted.
 #[tokio::test]
 async fn test_convergence_without_continue_on_failure() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let mut flow = HashMap::new();
     flow.insert("a".to_string(), flow_step(vec![]));
@@ -1355,7 +1346,7 @@ async fn test_convergence_without_continue_on_failure() -> Result<()> {
 /// (Pass) and C's tolerated skip (Pass) both satisfy the gate.
 #[tokio::test]
 async fn test_convergence_with_cws_on_branches() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let mut flow = HashMap::new();
     flow.insert("a".to_string(), flow_step(vec![]));
@@ -1452,7 +1443,7 @@ async fn test_convergence_with_cws_on_branches() -> Result<()> {
 /// is skipped.
 #[tokio::test]
 async fn test_multi_step_branch_cascade_skip() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let mut flow = HashMap::new();
     flow.insert("a".to_string(), flow_step(vec![]));
@@ -1519,7 +1510,7 @@ async fn test_multi_step_branch_cascade_skip() -> Result<()> {
 /// failure is still accepted on C's edge to B.
 #[tokio::test]
 async fn test_mixed_skipped_and_failed_dep_runs_when_both_deps_pass() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let mut flow = HashMap::new();
     flow.insert("root".to_string(), flow_step(vec![]));
@@ -1649,7 +1640,7 @@ async fn test_mixed_skipped_and_failed_dep_runs_when_both_deps_pass() -> Result<
 /// to B accepts a skip (`accept: [completed, skipped]`).
 #[tokio::test]
 async fn test_single_completed_plus_single_skipped_convergence() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let mut flow = HashMap::new();
     flow.insert("root".to_string(), flow_step(vec![]));
@@ -1782,7 +1773,7 @@ async fn test_single_completed_plus_single_skipped_convergence() -> Result<()> {
 /// C should be skipped because B is cancelled and C has no continue_on_failure.
 #[tokio::test]
 async fn test_cancelled_dep_blocks_without_cof() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
     let worker_id = register_worker(&pool).await;
 
     let mut flow = HashMap::new();
@@ -1826,7 +1817,7 @@ async fn test_cancelled_dep_blocks_without_cof() -> Result<()> {
 /// B's cancellation.
 #[tokio::test]
 async fn test_dependent_accept_cancelled_lets_it_run_past_cancelled_dep() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
     let worker_id = register_worker(&pool).await;
 
     let mut flow = HashMap::new();
@@ -1880,7 +1871,7 @@ async fn test_dependent_accept_cancelled_lets_it_run_past_cancelled_dep() -> Res
 /// test_continue_when_skipped_runs_after_condition_skip).
 #[tokio::test]
 async fn test_all_deps_skipped_with_cof_alone_is_still_omitted() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let mut flow = HashMap::new();
     flow.insert("root".to_string(), flow_step(vec![]));
@@ -1938,7 +1929,7 @@ async fn test_all_deps_skipped_with_cof_alone_is_still_omitted() -> Result<()> {
 /// it has no bearing on B's gate edge to A — so B is still omitted.
 #[tokio::test]
 async fn test_all_deps_skipped_with_cof_on_the_skipped_dep_is_still_omitted() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let mut flow = HashMap::new();
     flow.insert("root".to_string(), flow_step(vec![]));
@@ -1999,7 +1990,7 @@ async fn test_all_deps_skipped_with_cof_on_the_skipped_dep_is_still_omitted() ->
 /// is truthy. The all-deps-skipped check runs before when evaluation.
 #[tokio::test]
 async fn test_truthy_when_overridden_by_all_deps_skipped_cascade() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let mut flow = HashMap::new();
     flow.insert("root".to_string(), flow_step(vec![]));
@@ -2065,7 +2056,7 @@ async fn test_truthy_when_overridden_by_all_deps_skipped_cascade() -> Result<()>
 /// Pass.
 #[tokio::test]
 async fn test_three_dep_fan_in_one_completed_two_skipped_converges() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
     let worker_id = register_worker(&pool).await;
 
     let mut flow = HashMap::new();
@@ -2233,7 +2224,7 @@ fn step_for_each(job_id: Uuid, name: &str, status: &str, expr: &str) -> NewJobSt
 /// leave the job `running` with every step terminal.
 #[tokio::test]
 async fn test_failed_upstream_skips_for_each_placeholder_and_fails_job() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let expr = "{{ publish.output.periods | json_encode() }}";
     let mut flow = HashMap::new();
@@ -2290,7 +2281,7 @@ async fn test_failed_upstream_skips_for_each_placeholder_and_fails_job() -> Resu
 /// the job closes instead of waiting on a step that can never be promoted.
 #[tokio::test]
 async fn test_for_each_placeholder_skip_cascades_to_downstream_step() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let expr = "{{ b.output.items | json_encode() }}";
     let mut flow = HashMap::new();
@@ -2348,7 +2339,7 @@ async fn test_for_each_placeholder_skip_cascades_to_downstream_step() -> Result<
 /// placeholder itself (R4).
 #[tokio::test]
 async fn test_failed_dep_skips_for_each_placeholder_directly_downstream() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let expr = "{{ a.output.items | json_encode() }}";
     let mut flow = HashMap::new();
@@ -2404,7 +2395,7 @@ async fn test_failed_dep_skips_for_each_placeholder_directly_downstream() -> Res
 #[tokio::test]
 async fn test_failed_dep_with_continue_on_failure_does_not_skip_for_each_placeholder() -> Result<()>
 {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let expr = "{{ a.output.items | json_encode() }}";
     let mut flow = HashMap::new();
@@ -2460,7 +2451,7 @@ async fn test_failed_dep_with_continue_on_failure_does_not_skip_for_each_placeho
 /// `cancelled`, not `completed` (the old creation-time settle did that).
 #[tokio::test]
 async fn test_settle_cancelled_step_without_failure_marks_job_cancelled() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
     let mut flow = HashMap::new();
     flow.insert("a".to_string(), flow_step(vec![]));
     flow.insert("b".to_string(), flow_step(vec![]));
@@ -2491,7 +2482,7 @@ async fn test_settle_cancelled_step_without_failure_marks_job_cancelled() -> Res
 /// output from terminal steps — identical to the orchestrator path.
 #[tokio::test]
 async fn test_settle_tolerated_failure_completes_with_aggregated_output() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
     let mut flow = HashMap::new();
     flow.insert("a".to_string(), flow_step_cof(vec![]));
     flow.insert("b".to_string(), flow_step(vec![]));
@@ -2518,7 +2509,7 @@ async fn test_settle_tolerated_failure_completes_with_aggregated_output() -> Res
 
 #[tokio::test]
 async fn test_settle_returns_none_while_a_step_is_live() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
     let mut flow = HashMap::new();
     flow.insert("a".to_string(), flow_step(vec![]));
     let task = make_task(flow);
@@ -2539,7 +2530,7 @@ async fn test_settle_returns_none_while_a_step_is_live() -> Result<()> {
 /// call ever rolled up is rolled up by the next cascade on the job.
 #[tokio::test]
 async fn test_self_healing_rollup_on_unrelated_cascade() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
     let job_id = create_job(&pool).await;
     JobStepRepo::create_steps(
         &pool,
@@ -2579,7 +2570,7 @@ async fn test_self_healing_rollup_on_unrelated_cascade() -> Result<()> {
 /// instance completion's rollup.
 #[tokio::test]
 async fn test_rollup_never_overwrites_failed_or_cancelled_placeholder() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
     for terminal in ["failed", "cancelled"] {
         let job_id = create_job(&pool).await;
         JobStepRepo::create_steps(
@@ -2614,7 +2605,7 @@ async fn test_rollup_never_overwrites_failed_or_cancelled_placeholder() -> Resul
 /// skipped and never promoted (spec §4.3, deliberate change from today).
 #[tokio::test]
 async fn test_sequential_failure_skips_later_pending_instances() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
     let job_id = create_job(&pool).await;
     JobStepRepo::create_steps(
         &pool,
@@ -2652,7 +2643,7 @@ async fn test_sequential_failure_skips_later_pending_instances() -> Result<()> {
 /// A child job's cascade and its parent's cascade run concurrently; both complete.
 #[tokio::test]
 async fn test_parent_and_child_cascades_run_concurrently() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
     let parent = create_job(&pool).await;
     let child = JobRepo::create_with_parent(
         &pool,
@@ -2724,7 +2715,7 @@ async fn test_parent_and_child_cascades_run_concurrently() -> Result<()> {
 /// still pending) are adopted and roll up normally.
 #[tokio::test]
 async fn test_adopts_partially_expanded_placeholder() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
     let job_id = create_job(&pool).await;
     JobStepRepo::create_steps(
         &pool,
@@ -2760,7 +2751,7 @@ async fn test_adopts_partially_expanded_placeholder() -> Result<()> {
 /// B): C runs and the job completes once C completes.
 #[tokio::test]
 async fn test_continue_when_skipped_runs_after_condition_skip() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let mut flow = HashMap::new();
     flow.insert("a".to_string(), flow_step(vec![]));
@@ -2834,7 +2825,7 @@ async fn test_continue_when_skipped_runs_after_condition_skip() -> Result<()> {
 /// only `skipped` would not have helped C here either way.)
 #[tokio::test]
 async fn test_continue_when_skipped_does_not_run_after_upstream_failure() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let mut flow = HashMap::new();
     flow.insert("a".to_string(), flow_step(vec![]));
@@ -2888,7 +2879,7 @@ async fn test_continue_when_skipped_does_not_run_after_upstream_failure() -> Res
 /// unreachable skip is C's own `accept` entry.
 #[tokio::test]
 async fn test_dependent_accept_omitted_lets_it_run_past_unreachable_dep() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let mut flow = HashMap::new();
     flow.insert("a".to_string(), flow_step(vec![]));
@@ -2949,7 +2940,7 @@ async fn test_dependent_accept_omitted_lets_it_run_past_unreachable_dep() -> Res
 /// going forward (`cascade` is never written by new code).
 #[tokio::test]
 async fn test_every_skipped_row_has_a_reason() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let mut flow = HashMap::new();
     flow.insert("x".to_string(), flow_step(vec![]));

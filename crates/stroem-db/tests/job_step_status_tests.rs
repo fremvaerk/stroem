@@ -1,19 +1,12 @@
 use anyhow::Result;
 use sqlx::PgPool;
-use stroem_db::{create_pool, run_migrations, JobRepo, JobStepRepo, NewJobStep, WorkerRepo};
-use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::postgres::Postgres;
+use stroem_db::{JobRepo, JobStepRepo, NewJobStep, WorkerRepo};
 use uuid::Uuid;
 
 // ─── Test infrastructure ──────────────────────────────────────────────
 
-async fn setup_db() -> Result<(PgPool, testcontainers::ContainerAsync<Postgres>)> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
-    Ok((pool, container))
+async fn setup_db() -> Result<PgPool> {
+    Ok(stroem_test_support::test_pool().await)
 }
 
 /// Create a minimal job and return its ID.
@@ -73,7 +66,7 @@ fn make_step(job_id: Uuid, step_name: &str, status: &str) -> NewJobStep {
 /// populates `completed_at`.
 #[tokio::test]
 async fn test_mark_failed_sets_status_and_error_message() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let job_id = make_job(&pool, "fail-test").await?;
     JobStepRepo::create_steps(&pool, &[make_step(job_id, "step1", "ready")]).await?;
@@ -94,7 +87,7 @@ async fn test_mark_failed_sets_status_and_error_message() -> Result<()> {
 /// `mark_failed` should persist a long, multiline error message verbatim.
 #[tokio::test]
 async fn test_mark_failed_preserves_multiline_error_message() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let job_id = make_job(&pool, "fail-multiline").await?;
     JobStepRepo::create_steps(&pool, &[make_step(job_id, "step1", "ready")]).await?;
@@ -115,7 +108,7 @@ async fn test_mark_failed_preserves_multiline_error_message() -> Result<()> {
 /// `mark_failed` with an empty string stores an empty `error_message`, not NULL.
 #[tokio::test]
 async fn test_mark_failed_with_empty_error_string() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let job_id = make_job(&pool, "fail-empty-err").await?;
     JobStepRepo::create_steps(&pool, &[make_step(job_id, "step1", "ready")]).await?;
@@ -141,7 +134,7 @@ async fn test_mark_failed_with_empty_error_string() -> Result<()> {
 /// This documents the current (unconditional UPDATE) behaviour.
 #[tokio::test]
 async fn test_mark_failed_overwrites_completed_step() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let job_id = make_job(&pool, "fail-overwrite").await?;
     JobStepRepo::create_steps(&pool, &[make_step(job_id, "step1", "ready")]).await?;
@@ -174,7 +167,7 @@ async fn test_mark_failed_overwrites_completed_step() -> Result<()> {
 /// must not return an error.
 #[tokio::test]
 async fn test_mark_failed_on_nonexistent_step_is_noop() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let job_id = make_job(&pool, "fail-noop").await?;
 
@@ -195,7 +188,7 @@ async fn test_mark_failed_on_nonexistent_step_is_noop() -> Result<()> {
 /// `error_message` is left NULL because skipping carries no error.
 #[tokio::test]
 async fn test_mark_skipped_sets_status_and_completed_at() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let job_id = make_job(&pool, "skip-test").await?;
     JobStepRepo::create_steps(&pool, &[make_step(job_id, "step1", "pending")]).await?;
@@ -222,7 +215,7 @@ async fn test_mark_skipped_sets_status_and_completed_at() -> Result<()> {
 /// already been claimed or promoted.
 #[tokio::test]
 async fn test_mark_skipped_on_ready_step() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let job_id = make_job(&pool, "skip-ready").await?;
     JobStepRepo::create_steps(&pool, &[make_step(job_id, "step1", "ready")]).await?;
@@ -244,7 +237,7 @@ async fn test_mark_skipped_on_ready_step() -> Result<()> {
 /// guard prevents overwriting terminal states.
 #[tokio::test]
 async fn test_mark_skipped_does_not_overwrite_completed_step() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let job_id = make_job(&pool, "skip-overwrite").await?;
     JobStepRepo::create_steps(&pool, &[make_step(job_id, "step1", "ready")]).await?;
@@ -268,7 +261,7 @@ async fn test_mark_skipped_does_not_overwrite_completed_step() -> Result<()> {
 /// error.
 #[tokio::test]
 async fn test_mark_skipped_on_nonexistent_step_is_noop() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let job_id = make_job(&pool, "skip-noop").await?;
 
@@ -288,7 +281,7 @@ async fn test_mark_skipped_on_nonexistent_step_is_noop() -> Result<()> {
 /// pending rows.
 #[tokio::test]
 async fn test_skip_steps_tx_writes_reason_on_pending_rows_only() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
     let job_id = make_job(&pool, "skip-reason").await?;
     JobStepRepo::create_steps(
         &pool,
@@ -329,7 +322,7 @@ async fn test_skip_steps_tx_writes_reason_on_pending_rows_only() -> Result<()> {
 /// `parent_step_name` and those values are retrievable via `JobRepo::get`.
 #[tokio::test]
 async fn test_job_with_parent_columns_are_stored_and_retrieved() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     // Create the parent job.
     let parent_id = JobRepo::create(
@@ -386,7 +379,7 @@ async fn test_job_with_parent_columns_are_stored_and_retrieved() -> Result<()> {
 /// A job created via the normal `create` path has NULL parent columns.
 #[tokio::test]
 async fn test_job_without_parent_has_null_parent_columns() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let job_id = JobRepo::create(
         &pool,
@@ -419,7 +412,7 @@ async fn test_job_without_parent_has_null_parent_columns() -> Result<()> {
 /// child which references root.
 #[tokio::test]
 async fn test_job_grandchild_parent_chain() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let root_id = JobRepo::create(
         &pool,
@@ -492,7 +485,7 @@ async fn test_job_grandchild_parent_chain() -> Result<()> {
 /// Verifies each intermediate state and that the correct timestamps are set.
 #[tokio::test]
 async fn test_step_transition_ready_to_running_to_failed() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let job_id = make_job(&pool, "transition-fail").await?;
     JobStepRepo::create_steps(&pool, &[make_step(job_id, "work", "ready")]).await?;
@@ -539,7 +532,7 @@ async fn test_step_transition_ready_to_running_to_failed() -> Result<()> {
 /// but the DB layer itself does not enforce this constraint.
 #[tokio::test]
 async fn test_step_transition_pending_to_skipped() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let job_id = make_job(&pool, "transition-skip").await?;
     // Create two steps: step1 (ready), step2 (pending, depends on step1).
@@ -577,7 +570,7 @@ async fn test_step_transition_pending_to_skipped() -> Result<()> {
 /// its steps persists everything atomically.
 #[tokio::test]
 async fn test_transaction_commit_persists_child_job_and_steps() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let parent_id = make_job(&pool, "parent-tx").await?;
     let child_id = Uuid::new_v4();
@@ -630,7 +623,7 @@ async fn test_transaction_commit_persists_child_job_and_steps() -> Result<()> {
 /// neither row visible outside the transaction.
 #[tokio::test]
 async fn test_transaction_rollback_discards_child_job_and_steps() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let parent_id = make_job(&pool, "parent-rollback").await?;
     let child_id = Uuid::new_v4();
@@ -693,7 +686,7 @@ async fn test_transaction_rollback_discards_child_job_and_steps() -> Result<()> 
 /// terminal states: completed, failed, or skipped (mixed).
 #[tokio::test]
 async fn test_all_steps_terminal_with_mixed_terminal_states() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let job_id = make_job(&pool, "mixed-terminal").await?;
     let steps = vec![
@@ -726,7 +719,7 @@ async fn test_all_steps_terminal_with_mixed_terminal_states() -> Result<()> {
 /// completed or skipped ones.
 #[tokio::test]
 async fn test_get_failed_step_names_filters_correctly() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let job_id = make_job(&pool, "failed-names").await?;
     let steps = vec![
@@ -750,7 +743,7 @@ async fn test_get_failed_step_names_filters_correctly() -> Result<()> {
 /// `get_failed_step_names` returns an empty vec when no steps have failed.
 #[tokio::test]
 async fn test_get_failed_step_names_empty_when_no_failures() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let job_id = make_job(&pool, "no-failures").await?;
     JobStepRepo::create_steps(&pool, &[make_step(job_id, "step1", "ready")]).await?;
@@ -770,7 +763,7 @@ async fn test_get_failed_step_names_empty_when_no_failures() -> Result<()> {
 /// `create_steps` and `get_steps_for_job` unchanged.
 #[tokio::test]
 async fn test_action_workspace_and_revision_round_trip_when_set() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let job_id = make_job(&pool, "cross-workspace-owner").await?;
     let step = NewJobStep {
@@ -803,7 +796,7 @@ async fn test_action_workspace_and_revision_round_trip_when_set() -> Result<()> 
 /// as NULL, not empty strings or some other sentinel.
 #[tokio::test]
 async fn test_action_workspace_and_revision_round_trip_when_null() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let job_id = make_job(&pool, "same-workspace-owner").await?;
     // make_step already leaves action_workspace/action_revision as None.
@@ -882,7 +875,7 @@ fn seed_history_entry() -> serde_json::Value {
 
 #[tokio::test]
 async fn test_fail_or_retry_schedules_retry_when_budget_remains() -> Result<()> {
-    let (pool, _c) = setup_db().await?;
+    let pool = setup_db().await?;
     let job_id = make_job(&pool, "t").await?;
     make_running_step_with_retry(&pool, job_id, "s", Some(2)).await?;
 
@@ -952,7 +945,7 @@ fn parse_ts(v: &serde_json::Value) -> chrono::DateTime<chrono::Utc> {
 
 #[tokio::test]
 async fn test_fail_or_retry_fails_when_budget_exhausted() -> Result<()> {
-    let (pool, _c) = setup_db().await?;
+    let pool = setup_db().await?;
     let job_id = make_job(&pool, "t").await?;
     make_running_step_with_retry(&pool, job_id, "s", Some(1)).await?;
     sqlx::query("UPDATE job_step SET retry_attempt = 1 WHERE job_id = $1 AND step_name = 's'")
@@ -985,7 +978,7 @@ async fn test_fail_or_retry_fails_when_budget_exhausted() -> Result<()> {
 
 #[tokio::test]
 async fn test_fail_or_retry_fails_when_no_retry_configured() -> Result<()> {
-    let (pool, _c) = setup_db().await?;
+    let pool = setup_db().await?;
     let job_id = make_job(&pool, "t").await?;
     make_running_step_with_retry(&pool, job_id, "s", None).await?;
 
@@ -1004,7 +997,7 @@ async fn test_fail_or_retry_fails_when_no_retry_configured() -> Result<()> {
 
 #[tokio::test]
 async fn test_fail_or_retry_precondition() -> Result<()> {
-    let (pool, _c) = setup_db().await?;
+    let pool = setup_db().await?;
     let job_id = make_job(&pool, "t").await?;
     make_running_step_with_retry(&pool, job_id, "s", Some(2)).await?;
 
@@ -1050,7 +1043,7 @@ async fn test_fail_or_retry_precondition() -> Result<()> {
 
 #[tokio::test]
 async fn test_fail_or_retry_missing_row_is_not_applied() -> Result<()> {
-    let (pool, _c) = setup_db().await?;
+    let pool = setup_db().await?;
     let job_id = make_job(&pool, "t").await?;
     let outcome =
         JobStepRepo::fail_or_retry(&pool, job_id, "nope", "boom", &[], |_| 7, None).await?;
@@ -1063,7 +1056,7 @@ async fn test_fail_or_retry_missing_row_is_not_applied() -> Result<()> {
 /// the structural guarantee is the single statement in the implementation.
 #[tokio::test]
 async fn test_fail_or_retry_never_exposes_failed_on_retry_path() -> Result<()> {
-    let (pool, _c) = setup_db().await?;
+    let pool = setup_db().await?;
     let job_id = make_job(&pool, "t").await?;
     for i in 0..50 {
         let name = format!("s{i}");
@@ -1115,7 +1108,7 @@ async fn test_fail_or_retry_never_exposes_failed_on_retry_path() -> Result<()> {
 /// safe to run on every replica (see `recovery.rs`).
 #[tokio::test]
 async fn test_fail_or_retry_duplicate_reports_consume_budget() -> Result<()> {
-    let (pool, _c) = setup_db().await?;
+    let pool = setup_db().await?;
     let job_id = make_job(&pool, "t").await?;
     make_running_step_with_retry(&pool, job_id, "s", Some(2)).await?;
 
@@ -1145,7 +1138,7 @@ async fn test_fail_or_retry_duplicate_reports_consume_budget() -> Result<()> {
 /// is not applied: the `[Suspended]` precondition fails and the row is untouched.
 #[tokio::test]
 async fn test_fail_or_retry_reject_after_approve_is_not_applied() -> Result<()> {
-    let (pool, _c) = setup_db().await?;
+    let pool = setup_db().await?;
     let job_id = make_job(&pool, "t").await?;
     make_running_step_with_retry(&pool, job_id, "s", Some(2)).await?;
     sqlx::query("UPDATE job_step SET status = 'completed' WHERE job_id = $1 AND step_name = 's'")
@@ -1185,7 +1178,7 @@ async fn test_fail_or_retry_reject_after_approve_is_not_applied() -> Result<()> 
 /// (spec §4/§12).
 #[tokio::test]
 async fn test_fail_placeholder_tx_persists_the_output_column() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let job_id = make_job(&pool, "fail-placeholder").await?;
     let mut placeholder = make_step(job_id, "p", "running");
@@ -1211,7 +1204,7 @@ async fn test_fail_placeholder_tx_persists_the_output_column() -> Result<()> {
 /// left untouched and the caller's cascade guard-miss retry kicks in.
 #[tokio::test]
 async fn test_fail_placeholder_tx_is_a_noop_outside_running_status() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
+    let pool = setup_db().await?;
 
     let job_id = make_job(&pool, "fail-placeholder-noop").await?;
     JobStepRepo::create_steps(&pool, &[make_step(job_id, "p", "pending")]).await?;
@@ -1232,7 +1225,7 @@ async fn test_fail_placeholder_tx_is_a_noop_outside_running_status() -> Result<(
 /// `worker_id`.
 #[tokio::test]
 async fn test_stale_step_info_carries_claim_started_at() -> Result<()> {
-    let (pool, _c) = setup_db().await?;
+    let pool = setup_db().await?;
     let job_id = make_job(&pool, "t").await?;
     JobStepRepo::create_steps(&pool, &[make_step(job_id, "s", "running")]).await?;
     let worker_id = Uuid::new_v4();
@@ -1280,7 +1273,7 @@ async fn test_stale_step_info_carries_claim_started_at() -> Result<()> {
 /// (suspended) and phase 4 (ready) never pass an `expected_claim`.
 #[tokio::test]
 async fn test_stale_step_info_without_a_claim_for_suspended_and_ready_rows() -> Result<()> {
-    let (pool, _c) = setup_db().await?;
+    let pool = setup_db().await?;
     let job_id = make_job(&pool, "t").await?;
     JobStepRepo::create_steps(
         &pool,

@@ -1,7 +1,8 @@
 //! Shared fixture for the git-refs integration tests
 //! (`docs/superpowers/specs/2026-10-02-git-refs-design.md`).
 //!
-//! One Postgres container, a full `AppState` + router, and three workspaces:
+//! An isolated database (via `stroem_test_support`), a full `AppState` +
+//! router, and three workspaces:
 //! `etl` (git: `main` + `release/2.3`), `billing` (git: `main` + tag `v4.1.0`
 //! on an older commit) and `docs` (in-memory, not git). Git workspaces are local
 //! bare repos served over `file://`. Their LIVE entries are real `GitSource`s
@@ -27,7 +28,7 @@ use serde_json::{json, Value};
 use sqlx::PgPool;
 use stroem_common::budget::LoadBudget;
 use stroem_common::models::workflow::WorkspaceConfig;
-use stroem_db::{create_pool, run_migrations, ApiKeyRepo, JobRepo, UserGroupRepo, UserRepo};
+use stroem_db::{ApiKeyRepo, JobRepo, UserGroupRepo, UserRepo};
 use stroem_server::auth::{generate_api_key, hash_password};
 use stroem_server::blob_storage::{BlobArchive, LocalBlobArchive};
 use stroem_server::config::{
@@ -48,9 +49,6 @@ use stroem_server::workspace::{
     in_memory_entry, WorkspaceEntry, WorkspaceManager, WorkspaceSource,
 };
 use tempfile::TempDir;
-use testcontainers::runners::AsyncRunner;
-use testcontainers::ContainerAsync;
-use testcontainers_modules::postgres::Postgres;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -503,7 +501,6 @@ pub struct PinnedFixture {
     state_storage: bool,
     replicas: AtomicUsize,
     root: TempDir,
-    _container: ContainerAsync<Postgres>,
 }
 
 /// A second server replica: same pool and repos, its OWN (cold) PinStore dir,
@@ -514,11 +511,9 @@ pub struct Replica {
 }
 
 pub async fn pinned_workspace_fixture(opts: PinnedFixtureOpts) -> Result<PinnedFixture> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{port}/postgres");
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool;
+    let url = test_db.url;
 
     let root = TempDir::new()?;
     let etl_main_yaml = opts
@@ -643,7 +638,6 @@ pub async fn pinned_workspace_fixture(opts: PinnedFixtureOpts) -> Result<PinnedF
         state_storage: opts.state_storage,
         replicas: AtomicUsize::new(0),
         root,
-        _container: container,
     })
 }
 

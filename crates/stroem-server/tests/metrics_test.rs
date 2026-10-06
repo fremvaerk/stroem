@@ -10,7 +10,6 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 use stroem_common::models::workflow::WorkspaceConfig;
-use stroem_db::{create_pool, run_migrations};
 use stroem_server::config::{
     DbConfig, LogStorageConfig, MetricsConfig, RecoveryConfig, RetentionConfig, ServerConfig,
 };
@@ -22,8 +21,6 @@ use stroem_server::workspace::availability::ReloadSettings;
 use stroem_server::workspace::pins::{PinSource, PinStore, PinStoreConfig};
 use stroem_server::workspace::WorkspaceManager;
 use tempfile::TempDir;
-use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::postgres::Postgres;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -31,21 +28,17 @@ use uuid::Uuid;
 const WORKER_TOKEN: &str = "test-token-must-be-long-enough-32";
 
 struct Harness {
-    _container: testcontainers::ContainerAsync<Postgres>,
     pool: PgPool,
     url: String,
     _temp: TempDir,
 }
 
 async fn boot() -> Result<Harness> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{port}/postgres");
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let url = test_db.url;
     let temp = TempDir::new()?;
     Ok(Harness {
-        _container: container,
         pool,
         url,
         _temp: temp,

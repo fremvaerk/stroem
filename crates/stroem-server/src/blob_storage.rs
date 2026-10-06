@@ -50,6 +50,10 @@ pub enum ArchiveVersion {
 /// Keys are opaque slash-separated paths; each consumer owns its key namespace.
 /// `put`/`get` are the primary API; streaming overrides exist for callers that
 /// need to avoid buffering large payloads (artifacts up to 100 MiB).
+// async_trait desugars this to a function returning a `Pin<Box<dyn Future>>`,
+// already `#[must_use]`, and redundantly marks the method itself `#[must_use]`
+// too — newer clippy's `double_must_use` flags that redundancy.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait BlobArchive: Send + Sync {
     async fn put(&self, key: &str, content_type: &str, data: Bytes) -> Result<()>;

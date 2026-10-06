@@ -1860,17 +1860,10 @@ mod tests {
     /// have to resolve to a real flow.
     #[tokio::test(flavor = "multi_thread")]
     async fn hook_chain_depth_counts_hook_links_across_intermediate_task_levels() {
-        use testcontainers::runners::AsyncRunner;
-        use testcontainers_modules::postgres::Postgres;
-
         const INTERMEDIATE_LEVELS: usize = 9;
         const HOOK_LINKS: usize = 3;
 
-        let container = Postgres::default().start().await.unwrap();
-        let port = container.get_host_port_ipv4(5432).await.unwrap();
-        let url = format!("postgres://postgres:postgres@localhost:{port}/postgres");
-        let pool = stroem_db::create_pool(&url).await.unwrap();
-        stroem_db::run_migrations(&pool).await.unwrap();
+        let pool = stroem_test_support::test_pool().await;
 
         // Genesis: an ordinary top-level job whose (synthetic) "on_success"
         // fires the first hook link below.
@@ -1953,14 +1946,7 @@ mod tests {
     /// the plain job `source_id` names (depth 1).
     #[tokio::test(flavor = "multi_thread")]
     async fn hook_chain_depth_follows_source_job_id_not_source_id() {
-        use testcontainers::runners::AsyncRunner;
-        use testcontainers_modules::postgres::Postgres;
-
-        let container = Postgres::default().start().await.unwrap();
-        let port = container.get_host_port_ipv4(5432).await.unwrap();
-        let url = format!("postgres://postgres:postgres@localhost:{port}/postgres");
-        let pool = stroem_db::create_pool(&url).await.unwrap();
-        stroem_db::run_migrations(&pool).await.unwrap();
+        let pool = stroem_test_support::test_pool().await;
 
         let create = |source_type: &'static str,
                       source_id: Option<String>,
@@ -2004,14 +1990,7 @@ mod tests {
     /// typed hook -> legacy hook (NULL `source_job_id`) -> typed hook = 3.
     #[tokio::test(flavor = "multi_thread")]
     async fn hook_chain_depth_continues_through_pre_048_hook_rows() {
-        use testcontainers::runners::AsyncRunner;
-        use testcontainers_modules::postgres::Postgres;
-
-        let container = Postgres::default().start().await.unwrap();
-        let port = container.get_host_port_ipv4(5432).await.unwrap();
-        let url = format!("postgres://postgres:postgres@localhost:{port}/postgres");
-        let pool = stroem_db::create_pool(&url).await.unwrap();
-        stroem_db::run_migrations(&pool).await.unwrap();
+        let pool = stroem_test_support::test_pool().await;
 
         let create = |source_type: &'static str,
                       source_id: Option<String>,

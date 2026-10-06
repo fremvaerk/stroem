@@ -1,10 +1,14 @@
 //! High-availability integration tests.
 //!
-//! These tests boot a real Postgres via testcontainers, then exercise the
-//! HA primitives end-to-end:
+//! These tests get an isolated database via `stroem_test_support`, then
+//! exercise the HA primitives end-to-end:
 //!
 //! - Leader election: only one `LeaderElection` instance holds the advisory
 //!   lock at a time; failover happens within seconds when the holder drops.
+//!   Postgres advisory locks are server-wide, not per-database — so every
+//!   test here that touches the real `LEADER_LOCK_KEY` is `#[serial]`,
+//!   serializing them against each other (not against unrelated tests in
+//!   this binary) within this one shared container.
 //! - NOTIFY/LISTEN event bus: cancellation, log chunks, and workspace reloads
 //!   propagate from one replica to another via Postgres pub/sub.
 
@@ -13,12 +17,12 @@ use axum::body::Body;
 use http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use serde_json::json;
+use serial_test::serial;
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use stroem_common::models::workflow::WorkspaceConfig;
-use stroem_db::{create_pool, run_migrations};
 use stroem_server::config::{
     DbConfig, LogStorageConfig, RecoveryConfig, RetentionConfig, ServerConfig,
 };
@@ -30,8 +34,6 @@ use stroem_server::state::AppState;
 use stroem_server::web::build_router;
 use stroem_server::workspace::WorkspaceManager;
 use tempfile::TempDir;
-use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::postgres::Postgres;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
@@ -42,21 +44,17 @@ use uuid::Uuid;
 const ALL: u64 = 16 * 1024 * 1024;
 
 struct Harness {
-    _container: testcontainers::ContainerAsync<Postgres>,
     pool: PgPool,
     url: String,
     _temp: TempDir,
 }
 
 async fn boot() -> Result<Harness> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{port}/postgres");
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let url = test_db.url;
     let temp = TempDir::new()?;
     Ok(Harness {
-        _container: container,
         pool,
         url,
         _temp: temp,
@@ -150,6 +148,7 @@ where
 // ─── Leader election ─────────────────────────────────────────────────────────
 
 #[tokio::test]
+#[serial]
 async fn leader_only_one_holds_lock() -> Result<()> {
     let h = boot().await?;
     let cancel = CancellationToken::new();
@@ -173,6 +172,7 @@ async fn leader_only_one_holds_lock() -> Result<()> {
 }
 
 #[tokio::test]
+#[serial]
 async fn leader_failover_when_holder_cancelled() -> Result<()> {
     let h = boot().await?;
     let cancel_a = CancellationToken::new();
@@ -821,6 +821,7 @@ async fn events_are_distinct_channels() {
 // ─── Scheduler gating (smoke) ────────────────────────────────────────────────
 
 #[tokio::test]
+#[serial]
 async fn scheduler_followers_skip_firing() -> Result<()> {
     // Smoke test: two scheduler instances against the same DB shouldn't
     // double-fire. We can't easily inject a cron-trigger workspace via
@@ -1058,6 +1059,7 @@ async fn livez_fails_when_scheduler_stalled_but_readiness_holds() -> Result<()> 
 
 /// Followers run the loops too; a hung standby is no standby.
 #[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn livez_fails_for_stalled_loop_on_follower() -> Result<()> {
     let h = boot().await?;
     let cancel_leader = CancellationToken::new();
@@ -1132,6 +1134,7 @@ async fn livez_fails_when_started_task_exited_on_leader() -> Result<()> {
 /// `GET /healthz/detail` must return 200 with `checks.scheduler == "follower"`.
 /// Followers don't fail health on background-task liveness.
 #[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn healthz_follower_reports_follower_not_503() -> Result<()> {
     let h = boot().await?;
 
@@ -1242,6 +1245,7 @@ async fn listener_reconnects_after_disconnect() -> Result<()> {
 /// `application_name = 'stroem-leader'`) and assert that `is_leader()` returns
 /// false within two retry intervals (10 s).
 #[tokio::test]
+#[serial]
 async fn leader_connection_lost_triggers_reflag_to_follower() -> Result<()> {
     let h = boot().await?;
     let cancel = CancellationToken::new();
@@ -1280,6 +1284,7 @@ async fn leader_connection_lost_triggers_reflag_to_follower() -> Result<()> {
 /// Start three LeaderElection instances simultaneously and assert exactly one
 /// holds the lock after 3 s.
 #[tokio::test]
+#[serial]
 async fn double_leader_race_both_attempt_simultaneously() -> Result<()> {
     let h = boot().await?;
     let cancel = CancellationToken::new();

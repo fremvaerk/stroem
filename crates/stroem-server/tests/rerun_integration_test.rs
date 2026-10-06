@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use stroem_common::models::workflow::{
     ActionDef, ConnectionDef, FlowStep, InputFieldDef, TaskDef, WorkspaceConfig,
 };
-use stroem_db::{create_pool, run_migrations, JobRepo, WorkerRepo};
+use stroem_db::{JobRepo, WorkerRepo};
 use stroem_server::config::{
     DbConfig, LogStorageConfig, RetentionConfig, ServerConfig, WorkspaceSourceDef,
 };
@@ -26,19 +26,13 @@ use stroem_server::state::AppState;
 use stroem_server::web::build_router;
 use stroem_server::workspace::WorkspaceManager;
 use tempfile::TempDir;
-use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::postgres::Postgres;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 use uuid::Uuid;
 
-async fn spawn_pg() -> Result<(PgPool, testcontainers::ContainerAsync<Postgres>)> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
-    Ok((pool, container))
+async fn spawn_pg() -> Result<PgPool> {
+    let pool = stroem_test_support::test_pool().await;
+    Ok(pool)
 }
 
 /// Build a workspace with one task whose inputs cover all three field categories
@@ -202,12 +196,11 @@ fn build_rerun_workspace() -> WorkspaceConfig {
 struct TestApp {
     router: Router,
     pool: PgPool,
-    _pg: testcontainers::ContainerAsync<Postgres>,
     _tmp: TempDir,
 }
 
 async fn build_test_app(workspace_name: &str, workspace: WorkspaceConfig) -> Result<TestApp> {
-    let (pool, _pg) = spawn_pg().await?;
+    let pool = spawn_pg().await?;
 
     let tmp = TempDir::new()?;
     let log_dir = tmp.path().join("logs");
@@ -257,7 +250,6 @@ async fn build_test_app(workspace_name: &str, workspace: WorkspaceConfig) -> Res
     Ok(TestApp {
         router,
         pool,
-        _pg,
         _tmp: tmp,
     })
 }

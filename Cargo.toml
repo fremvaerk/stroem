@@ -9,10 +9,11 @@ members = [
     "crates/stroem-worker",
     "crates/stroem-cli",
     "crates/stroem-e2e",
+    "crates/stroem-test-support",
 ]
 
 [workspace.package]
-version = "0.17.0"
+version = "0.17.1"
 edition = "2021"
 license = "MIT"
 
@@ -105,3 +106,4 @@ stroem-agent = { path = "crates/stroem-agent" }
 stroem-common = { path = "crates/stroem-common" }
 stroem-db = { path = "crates/stroem-db" }
 stroem-runner = { path = "crates/stroem-runner", default-features = false }
+stroem-test-support = { path = "crates/stroem-test-support" }

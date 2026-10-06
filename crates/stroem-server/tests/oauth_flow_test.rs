@@ -2,7 +2,7 @@
 //!
 //! These tests exercise the real HTTP surface: /oauth/authorize, the SPA
 //! consent JSON endpoint, /oauth/token, and the refresh-token rotation
-//! path. Each test runs against a fresh Postgres container.
+//! path. Each test runs against its own fresh, isolated database.
 
 use anyhow::Result;
 use axum::body::Body;
@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use stroem_common::models::workflow::WorkspaceConfig;
-use stroem_db::{create_pool, run_migrations, OAuthClientRepo, UserRepo};
+use stroem_db::{OAuthClientRepo, UserRepo};
 use stroem_server::auth::{hash_password, validate_access_token};
 use stroem_server::config::{
     AuthConfig, DbConfig, InitialUserConfig, LogStorageConfig, McpConfig, RetentionConfig,
@@ -27,8 +27,6 @@ use stroem_server::state::AppState;
 use stroem_server::web::build_router;
 use stroem_server::workspace::WorkspaceManager;
 use tempfile::TempDir;
-use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::postgres::Postgres;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -50,17 +48,10 @@ async fn body_string(resp: axum::response::Response) -> String {
     String::from_utf8(bytes.to_vec()).unwrap()
 }
 
-async fn setup() -> Result<(
-    Router,
-    PgPool,
-    TempDir,
-    testcontainers::ContainerAsync<Postgres>,
-)> {
-    let container = Postgres::default().start().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
-    run_migrations(&pool).await?;
+async fn setup() -> Result<(Router, PgPool, TempDir)> {
+    let test_db = stroem_test_support::test_db().await;
+    let pool = test_db.pool.clone();
+    let url = test_db.url;
 
     let temp_dir = TempDir::new()?;
     let log_dir = temp_dir.path().join("logs");
@@ -127,7 +118,7 @@ async fn setup() -> Result<(
     let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None);
     let router = build_router(state, CancellationToken::new());
 
-    Ok((router, pool, temp_dir, container))
+    Ok((router, pool, temp_dir))
 }
 
 /// Register a test client directly via the DB repo so we don't need the
@@ -233,7 +224,7 @@ async fn run_pkce_flow(router: &Router, client_id: &str) -> Value {
 /// bound credential. This holds across the refresh path too.
 #[tokio::test]
 async fn test_oauth_token_never_carries_admin() -> Result<()> {
-    let (router, pool, _tmp, _c) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
     let client_id = register_public_client(&pool).await?;
 
     // Promote the test user to admin — the minted token must STILL be unprivileged.
@@ -279,7 +270,7 @@ async fn test_oauth_token_never_carries_admin() -> Result<()> {
 /// the server itself.
 #[tokio::test]
 async fn test_authorize_redirects_to_consent_page() -> Result<()> {
-    let (router, pool, _tmp, _c) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
     let client_id = register_public_client(&pool).await?;
     let verifier = "a".repeat(64);
     let challenge = s256_challenge(&verifier);
@@ -316,7 +307,7 @@ async fn test_authorize_redirects_to_consent_page() -> Result<()> {
 /// Unknown client_id is reported inline (NOT redirected) — RFC 6749 §4.1.2.1.
 #[tokio::test]
 async fn test_authorize_rejects_unknown_client_inline() -> Result<()> {
-    let (router, _pool, _tmp, _c) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
     let verifier = "a".repeat(64);
     let challenge = s256_challenge(&verifier);
     let resource = format!("{BASE_URL}/mcp");
@@ -347,7 +338,7 @@ async fn test_authorize_rejects_unknown_client_inline() -> Result<()> {
 /// inline error is the only safe response.
 #[tokio::test]
 async fn test_authorize_rejects_bad_redirect_inline() -> Result<()> {
-    let (router, pool, _tmp, _c) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
     let client_id = register_public_client(&pool).await?;
     let verifier = "a".repeat(64);
     let challenge = s256_challenge(&verifier);
@@ -376,7 +367,7 @@ async fn test_authorize_rejects_bad_redirect_inline() -> Result<()> {
 /// Full happy-path: authorize → consent → token → /mcp call succeeds.
 #[tokio::test]
 async fn test_full_pkce_flow_yields_mcp_capable_token() -> Result<()> {
-    let (router, pool, _tmp, _c) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
     let client_id = register_public_client(&pool).await?;
     let access_jwt = login(&router).await;
     let verifier = "AaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSsTtUuVvWwXxYy".to_string();
@@ -524,7 +515,7 @@ async fn test_full_pkce_flow_yields_mcp_capable_token() -> Result<()> {
 /// PKCE failure: wrong verifier → invalid_grant.
 #[tokio::test]
 async fn test_token_rejects_bad_pkce_verifier() -> Result<()> {
-    let (router, pool, _tmp, _c) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
     let client_id = register_public_client(&pool).await?;
     let access_jwt = login(&router).await;
     let verifier = "x".repeat(48);
@@ -584,7 +575,7 @@ async fn test_token_rejects_bad_pkce_verifier() -> Result<()> {
 /// RFC 7591 Dynamic Client Registration — happy path with a public client.
 #[tokio::test]
 async fn test_dcr_register_public_client_then_authorize() -> Result<()> {
-    let (router, _pool, _tmp, _c) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     let body = json!({
         "client_name": "Cursor Editor",
@@ -650,7 +641,7 @@ async fn test_dcr_register_public_client_then_authorize() -> Result<()> {
 /// a generated secret returned exactly once.
 #[tokio::test]
 async fn test_dcr_register_confidential_client_returns_secret() -> Result<()> {
-    let (router, _pool, _tmp, _c) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
     let body = json!({
         "client_name": "CI Pipeline",
         "redirect_uris": ["https://ci.example/oauth/cb"],
@@ -682,7 +673,7 @@ async fn test_dcr_register_confidential_client_returns_secret() -> Result<()> {
 /// DCR rejects unsupported scope.
 #[tokio::test]
 async fn test_dcr_rejects_unsupported_scope() -> Result<()> {
-    let (router, _pool, _tmp, _c) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
     let body = json!({
         "client_name": "evil",
         "redirect_uris": ["http://127.0.0.1/cb"],
@@ -708,7 +699,7 @@ async fn test_dcr_rejects_unsupported_scope() -> Result<()> {
 /// prevention — OAuth 2.1 §4.1).
 #[tokio::test]
 async fn test_dcr_rejects_http_non_loopback_redirect() -> Result<()> {
-    let (router, _pool, _tmp, _c) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
     let body = json!({
         "client_name": "evil",
         "redirect_uris": ["http://attacker.example/cb"],
@@ -735,7 +726,7 @@ async fn test_dcr_rejects_http_non_loopback_redirect() -> Result<()> {
 /// REST API including /api/users/{id}/admin.
 #[tokio::test]
 async fn test_mcp_token_rejected_by_rest_api() -> Result<()> {
-    let (router, pool, _tmp, _c) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
     let client_id = register_public_client(&pool).await?;
 
     // Drive the full PKCE flow to get an audience-bound MCP access token.
@@ -766,7 +757,7 @@ async fn test_mcp_token_rejected_by_rest_api() -> Result<()> {
 /// echo. A logged-in user posting a bogus `resource` directly must fail.
 #[tokio::test]
 async fn test_consent_rejects_unexpected_resource() -> Result<()> {
-    let (router, pool, _tmp, _c) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
     let client_id = register_public_client(&pool).await?;
     let access_jwt = login(&router).await;
     let verifier = "z".repeat(64);
@@ -803,7 +794,7 @@ async fn test_consent_rejects_unexpected_resource() -> Result<()> {
 /// after rotation.
 #[tokio::test]
 async fn test_refresh_reuse_revokes_entire_chain() -> Result<()> {
-    let (router, pool, _tmp, _c) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
     let client_id = register_public_client(&pool).await?;
 
     // Get an initial token pair via the full PKCE flow.
@@ -875,7 +866,7 @@ async fn test_refresh_reuse_revokes_entire_chain() -> Result<()> {
 /// provides. Allowed: https, http loopback, reverse-DNS private schemes.
 #[tokio::test]
 async fn test_dcr_rejects_intent_scheme() -> Result<()> {
-    let (router, _pool, _tmp, _c) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
     let resp = router
         .oneshot(
             Request::builder()
@@ -902,7 +893,7 @@ async fn test_dcr_rejects_intent_scheme() -> Result<()> {
 /// token to be bound to the authenticated client.
 #[tokio::test]
 async fn test_refresh_rejects_cross_client_binding() -> Result<()> {
-    let (router, pool, _tmp, _c) = setup().await?;
+    let (router, pool, _tmp) = setup().await?;
     let client_y = register_public_client(&pool).await?;
     let client_x = register_public_client(&pool).await?;
 
@@ -938,7 +929,7 @@ async fn test_refresh_rejects_cross_client_binding() -> Result<()> {
 /// rely on them.
 #[tokio::test]
 async fn test_dcr_accepts_reverse_dns_scheme() -> Result<()> {
-    let (router, _pool, _tmp, _c) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
     let resp = router
         .oneshot(
             Request::builder()
@@ -965,7 +956,7 @@ async fn test_dcr_accepts_reverse_dns_scheme() -> Result<()> {
 /// another resource server that trusts the same issuer.
 #[tokio::test]
 async fn test_mcp_rejects_token_for_different_audience() -> Result<()> {
-    let (router, _pool, _tmp, _c) = setup().await?;
+    let (router, _pool, _tmp) = setup().await?;
 
     // Forge a JWT with aud=<wrong>.
     use jsonwebtoken::{encode, EncodingKey, Header};

@@ -2,7 +2,7 @@ pub mod pool;
 pub mod repos;
 
 // Re-export commonly used items
-pub use pool::{create_pool, run_migrations};
+pub use pool::{create_pool, migration_fingerprint, run_migrations};
 pub use repos::api_key::{ApiKeyRepo, ApiKeyRow};
 pub use repos::job::{
     ClosureBounds, ClosurePinRow, DurationStatsRow, JobAclScope, JobPinCols, JobRepo, JobRow,
