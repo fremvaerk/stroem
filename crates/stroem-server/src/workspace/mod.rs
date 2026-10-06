@@ -2318,7 +2318,7 @@ tasks:
         const PW: &str = "load-canary-pw";
         const PW_UPPER: &str = "LOAD-CANARY-PW";
         assert!(
-            crate::workspace_set::tera_raw_detail_contains(
+            crate::test_support::tera_raw_detail_contains(
                 TPL,
                 &serde_json::json!({"secret": {"PW": PW}}),
                 PW_UPPER

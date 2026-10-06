@@ -5,8 +5,8 @@
 //!
 //! Not part of `common/mod.rs`: a test file includes it with
 //! `#[path = "common/tera_fixtures.rs"] mod tera_fixtures;`. Test code only —
-//! it is the one server file the `raw_detail` guard
-//! (`stroem-common/tests/raw_detail_guard.rs`) allows.
+//! with `src/test_support.rs` it is one of the two server files the
+//! `raw_detail` guard (`stroem-common/tests/raw_detail_guard.rs`) allows.
 
 #![allow(dead_code)]
 
@@ -25,8 +25,13 @@ pub fn quoting_upper_int(secret_path: &str) -> String {
 }
 
 /// True when rendering `tpl` against `ctx` fails and Tera's raw detail
-/// contains `needle`.
+/// contains `needle`. The raw detail quotes the template's source line, so a
+/// needle occurring in `tpl` itself would prove nothing: refused.
 pub fn raw_detail_contains(tpl: &str, ctx: &serde_json::Value, needle: &str) -> bool {
+    assert!(
+        !tpl.contains(needle),
+        "proof needle occurs in the template source, so the source line alone would satisfy it"
+    );
     let err = render_template(tpl, ctx).expect_err("the fixture must fail to render");
     err.chain()
         .find_map(|c| c.downcast_ref::<TemplateError>())

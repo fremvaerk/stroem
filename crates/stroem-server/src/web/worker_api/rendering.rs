@@ -1562,7 +1562,7 @@ mod tests {
 
         const TPL: &str = "{{ 1 | round(method=secret.T) }}";
         assert!(
-            crate::workspace_set::tera_raw_detail_contains(
+            crate::test_support::tera_raw_detail_contains(
                 TPL,
                 &json!({"secret": {"T": "owner-value"}}),
                 "owner-value"

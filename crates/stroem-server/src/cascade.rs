@@ -1299,7 +1299,7 @@ mod tests {
     fn when_condition_error_does_not_leak_secret_values() {
         const TPL: &str = "{{ 1 | round(method=secret.db.host) }}";
         assert!(
-            crate::workspace_set::tera_raw_detail_contains(
+            crate::test_support::tera_raw_detail_contains(
                 TPL,
                 &json!({"secret": {"db": {"host": "db.internal.prod"}}}),
                 "db.internal.prod"

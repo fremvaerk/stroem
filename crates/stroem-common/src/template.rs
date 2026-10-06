@@ -2621,15 +2621,6 @@ mod tests {
         assert_eq!(out["ch"]["host"], "ch.jobs.internal");
     }
 
-    /// True when rendering `tpl` against `ctx` fails and Tera's raw detail
-    /// contains `needle` (spec 2026-10-06 § 3.5: proves a fixture is real).
-    fn raw_detail_contains(tpl: &str, ctx: &serde_json::Value, needle: &str) -> bool {
-        let err = render_template(tpl, ctx).unwrap_err();
-        err.chain()
-            .find_map(|c| c.downcast_ref::<TemplateError>())
-            .is_some_and(|te| te.raw_detail().contains(needle))
-    }
-
     /// Git-refs spec § 7.2: claim decides withholding by ORIGIN. Each phase
     /// of `prepare_action_input_roles` tags its errors with the bucket it
     /// serves — the caller pass `Caller`, the defaults merge and the owner
@@ -2675,7 +2666,7 @@ mod tests {
         // Tera's raw text quotes the owner's secret; the chain never does.
         const TPL: &str = "{{ 1 | round(method=secret.TOKEN) }}";
         assert!(
-            raw_detail_contains(
+            crate::template_error::raw_detail_contains(
                 TPL,
                 &json!({"secret": {"TOKEN": "owner-secret"}}),
                 "owner-secret"

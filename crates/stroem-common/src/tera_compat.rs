@@ -391,14 +391,13 @@ mod tests {
             &json!({"secret": {"X": "not-a-date-canary"}}),
         )
         .unwrap_err();
-        let te = err
-            .chain()
-            .find_map(|c| c.downcast_ref::<crate::template_error::TemplateError>())
-            .expect("TemplateError in chain");
         assert!(
-            te.raw_detail().contains("not-a-date-canary"),
-            "fixture must reach the date filter's error: {}",
-            te.raw_detail()
+            crate::template_error::raw_detail_contains(
+                "{{ secret.X | date }}",
+                &json!({"secret": {"X": "not-a-date-canary"}}),
+                "not-a-date-canary"
+            ),
+            "fixture must reach the date filter's error"
         );
         assert!(!format!("{err:#}").contains("not-a-date-canary"));
         assert!(!format!("{err:?}").contains("not-a-date-canary"));

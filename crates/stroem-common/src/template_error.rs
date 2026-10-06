@@ -395,6 +395,26 @@ impl fmt::Debug for TemplateError {
 
 impl std::error::Error for TemplateError {}
 
+/// Test-only proof that a security fixture is real (spec 2026-10-06 § 3.5):
+/// true when rendering `tpl` against `ctx` fails and Tera's RAW detail — the
+/// text our value-free message never shows — contains `needle`. The raw
+/// detail quotes the template's source line, so a needle that occurs in
+/// `tpl` itself would prove nothing: that is refused outright. The one
+/// stroem-common home of a `raw_detail` call outside the CLI (guard:
+/// `tests/raw_detail_guard.rs`).
+#[cfg(test)]
+pub(crate) fn raw_detail_contains(tpl: &str, ctx: &serde_json::Value, needle: &str) -> bool {
+    assert!(
+        !tpl.contains(needle),
+        "proof needle occurs in the template source, so the source line alone would satisfy it"
+    );
+    let err =
+        crate::template::render_template(tpl, ctx).expect_err("the fixture must fail to render");
+    err.chain()
+        .find_map(|c| c.downcast_ref::<TemplateError>())
+        .is_some_and(|te| te.raw_detail().contains(needle))
+}
+
 #[cfg(test)]
 mod tests {
     use crate::template::render_template;
