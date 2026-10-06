@@ -42,6 +42,8 @@ tasks:
         continue_on_failure: true
       step-after:
         action: simple-greet
-        depends_on: [step-fail]
+        depends_on:
+          - step: step-fail
+            accept: [completed, failed]
         input:
           name: "{{ input.name }}"
