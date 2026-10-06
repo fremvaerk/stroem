@@ -376,29 +376,90 @@ pub fn evaluate_condition(template: &str, context: &serde_json::Value) -> Result
 
 /// Recursively renders all string values in a JSON value as Tera templates.
 /// Objects and arrays are traversed; non-string leaves pass through unchanged.
+/// An error names the failing string's JSON path (spec 2026-10-06 § 3.3).
 pub fn render_json_strings(
     value: &serde_json::Value,
     context: &serde_json::Value,
 ) -> Result<serde_json::Value> {
+    render_strings_at(value, context, false, &mut Vec::new())
+}
+
+/// One step of a JSON path. Keys come from config (manifest, args, input
+/// schema defaults), never from a rendered value.
+enum PathSeg<'a> {
+    Key(&'a str),
+    Index(usize),
+}
+
+/// `spec.containers[0].image`; a key that is not a plain identifier is
+/// written `["key"]`.
+fn json_path(segs: &[PathSeg<'_>]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    for seg in segs {
+        match seg {
+            PathSeg::Key(k)
+                if !k.is_empty()
+                    && k.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') =>
+            {
+                if !out.is_empty() {
+                    out.push('.');
+                }
+                out.push_str(k);
+            }
+            PathSeg::Key(k) => {
+                let _ = write!(out, "[{k:?}]");
+            }
+            PathSeg::Index(i) => {
+                let _ = write!(out, "[{i}]");
+            }
+        }
+    }
+    out
+}
+
+/// Shared walk of [`render_json_strings`] (`only_templated == false`) and
+/// [`render_value_deep`] (only strings containing `{{`). The error context is
+/// the failing string's location — never the template text.
+fn render_strings_at<'a>(
+    value: &'a serde_json::Value,
+    context: &serde_json::Value,
+    only_templated: bool,
+    path: &mut Vec<PathSeg<'a>>,
+) -> Result<serde_json::Value> {
     match value {
         serde_json::Value::String(s) => {
-            let rendered = render_template(s, context)
-                .context("Failed to render a template in a JSON string")?;
+            if only_templated && !s.contains("{{") {
+                return Ok(value.clone());
+            }
+            let rendered = render_template(s, context).with_context(|| {
+                if path.is_empty() {
+                    "Failed to render the template at the top level".to_string()
+                } else {
+                    format!("Failed to render the template at `{}`", json_path(path))
+                }
+            })?;
             Ok(serde_json::Value::String(rendered))
         }
         serde_json::Value::Object(map) => {
             let mut result = serde_json::Map::new();
             for (k, v) in map {
-                result.insert(k.clone(), render_json_strings(v, context)?);
+                path.push(PathSeg::Key(k));
+                let rendered = render_strings_at(v, context, only_templated, path)?;
+                path.pop();
+                result.insert(k.clone(), rendered);
             }
             Ok(serde_json::Value::Object(result))
         }
         serde_json::Value::Array(arr) => {
-            let result: Result<Vec<_>> = arr
-                .iter()
-                .map(|v| render_json_strings(v, context))
-                .collect();
-            Ok(serde_json::Value::Array(result?))
+            let mut result = Vec::with_capacity(arr.len());
+            for (i, v) in arr.iter().enumerate() {
+                path.push(PathSeg::Index(i));
+                result.push(render_strings_at(v, context, only_templated, path)?);
+                path.pop();
+            }
+            Ok(serde_json::Value::Array(result))
         }
         other => Ok(other.clone()),
     }
@@ -756,36 +817,12 @@ pub fn resolve_rerun_sentinels(
 
 /// Recursively walk a JSON value tree and render all string values containing `{{`
 /// through Tera. Objects and arrays are traversed recursively; other types are cloned as-is.
+/// An error names the failing string's JSON path (spec 2026-10-06 § 3.3).
 pub fn render_value_deep(
     value: &serde_json::Value,
     context: &serde_json::Value,
 ) -> Result<serde_json::Value> {
-    match value {
-        serde_json::Value::String(s) => {
-            if s.contains("{{") {
-                let rendered = render_template(s, context)
-                    .context("Failed to render a template in a value")?;
-                Ok(serde_json::Value::String(rendered))
-            } else {
-                Ok(value.clone())
-            }
-        }
-        serde_json::Value::Object(map) => {
-            let mut result = serde_json::Map::new();
-            for (k, v) in map {
-                result.insert(k.clone(), render_value_deep(v, context)?);
-            }
-            Ok(serde_json::Value::Object(result))
-        }
-        serde_json::Value::Array(arr) => {
-            let mut result = Vec::new();
-            for v in arr {
-                result.push(render_value_deep(v, context)?);
-            }
-            Ok(serde_json::Value::Array(result))
-        }
-        _ => Ok(value.clone()),
-    }
+    render_strings_at(value, context, true, &mut Vec::new())
 }
 
 /// Merge action-level input defaults into already-rendered step input.
@@ -3496,6 +3533,48 @@ mod tests {
         let context = json!({});
         let result = render_value_deep(&value, &context);
         assert!(result.is_err());
+    }
+
+    /// Spec 2026-10-06 § 3.3: a failing nested template is located by its
+    /// JSON path (config keys and indices), never by its text or a value.
+    #[test]
+    fn deep_render_errors_name_the_json_path_not_the_template() {
+        const SRC: &str = "src-canary-path-3c";
+        let ctx = json!({"secret": {"X": "deep-secret"}});
+        let tpl = format!("{{{{ secret.X | upper | int }}}} {SRC}");
+        let value = json!({
+            "spec": {"containers": [{"name": "ok"}, {"image": tpl}]},
+            "metadata": {"labels": {"app.kubernetes.io/name": tpl}},
+        });
+        type Render = fn(&serde_json::Value, &serde_json::Value) -> Result<serde_json::Value>;
+        let path = "spec.containers[1].image";
+        for render in [render_json_strings as Render, render_value_deep as Render] {
+            let v = json!({"spec": value["spec"].clone()});
+            let err = render(&v, &ctx).unwrap_err();
+            let text = format!("{err:#}");
+            assert!(
+                text.contains(&format!("Failed to render the template at `{path}`")),
+                "{text}"
+            );
+            let all = format!("{text} {err:?}");
+            for needle in [SRC, "deep-secret", "DEEP-SECRET", "secret.X"] {
+                assert!(!all.contains(needle), "{needle}: {all}");
+            }
+        }
+        let v = json!({"metadata": value["metadata"].clone()});
+        let text = format!("{:#}", render_json_strings(&v, &ctx).unwrap_err());
+        assert!(
+            text.contains(r#"at `metadata.labels["app.kubernetes.io/name"]`"#),
+            "{text}"
+        );
+        let text = format!(
+            "{:#}",
+            render_json_strings(&json!(["a", tpl]), &ctx).unwrap_err()
+        );
+        assert!(text.contains("at `[1]`"), "{text}");
+        let text = format!("{:#}", render_value_deep(&json!(tpl), &ctx).unwrap_err());
+        assert!(text.contains("at the top level"), "{text}");
+        assert!(!text.contains(SRC), "{text}");
     }
 
     // --- merge_action_defaults tests ---
