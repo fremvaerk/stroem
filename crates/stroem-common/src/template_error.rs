@@ -326,11 +326,17 @@ fn removed_builtin_hint(msg_text: &str) -> Option<String> {
 /// error's span text. Can only ever return a member of REGISTERED_FILTERS.
 fn failing_filter(src: Option<&str>, span: &tera::Span) -> Option<&'static str> {
     let text = src?.get(span.range.clone())?;
-    let after_pipe = text.rsplit('|').next()?.trim_start();
-    let ident: String = after_pipe
+    // A filter's span starts at its NAME and ends after its arguments; it
+    // holds neither the left-hand value nor its own `|`, so a `|` inside is
+    // part of an argument and must not be looked at.
+    let text = text.trim_start();
+    let ident: String = text
         .chars()
         .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
         .collect();
+    if !text[ident.len()..].is_empty() && !text[ident.len()..].starts_with('(') {
+        return None;
+    }
     REGISTERED_FILTERS.iter().copied().find(|f| *f == ident)
 }
 
@@ -481,9 +487,56 @@ mod tests {
         assert!(!text.contains(CONTEXT_CANARY), "{text}");
     }
 
-    /// Value-bearing rendering cases: Tera's raw MESSAGE (not the report,
-    /// which contains the source line) carries the context canary — the
-    /// fixture is real — and our text carries nothing.
+    /// Tera's `ReportError::message()` of a rendering failure (not the full
+    /// report, which also holds the source line).
+    fn tera_message(tpl: &str, ctx: &serde_json::Value) -> String {
+        let tera = crate::tera_engine::render_engine(
+            crate::budget::LoadBudget::unbounded(),
+            Default::default(),
+        );
+        let ctx = tera::Context::from_serialize(ctx).unwrap();
+        let err = tera.render_str(tpl, &ctx, false).unwrap_err();
+        match err.kind() {
+            tera::ErrorKind::RenderingError(r) => r.message().to_string(),
+            other => panic!("not a RenderingError for {tpl}: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn failing_filter_is_named_from_its_own_span() {
+        let m = msg("{{ 'abc' | int }}", json!({}));
+        assert!(m.starts_with("filter `int` failed"), "{m}");
+        let m = msg(
+            "{{ m | get(key=k | lower) }}",
+            json!({"m": {}, "k": "Missing"}),
+        );
+        assert!(m.starts_with("filter `get` failed"), "{m}");
+        let m = msg("{{ 1 | round(method=x | upper) }}", json!({"x": "bad"}));
+        assert!(m.starts_with("filter `round` failed"), "{m}");
+        let m = msg("{{ throw(message=x | upper) }}", json!({"x": "boom"}));
+        assert!(!m.contains("upper"), "{m}");
+    }
+
+    #[test]
+    fn corpus_numeric_operation_is_value_free() {
+        const BIG: &str = "170141183460469231731687303715884105727";
+        let ctx = json!({"secret": {"BIG": BIG}});
+        let tpl = format!("{{{{ (secret.BIG | int) * 2 }}}} {SOURCE_CANARY}");
+        let raw = tera_message(&tpl, &ctx);
+        assert!(raw.contains(BIG), "fixture not real: {raw}");
+        let err = render_template(&tpl, &ctx).unwrap_err();
+        let te = template_error(&err);
+        for text in [format!("{err:#}"), format!("{err:?}"), te.to_string()] {
+            assert!(
+                !text.contains(BIG) && !text.contains(SOURCE_CANARY),
+                "{text}"
+            );
+        }
+    }
+
+    /// Value-bearing rendering cases: Tera's `ReportError::message()` (not
+    /// the report, which contains the source line) carries the context
+    /// canary — the fixture is real — and our text carries nothing.
     #[test]
     fn corpus_value_bearing_cases_are_value_free() {
         let ctx = json!({"secret": {"X": CONTEXT_CANARY, "N": "0x1f-not-a-number"}});
@@ -499,7 +552,7 @@ mod tests {
             let tpl = format!("{tpl} {SOURCE_CANARY}");
             let err = render_template(&tpl, &ctx).unwrap_err();
             let te = template_error(&err);
-            let raw = te.raw_detail();
+            let raw = tera_message(&tpl, &ctx);
             assert!(
                 raw.contains(CONTEXT_CANARY)
                     || raw.contains(&CONTEXT_CANARY.to_uppercase())
