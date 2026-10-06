@@ -12,7 +12,7 @@ workflow authors write. The facts below were gathered in research notes
 **Revision 9 (2026-10-06, fix wave 2).** R24 — the deep-render path context names only the root field our own code
 supplies (`manifest` / `args`), never object keys (author text); R26 — action defaults are rendered exactly once (a second
 render in `merge_action_defaults` let an owner secret smuggle through a
-caller-visible value; pre-existing, fixed in PR #8). Corrections: R20 also
+caller-visible value; pre-existing, fixed in PR #8); R27 — documented behaviour change: action input defaults render exactly once (previously a default whose first render produced `{{ … }}` was evaluated again). Corrections: R20 also
 accepts `indentation=`; § 3.2.3 lists the real `raw_detail()` callers
 (`local/validate.rs`, the `stroem run` printers, `main`'s top-level error
 print); deep-render errors name the field (`manifest`/`args`), not object keys.

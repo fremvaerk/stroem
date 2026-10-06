@@ -258,8 +258,10 @@ and setup errors: the CLI prints `Error: …` followed by a `Tera detail`
 section. A step's `error` that a later step reads in `stroem run` stays
 value-free, as on the server.
 
-A template inside a manifest or `args` names the field (`manifest` or `args`)
-but never object keys or the template's text. An `env` template is reported by
+A template inside a manifest or `args` is reported without object keys or the
+template's text: ``Failed to render a template in this value`` for a manifest
+or object default, ``Failed to render the template at `[1]` `` for `args`
+(array indices only). An `env` template is reported by
 its key: `Failed to render env template for key 'X'`. A context that cannot be built reads
 `template context could not be prepared`. The operator running the CLI
 already holds the secrets.
@@ -342,6 +344,15 @@ against the workspace locally. `vals` stderr is shown **only** there; the
 server logs no longer carry it. Local runs use the operator's own
 credentials, so a failure that only happens in the pod (for example a missing
 IAM permission) may not reproduce locally.
+
+### 14. Action input defaults render exactly once
+
+Previously a `type: task` action's `input` default was rendered while merging
+defaults and then again by the general renderer, so a default whose first
+render produced `{{ … }}` was evaluated a second time:
+`default: "{{ secret.X }}"` with `X`'s value `{{ secret.Y }}` resolved to
+`Y`'s value. Now `X`'s literal value (`{{ secret.Y }}`) is used. A secret
+value is data, and the second pass was an injection path.
 
 ## Checklist
 
