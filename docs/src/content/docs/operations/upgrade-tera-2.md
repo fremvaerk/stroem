@@ -49,7 +49,7 @@ working unchanged. You do not need to edit anything for these.
   also available (same output as before; keys of maps that come from the
   context are sorted, map literals written in a template keep insertion
   order). `indent` and `unique` are kept with Tera 1 semantics too:
-  `indent(prefix=…)` works as in Tera 1 (and `width=` also works), and
+  `indent(prefix=…, first=, blank=)` works as in Tera 1 (Tera 2's `width=` and `indentation=` also work; `prefix=` wins when both are given), and
   `unique` is case-insensitive by default, with `case_sensitive=` and
   `attribute=` as in Tera 1.
 - **C4 — `when:` falsiness is decided on the rendered text.** Empty,
@@ -246,7 +246,15 @@ depended on Tera 1's wording needs updating.
 
 For full detail, reproduce the problem locally: **`stroem run` and
 `stroem validate` print Tera's complete report** (with the source line and
-available fields) under the value-free line. The operator running the CLI
+available fields) under the value-free line, including for top-level load
+and setup errors: the CLI prints `Error: …` followed by a `Tera detail`
+section. A step's `error` that a later step reads in `stroem run` stays
+value-free, as on the server.
+
+A template inside a manifest, `env` or other nested structure is reported by
+its JSON path, not its text: ``Failed to render the template at
+`spec.containers[1].image` ``. A context that cannot be built reads
+`template context could not be prepared`. The operator running the CLI
 already holds the secrets.
 
 Errors that arise *after* rendering — for example a rendered connection name
@@ -256,8 +264,8 @@ value: `Input field 'db': no connection with that name exists`.
 ### 10. Reserved step names
 
 A flow step named like a Tera 2 keyword can no longer be referenced from a
-template: `none`, `null`, `self`, `loop`, `break`, `continue`, `true`,
-`false`, `and`, `or`, `not`, `is`, `in`, `if`, `else`. The workspace still
+template: `none`, `None`, `null`, `self`, `loop`, `break`, `continue`, `true`,
+`True`, `false`, `False`, `and`, `or`, `not`, `is`, `in`, `if`, `else`. The workspace still
 loads — a step with such a name that is never referenced keeps working — but
 the server logs `[render] step 'none' is a Tera keyword and cannot be
 referenced in templates` when it renders. Rename the step.
