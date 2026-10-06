@@ -931,6 +931,65 @@ mod tests {
         );
     }
 
+    /// R24: a manifest render failure names the field (`manifest`) but never
+    /// an object key — manifest keys are arbitrary author text. An `args`
+    /// failure is located by its index.
+    #[test]
+    fn test_render_action_spec_manifest_and_args_errors_never_name_keys() {
+        const KEY: &str = "keycanary-9z";
+        const TPL: &str = "{{ secret.X | upper | int }}";
+        let secrets = json!({"X": "deep-secret"});
+        assert!(
+            crate::test_support::tera_raw_detail_contains(
+                TPL,
+                &json!({"secret": {"X": "deep-secret"}}),
+                "DEEP-SECRET"
+            ),
+            "fixture must leak through Tera's raw text, else this test is vacuous"
+        );
+        let ws = ws_with_secrets(&secrets);
+        let step = make_step_row("step1", None);
+        let render = |spec: serde_json::Value| {
+            let err = render_action_spec(
+                Some(&spec),
+                &tctx(
+                    None,
+                    &ws,
+                    &ws,
+                    &[],
+                    None,
+                    None,
+                    None,
+                    &step,
+                    action_body_scope,
+                    Some(json!({})),
+                ),
+            )
+            .unwrap_err();
+            (format!("{err:#}"), format!("{err:?}"))
+        };
+
+        let (text, debug) = render(json!({"manifest": {"metadata": {"labels": {KEY: TPL}}}}));
+        assert!(
+            text.starts_with(
+                "Failed to render manifest template: Failed to render a template in this value: "
+            ),
+            "{text}"
+        );
+        let (args_text, args_debug) = render(json!({"args": ["--ok", TPL]}));
+        assert!(
+            args_text.starts_with(
+                "Failed to render args templates: Failed to render the template at `[1]`: "
+            ),
+            "{args_text}"
+        );
+        for all in [text, debug, args_text, args_debug] {
+            for needle in [KEY, "metadata", "labels", "deep-secret", "DEEP-SECRET"] {
+                assert!(!all.contains(needle), "{needle}: {all}");
+            }
+        }
+    }
+
     // -------------------------------------------------------------------------
     // render_image
     // -------------------------------------------------------------------------
