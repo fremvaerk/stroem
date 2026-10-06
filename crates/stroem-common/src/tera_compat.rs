@@ -1,4 +1,5 @@
-//! Tera 1 behaviour kept under Tera 2 (spec 2026-10-06 § 3.6 C1, C3).
+//! Tera 1 behaviour kept under Tera 2 (spec 2026-10-06 § 3.6 C1, C3;
+//! `indent` and `unique` per ruling R20).
 //! The ported filters reproduce tera 1.20.1 (MIT, Keats) output exactly;
 //! they convert through serde_json so the Tera 1 logic applies unchanged.
 
@@ -89,11 +90,158 @@ fn linebreaksbr(val: &str, _: Kwargs, _: &State) -> String {
     val.replace("\r\n", "<br>").replace('\n', "<br>")
 }
 
-/// tera 1 `dotted_pointer`, without its quoted-segment syntax.
-fn dotted<'a>(v: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
-    path.split('.').try_fold(v, |cur, seg| match cur {
-        serde_json::Value::Object(m) => m.get(seg),
-        serde_json::Value::Array(a) => seg.parse::<usize>().ok().and_then(|i| a.get(i)),
+/// tera 1.20.1 `PointerMachina` (src/context.rs): splits a dotted path into
+/// segments, honouring `"…"` / `'…'` quoted segments, `[…]` and `\`
+/// escapes. Ported verbatim with one deliberate difference: Tera 1 used
+/// `chars().enumerate()` positions as BYTE offsets, which mis-sliced or
+/// panicked on a multi-byte character; this walks `char_indices` and slices
+/// with `get`, so an ASCII path splits exactly as in Tera 1 and a non-ASCII
+/// one splits correctly (`broken` marks a slice off a char boundary — the
+/// lookup then fails instead of panicking).
+struct PointerMachina<'a> {
+    pointer: &'a str,
+    single_quoted: bool,
+    dual_quoted: bool,
+    escaped: bool,
+    last_position: usize,
+    broken: bool,
+}
+
+impl<'a> PointerMachina<'a> {
+    fn new(pointer: &'a str) -> Self {
+        PointerMachina {
+            pointer,
+            single_quoted: false,
+            dual_quoted: false,
+            escaped: false,
+            last_position: 0,
+            broken: false,
+        }
+    }
+
+    fn slice(&mut self, from: usize, to: Option<usize>) -> Option<&'a str> {
+        let s = match to {
+            Some(to) => self.pointer.get(from..to),
+            None => self.pointer.get(from..),
+        };
+        if s.is_none() {
+            self.broken = true;
+        }
+        s
+    }
+}
+
+impl<'a> Iterator for PointerMachina<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.broken {
+            return None;
+        }
+        let forwarded = self.slice(self.last_position, None)?;
+        let mut offset: usize = 0;
+        for (i, character) in forwarded.char_indices() {
+            // Tera 1's `if !single_quoted && !dual_quoted && !escaped` inside
+            // the `[`, `]` and `.` arms, as match guards (a false guard falls
+            // through to `_ => ()`, exactly as the inner `if` did nothing).
+            let unquoted = !self.single_quoted && !self.dual_quoted && !self.escaped;
+            match character {
+                '"' => {
+                    if !self.escaped {
+                        self.dual_quoted = !self.dual_quoted;
+                        if i == offset {
+                            offset += 1;
+                        } else {
+                            let result = self
+                                .slice(self.last_position + offset, Some(self.last_position + i))?;
+                            self.last_position += i + 1;
+                            if !result.is_empty() {
+                                return Some(result);
+                            }
+                        }
+                    }
+                }
+                '\'' => {
+                    if !self.escaped {
+                        self.single_quoted = !self.single_quoted;
+                        if i == offset {
+                            offset += 1;
+                        } else {
+                            let result = self
+                                .slice(self.last_position + offset, Some(self.last_position + i))?;
+                            self.last_position += i + 1;
+                            if !result.is_empty() {
+                                return Some(result);
+                            }
+                        }
+                    }
+                }
+                '\\' => {
+                    self.escaped = true;
+                    continue;
+                }
+                '[' if unquoted => {
+                    let result =
+                        self.slice(self.last_position + offset, Some(self.last_position + i))?;
+                    self.last_position += i + 1;
+                    if !result.is_empty() {
+                        return Some(result);
+                    }
+                }
+                ']' if unquoted => {
+                    offset += 1;
+                }
+                '.' if unquoted => {
+                    if i == offset {
+                        offset += 1;
+                    } else {
+                        let result =
+                            self.slice(self.last_position + offset, Some(self.last_position + i))?;
+                        self.last_position += i + 1;
+                        if !result.is_empty() {
+                            return Some(result);
+                        }
+                    }
+                }
+                _ => (),
+            }
+            self.escaped = false;
+        }
+        if self.last_position + offset < self.pointer.len() {
+            let result = self.slice(self.last_position + offset, None)?;
+            self.last_position = self.pointer.len();
+            return Some(result);
+        }
+        None
+    }
+}
+
+/// serde_json's `parse_index`, as tera 1.20.1 copied it: no `+`, no leading
+/// zero.
+fn parse_index(s: &str) -> Option<usize> {
+    if s.starts_with('+') || (s.starts_with('0') && s.len() != 1) {
+        return None;
+    }
+    s.parse().ok()
+}
+
+/// tera 1.20.1 `dotted_pointer` (src/context.rs): an empty path is the value
+/// itself; segments are unescaped `~1` → `/`, `~0` → `~`.
+fn dotted<'a>(value: &'a serde_json::Value, pointer: &str) -> Option<&'a serde_json::Value> {
+    if pointer.is_empty() {
+        return Some(value);
+    }
+    let mut machina = PointerMachina::new(pointer);
+    let tokens: Vec<String> = machina
+        .by_ref()
+        .map(|mat| mat.replace("~1", "/").replace("~0", "~"))
+        .collect();
+    if machina.broken {
+        return None;
+    }
+    tokens.iter().try_fold(value, |target, token| match target {
+        serde_json::Value::Object(map) => map.get(token),
+        serde_json::Value::Array(list) => parse_index(token).and_then(|x| list.get(x)),
         _ => None,
     })
 }
@@ -107,6 +255,10 @@ fn as_array(val: &Value, filter: &str) -> TeraResult<Vec<serde_json::Value>> {
 
 fn map(val: &Value, kwargs: Kwargs, _: &State) -> TeraResult<Value> {
     let arr = as_array(val, "map")?;
+    // Tera 1 returns an empty array before looking at its arguments.
+    if arr.is_empty() {
+        return Ok(from_json(&serde_json::Value::Array(arr)));
+    }
     let attribute = kwargs
         .get::<&str>("attribute")?
         .ok_or_else(|| err("The `map` filter has to have an `attribute` argument"))?;
@@ -119,6 +271,9 @@ fn map(val: &Value, kwargs: Kwargs, _: &State) -> TeraResult<Value> {
 
 fn filter(val: &Value, kwargs: Kwargs, _: &State) -> TeraResult<Value> {
     let arr = as_array(val, "filter")?;
+    if arr.is_empty() {
+        return Ok(from_json(&serde_json::Value::Array(arr)));
+    }
     let key = kwargs
         .get::<&str>("attribute")?
         .ok_or_else(|| err("The `filter` filter has to have an `attribute` argument"))?;
@@ -138,6 +293,132 @@ fn filter(val: &Value, kwargs: Kwargs, _: &State) -> TeraResult<Value> {
         })
         .collect();
     Ok(from_json(&serde_json::Value::Array(out)))
+}
+
+/// tera 1.20.1 `unique` (src/builtins/filters/array.rs + filter_utils.rs):
+/// strings compare case-INsensitively unless `case_sensitive=true`;
+/// `attribute=` picks the key; the first element's type decides the
+/// comparison and a mixed-type array is an error; floats, arrays, objects
+/// and null cannot be made unique.
+fn unique(val: &Value, kwargs: Kwargs, _: &State) -> TeraResult<Value> {
+    use std::collections::HashSet;
+    enum Seen {
+        Numbers(HashSet<i64>),
+        Bools(HashSet<bool>),
+        Strings(HashSet<String>, bool),
+    }
+    impl Seen {
+        fn insert(&mut self, key: &serde_json::Value) -> TeraResult<bool> {
+            match self {
+                Seen::Numbers(set) => {
+                    let n = key
+                        .as_i64()
+                        .ok_or_else(|| err(&format!("expected number got {key}")))?;
+                    Ok(set.insert(n))
+                }
+                Seen::Bools(set) => {
+                    let b = key
+                        .as_bool()
+                        .ok_or_else(|| err(&format!("expected bool got {key}")))?;
+                    Ok(set.insert(b))
+                }
+                Seen::Strings(set, case_sensitive) => {
+                    let s = key
+                        .as_str()
+                        .ok_or_else(|| err(&format!("expected string got {key}")))?;
+                    Ok(set.insert(if *case_sensitive {
+                        s.to_owned()
+                    } else {
+                        s.to_lowercase()
+                    }))
+                }
+            }
+        }
+    }
+
+    let arr = as_array(val, "unique")?;
+    if arr.is_empty() {
+        return Ok(from_json(&serde_json::Value::Array(arr)));
+    }
+    let case_sensitive = kwargs.get::<bool>("case_sensitive")?.unwrap_or(false);
+    let attribute = kwargs.get::<&str>("attribute")?.unwrap_or("").to_string();
+
+    let first = dotted(&arr[0], &attribute).ok_or_else(|| {
+        err(&format!(
+            "attribute '{attribute}' does not reference a field"
+        ))
+    })?;
+    let disc = std::mem::discriminant(first);
+    let mut seen = match first {
+        serde_json::Value::Null => return Err(err("Null is not a unique value")),
+        serde_json::Value::Bool(_) => Seen::Bools(HashSet::new()),
+        serde_json::Value::Number(n) if n.is_f64() => {
+            return Err(err("Unique floats are not implemented"))
+        }
+        serde_json::Value::Number(_) => Seen::Numbers(HashSet::new()),
+        serde_json::Value::String(_) => Seen::Strings(HashSet::new(), case_sensitive),
+        serde_json::Value::Array(_) => return Err(err("Unique arrays are not implemented")),
+        serde_json::Value::Object(_) => return Err(err("Unique objects are not implemented")),
+    };
+
+    let mut out = Vec::new();
+    for v in &arr {
+        if let Some(key) = dotted(v, &attribute) {
+            if disc != std::mem::discriminant(key) {
+                return Err(err("unique filter can't compare multiple types"));
+            }
+            if seen.insert(key)? {
+                out.push(v.clone());
+            }
+        }
+    }
+    Ok(from_json(&serde_json::Value::Array(out)))
+}
+
+/// tera 1.20.1 `indent` (src/builtins/filters/string.rs): `prefix=` (default
+/// four spaces), `first=` indents the first line, `blank=` indents blank
+/// (whitespace-only) lines; the trailing newline is dropped, as in Tera 1.
+/// Tera 2's `width=` / `indentation=` are also accepted (`indentation`, one
+/// character, default a space, repeated `width` times, width ≤ 1000) so a
+/// template written for Tera 2 keeps its prefix; `prefix=` wins over both.
+fn indent(val: &str, kwargs: Kwargs, _: &State) -> TeraResult<String> {
+    let prefix = match kwargs.get::<&str>("prefix")? {
+        Some(p) => p.to_string(),
+        None => {
+            let width = kwargs.get::<usize>("width")?;
+            let indentation = kwargs.get::<&str>("indentation")?;
+            if indentation.is_some_and(|i| i.chars().count() != 1) {
+                return Err(err(
+                    "The `indentation` argument must contain exactly one character",
+                ));
+            }
+            indentation
+                .unwrap_or(" ")
+                .repeat(width.unwrap_or(4).min(1000))
+        }
+    };
+    let first = kwargs.get::<bool>("first")?.unwrap_or(false);
+    let blank = kwargs.get::<bool>("blank")?.unwrap_or(false);
+
+    let mut out = String::with_capacity(
+        val.len() + (prefix.len() * (val.chars().filter(|&c| c == '\n').count() + 1)),
+    );
+    let mut first_pass = true;
+    for line in val.lines() {
+        if first_pass {
+            if first {
+                out.push_str(&prefix);
+            }
+            first_pass = false;
+        } else {
+            out.push('\n');
+            if blank || !line.trim_start().is_empty() {
+                out.push_str(&prefix);
+            }
+        }
+        out.push_str(line);
+    }
+    Ok(out)
 }
 
 fn concat(val: &Value, kwargs: Kwargs, _: &State) -> TeraResult<Value> {
@@ -264,6 +545,8 @@ pub(crate) fn register(t: &mut tera::Tera) {
     t.register_filter("map", map);
     t.register_filter("filter", filter);
     t.register_filter("concat", concat);
+    t.register_filter("unique", unique);
+    t.register_filter("indent", indent);
     t.register_filter("slice", slice);
     t.register_filter("date", date);
     t.register_function("now", now);
@@ -358,6 +641,161 @@ mod tests {
             ),
             "2,3"
         );
+    }
+
+    #[test]
+    fn map_and_filter_return_empty_before_checking_attribute_like_tera1() {
+        assert_eq!(r("{{ [] | map | length }}", json!({})), "0");
+        assert_eq!(r("{{ [] | filter | length }}", json!({})), "0");
+        assert!(render_template("{{ [1] | map | length }}", &json!({})).is_err());
+        assert!(render_template("{{ [1] | filter | length }}", &json!({})).is_err());
+    }
+
+    /// tera 1.20.1 `dotted_pointer` forms, through `map` / `filter`.
+    #[test]
+    fn dotted_pointer_matches_tera1() {
+        let ctx = json!({"xs": [{
+            "a": {"b.c": "quoted", "b": {"c": "plain"}, "x/y": "slash", "t~u": "tilde"},
+            "l": ["zero", "one"],
+            "é": {"x": "accent"},
+        }, null]});
+        let m = |attr: &str| {
+            r(
+                &format!("{{{{ xs | map(attribute='{attr}') | join(sep=',') }}}}"),
+                ctx.clone(),
+            )
+        };
+        assert_eq!(m("a.b.c"), "plain");
+        assert_eq!(m(r#"a."b.c""#), "quoted");
+        assert_eq!(m(r#"a["b.c"]"#), "quoted");
+        assert_eq!(m(r#"a["b"].c"#), "plain");
+        assert_eq!(m("a.x~1y"), "slash");
+        assert_eq!(m("a.t~0u"), "tilde");
+        assert_eq!(m("l.1"), "one");
+        assert_eq!(m("l.0"), "zero");
+        assert_eq!(m("l.+1"), "", "parse_index rejects a leading +");
+        assert_eq!(m("l.01"), "", "parse_index rejects a leading zero");
+        assert_eq!(m("é.x"), "accent", "Tera 1 panicked here; we resolve it");
+        // Empty path: the element itself (null elements dropped by `map`).
+        assert_eq!(
+            r(
+                "{{ [1, none, 2] | map(attribute='') | join(sep=',') }}",
+                json!({})
+            ),
+            "1,2"
+        );
+        assert_eq!(
+            r(
+                r#"{{ xs | filter(attribute='a."b.c"', value='quoted') | length }}"#,
+                ctx.clone()
+            ),
+            "1"
+        );
+    }
+
+    #[test]
+    fn unique_like_tera1() {
+        assert_eq!(
+            r(
+                "{{ [3, -1, 3, 3, 5, 2, 5, 4] | unique | join(sep=',') }}",
+                json!({})
+            ),
+            "3,-1,5,2,4"
+        );
+        let words = json!({"w": ["One", "Two", "Three", "one", "Two"]});
+        assert_eq!(
+            r("{{ w | unique | join(sep=',') }}", words.clone()),
+            "One,Two,Three",
+            "case-insensitive by default"
+        );
+        assert_eq!(
+            r(
+                "{{ w | unique(case_sensitive=true) | join(sep=',') }}",
+                words
+            ),
+            "One,Two,Three,one"
+        );
+        let foos =
+            json!({"f": [{"a": 1, "b": 2}, {"a": 3, "b": 3}, {"a": 1, "b": 3}, {"a": 0, "b": 4}]});
+        assert_eq!(
+            r(
+                "{{ f | unique(attribute='a') | map(attribute='b') | join(sep=',') }}",
+                foos.clone()
+            ),
+            "2,3,4"
+        );
+        assert_eq!(r("{{ [] | unique | length }}", json!({})), "0");
+        assert_eq!(
+            r(
+                "{{ [true, false, true] | unique | join(sep=',') }}",
+                json!({})
+            ),
+            "true,false"
+        );
+        for (tpl, needle) in [
+            (
+                "{{ f | unique(attribute='zz') }}",
+                "does not reference a field",
+            ),
+            ("{{ [12, []] | unique }}", "can't compare multiple types"),
+            (
+                "{{ [1.5, 2.5] | unique }}",
+                "Unique floats are not implemented",
+            ),
+            ("{{ [none] | unique }}", "Null is not a unique value"),
+            ("{{ [[1]] | unique }}", "Unique arrays are not implemented"),
+        ] {
+            assert!(
+                crate::template_error::raw_detail_contains(tpl, &foos, needle),
+                "{tpl}"
+            );
+        }
+    }
+
+    #[test]
+    fn indent_like_tera1() {
+        let ctx = json!({"s": "one\n\ntwo\nthree", "ws": "a\n  \nb\n", "tab": "\t"});
+        assert_eq!(
+            r("{{ s | indent }}", ctx.clone()),
+            "one\n\n    two\n    three"
+        );
+        assert_eq!(
+            r(
+                "{{ s | indent(first=true, prefix=' ', blank=true) }}",
+                ctx.clone()
+            ),
+            " one\n \n two\n three"
+        );
+        assert_eq!(
+            r("{{ s | indent(prefix='> ') }}", ctx.clone()),
+            "one\n\n> two\n> three"
+        );
+        assert_eq!(
+            r("{{ s | indent(first=true) }}", ctx.clone()),
+            "    one\n\n    two\n    three"
+        );
+        // Tera 1 line handling: a whitespace-only line counts as blank and
+        // the trailing newline is dropped.
+        assert_eq!(r("{{ ws | indent }}", ctx.clone()), "a\n  \n    b");
+        assert_eq!(
+            r("{{ ws | indent(blank=true) }}", ctx.clone()),
+            "a\n      \n    b"
+        );
+        // Tera 2 arguments keep working.
+        assert_eq!(
+            r("{{ s | indent(width=2) }}", ctx.clone()),
+            "one\n\n  two\n  three"
+        );
+        assert_eq!(
+            r("{{ s | indent(width=1, indentation=tab) }}", ctx.clone()),
+            "one\n\n\ttwo\n\tthree"
+        );
+        assert_eq!(
+            r("{{ s | indent(prefix='-', width=8) }}", ctx.clone()),
+            "one\n\n-two\n-three",
+            "prefix= wins over width="
+        );
+        assert!(render_template("{{ s | indent(indentation='ab') }}", &ctx).is_err());
     }
 
     #[test]
