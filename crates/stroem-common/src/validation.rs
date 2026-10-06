@@ -326,12 +326,15 @@ fn validate_workflow_config_inner(
                             );
                         }
                     }
-                    _ => {
+                    // Name the JSON type only: a YAML literal is template
+                    // source and can hold a literal secret (spec 2026-10-06
+                    // § 3.3).
+                    other => {
                         bail!(
-                            "Task '{}' step '{}' for_each must be a string (Tera template) or array, got {:?}",
+                            "Task '{}' step '{}' field 'for_each' must be a string (Tera template) or array, got a JSON {}",
                             task_name,
                             step_name,
-                            for_each
+                            crate::template::json_type_name(other)
                         );
                     }
                 }
@@ -6506,8 +6509,35 @@ tasks:
             result
                 .unwrap_err()
                 .to_string()
-                .contains("for_each must be a string"),
-            "Error should mention 'for_each must be a string'"
+                .contains("'for_each' must be a string"),
+            "Error should mention 'for_each' must be a string"
+        );
+    }
+
+    /// Codex review (R19): an invalid literal `for_each` is never echoed —
+    /// the message names the task, step, field and JSON type only.
+    #[test]
+    fn test_for_each_invalid_literal_is_not_echoed() {
+        let yaml = r#"
+actions:
+  process:
+    type: script
+    script: echo hello
+tasks:
+  main:
+    flow:
+      step:
+        action: process
+        for_each: {"token": "literal-secret"}
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = validate_workflow_config(&config).unwrap_err();
+        let text = format!("{err:#} {err:?}");
+        assert!(!text.contains("literal-secret"), "{text}");
+        assert!(!text.contains("token"), "{text}");
+        assert_eq!(
+            format!("{err:#}"),
+            "Task 'main' step 'step' field 'for_each' must be a string (Tera template) or array, got a JSON object"
         );
     }
 

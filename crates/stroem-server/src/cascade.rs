@@ -81,10 +81,12 @@ fn parse_for_each_items(
                 // It's a JSON-encoded string — this is a Tera template
                 return render_for_each_template(&template, render_ctx);
             }
-            _ => {
+            // A YAML literal is template SOURCE and can hold a literal
+            // secret (spec 2026-10-06 § 3.3): name the JSON type only.
+            other => {
                 bail!(
-                    "for_each expression must evaluate to a JSON array, got {}",
-                    value
+                    "for_each must render a JSON array, got a JSON {}",
+                    stroem_common::template::json_type_name(&other)
                 );
             }
         }
@@ -2559,13 +2561,45 @@ mod tests {
         let ctx = json!({});
         let result = parse_for_each_items(expr, &ctx);
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("must evaluate to a JSON array"),
-            "Error should mention 'must evaluate to a JSON array'"
+        let msg = result.unwrap_err().to_string();
+        assert_eq!(msg, "for_each must render a JSON array, got a JSON number");
+    }
+
+    /// Codex review (R19): a literal JSON `for_each` is template SOURCE — a
+    /// YAML literal can hold a literal secret — so the error names the JSON
+    /// type only, in `parse_for_each_items` and in the persisted step error.
+    #[test]
+    fn literal_for_each_error_names_the_json_type_only() {
+        let expr = r#"{"token":"literal-secret"}"#;
+        let err = parse_for_each_items(expr, &json!({})).unwrap_err();
+        let text = format!("{err:#} {err:?}");
+        assert!(!text.contains("literal-secret"), "{text}");
+        assert!(!text.contains("token"), "{text}");
+        assert_eq!(
+            format!("{err:#}"),
+            "for_each must render a JSON array, got a JSON object"
         );
+
+        let t = task(vec![("loop", fs(&[]))]);
+        let rows = vec![placeholder("loop", "pending", expr)];
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
+        let persisted = plan
+            .changes
+            .iter()
+            .find_map(|c| match c {
+                Change::Fail { step, error } if step == "loop" => Some(error.clone()),
+                _ => None,
+            })
+            .expect("the placeholder fails");
+        assert!(!persisted.contains("literal-secret"), "{persisted}");
+        assert!(persisted.contains("got a JSON object"), "{persisted}");
     }
 
     #[test]
