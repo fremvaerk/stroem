@@ -1,85 +1,71 @@
 use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
-use tera::Tera;
+use std::sync::{Arc, Mutex};
 
 use crate::budget::{is_deadline_exceeded, run_with_deadline, LoadBudget};
 use crate::models::workflow::{ConnectionDef, InputFieldDef, WorkspaceConfig};
+use crate::template_error::{TemplateError, ValsFailure, ValsFailureKind};
 
-/// Test-only wrapper keeping the historic two-argument filter signature.
-#[cfg(test)]
-fn vals_filter(
-    value: &tera::Value,
-    args: &HashMap<String, tera::Value>,
-) -> tera::Result<tera::Value> {
-    vals_filter_with(value, args, LoadBudget::unbounded())
-}
+/// Name the `vals` filter is registered under.
+pub(crate) const VALS_FILTER: &str = "vals";
 
 /// Tera filter that resolves `ref+` secret references via the vals CLI.
 ///
 /// Usage in templates: `{{ secret.KEY | vals }}`
-/// - Non-string values pass through unchanged
-/// - Strings not starting with `ref+` pass through unchanged
-/// - Strings starting with `ref+` are resolved via `vals eval`, killed if
-///   `budget` expires
-fn vals_filter_with(
+/// - Non-string values and strings not starting with `ref+` pass through.
+/// - `ref+` strings are resolved via `vals eval`, killed if `budget` expires.
+///
+/// A failure is recorded in `slot` (kind + stderr) and reported to Tera with
+/// a fixed message: neither the reference nor the stderr enters Tera's text.
+pub(crate) fn vals_filter_with(
     value: &tera::Value,
-    _args: &HashMap<String, tera::Value>,
     budget: LoadBudget,
-) -> tera::Result<tera::Value> {
+    slot: &Mutex<Option<ValsFailure>>,
+) -> tera::TeraResult<tera::Value> {
+    let fail = |kind: ValsFailureKind, stderr: String| {
+        *slot.lock().unwrap_or_else(|p| p.into_inner()) = Some(ValsFailure { kind, stderr });
+        tera::Error::message("vals failed")
+    };
     let s = match value.as_str() {
         Some(s) => s,
         None => return Ok(value.clone()),
     };
-
     if !s.starts_with("ref+") {
         return Ok(value.clone());
     }
 
-    let input = serde_json::json!({"_v": s});
-    let input_str = serde_json::to_string(&input)
-        .map_err(|e| tera::Error::msg(format!("vals: serialize failed: {e}")))?;
-
+    let input_str = serde_json::to_string(&serde_json::json!({ "_v": s }))
+        .map_err(|_| fail(ValsFailureKind::BadOutput, String::new()))?;
     let mut cmd = std::process::Command::new("vals");
     cmd.args(["eval", "-f", "-", "-o", "json"]);
     let output = run_with_deadline(cmd, Some(input_str.as_bytes()), &budget).map_err(|e| {
         if is_deadline_exceeded(&e) {
-            tera::Error::msg("vals: deadline exceeded while resolving a ref+ secret")
+            fail(ValsFailureKind::TimedOut, String::new())
         } else {
-            tera::Error::msg(format!(
-                "vals CLI not found. Install vals to use ref+ secrets: {e:#}"
-            ))
+            fail(ValsFailureKind::SpawnFailed, format!("{e:#}"))
         }
     })?;
-
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(tera::Error::msg(format!(
-            "vals eval failed (exit {}): {}",
-            output.status,
-            stderr.trim()
-        )));
+        return Err(fail(
+            ValsFailureKind::Exited(output.status.code()),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        ));
     }
-
     let resolved: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .map_err(|e| tera::Error::msg(format!("vals: invalid output JSON: {e}")))?;
-
+        .map_err(|_| fail(ValsFailureKind::BadOutput, String::new()))?;
     match resolved.get("_v").and_then(|v| v.as_str()) {
-        Some(resolved_str) => Ok(tera::Value::String(resolved_str.to_string())),
-        None => Err(tera::Error::msg("vals: resolved output missing '_v' key")),
+        Some(resolved_str) => Ok(tera::Value::from(resolved_str)),
+        None => Err(fail(ValsFailureKind::BadOutput, String::new())),
     }
 }
 
-/// Name the `vals` filter is registered under.
-const VALS_FILTER: &str = "vals";
-
-/// True when `err` is, or wraps, a failure of the `vals` filter: the CLI is
-/// missing, `vals eval` failed, its deadline passed, or its output was bad.
-/// Typed (tera's `CallFilter` kind for this filter), never by message text.
+/// True when `err` is, or wraps, a failure of the `vals` filter (typed: the
+/// filter records it in a side channel, spec § 3.7).
 pub fn is_vals_failure(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
-        cause.downcast_ref::<tera::Error>().is_some_and(
-            |e| matches!(&e.kind, tera::ErrorKind::CallFilter(name) if name == VALS_FILTER),
-        )
+        cause
+            .downcast_ref::<TemplateError>()
+            .is_some_and(TemplateError::is_vals_failure)
     })
 }
 
@@ -94,25 +80,33 @@ pub fn render_template_with(
     context: &serde_json::Value,
     budget: &LoadBudget,
 ) -> Result<String> {
-    let mut tera = Tera::default();
-    let template_name = "__template__";
+    let slot = Arc::new(Mutex::new(None));
+    let tera = crate::tera_engine::render_engine(*budget, slot.clone());
+    let ctx = tera::Context::from_serialize(context)
+        .map_err(|e| anyhow::Error::new(TemplateError::from_tera(&e, None, None)))
+        .context("Failed to convert JSON to Tera context")?;
+    tera.render_str(template, &ctx, false).map_err(|e| {
+        let vals = slot.lock().unwrap_or_else(|p| p.into_inner()).take();
+        let outer = if matches!(e.kind(), tera::ErrorKind::SyntaxError(_)) {
+            "Failed to parse template"
+        } else {
+            "Failed to render template"
+        };
+        anyhow::Error::new(TemplateError::from_tera(&e, Some(template), vals)).context(outer)
+    })
+}
 
-    tera.add_raw_template(template_name, template)
-        .context("Failed to parse template")?;
-
-    let budget = *budget;
-    tera.register_filter(
-        VALS_FILTER,
-        move |value: &tera::Value, args: &HashMap<String, tera::Value>| {
-            vals_filter_with(value, args, budget)
-        },
-    );
-
-    let tera_context =
-        tera::Context::from_serialize(context).context("Failed to convert JSON to Tera context")?;
-
-    tera.render(template_name, &tera_context)
-        .context("Failed to render template")
+/// Compile `src` exactly as rendering would (`render_str`'s one-off
+/// restrictions included) without running anything that has a side effect.
+/// A runtime error (undefined variable, filter failure on the empty context)
+/// means the template compiled.
+pub fn check_template_syntax(src: &str) -> std::result::Result<(), TemplateError> {
+    let tera = crate::tera_engine::check_engine();
+    match tera.render_str(src, &tera::Context::new(), false) {
+        Ok(_) => Ok(()),
+        Err(e) if matches!(e.kind(), tera::ErrorKind::RenderingError(_)) => Ok(()),
+        Err(e) => Err(TemplateError::from_tera(&e, Some(src), None)),
+    }
 }
 
 /// Split a possibly-qualified reference `workspace.item` on the FIRST `.`.
@@ -384,7 +378,7 @@ pub fn render_json_strings(
     match value {
         serde_json::Value::String(s) => {
             let rendered = render_template(s, context)
-                .with_context(|| format!("Failed to render template in JSON string: {}", s))?;
+                .context("Failed to render a template in a JSON string")?;
             Ok(serde_json::Value::String(rendered))
         }
         serde_json::Value::Object(map) => {
@@ -775,7 +769,7 @@ pub fn render_value_deep(
         serde_json::Value::String(s) => {
             if s.contains("{{") {
                 let rendered = render_template(s, context)
-                    .with_context(|| format!("Failed to render template in value: {}", s))?;
+                    .context("Failed to render a template in a value")?;
                 Ok(serde_json::Value::String(rendered))
             } else {
                 Ok(value.clone())
@@ -1588,57 +1582,53 @@ mod tests {
         assert_eq!(result, None);
     }
 
+    fn vals_direct(value: tera::Value) -> tera::TeraResult<tera::Value> {
+        vals_filter_with(&value, LoadBudget::unbounded(), &Mutex::new(None))
+    }
+
     #[test]
     fn test_vals_filter_passthrough_non_string() {
-        let value = json!(42);
-        let args = HashMap::new();
-        let result = vals_filter(&value, &args).unwrap();
-        assert_eq!(result, json!(42));
+        let result = vals_direct(tera::Value::from(42)).unwrap();
+        assert_eq!(result.to_string(), "42");
     }
 
     #[test]
     fn test_vals_filter_passthrough_no_ref() {
-        let value = json!("plain-text");
-        let args = HashMap::new();
-        let result = vals_filter(&value, &args).unwrap();
-        assert_eq!(result, json!("plain-text"));
+        let result = vals_direct(tera::Value::from("plain-text")).unwrap();
+        assert_eq!(result.as_str(), Some("plain-text"));
     }
 
     #[test]
     fn test_vals_filter_passthrough_empty() {
-        let value = json!("");
-        let args = HashMap::new();
-        let result = vals_filter(&value, &args).unwrap();
-        assert_eq!(result, json!(""));
+        let result = vals_direct(tera::Value::from("")).unwrap();
+        assert_eq!(result.as_str(), Some(""));
     }
 
     #[test]
     fn test_vals_filter_passthrough_boolean() {
-        let args = HashMap::new();
-        let result = vals_filter(&json!(true), &args).unwrap();
-        assert_eq!(result, json!(true));
+        let result = vals_direct(tera::Value::from(true)).unwrap();
+        assert_eq!(result.as_bool(), Some(true));
     }
 
     #[test]
     fn test_vals_filter_passthrough_null() {
-        let args = HashMap::new();
-        let result = vals_filter(&json!(null), &args).unwrap();
-        assert_eq!(result, json!(null));
+        let result = vals_direct(tera::Value::none()).unwrap();
+        assert!(result.is_none(), "{result:?}");
     }
 
     #[test]
     fn test_vals_filter_ref_value_errors() {
-        // When vals is not installed: "vals CLI not found"
-        // When vals is installed but backend unreachable: "vals eval failed"
-        let value = json!("ref+vault://secret/key");
-        let args = HashMap::new();
-        let result = vals_filter(&value, &args);
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
+        // vals missing ("could not be started") or the backend unreachable
+        // ("failed (exit status N)"): typed either way, and the reference
+        // never reaches the message.
+        let err = render_template("{{ 'ref+vault://secret/key' | vals }}", &json!({})).unwrap_err();
+        assert!(is_vals_failure(&err), "{err:#}");
+        let text = format!("{err:#} {err:?}");
         assert!(
-            err.contains("vals CLI not found") || err.contains("vals eval failed"),
-            "Expected vals-related error, got: {err}"
+            text.contains("vals could not be started") || text.contains("vals failed (exit"),
+            "Expected vals-related error, got: {text}"
         );
+        assert!(!text.contains("vault://secret/key"), "{text}");
     }
 
     #[test]
@@ -1674,6 +1664,83 @@ mod tests {
         let context = json!({});
         let result = render_template(template, &context).unwrap();
         assert_eq!(result, "plain-value");
+    }
+
+    #[test]
+    fn check_template_syntax_accepts_vals_and_json_encode() {
+        assert!(check_template_syntax("{{ 'ref+vault://x' | vals }}").is_ok());
+        assert!(check_template_syntax("{{ x | json_encode() }}").is_ok());
+        assert!(check_template_syntax("{{ undefined_var.field }}").is_ok());
+    }
+
+    #[test]
+    fn check_template_syntax_rejects_unknown_filter_blocks_and_extends() {
+        assert_eq!(
+            check_template_syntax("{% if false %}{{ x | nope }}{% endif %}")
+                .unwrap_err()
+                .message(),
+            "template uses an unknown filter"
+        );
+        assert_eq!(
+            check_template_syntax("{% block b %}{% endblock %}")
+                .unwrap_err()
+                .message(),
+            "{% block %} is not supported"
+        );
+        assert_eq!(
+            check_template_syntax("{% extends \"x\" %}")
+                .unwrap_err()
+                .message(),
+            "{% extends %} is not supported"
+        );
+    }
+
+    #[test]
+    fn vals_passes_non_ref_values_through() {
+        assert_eq!(
+            render_template("{{ 'plain' | vals }}", &json!({})).unwrap(),
+            "plain"
+        );
+        assert_eq!(
+            render_template("{{ 42 | vals }}", &json!({})).unwrap(),
+            "42"
+        );
+    }
+
+    #[test]
+    fn vals_records_failure_kind_in_slot() {
+        // vals passes an unknown scheme (`ref+bogus-backend://`) through
+        // unchanged; a missing local file fails offline when vals is installed.
+        let slot = std::sync::Mutex::new(None);
+        let r = vals_filter_with(
+            &tera::Value::from("ref+file:///nonexistent-stroem-test/x.txt"),
+            LoadBudget::unbounded(),
+            &slot,
+        );
+        assert!(r.is_err());
+        let kind = slot.lock().unwrap().as_ref().map(|v| v.kind);
+        assert!(
+            matches!(
+                kind,
+                Some(ValsFailureKind::SpawnFailed) | Some(ValsFailureKind::Exited(_))
+            ),
+            "{kind:?}"
+        );
+    }
+
+    #[test]
+    fn non_vals_render_error_is_not_a_vals_failure() {
+        let err = render_template("{{ 'x' | int }}", &json!({})).unwrap_err();
+        assert!(!is_vals_failure(&err));
+    }
+
+    #[test]
+    fn json_encode_keeps_sorted_key_order() {
+        let ctx = json!({"m": {"b": 1, "a": 2, "c": 3}});
+        assert_eq!(
+            render_template("{{ m | json_encode() }}", &ctx).unwrap(),
+            r#"{"a":2,"b":1,"c":3}"#
+        );
     }
 
     // --- merge_defaults tests ---
@@ -4024,26 +4091,12 @@ mod tests {
             &expired,
         )
         .unwrap_err();
-        assert!(format!("{err:#}").contains("deadline"), "{err:#}");
-    }
-
-    /// The typed vals marker: tera's `CallFilter("vals")` anywhere in the
-    /// chain. Never the word "vals" in a message.
-    #[test]
-    fn is_vals_failure_recognises_the_vals_filter_and_nothing_else() {
-        let expired = crate::budget::LoadBudget::until(std::time::Instant::now());
-        let vals =
-            render_template_with("{{ 'ref+echo://x' | vals }}", &json!({}), &expired).unwrap_err();
-        assert!(is_vals_failure(&vals), "{vals:#}");
-        let wrapped = vals.context("Failed to render secret 'k'");
-        assert!(is_vals_failure(&wrapped), "{wrapped:#}");
-
-        let missing = render_template("{{ secret.vals }}", &json!({"secret": {}})).unwrap_err();
-        assert!(format!("{missing:#}").contains("vals"), "{missing:#}");
-        assert!(!is_vals_failure(&missing), "{missing:#}");
-
-        let other_filter = render_template("{{ 'vals' | round }}", &json!({})).unwrap_err();
-        assert!(!is_vals_failure(&other_filter), "{other_filter:#}");
+        assert!(is_vals_failure(&err), "{err:#}");
+        assert!(format!("{err:#}").contains("vals timed out"), "{err:#}");
+        assert!(
+            !format!("{err:#} {err:?}").contains("ref+echo://x"),
+            "{err:#}"
+        );
     }
 
     #[test]

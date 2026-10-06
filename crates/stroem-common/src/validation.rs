@@ -272,11 +272,9 @@ fn validate_workflow_config_inner(
 
             // Validate when condition template syntax.
             //
-            // Two-pass strategy: first try `one_off` (compile + execute) with an
-            // empty context to catch syntax errors. If that fails (because the
-            // expression references variables not in the empty context), fall back
-            // to `add_raw_template` (compile only) to distinguish syntax errors
-            // from missing-variable errors.
+            // `check_template_syntax` compiles the expression on the rendering
+            // engine and runs it against an empty context: a compile error is
+            // a validation error, a runtime error (undefined variable) is not.
             //
             // Known limitation — variable references: we cannot validate which
             // step names are referenced in the expression at parse time, because
@@ -285,26 +283,15 @@ fn validate_workflow_config_inner(
             // (missing 'a') passes this check and surfaces as a condition
             // evaluation failure when the job runs.
             //
-            // Known limitation — unknown Tera filters: Tera's compile-time check
-            // only validates syntax, not filter names. An expression like
-            // `{{ foo | nonexistent_filter }}` passes both the `add_raw_template`
-            // compile step and the `one_off` call with an empty context (because
-            // the variable is undefined and the filter is never invoked), but will
-            // fail at render time when `foo` has a value. Unknown filters are
-            // therefore caught only at job execution time, not at YAML parse time.
+            // Unknown filters, tests and functions are rejected here: Tera 2
+            // checks every reference when the template compiles, including
+            // branches that never run (spec 2026-10-06 § 3.1).
             if let Some(ref when_expr) = step.when {
-                if tera::Tera::one_off(when_expr, &tera::Context::new(), false).is_err() {
-                    // Only catch syntax errors — undefined variables are OK at validation time
-                    let mut test_tera = tera::Tera::default();
-                    if let Err(e) = test_tera.add_raw_template("__when__", when_expr) {
-                        bail!(
-                            "Task '{}' step '{}' has invalid when expression '{}': {}",
-                            task_name,
-                            step_name,
-                            when_expr,
-                            e
-                        );
-                    }
+                if let Err(e) = crate::template::check_template_syntax(when_expr) {
+                    return Err(anyhow::Error::new(e).context(format!(
+                        "Task '{}' step '{}' has an invalid when expression",
+                        task_name, step_name
+                    )));
                 }
             }
 
@@ -321,18 +308,12 @@ fn validate_workflow_config_inner(
             if let Some(ref for_each) = step.for_each {
                 match for_each {
                     serde_json::Value::String(expr) => {
-                        // Validate as Tera template (same two-pass strategy as `when`)
-                        if tera::Tera::one_off(expr, &tera::Context::new(), false).is_err() {
-                            let mut test_tera = tera::Tera::default();
-                            if let Err(e) = test_tera.add_raw_template("__for_each__", expr) {
-                                bail!(
-                                    "Task '{}' step '{}' has invalid for_each expression '{}': {}",
-                                    task_name,
-                                    step_name,
-                                    expr,
-                                    e
-                                );
-                            }
+                        // Validate as Tera template (same check as `when`)
+                        if let Err(e) = crate::template::check_template_syntax(expr) {
+                            return Err(anyhow::Error::new(e).context(format!(
+                                "Task '{}' step '{}' has an invalid for_each expression",
+                                task_name, step_name
+                            )));
                         }
                     }
                     serde_json::Value::Array(arr) => {
@@ -1751,31 +1732,21 @@ fn validate_agent_action(action: &ActionDef, action_name: &str) -> Result<Vec<St
         }
     }
 
-    // Validate prompt is valid Tera template syntax (same two-pass strategy as `when`)
+    // Validate prompt / system_prompt template syntax (same check as `when`)
     if let Some(ref prompt) = action.prompt {
-        if tera::Tera::one_off(prompt, &tera::Context::new(), false).is_err() {
-            let mut test_tera = tera::Tera::default();
-            if let Err(e) = test_tera.add_raw_template("__prompt__", prompt) {
-                bail!(
-                    "Action '{}' has invalid prompt template: {}",
-                    action_name,
-                    e
-                );
-            }
+        if let Err(e) = crate::template::check_template_syntax(prompt) {
+            return Err(anyhow::Error::new(e).context(format!(
+                "Action '{}' has an invalid prompt template",
+                action_name
+            )));
         }
     }
-
-    // Same for system_prompt
     if let Some(ref sp) = action.system_prompt {
-        if tera::Tera::one_off(sp, &tera::Context::new(), false).is_err() {
-            let mut test_tera = tera::Tera::default();
-            if let Err(e) = test_tera.add_raw_template("__system_prompt__", sp) {
-                bail!(
-                    "Action '{}' has invalid system_prompt template: {}",
-                    action_name,
-                    e
-                );
-            }
+        if let Err(e) = crate::template::check_template_syntax(sp) {
+            return Err(anyhow::Error::new(e).context(format!(
+                "Action '{}' has an invalid system_prompt template",
+                action_name
+            )));
         }
     }
 
