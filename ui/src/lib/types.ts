@@ -47,7 +47,7 @@ export type Outcome = "completed" | "failed" | "cancelled" | "skipped" | "omitte
  *  a bare step name, a `{step, accept}` pair, or an `all`/`any` group. */
 export type DependsOnEntry =
   | string
-  | { step: string; accept?: Outcome[] | "terminal" }
+  | { step: string; accept?: Outcome[] | "any" }
   | { all: DependsOnEntry[] }
   | { any: DependsOnEntry[] };
 

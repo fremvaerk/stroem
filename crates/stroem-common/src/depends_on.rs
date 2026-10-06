@@ -41,52 +41,52 @@ impl Outcome {
     }
 }
 
-/// Deserializes only from the exact string "terminal"; any other value is a
+/// Deserializes only from the exact string "any"; any other value is a
 /// parse error. Serializes back to that same literal string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TerminalKeyword;
+pub struct AnyKeyword;
 
-impl Serialize for TerminalKeyword {
+impl Serialize for AnyKeyword {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str("terminal")
+        serializer.serialize_str("any")
     }
 }
 
-impl<'de> Deserialize<'de> for TerminalKeyword {
+impl<'de> Deserialize<'de> for AnyKeyword {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct TerminalVisitor;
-        impl Visitor<'_> for TerminalVisitor {
-            type Value = TerminalKeyword;
+        struct AnyVisitor;
+        impl Visitor<'_> for AnyVisitor {
+            type Value = AnyKeyword;
             fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                write!(f, "the literal string \"terminal\"")
+                write!(f, "the literal string \"any\"")
             }
-            fn visit_str<E: de::Error>(self, v: &str) -> Result<TerminalKeyword, E> {
-                if v == "terminal" {
-                    Ok(TerminalKeyword)
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<AnyKeyword, E> {
+                if v == "any" {
+                    Ok(AnyKeyword)
                 } else {
                     Err(E::custom(format!(
-                        "expected the literal string \"terminal\", got \"{v}\""
+                        "expected the literal string \"any\", got \"{v}\""
                     )))
                 }
             }
         }
-        deserializer.deserialize_str(TerminalVisitor)
+        deserializer.deserialize_str(AnyVisitor)
     }
 }
 
 /// A non-empty set of outcomes that satisfies one dependency edge, or the
-/// literal `terminal` sugar for "all five, I don't care which." Spec §2.2.
+/// literal `any` sugar for "all five, I don't care which." Spec §2.2.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum AcceptSet {
-    Terminal(TerminalKeyword),
+    Any(AnyKeyword),
     Outcomes(Vec<Outcome>),
 }
 
 impl AcceptSet {
     pub fn contains(&self, outcome: Outcome) -> bool {
         match self {
-            AcceptSet::Terminal(_) => true,
+            AcceptSet::Any(_) => true,
             AcceptSet::Outcomes(v) => v.contains(&outcome),
         }
     }
@@ -260,13 +260,16 @@ mod tests {
     }
 
     #[test]
-    fn terminal_keyword_accepts_only_the_exact_string() {
-        let ok: TerminalKeyword = serde_json::from_str("\"terminal\"").unwrap();
-        assert_eq!(serde_json::to_string(&ok).unwrap(), "\"terminal\"");
-        let err = serde_json::from_str::<TerminalKeyword>("\"Terminal\"");
+    fn any_keyword_accepts_only_the_exact_string() {
+        let ok: AnyKeyword = serde_json::from_str("\"any\"").unwrap();
+        assert_eq!(serde_json::to_string(&ok).unwrap(), "\"any\"");
+        let err = serde_json::from_str::<AnyKeyword>("\"Any\"");
         assert!(err.is_err(), "must reject case variants, not fuzzy-match");
-        let err2 = serde_json::from_str::<TerminalKeyword>("\"all\"");
+        let err2 = serde_json::from_str::<AnyKeyword>("\"all\"");
         assert!(err2.is_err());
+        // The keyword's pre-release spelling (0.17.1) is gone, not aliased.
+        let err3 = serde_json::from_str::<AcceptSet>("\"terminal\"");
+        assert!(err3.is_err());
     }
 
     #[test]
@@ -278,10 +281,10 @@ mod tests {
     }
 
     #[test]
-    fn accept_set_terminal_contains_everything() {
-        let a = AcceptSet::Terminal(TerminalKeyword);
+    fn accept_set_any_contains_everything() {
+        let a = AcceptSet::Any(AnyKeyword);
         for o in Outcome::ALL {
-            assert!(a.contains(o), "{o:?} should be accepted by terminal");
+            assert!(a.contains(o), "{o:?} should be accepted by any");
         }
     }
 
@@ -291,8 +294,8 @@ mod tests {
         assert!(
             matches!(list, AcceptSet::Outcomes(v) if v == vec![Outcome::Completed, Outcome::Failed])
         );
-        let term: AcceptSet = serde_json::from_str("\"terminal\"").unwrap();
-        assert!(matches!(term, AcceptSet::Terminal(_)));
+        let any: AcceptSet = serde_json::from_str("\"any\"").unwrap();
+        assert!(matches!(any, AcceptSet::Any(_)));
     }
 
     #[test]
@@ -334,6 +337,22 @@ mod tests {
             DependsOnEntry::Any(a) => assert_eq!(a.any.len(), 2),
             other => panic!("expected Any, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn accept_any_inside_an_any_group_parses_as_each() {
+        // The same word names a group (`any:` key) and an accept set
+        // (`accept: any` value); position alone decides which.
+        let yaml = "any:\n  - step: audit\n    accept: any\n  - mirror-a\n";
+        let e: DependsOnEntry = serde_yaml::from_str(yaml).unwrap();
+        let DependsOnEntry::Any(group) = e else {
+            panic!("expected an any group, got {e:?}");
+        };
+        assert!(matches!(
+            &group.any[0],
+            DependsOnEntry::Step(StepEntry { step, accept: AcceptSet::Any(_) }) if step == "audit"
+        ));
+        assert!(matches!(&group.any[1], DependsOnEntry::Name(n) if n == "mirror-a"));
     }
 
     #[test]

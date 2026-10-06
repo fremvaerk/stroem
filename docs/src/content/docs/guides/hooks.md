@@ -258,7 +258,7 @@ tasks:
 
 ## Cleanup and notification after a failure
 
-A dependent's own `accept: [completed, failed]` (or `accept: terminal`) does let it run after an upstream failure, and that's fully decoupled from whether the job still fails (`continue_on_failure`, self-scoped on the upstream step — see [Conditionals](/guides/conditionals/)). But a step that isn't really part of the flow's own DAG — cleanup, notifying on-call, tearing down partial resources — still belongs in an `on_error` (or `on_cancel`) hook, so it fires exactly once on any terminal outcome without wiring an `accept` edge to every step that might fail:
+A dependent's own `accept: [completed, failed]` (or `accept: any`) does let it run after an upstream failure, and that's fully decoupled from whether the job still fails (`continue_on_failure`, self-scoped on the upstream step — see [Conditionals](/guides/conditionals/)). But a step that isn't really part of the flow's own DAG — cleanup, notifying on-call, tearing down partial resources — still belongs in an `on_error` (or `on_cancel`) hook, so it fires exactly once on any terminal outcome without wiring an `accept` edge to every step that might fail:
 
 ```yaml
 tasks:

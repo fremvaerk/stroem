@@ -809,7 +809,7 @@ CWS_CMERGE=$(echo "$CWS_DETAIL" | jq -r '.steps[] | select(.step_name == "cws-me
 pass "strict AND: merge with the default-accept skipped branch omitted, tolerant-accept branch ran"
 
 # --- dependency-conditions `any`/`all` grouping, end to end ---
-# fanin-demo: `ranked` depends on `audit` (accept: terminal, ordering only)
+# fanin-demo: `ranked` depends on `audit` (accept: any, ordering only)
 # and an `any: [mirror-a, mirror-b]` group. mirror-a always fails (with its
 # own continue_on_failure so that failure alone doesn't fail the job) and
 # mirror-b always completes — the any group is satisfied by mirror-b alone,

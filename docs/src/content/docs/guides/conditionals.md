@@ -20,7 +20,7 @@ depends_on:
   - step: b
     accept: [completed, failed]        # tolerates b failing, not being skipped
   - step: c
-    accept: terminal                   # ordering only — don't care how c ends
+    accept: any                   # ordering only — don't care how c ends
 ```
 
 **Readiness waits for everything named, every time.** Whether a dependency is required or tolerated, the step is only decided once *every* step named anywhere in its `depends_on` tree has gone terminal — there's no fail-fast on an already-unsatisfiable tree, and no shortcut for an `any` group already satisfied by its first child. See [Validation](#validation) and the [YAML reference](/reference/workflow-yaml/#dependencies) for the full grammar, including `all`/`any` grouping.
@@ -159,7 +159,7 @@ tasks:
           - step: enrichment
             accept: [completed, failed]              # tolerates a failed enrichment, not a skip
           - step: audit
-            accept: terminal                          # pure ordering: wait for it, don't care how it ends
+            accept: any                          # pure ordering: wait for it, don't care how it ends
 ```
 
 `enrichment` and `audit` each carry their own `continue_on_failure: true` if their own failure shouldn't fail the *job* — that's a separate decision (see [Accounting vs. readiness](#accounting-vs-readiness) below) from whether `publish` *accepts* their failure. This is the shape 0.17's flags had no answer for: "tolerate a dependency's failure, but still block on it being skipped" needs `[completed, failed]` — `skipped` and `omitted` just aren't in the set.
@@ -186,7 +186,7 @@ tasks:
         action: rank-mirrors
         depends_on:
           - step: audit
-            accept: terminal
+            accept: any
           - any: [mirror-a, mirror-b]   # at least one mirror must complete
 ```
 
@@ -211,10 +211,10 @@ flow:
     action: remove-temp-files
     depends_on:
       - step: last-step
-        accept: terminal         # runs whether last-step completed, failed, or was cancelled
+        accept: any         # runs whether last-step completed, failed, or was cancelled
 ```
 
-`continue_on_failure` on `last-step` means `last-step` failing doesn't fail the job — full stop. It has no effect on whether `cleanup` runs; that's `cleanup`'s own `accept: terminal`. The example above, as written (no `continue_on_failure` on `last-step`), already does the more direct thing: `cleanup` runs after a failure **and** the job still ends `failed` (so `on_error` fires too) — `accept` and `continue_on_failure` are fully decoupled, so a cleanup step doesn't need to leave the flow just to keep the job's outcome honest. Reach for an [`on_error` / `on_cancel` hook](/guides/hooks/) instead when what needs to run isn't really part of the task's own DAG — paging on-call, tearing down infrastructure the flow itself never touched — and you want it to fire exactly once on any terminal outcome without wiring an `accept` edge to every step that might fail.
+`continue_on_failure` on `last-step` means `last-step` failing doesn't fail the job — full stop. It has no effect on whether `cleanup` runs; that's `cleanup`'s own `accept: any`. The example above, as written (no `continue_on_failure` on `last-step`), already does the more direct thing: `cleanup` runs after a failure **and** the job still ends `failed` (so `on_error` fires too) — `accept` and `continue_on_failure` are fully decoupled, so a cleanup step doesn't need to leave the flow just to keep the job's outcome honest. Reach for an [`on_error` / `on_cancel` hook](/guides/hooks/) instead when what needs to run isn't really part of the task's own DAG — paging on-call, tearing down infrastructure the flow itself never touched — and you want it to fire exactly once on any terminal outcome without wiring an `accept` edge to every step that might fail.
 
 A dependent's own `when` is still evaluated on its own terms once its `depends_on` tree is satisfied: the tree decides whether the dependent is even considered, not what its own condition renders to.
 

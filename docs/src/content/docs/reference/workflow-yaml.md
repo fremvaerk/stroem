@@ -457,11 +457,11 @@ Steps without `depends_on` start immediately. Each entry in a `depends_on` list 
 |---|---|
 | `plain-name` | Sugar for `{step: plain-name, accept: [completed]}` — today's default: the dependency must complete |
 | `{step: name, accept: [...]}` | Satisfied iff `name`'s outcome is in the `accept` list |
-| `{step: name, accept: terminal}` | Sugar for all five outcomes below — "wait for it, don't care how it ends" |
+| `{step: name, accept: any}` | Sugar for all five outcomes below — "wait for it, don't care how it ends" |
 | `{all: [...]}` | Satisfied iff every nested entry is satisfied (an explicit, nestable AND) |
 | `{any: [...]}` | Satisfied iff at least one nested entry is satisfied (OR) |
 
-`accept` is a non-empty list drawn from five **outcomes**, or the literal string `terminal`:
+`accept` is a non-empty list drawn from five **outcomes**, or the literal string `any` (any outcome — not to be confused with the `any:` group, which needs any one of its entries satisfied):
 
 | Outcome | Meaning |
 |---|---|

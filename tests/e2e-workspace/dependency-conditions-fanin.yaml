@@ -31,5 +31,5 @@ tasks:
         action: noop
         depends_on:
           - step: audit
-            accept: terminal
+            accept: any
           - any: [mirror-a, mirror-b]

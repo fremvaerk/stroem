@@ -13,7 +13,7 @@
 
 use serde_json::json;
 use std::collections::HashMap;
-use stroem_common::depends_on::{AcceptSet, DependsOnEntry, StepEntry, TerminalKeyword};
+use stroem_common::depends_on::{AcceptSet, AnyKeyword, DependsOnEntry, StepEntry};
 use stroem_common::models::job::JobStatus;
 use stroem_common::models::workflow::{FlowStep, TaskDef, WorkspaceConfig};
 use stroem_db::{JobRow, JobStepRow};
@@ -29,12 +29,12 @@ fn req(name: &str) -> DependsOnEntry {
     DependsOnEntry::Name(name.to_string())
 }
 
-/// A `{step, accept: terminal}` dependency: pure ordering, any outcome
+/// A `{step, accept: any}` dependency: pure ordering, any outcome
 /// satisfies it.
 fn ordering(name: &str) -> DependsOnEntry {
     DependsOnEntry::Step(StepEntry {
         step: name.to_string(),
-        accept: AcceptSet::Terminal(TerminalKeyword),
+        accept: AcceptSet::Any(AnyKeyword),
     })
 }
 
@@ -84,7 +84,7 @@ fn recalc_pipeline_flow() -> TaskDef {
     );
 
     // build-sessions stays required (rule 1 must still hold transitively
-    // through ai_sources); ai_maintain is ordering-only (accept: terminal),
+    // through ai_sources); ai_maintain is ordering-only (accept: any),
     // so its failure OR skip never blocks ai_sources (rules 2/3).
     flow.insert(
         "ai_sources".to_string(),
@@ -416,7 +416,7 @@ fn rules_5_and_6_beta_stage_prediction_fails_survives_job_but_impressions_skip()
         );
         assert_eq!(skip_reason_of(&rows, &imp).as_deref(), Some("unreachable"));
         // The pipeline continues around the tolerated failure: merge-ml
-        // only has an ordering (accept: terminal) edge to this variant's
+        // only has an ordering (accept: any) edge to this variant's
         // impressions step, so it still runs.
         assert_eq!(
             status_of(&rows, "merge-ml"),

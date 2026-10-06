@@ -228,7 +228,7 @@ flow:
     depends_on: [build]
 ```
 
-When a step times out, it is marked as `failed` with the error "Step timed out". Its dependents run only if their own `depends_on` edge to this step accepts `failed` (e.g. `accept: [completed, failed]` or `accept: terminal`) — otherwise they're skipped `unreachable`. `continue_on_failure` on the timed-out step itself is unrelated to that: it only decides whether the timeout fails the *job* (see [Conditionals](/guides/conditionals/)). The worker also enforces the timeout client-side by cancelling the running process.
+When a step times out, it is marked as `failed` with the error "Step timed out". Its dependents run only if their own `depends_on` edge to this step accepts `failed` (e.g. `accept: [completed, failed]` or `accept: any`) — otherwise they're skipped `unreachable`. `continue_on_failure` on the timed-out step itself is unrelated to that: it only decides whether the timeout fails the *job* (see [Conditionals](/guides/conditionals/)). The worker also enforces the timeout client-side by cancelling the running process.
 
 **Task timeout** — cancels the entire job if it runs too long (max 7d):
 
@@ -271,7 +271,7 @@ A step runs only when its whole `depends_on` tree is satisfied. Each entry names
 
 - A plain `depends_on: [a]` is sugar for `accept: [completed]` — today's default: the dependency must complete cleanly.
 - `{step: a, accept: [completed, failed]}` also tolerates `a` failing.
-- `{step: a, accept: terminal}` runs regardless of how `a` ends.
+- `{step: a, accept: any}` runs regardless of how `a` ends.
 
 There is no automatic convergence: every edge of a merge needs its own `accept` — tolerating one dependency's failure doesn't automatically tolerate a sibling's skip. See the [Conditionals guide](/guides/conditionals/) for branching patterns, the merge/if-else pattern, and skip reasons.
 

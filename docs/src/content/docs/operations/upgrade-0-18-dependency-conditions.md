@@ -37,7 +37,7 @@ In short:
   `accept: [completed]`), a `{step, accept}` object, or an `all`/`any` group.
   `accept` is a non-empty list drawn from five outcomes —
   `completed`/`failed`/`cancelled`/`skipped`/`omitted` — or the literal
-  `terminal` (all five). A dependent now states directly what it tolerates
+  `any` (all five). A dependent now states directly what it tolerates
   about each dependency, instead of relying on the dependency to broadcast a
   flag to everyone downstream.
 - **Readiness is uniform.** The gate always waits for every step named
@@ -62,9 +62,9 @@ translations — the table below says so honestly rather than papering over it:
 | Dependency's 0.17.0 flags | Closest new `accept` | What changes, precisely |
 |---|---|---|
 | neither | `[completed]` (unchanged default) | Exact. |
-| both | `terminal` | Exact (both old flags together already tolerated everything but `pending`). |
+| both | `any` | Exact (both old flags together already tolerated everything but `pending`). |
 | `continue_when_skipped` only | `[completed, skipped]` | **Narrows**: today this also tolerates the dependency being cascade-skipped (an upstream choice-block reaching it); `omitted` isn't in this set, so that case is now newly rejected. |
-| `continue_on_failure` only | `[completed, failed, cancelled, omitted]` (`terminal` minus `skipped`) | **Widens**: `omitted` here also covers the dependency being cascade-skipped, which the old flag never tolerated — only `unreachable`/unknown did. |
+| `continue_on_failure` only | `[completed, failed, cancelled, omitted]` (`any` minus `skipped`) | **Widens**: `omitted` here also covers the dependency being cascade-skipped, which the old flag never tolerated — only `unreachable`/unknown did. |
 
 **The "neither"/"both" rows are exact. The two single-flag rows are
 approximations, and you need to know which case you're actually in before
@@ -106,7 +106,7 @@ reproduce this:
 - So `accept: [completed, skipped]` on `c`'s edge to `b` doesn't include
   `omitted` — `c` is now **omitted too**, where it used to run.
 - Reproducing 0.17.0's behaviour here needs `accept: [completed, omitted]`
-  (or `terminal`) instead — the *opposite* of what a literal reading of
+  (or `any`) instead — the *opposite* of what a literal reading of
   "migrate `continue_when_skipped` to `accept: [completed, skipped]`" would
   suggest.
 
@@ -126,7 +126,7 @@ that distinction away. The only faithful fix is to stop relying on the
 intermediate hop's broadcast and name the actual origin directly: give the
 edge **several hops up** an explicit `accept` for its own direct outcome
 (`failed`/`cancelled` vs. `skipped`), and have the intermediate steps use
-`accept: terminal` purely for ordering.
+`accept: any` purely for ordering.
 
 ## Structural-catch audit
 
@@ -161,7 +161,7 @@ script it) against each task's flow:
    fails? If yes, move `continue_on_failure` onto `f` itself. If the
    downstream step merely needs to *run* after `f` fails (without changing
    the job's outcome), that's a readiness question instead — give that
-   step's edge to `f` an `accept` that includes `failed` (or `terminal`),
+   step's edge to `f` an `accept` that includes `failed` (or `any`),
    and leave `continue_on_failure` off both steps.
 
 No amount of `accept` tuning on downstream edges substitutes for step 3's
@@ -232,7 +232,7 @@ workspace is confirmed on 0.18.0+.
   rollup status (`failed`, if any instance failed), and the output array is
   now built and visible on that `failed` rollup too. Update every such
   dependent's edge to the placeholder to `accept: [completed, failed]` (or
-  `terminal`).
+  `any`).
 - [ ] Deduplicate any `depends_on: [a, a]`-style duplicate entries — still
   valid YAML, but redundant, and the validator now rejects a duplicate name
   among the **direct siblings** of the same `all`/`any` node (the same name

@@ -608,7 +608,7 @@ triggers:
     max_in_flight: 20
 ```
 
-The `consume` step runs indefinitely while emitting `OUTPUT: ` lines. A dependent's own `accept: [failed]` (or `accept: terminal`) would now let it run even after `consume` fails — but that's a `depends_on` question, separate from `continue_on_failure` on `consume` itself, which also changes how the consumer's own failure interacts with `restart_policy` (see [Restart policies](#restart-policies) above). Neither is what a cleanup step needs here: `cleanup-on-exit` runs as an `on_success` / `on_error` / `on_cancel` hook instead, so it always fires exactly once when the job reaches a terminal state, whatever that state is and however `consume` got there, independent of the restart policy that separately determines whether the consumer task restarts.
+The `consume` step runs indefinitely while emitting `OUTPUT: ` lines. A dependent's own `accept: [failed]` (or `accept: any`) would now let it run even after `consume` fails — but that's a `depends_on` question, separate from `continue_on_failure` on `consume` itself, which also changes how the consumer's own failure interacts with `restart_policy` (see [Restart policies](#restart-policies) above). Neither is what a cleanup step needs here: `cleanup-on-exit` runs as an `on_success` / `on_error` / `on_cancel` hook instead, so it always fires exactly once when the job reaches a terminal state, whatever that state is and however `consume` got there, independent of the restart policy that separately determines whether the consumer task restarts.
 
 ## Comparison with other triggers
 
