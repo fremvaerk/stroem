@@ -434,21 +434,24 @@ pub async fn fire_suspended_hooks(
         )
         .await
         {
-            tracing::error!(
-                "Failed to fire on_suspended hook[{}] for job {} step '{}': {:#}",
-                i,
-                job.job_id,
-                step_name,
-                e
-            );
-            s.server_log(
-                job.job_id,
-                &format!(
-                    "[hooks] Failed to fire on_suspended hook[{}] for action '{}': {:#}",
-                    i, hook.action, e
-                ),
-            )
-            .await;
+            {
+                let detail = scrub_hook_error(&format!("{e:#}"), workspace_config);
+                tracing::error!(
+                    "Failed to fire on_suspended hook[{}] for job {} step '{}': {}",
+                    i,
+                    job.job_id,
+                    step_name,
+                    detail
+                );
+                s.server_log(
+                    job.job_id,
+                    &format!(
+                        "[hooks] Failed to fire on_suspended hook[{}] for action '{}': {}",
+                        i, hook.action, detail
+                    ),
+                )
+                .await;
+            }
         }
     }
 }
