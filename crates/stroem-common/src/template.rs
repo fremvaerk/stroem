@@ -827,12 +827,10 @@ pub fn render_value_deep(
 
 /// Merge action-level input defaults into already-rendered step input.
 ///
-/// 1. Calls `merge_defaults()` to fill missing fields from the action's input schema
-/// 2. Calls `render_value_deep()` ONLY on the fields that step 1 filled in from
-///    defaults (a field already present in `rendered_input` is never touched
-///    again, no matter what `merge_defaults()` returns for it)
-///
-/// This handles the case where an action defines a default like:
+/// Every schema field absent from `rendered_input` is filled from its RAW
+/// schema default, and that default is rendered EXACTLY ONCE against
+/// `context`: a string default containing `{{` through Tera, an object or
+/// array default by walking it with `render_value_deep()`, e.g.
 /// ```yaml
 /// input:
 ///   clickhouse:
@@ -841,50 +839,44 @@ pub fn render_value_deep(
 ///       host: "{{ secret.clickhouse.host }}"
 ///       port: 8443
 /// ```
-/// The object default is inserted by `merge_defaults()` as-is, then
-/// `render_value_deep()` walks it to render the `{{ secret.clickhouse.host }}`
-/// template.
 ///
-/// Values already present in `rendered_input` are deliberately excluded from
-/// that second pass and passed through byte-for-byte: they were rendered once
-/// already, in the caller's own context. Re-rendering them here — against
-/// this call's context, which for a cross-workspace action is the *owner's*
-/// `secret` map — would let a caller smuggle out the owner's secrets with a
-/// Tera string-literal trick (a value like `'{{ "{{ secret.TOKEN }}" }}'`
-/// renders to a literal `{{ secret.TOKEN }}` on the first, caller-side pass,
-/// then would render again to the real secret value if this function
-/// re-rendered already-resolved fields).
+/// Exactly once matters (R26): the output of a render is never rendered
+/// again. A default such as `"{{ input.note }}"` can render to a
+/// caller-supplied literal `{{ secret.TOKEN }}` (the caller-side output of
+/// `'{{ "{{ secret.TOKEN }}" }}'`); a second pass — this function used to
+/// run `merge_defaults()` and then `render_value_deep()` over the same
+/// fields — would render THAT against this call's context, for a
+/// cross-workspace action the *owner's* `secret` map, and hand the owner's
+/// secret to the caller.
+///
+/// Values already present in `rendered_input` are passed through
+/// byte-for-byte for the same reason: they were rendered once already, in
+/// the caller's own context.
 pub fn merge_action_defaults(
     rendered_input: &serde_json::Value,
     action_input_schema: &HashMap<String, InputFieldDef>,
     context: &serde_json::Value,
 ) -> Result<serde_json::Value> {
-    let empty = serde_json::Map::new();
-    let input_map = rendered_input.as_object().unwrap_or(&empty);
+    let mut merged_map = rendered_input.as_object().cloned().unwrap_or_default();
 
-    let merged = merge_defaults(rendered_input, action_input_schema, context)
+    for (field_name, field_def) in action_input_schema {
+        if merged_map.contains_key(field_name) {
+            continue;
+        }
+        let Some(default_value) = &field_def.default else {
+            continue;
+        };
+        let rendered = match default_value {
+            serde_json::Value::String(s) if s.contains("{{") => {
+                render_template(s, context).map(serde_json::Value::String)
+            }
+            _ => render_value_deep(default_value, context),
+        }
+        .with_context(|| {
+            format!("Failed to render default template for input field '{field_name}'")
+        })
         .context("Failed to merge action input defaults")?;
-    let mut merged_map = merged.as_object().cloned().unwrap_or_default();
-
-    // Only fields absent from the caller-supplied input were filled in from
-    // schema defaults above; render templates in those alone. A value the
-    // caller supplied (including a connection object an earlier resolver
-    // pass already substituted in) must never be re-rendered here — doing so
-    // against, e.g., the action owner's `secret` context would let a caller
-    // smuggle out owner secrets via a Tera string-literal trick
-    // (`'{{ "{{ secret.TOKEN }}" }}'`).
-    let mut defaults_only = serde_json::Map::new();
-    for (key, value) in merged_map.iter() {
-        if !input_map.contains_key(key) {
-            defaults_only.insert(key.clone(), value.clone());
-        }
-    }
-    let rendered_defaults = render_value_deep(&serde_json::Value::Object(defaults_only), context)
-        .context("Failed to render templates in action defaults")?;
-    if let serde_json::Value::Object(rendered_map) = rendered_defaults {
-        for (key, value) in rendered_map {
-            merged_map.insert(key, value);
-        }
+        merged_map.insert(field_name.clone(), rendered);
     }
 
     Ok(serde_json::Value::Object(merged_map))
@@ -1318,18 +1310,15 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_action_defaults_renders_a_self_referencing_default_twice() {
-        // `merge_action_defaults` composes `merge_defaults` (which already
-        // renders a *string* default through Tera as it fills it in) with a
-        // second `render_value_deep` pass over the same "filled from
-        // defaults" bucket (needed for the *object*-default case its own doc
-        // comment documents, e.g. `{host: "{{ secret.foo }}"}`). For a plain
-        // string default that itself renders to another `{{ }}` expression,
-        // this doubles up: `merge_defaults` renders `"{{ secret.X }}"` to
-        // secret X's OWN raw value, and `render_value_deep` then renders
-        // THAT a second time. See `crates/stroem-server/tests/integration_test.rs`
-        // `test_xws_task_two_pass_default_is_pinned_behaviour`, which locks
-        // this in end-to-end through a `type: task` action's input default.
+    fn test_merge_action_defaults_renders_a_self_referencing_default_once() {
+        // A string default renders exactly once (R26). `"{{ secret.X }}"`
+        // renders to secret X's OWN raw value — the literal text
+        // `{{ secret.Y }}` — and that output is never rendered again. Until
+        // R26 `merge_action_defaults` ran `merge_defaults` (which renders a
+        // string default) and then `render_value_deep` over the same fields,
+        // landing on `yval`; this test pinned that. The end-to-end pin is
+        // `crates/stroem-server/tests/integration_test.rs`
+        // `test_xws_task_default_is_rendered_exactly_once`.
         use std::collections::HashMap;
         let caller_bucket = json!({});
         let mut schema = HashMap::new();
@@ -1343,7 +1332,7 @@ mod tests {
         );
         let secrets_ctx = json!({"secret": {"X": "{{ secret.Y }}", "Y": "yval"}});
         let merged = merge_action_defaults(&caller_bucket, &schema, &secrets_ctx).unwrap();
-        assert_eq!(merged, json!({"note": "yval"}));
+        assert_eq!(merged, json!({"note": "{{ secret.Y }}"}));
     }
 
     #[test]
@@ -3681,6 +3670,75 @@ mod tests {
         let context = json!({"secret": {"deep": "resolved"}});
         let result = merge_action_defaults(&rendered_input, &schema, &context).unwrap();
         assert_eq!(result["config"]["level1"]["level2"]["value"], "resolved");
+    }
+
+    /// R26: a string default is rendered EXACTLY once. Before the fix,
+    /// `merge_defaults` rendered it and `render_value_deep` rendered the
+    /// result again, so a default that renders to a caller-supplied literal
+    /// `{{ secret.TOKEN }}` (the caller-side output of
+    /// `'{{ "{{ secret.TOKEN }}" }}'`) was rendered a second time against the
+    /// owner's `secret` map and yielded the owner's secret.
+    #[test]
+    fn merge_action_defaults_renders_a_string_default_exactly_once() {
+        const CANARY: &str = "owner-secret-canary";
+        let mut schema = HashMap::new();
+        schema.insert(
+            "copy".to_string(),
+            field("string", false, Some(json!("{{ input.note }}"))),
+        );
+        schema.insert("note".to_string(), field("string", false, None));
+        let context = json!({
+            "secret": {"TOKEN": CANARY},
+            "input": {"note": "{{ secret.TOKEN }}"},
+        });
+        let rendered_input = json!({"note": "{{ secret.TOKEN }}"});
+
+        let merged = merge_action_defaults(&rendered_input, &schema, &context).unwrap();
+
+        assert_eq!(merged["copy"], "{{ secret.TOKEN }}", "{merged}");
+        assert_eq!(merged["note"], "{{ secret.TOKEN }}", "{merged}");
+        assert!(!merged.to_string().contains(CANARY), "{merged}");
+    }
+
+    /// R26 counterpart: an object/array default's nested templates are the
+    /// owner's own and still render, also exactly once.
+    #[test]
+    fn merge_action_defaults_renders_nested_object_and_array_defaults_once() {
+        let mut schema = HashMap::new();
+        schema.insert(
+            "conn".to_string(),
+            field(
+                "object",
+                false,
+                Some(json!({
+                    "host": "{{ secret.TOKEN }}",
+                    "echo": "{{ input.note }}",
+                    "port": 5432,
+                })),
+            ),
+        );
+        schema.insert(
+            "list".to_string(),
+            field(
+                "array",
+                false,
+                Some(json!(["{{ secret.TOKEN }}", "{{ input.note }}", 7])),
+            ),
+        );
+        let context = json!({
+            "secret": {"TOKEN": "owner-secret-canary"},
+            "input": {"note": "{{ secret.TOKEN }}"},
+        });
+
+        let merged = merge_action_defaults(&json!({}), &schema, &context).unwrap();
+
+        assert_eq!(merged["conn"]["host"], "owner-secret-canary");
+        assert_eq!(merged["conn"]["echo"], "{{ secret.TOKEN }}");
+        assert_eq!(merged["conn"]["port"], 5432);
+        assert_eq!(
+            merged["list"],
+            json!(["owner-secret-canary", "{{ secret.TOKEN }}", 7])
+        );
     }
 
     #[test]

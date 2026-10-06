@@ -5066,7 +5066,7 @@ async fn test_xws_task_persisted_library_action_stays_local() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_xws_task_two_pass_default_is_pinned_behaviour() -> Result<()> {
+async fn test_xws_task_default_is_rendered_exactly_once() -> Result<()> {
     let (router, pool, _mgr, _tmp) = setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
     let resp = router
         .oneshot(api_request(
@@ -5082,15 +5082,16 @@ async fn test_xws_task_two_pass_default_is_pinned_behaviour() -> Result<()> {
         .pop()
         .expect("child job");
     let child_input = child.input.expect("child input");
-    // PIN: `merge_action_defaults` composes `merge_defaults` (which already
-    // renders a string default through Tera as it fills it in) with a
-    // second `render_value_deep` pass over the whole "filled from defaults"
-    // bucket. `note`'s default `{{ secret.X }}` is rendered by the first
-    // pass to X's own raw value, the literal string `{{ secret.Y }}` — and
-    // the second pass renders THAT too, landing on `yval`. See
-    // `stroem_common::template::tests::test_merge_action_defaults_renders_a_self_referencing_default_twice`
-    // for the isolated unit-level pin of this mechanism.
-    assert_eq!(child_input["note"], "yval", "{child_input}");
+    // R26: an action default renders exactly once. `note`'s default
+    // `{{ secret.X }}` renders to X's own raw value, the literal string
+    // `{{ secret.Y }}`, and that output is never rendered again (until R26 a
+    // second `render_value_deep` pass landed on `yval`, and the same second
+    // pass let a caller-supplied literal `{{ secret.… }}` reach the owner's
+    // secrets). Unit-level pins:
+    // `stroem_common::template::tests::test_merge_action_defaults_renders_a_self_referencing_default_once`
+    // and `merge_action_defaults_renders_a_string_default_exactly_once`.
+    assert_eq!(child_input["note"], "{{ secret.Y }}", "{child_input}");
+    assert!(!child_input.to_string().contains("yval"), "{child_input}");
     Ok(())
 }
 
