@@ -2,14 +2,12 @@
 //! re-match + redaction, the § 7.8 job ACL rule on every job-scoped path,
 //! and state partitions that follow the job.
 
-mod common;
-
 use std::time::Duration;
 
+use crate::common::pinned::*;
 use anyhow::Result;
 use axum::body::Body;
 use axum::Router;
-use common::pinned::*;
 use http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};

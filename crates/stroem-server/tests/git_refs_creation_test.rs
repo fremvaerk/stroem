@@ -2,8 +2,7 @@
 //! ref resolution and stamping at creation, the role-scoped pre-check, and
 //! pinned jobs through settlement, dispatch, hooks, retry and recovery.
 
-mod common;
-use common::pinned::*;
+use crate::common::pinned::*;
 
 use anyhow::Result;
 use serde_json::json;

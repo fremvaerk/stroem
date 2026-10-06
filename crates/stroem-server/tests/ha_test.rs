@@ -7,8 +7,9 @@
 //!   lock at a time; failover happens within seconds when the holder drops.
 //!   Postgres advisory locks are server-wide, not per-database — so every
 //!   test here that touches the real `LEADER_LOCK_KEY` is `#[serial]`,
-//!   serializing them against each other (not against unrelated tests in
-//!   this binary) within this one shared container.
+//!   serializing them against each other (and the metrics tests' `#[serial]`
+//!   ones, the same default key; not against the other tests of this
+//!   binary) within this one shared container.
 //! - NOTIFY/LISTEN event bus: cancellation, log chunks, and workspace reloads
 //!   propagate from one replica to another via Postgres pub/sub.
 

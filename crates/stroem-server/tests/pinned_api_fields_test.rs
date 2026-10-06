@@ -1,7 +1,6 @@
 //! API exposure of pins (spec 2026-10-02 § 11).
 
-mod common;
-use common::pinned::*;
+use crate::common::pinned::*;
 
 use std::time::Duration;
 

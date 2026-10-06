@@ -3,6 +3,12 @@ name = "stroem-worker"
 version.workspace = true
 edition.workspace = true
 
+# No tests in main.rs: skip building an empty test binary.
+[[bin]]
+name = "stroem-worker"
+path = "src/main.rs"
+test = false
+
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true

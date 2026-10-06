@@ -1,10 +1,8 @@
 //! Spec 2026-10-02 (git refs) — DB layer: pin columns, partitioned state,
 //! stats exclusion, release_claim, the expected_claim guard, the ACL scope.
 
-mod common;
-
+use crate::common::{create_job, setup_db};
 use anyhow::Result;
-use common::{create_job, setup_db};
 use sqlx::PgPool;
 use stroem_db::{
     ClaimIdentity, ClosureBounds, FailOutcome, JobAclScope, JobPinCols, JobRepo, JobStepRepo,

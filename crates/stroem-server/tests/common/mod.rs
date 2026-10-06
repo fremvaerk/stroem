@@ -1,3 +1,6 @@
-//! Shared integration-test fixtures. A directory under `tests/` is not a test
-//! target; each test file opts in with `mod common;`.
+//! Shared integration-test fixtures, reached as `crate::common::…` from every
+//! module of the integration binary (`tests/main.rs`).
+#[cfg(feature = "s3")]
+pub mod minio;
 pub mod pinned;
+pub mod tera_fixtures;

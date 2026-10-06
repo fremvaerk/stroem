@@ -2,6 +2,9 @@
 name = "stroem-cli"
 version.workspace = true
 edition.workspace = true
+# One integration-test binary per crate: tests/main.rs declares every test
+# file as a module. A new test file is a `mod` line there, not a new target.
+autotests = false
 
 [[bin]]
 name = "stroem"
@@ -31,3 +34,7 @@ url.workspace = true
 serde_yaml.workspace = true
 tempfile.workspace = true
 wiremock = "0.6"
+
+[[test]]
+name = "integration"
+path = "tests/main.rs"

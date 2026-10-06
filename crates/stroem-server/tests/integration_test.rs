@@ -33,8 +33,7 @@ use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 use uuid::Uuid;
 
-#[path = "common/tera_fixtures.rs"]
-mod tera_fixtures;
+use crate::common::tera_fixtures;
 
 /// `read_tail`'s tail budget for tests that want the whole log — well above
 /// anything these fixtures write.

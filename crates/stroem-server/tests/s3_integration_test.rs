@@ -9,8 +9,7 @@ use stroem_server::log_storage::{JobLogMeta, LogStorage};
 use tempfile::TempDir;
 use uuid::Uuid;
 
-#[path = "common/minio.rs"]
-mod minio;
+use crate::common::minio;
 
 /// `read_tail`'s tail budget for tests that want the whole log — well above
 /// anything these fixtures write.

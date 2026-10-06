@@ -84,8 +84,10 @@ fn empty_config(url: &str, log_dir: &std::path::Path) -> ServerConfig {
 /// The `metrics` facade has a single global recorder per process. Install
 /// exactly once for the whole test binary; every test reuses the same handle.
 ///
-/// Side effect: counters accumulate across tests in the same process. Tests
-/// must assert *presence* (or per-test diffs) rather than absolute values.
+/// Side effect: counters accumulate across tests in the same process — every
+/// server integration test, since they share one binary (`tests/main.rs`).
+/// Tests here assert *presence*; an exact count needs a recorder local to the
+/// test (see `cascading_cancel_counts_parent_exactly_once`).
 /// Gauges set a fresh value each scrape via `gather_gauges`, so they are
 /// stable across tests as long as each test seeds known DB state.
 fn global_test_handle() -> metrics_exporter_prometheus::PrometheusHandle {
@@ -675,19 +677,18 @@ async fn metrics_success_response_has_cache_control_no_store() -> Result<()> {
 ///   UPDATE job SET metrics_recorded_at = NOW()
 ///   WHERE job_id = $1 AND metrics_recorded_at IS NULL
 /// and only the winner increments.
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
+///
+/// Counted on a recorder local to this test, not the global one: every
+/// server test shares this process (`tests/main.rs`), so the global counter
+/// also sees jobs other tests cancel meanwhile, and its only label is
+/// `status`. Current-thread runtime, so the whole cascade runs on the thread
+/// that holds the local recorder.
+#[tokio::test]
 async fn cascading_cancel_counts_parent_exactly_once() -> Result<()> {
     let h = boot().await?;
     let log_dir = h._temp.path().to_path_buf();
-    let mut config = empty_config(&h.url, &log_dir);
-    config.metrics = Some(MetricsConfig {
-        public: true,
-        ..Default::default()
-    });
+    let config = empty_config(&h.url, &log_dir);
 
-    // Build the state explicitly so we can reuse it both for cancel_job and
-    // for the metrics router (AppState is Clone).
     let mgr = WorkspaceManager::from_config("default", WorkspaceConfig::new());
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
     let state = AppState::new(
@@ -699,10 +700,6 @@ async fn cascading_cancel_counts_parent_exactly_once() -> Result<()> {
         None,
     )
     .with_event_bus(EventBus::noop());
-
-    let cancel = CancellationToken::new();
-    let handle = global_test_handle();
-    let router = build_router(state.clone(), cancel).layer(Extension(handle));
 
     // --- Seed: parent job (running) with one task-type step (server-managed,
     // no worker_id), and a child job (running, no steps) linked to it. ---
@@ -738,10 +735,21 @@ async fn cascading_cancel_counts_parent_exactly_once() -> Result<()> {
     .execute(&h.pool)
     .await?;
 
-    // Record counter values BEFORE the cancel so we can compute the delta
-    // (counters accumulate across tests in the same process).
-    let body_before = scrape(&router).await?;
-    let count_before: u64 = body_before
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let local = recorder.handle();
+    {
+        let _local = metrics::set_default_local_recorder(&recorder);
+        // Cancel the parent — this cascades synchronously through:
+        //   cancel(parent) → cancel(child) → advance(child)
+        //   → propagate(child, parent) → [parent terminal detected]
+        //   → claim_terminal_handling(parent)  [attempt 1 — wins CAS]
+        //   back in cancel(parent): advance(parent)
+        //   → claim_terminal_handling(parent)  [attempt 2 — CAS guard blocks it]
+        state.settlement().cancel(parent_id).await?;
+    }
+
+    let body = local.render();
+    let count: u64 = body
         .lines()
         .filter(|l| l.starts_with(stroem_server::metrics::STROEM_JOBS_COMPLETED_TOTAL))
         .filter(|l| l.contains(r#"status="cancelled""#))
@@ -751,32 +759,9 @@ async fn cascading_cancel_counts_parent_exactly_once() -> Result<()> {
                 .and_then(|n| n.parse::<u64>().ok())
         })
         .sum();
-
-    // Cancel the parent — this cascades synchronously through:
-    //   cancel(parent) → cancel(child) → advance(child)
-    //   → propagate(child, parent) → [parent terminal detected]
-    //   → claim_terminal_handling(parent)  [attempt 1 — wins CAS]
-    //   back in cancel(parent): advance(parent)
-    //   → claim_terminal_handling(parent)  [attempt 2 — CAS guard blocks it]
-    state.settlement().cancel(parent_id).await?;
-
-    let body_after = scrape(&router).await?;
-    let count_after: u64 = body_after
-        .lines()
-        .filter(|l| l.starts_with(stroem_server::metrics::STROEM_JOBS_COMPLETED_TOTAL))
-        .filter(|l| l.contains(r#"status="cancelled""#))
-        .filter_map(|l| {
-            l.split_whitespace()
-                .last()
-                .and_then(|n| n.parse::<u64>().ok())
-        })
-        .sum();
-
-    let delta = count_after - count_before;
     assert_eq!(
-        delta, 2,
-        "expected exactly 2 cancelled-job counts (1 parent + 1 child), got {delta}\n\
-         body_before:\n{body_before}\nbody_after:\n{body_after}"
+        count, 2,
+        "expected exactly 2 cancelled-job counts (1 parent + 1 child), got {count}\n{body}"
     );
     Ok(())
 }

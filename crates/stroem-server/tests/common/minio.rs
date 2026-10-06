@@ -1,7 +1,6 @@
-//! MinIO container + S3 client for the S3 tests. Not part of `common/mod.rs`:
-//! `s3_integration_test.rs` and `log_peak_alloc_test.rs` include this file
-//! with `#[path = "common/minio.rs"] mod minio;`, so neither drags in the
-//! other shared fixtures.
+//! MinIO container + S3 client for the S3 tests: `crate::common::minio` in the
+//! integration binary; `log_peak_alloc_test.rs`, a binary of its own, includes
+//! this file alone with `#[path = "common/minio.rs"] mod minio;`.
 
 use anyhow::Result;
 use testcontainers::core::{ContainerPort, WaitFor};

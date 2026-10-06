@@ -1,6 +1,4 @@
-mod harness;
-
-use harness::TestEnv;
+use crate::harness::TestEnv;
 use serde_json::json;
 use std::time::Duration;
 

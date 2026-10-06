@@ -2,11 +2,20 @@
 name = "stroem-server"
 version.workspace = true
 edition.workspace = true
+# One integration-test binary per crate: tests/main.rs declares every test
+# file as a module. A new test file is a `mod` line there, not a new target.
+autotests = false
 
 [features]
 default = ["s3", "mcp"]
 s3 = ["dep:aws-sdk-s3", "dep:aws-config"]
 mcp = ["dep:rmcp", "dep:schemars", "dep:http"]
+
+# No tests in main.rs: skip building an empty test binary.
+[[bin]]
+name = "stroem-server"
+path = "src/main.rs"
+test = false
 
 [dependencies]
 anyhow.workspace = true
@@ -92,4 +101,9 @@ serial_test = "4"
 # Counting global allocator, one read at a time: needs its own main.
 [[test]]
 name = "log_peak_alloc_test"
+path = "tests/log_peak_alloc_test.rs"
 harness = false
+
+[[test]]
+name = "integration"
+path = "tests/main.rs"

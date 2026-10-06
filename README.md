@@ -403,6 +403,9 @@ cargo test --workspace
 # Integration tests (requires Docker)
 cargo test -p stroem-db
 
+# One crate's integration tests are one binary (`tests/main.rs`); filter by module
+cargo test -p stroem-server --test integration git_refs_claim_test::
+
 # E2E tests (requires Docker Compose)
 ./tests/e2e.sh
 

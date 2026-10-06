@@ -1,7 +1,6 @@
 use stroem_db::repos::job_artifact::{JobArtifactRepo, NewArtifactRow};
 
-mod common;
-use common::{create_job, setup_db};
+use crate::common::{create_job, setup_db};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn upsert_then_list_returns_artifacts_for_job() {

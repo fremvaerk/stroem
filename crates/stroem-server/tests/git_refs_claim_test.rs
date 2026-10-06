@@ -1,10 +1,8 @@
 //! Claim-time pins, release, withholding and pinned tarballs (spec § 5.4,
 //! § 7.2). Uses the shared git-refs fixture (`tests/common/pinned.rs`).
 
-mod common;
-use common::pinned::*;
-#[path = "common/tera_fixtures.rs"]
-mod tera_fixtures;
+use crate::common::pinned::*;
+use crate::common::tera_fixtures;
 
 use axum::http::StatusCode;
 use serde_json::{json, Value};

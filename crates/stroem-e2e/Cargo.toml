@@ -2,6 +2,9 @@
 name = "stroem-e2e"
 version.workspace = true
 edition.workspace = true
+# One integration-test binary per crate: tests/main.rs declares every test
+# file as a module. A new test file is a `mod` line there, not a new target.
+autotests = false
 # No lib — tests only
 
 [dev-dependencies]
@@ -21,3 +24,7 @@ sqlx = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 stroem-test-support.workspace = true
+
+[[test]]
+name = "integration"
+path = "tests/main.rs"

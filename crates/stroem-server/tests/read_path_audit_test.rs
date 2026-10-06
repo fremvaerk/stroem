@@ -9,8 +9,7 @@
 //!   output settling into its parent step), which the job's redaction set must
 //!   cover through its redaction closure (§ 7.4).
 
-mod common;
-use common::pinned::*;
+use crate::common::pinned::*;
 
 use std::collections::BTreeSet;
 

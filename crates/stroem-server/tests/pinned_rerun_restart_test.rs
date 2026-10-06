@@ -5,8 +5,7 @@
 //! § 7.3, both entry points looked the task up in the live config first and
 //! answered 404/400.
 
-mod common;
-use common::pinned::*;
+use crate::common::pinned::*;
 
 use std::time::Duration;
 

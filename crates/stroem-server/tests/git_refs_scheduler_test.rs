@@ -2,8 +2,7 @@
 //! These also cover `trigger_target::create_target_job`: the pinned branch
 //! (`*_with_ref_*`) and the unpinned branch (`*_without_ref_*`).
 
-mod common;
-use common::pinned::*;
+use crate::common::pinned::*;
 
 use stroem_db::{JobRepo, JobRow};
 use uuid::Uuid;

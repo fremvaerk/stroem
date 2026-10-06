@@ -3,10 +3,9 @@
 //! [`raw_detail_contains`] on it, and `fixtures_are_real` below pins both,
 //! so a test asserting the secret is absent from our output is never vacuous.
 //!
-//! Not part of `common/mod.rs`: a test file includes it with
-//! `#[path = "common/tera_fixtures.rs"] mod tera_fixtures;`. Test code only —
-//! with `src/test_support.rs` it is one of the two server files the
-//! `raw_detail` guard (`stroem-common/tests/raw_detail_guard.rs`) allows.
+//! Test code only (`crate::common::tera_fixtures`) — with
+//! `src/test_support.rs` it is one of the two server files the `raw_detail`
+//! guard (`stroem-common/tests/raw_detail_guard.rs`) allows.
 
 #![allow(dead_code)]
 
