@@ -11,6 +11,15 @@ use uuid::Uuid;
 /// Interval between reconciliation passes (seconds).
 const RECONCILE_INTERVAL_SECS: u64 = 30;
 
+/// Defence in depth (spec § 3.4): template errors are value-free, but the
+/// chain also carries our own contexts; scrub with the workspace's secrets.
+fn scrub_env_error(text: &str, cfg: &stroem_common::models::workflow::WorkspaceConfig) -> String {
+    crate::workspace_set::redact_secrets_in_str(
+        text,
+        &crate::workspace_set::collect_config_secret_values(cfg),
+    )
+}
+
 /// Spawn the event source manager background task.
 ///
 /// On each reconcile cycle the manager ensures that exactly one active event
@@ -420,11 +429,12 @@ async fn collect_desired(state: &AppState) -> Vec<DesiredEventSource> {
             let resolved_env = match render_env_map(&env, &secrets_ctx) {
                 Ok(e) => e,
                 Err(e) => {
+                    let detail = scrub_env_error(&format!("{e:#}"), &config);
                     tracing::warn!(
-                        "EventSourceManager: failed to render env for '{}/{}': {:#}",
+                        "EventSourceManager: failed to render env for '{}/{}': {}",
                         ws_name,
                         trigger_name,
-                        e
+                        detail
                     );
                     continue;
                 }
@@ -1078,5 +1088,14 @@ mod tests {
             result.is_ok(),
             "EventSourceManager should stop cleanly after cancellation as follower"
         );
+    }
+
+    #[test]
+    fn env_error_text_is_scrubbed_with_workspace_secrets() {
+        let mut cfg = stroem_common::models::workflow::WorkspaceConfig::new();
+        cfg.secrets
+            .insert("T".into(), serde_json::json!("env-raw-canary"));
+        let text = super::scrub_env_error("failed: env-raw-canary", &cfg);
+        assert!(!text.contains("env-raw-canary"), "{text}");
     }
 }

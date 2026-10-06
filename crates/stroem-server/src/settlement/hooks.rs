@@ -317,21 +317,24 @@ pub async fn fire_hooks_of_kind(
         )
         .await
         {
-            tracing::error!(
-                "Failed to fire hook {}[{}] for job {}: {:#}",
-                hook_type,
-                i,
-                job.job_id,
-                e
-            );
-            s.server_log(
-                job.job_id,
-                &format!(
-                    "[hooks] Failed to fire hook {}[{}] for action '{}': {:#}",
-                    hook_type, i, hook.action, e
-                ),
-            )
-            .await;
+            {
+                let detail = scrub_hook_error(&format!("{e:#}"), workspace_config);
+                tracing::error!(
+                    "Failed to fire hook {}[{}] for job {}: {}",
+                    hook_type,
+                    i,
+                    job.job_id,
+                    detail
+                );
+                s.server_log(
+                    job.job_id,
+                    &format!(
+                        "[hooks] Failed to fire hook {}[{}] for action '{}': {}",
+                        hook_type, i, hook.action, detail
+                    ),
+                )
+                .await;
+            }
         }
     }
 }
@@ -819,6 +822,15 @@ fn foreign_hook_task_error(
             "hook uses action '{hook_action}' whose task '{task_ref}' is in another workspace; hook actions cannot call tasks across workspaces"
         )
     })
+}
+
+/// Defence in depth (spec § 3.4): template errors are value-free, but the
+/// chain also carries our own contexts; scrub with the workspace's secrets.
+fn scrub_hook_error(text: &str, cfg: &WorkspaceConfig) -> String {
+    crate::workspace_set::redact_secrets_in_str(
+        text,
+        &crate::workspace_set::collect_config_secret_values(cfg),
+    )
 }
 
 /// Select which hooks to fire for a job, applying the priority and fallback rules.
@@ -2025,6 +2037,17 @@ mod tests {
 
         let job = JobRepo::get(&pool, last).await.unwrap().unwrap();
         assert_eq!(hook_chain_depth(&pool, &job).await, 3);
+    }
+
+    // ─── Error scrubbing tests (defence in depth: Tera 1→2 upgrade) ──────────
+
+    #[test]
+    fn hook_error_text_is_scrubbed_with_workspace_secrets() {
+        let mut cfg = stroem_common::models::workflow::WorkspaceConfig::new();
+        cfg.secrets
+            .insert("T".into(), serde_json::json!("hook-raw-canary"));
+        let text = super::scrub_hook_error("failed: hook-raw-canary", &cfg);
+        assert!(!text.contains("hook-raw-canary"), "{text}");
     }
 
     // ─── H2 regression: instrument spans must not Debug-print the JobRow ─────
