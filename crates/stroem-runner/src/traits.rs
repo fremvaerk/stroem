@@ -96,6 +96,10 @@ pub enum LogStream {
     Stderr,
 }
 
+// async_trait desugars this to a function returning a `Pin<Box<dyn Future>>`,
+// already `#[must_use]`, and redundantly marks the method itself `#[must_use]`
+// too — newer clippy's `double_must_use` flags that redundancy.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Runner: Send + Sync {
     /// Execute a command and return the result.
