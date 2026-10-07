@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
-use stroem_common::models::workflow::WorkspaceConfig;
+use std::collections::HashMap;
+use stroem_common::models::workflow::{InputFieldDef, WorkspaceConfig};
 use stroem_common::template::{
-    prepare_action_input_roles, render_env_map, render_input_map, render_json_strings,
+    prepare_action_input_roles, render_env_map, render_input_typed, render_json_strings,
     render_string_opt, ProvenanceBucket, ProvenanceError, RoleConfig, RoleScope,
 };
 use stroem_db::JobStepRow;
@@ -25,6 +26,11 @@ pub struct PrepareContext<'a> {
     pub action_workspace_name: Option<&'a str>,
     /// Snapshot of all workspace configs for cross-workspace connection resolution.
     pub lookup: &'a dyn stroem_common::template::WorkspaceLookup,
+    /// The action's input schema as persisted at job creation
+    /// (`action_spec.input`, spec 2026-10-06-json-input-type D10): decides
+    /// which fields are `json`, which defaults merge and which fields are
+    /// connection-typed. `None` = no schema.
+    pub input_schema: Option<&'a HashMap<String, InputFieldDef>>,
 }
 
 /// Result of rendering: rendered input, rendered action_spec, rendered image.
@@ -51,6 +57,29 @@ pub fn withheld_owner_error(action_name: &str, owner: &str) -> String {
 pub fn is_owner_side_prepare_error(err: &anyhow::Error) -> bool {
     err.downcast_ref::<ProvenanceError>()
         .is_some_and(|p| p.bucket == ProvenanceBucket::ActionDefault)
+}
+
+/// Fixed, value-free claim failure for a persisted input schema that does
+/// not deserialise (spec 2026-10-06-json-input-type § 6). No serde text: it
+/// can quote the stored value.
+pub const UNREADABLE_INPUT_SCHEMA: &str =
+    "the step's persisted action definition has an unreadable input schema";
+
+/// The input schema of the action this step runs, as persisted at job
+/// creation (spec D10). `Ok(None)` when absent (no `action_spec`, no `input`
+/// key, or `null`); `Err` when present but not an input schema — never a
+/// fallback to "no schema", which would skip defaults and connection
+/// resolution.
+pub fn step_input_schema(step: &JobStepRow) -> Result<Option<HashMap<String, InputFieldDef>>> {
+    let Some(spec) = step.action_spec.as_ref() else {
+        return Ok(None);
+    };
+    match spec.get("input") {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(v) => serde_json::from_value(v.clone())
+            .map(Some)
+            .map_err(|_| anyhow::anyhow!(UNREADABLE_INPUT_SCHEMA)),
+    }
 }
 
 /// Render step input by evaluating Tera templates against the context.
@@ -83,7 +112,7 @@ pub fn render_step_input(
         return Ok(prep.step.input.clone());
     }
 
-    let rendered = render_input_map(&flow_step.input, ctx.as_value())
+    let rendered = render_input_typed(&flow_step.input, prep.input_schema, ctx.as_value())
         .context("Failed to render step input template")?;
     Ok(Some(rendered))
 }
@@ -101,49 +130,31 @@ pub fn prepare_step_action_input(
         Some(t) => t,
         None => return Ok(rendered_input),
     };
-    // For loop instance steps, fall back to looking up by loop_source
-    let flow_step = match task.flow.get(&ctx.step.step_name) {
-        Some(fs) => fs,
-        None => match ctx
+    // For loop instance steps, fall back to looking up by loop_source. The
+    // flow step is only a guard here: when rendering passed the stored input
+    // through (task / flow step gone, F13), preparation does too.
+    let has_flow_step = task.flow.contains_key(&ctx.step.step_name)
+        || ctx
             .step
             .loop_source
             .as_ref()
-            .and_then(|src| task.flow.get(src))
-        {
-            Some(fs) => fs,
-            None => return Ok(rendered_input),
-        },
-    };
-    // The action body (defaults + connection-typed inputs) belongs to the OWNER
-    // workspace for cross-workspace steps. `action_workspace` is `Some` only when
-    // the step references `owner.action`; for local steps it falls back to the
-    // caller `workspace`, keeping today's behaviour byte-for-byte.
-    //
-    // Lookup key: only strip to the BARE name for genuine cross-workspace steps
-    // (the owner stores the action unqualified). For LOCAL steps we MUST use the
-    // full key — a library-imported action is stored under its dotted name
-    // (e.g. `common.pg-query`) and never under the bare `pg-query`, so stripping
-    // would miss it and skip default-merge + connection resolution.
-    let action_ws = ctx.action_workspace.unwrap_or(ctx.workspace);
-    let lookup: &str = if ctx.action_workspace.is_some() {
-        stroem_common::template::parse_qualified_ref(&flow_step.action).1
-    } else {
-        &flow_step.action
-    };
-    let action = match action_ws.actions.get(lookup) {
-        Some(a) => a,
-        None => return Ok(rendered_input),
-    };
-    if action.input.is_empty() {
+            .is_some_and(|src| task.flow.contains_key(src));
+    if !has_flow_step {
         return Ok(rendered_input);
     }
+    // The schema is the PERSISTED one (spec D10); the live action is not
+    // looked up. Connection VALUES still resolve against the owner's config.
+    let schema = match ctx.input_schema {
+        Some(s) if !s.is_empty() => s,
+        _ => return Ok(rendered_input),
+    };
 
     let mut input_val = rendered_input.unwrap_or_else(|| serde_json::json!({}));
 
     // Merge missing fields from job input that match the action's input schema.
     // This handles the case where a flow step doesn't explicitly map a field
     // (e.g. a connection input), but the job-level input has it resolved.
-    merge_missing_action_fields(&mut input_val, ctx.job_input, action.input.keys());
+    merge_missing_action_fields(&mut input_val, ctx.job_input, schema.keys());
 
     // Role-scoped (git-refs spec § 7.4): the caller is the job's own config,
     // the action owner the step's owner config (pinned or live) — never two
@@ -169,7 +180,7 @@ pub fn prepare_step_action_input(
         task_owner: None,
         others: ctx.lookup,
     };
-    let prepared = prepare_action_input_roles(&input_val, &action.input, &roles)
+    let prepared = prepare_action_input_roles(&input_val, schema, &roles)
         .context("Failed to prepare action input")?;
     Ok(Some(prepared))
 }
@@ -510,6 +521,7 @@ mod tests {
         let workspace = WorkspaceConfig::default();
         let step = make_step_row("step1", Some(json!({"key": "value"})));
         let prep = PrepareContext {
+            input_schema: None,
             workspace: &workspace,
             task_name: "nonexistent-task",
             step: &step,
@@ -563,6 +575,7 @@ mod tests {
 
         let step = make_step_row("missing-step", Some(json!({"original": true})));
         let prep = PrepareContext {
+            input_schema: None,
             workspace: &workspace,
             task_name: "my-task",
             step: &step,
@@ -618,6 +631,7 @@ mod tests {
 
         let step = make_step_row("step1", Some(json!({"stored": "value"})));
         let prep = PrepareContext {
+            input_schema: None,
             workspace: &workspace,
             task_name: "my-task",
             step: &step,
@@ -671,6 +685,7 @@ mod tests {
         let step = make_step_row("step1", None);
         let job_input = json!({"name": "World"});
         let prep = PrepareContext {
+            input_schema: None,
             workspace: &workspace,
             task_name: "my-task",
             step: &step,
@@ -725,6 +740,7 @@ mod tests {
         let step = make_step_row("step1", None);
         let rows = vec![completed_row("step-a", json!({"result": "computed-value"}))];
         let prep = PrepareContext {
+            input_schema: None,
             workspace: &workspace,
             task_name: "my-task",
             step: &step,
@@ -1306,6 +1322,7 @@ mod tests {
         let step = make_step_row("step1", None);
         let job_input = json!({"name": "Alice"});
         let prep = PrepareContext {
+            input_schema: None,
             workspace: &workspace,
             task_name: "nonexistent",
             step: &step,
@@ -1348,6 +1365,7 @@ mod tests {
 
         let step = make_step_row("step1", None);
         let prep = PrepareContext {
+            input_schema: None,
             workspace: &workspace,
             task_name: "my-task",
             step: &step,
@@ -1404,6 +1422,7 @@ mod tests {
         // job_input has "extra" which should be merged for action schema fields
         let job_input = json!({"sql": "SELECT 1", "extra": "from-job"});
         let prep = PrepareContext {
+            input_schema: workspace.actions.get("run-query").map(|a| &a.input),
             workspace: &workspace,
             task_name: "my-task",
             step: &step,
@@ -1487,6 +1506,7 @@ mod tests {
         );
         let step = make_step_row("s", None);
         let prep = PrepareContext {
+            input_schema: owner.actions.get("remote").map(|a| &a.input),
             workspace: &caller,
             task_name: "t",
             step: &step,
@@ -1523,6 +1543,7 @@ mod tests {
             vec![],
         );
         let prep_unshared = PrepareContext {
+            input_schema: owner_unshared.actions.get("remote").map(|a| &a.input),
             workspace: &caller,
             task_name: "t",
             step: &step,
@@ -1592,6 +1613,7 @@ mod tests {
         let set = WorkspaceSet::from_parts("A", Some(&caller), vec![], vec!["B".to_string()]);
         let step = make_step_row("s", None);
         let prep = PrepareContext {
+            input_schema: caller.actions.get("query").map(|a| &a.input),
             workspace: &caller,
             task_name: "t",
             step: &step,
@@ -1663,6 +1685,7 @@ mod tests {
         );
         let step = make_step_row("s", None);
         let prep = PrepareContext {
+            input_schema: owner.actions.get("remote").map(|a| &a.input),
             workspace: &caller,
             task_name: "t",
             step: &step,
@@ -1757,6 +1780,7 @@ mod tests {
         );
         let step = make_step_row("s", None);
         let prep = PrepareContext {
+            input_schema: owner.actions.get("remote").map(|a| &a.input),
             workspace: &caller,
             task_name: "t",
             step: &step,
@@ -1836,6 +1860,7 @@ mod tests {
 
         let step = make_step_row("s", None);
         let prep = PrepareContext {
+            input_schema: workspace.actions.get("common.pg-query").map(|a| &a.input),
             workspace: &workspace,
             task_name: "t",
             step: &step,
@@ -2101,6 +2126,7 @@ mod tests {
         let workspace = make_workspace_with_step(flow_input);
         let step = make_step_row("step1", None);
         let prep = PrepareContext {
+            input_schema: None,
             workspace: &workspace,
             task_name: "my-task",
             step: &step,

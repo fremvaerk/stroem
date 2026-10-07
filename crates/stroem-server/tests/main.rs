@@ -17,6 +17,7 @@ mod git_refs_read_paths_test;
 mod git_refs_scheduler_test;
 mod ha_test;
 mod integration_test;
+mod json_input_test;
 mod mcp_artifacts_test;
 mod mcp_test;
 mod metrics_test;

@@ -1026,6 +1026,28 @@ pub async fn claim_job(
     let loop_slot = crate::render_context::LoopSlot::of(&step);
     let mut collision_lines: Vec<String> = Vec::new();
 
+    // Spec 2026-10-06-json-input-type D10: one schema, read once, from the
+    // persisted action definition. An unreadable one fails the claim.
+    let input_schema = match rendering::step_input_schema(&step) {
+        Ok(s) => s,
+        Err(e) => {
+            return Ok(fail_claimed_step_with_collisions(
+                &state,
+                step.job_id,
+                &step.step_name,
+                &e.to_string(),
+                &ws_set,
+                &ClaimFailure {
+                    claim,
+                    pin_secrets: &pin_secrets,
+                    withheld: None,
+                },
+                std::mem::take(&mut collision_lines),
+            )
+            .await);
+        }
+    };
+
     // Render step input and apply action defaults
     let rendered_input = if let Some(ref workspace) = ws_config {
         let prep = rendering::PrepareContext {
@@ -1050,6 +1072,7 @@ pub async fn claim_job(
                 None
             },
             lookup: &ws_set,
+            input_schema: input_schema.as_ref(),
         };
 
         let input_ctx = crate::render_context::build(
