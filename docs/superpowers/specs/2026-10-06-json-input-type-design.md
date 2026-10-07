@@ -1,12 +1,22 @@
 # `json` input type
 
-Status: revision 6, approved for implementation (2026-10-07)
+Status: revision 7, approved for implementation (2026-10-07)
 
 A new task/action input field type, `type: json`, that holds any JSON value
 and keeps it structured through templates. Facts below are verified at
 `b310bb44` (v0.18.0).
 
 ## Revision history
+
+**Revision 7 (2026-10-07, user decision).** Numeric secret masking dropped
+(D7, § 9): redaction stays strings-only as today. The user weighed the
+revision 2–5 design (collect numeric secrets as text, mask numbers) against
+its costs — false positives on legitimate numbers, number→string type changes
+in responses, a float-format caveat, structural numbers masked under
+`MaskAll` — and chose today's behaviour plus a `stroem validate` warning for
+secrets written as YAML numbers (§ 5.4). Revision 2's finding (1), revision 3's
+(A), revision 4's (5) and Low are superseded by this: none of their
+mechanisms is built.
 
 **Revision 6 (2026-10-07, found while planning).** The § 4.2 wrapper would
 have turned an UNDEFINED top-level variable into `null`: Tera's `LoadName`
@@ -220,7 +230,7 @@ change to how non-`json` fields render.
 | D4 | `secret: true`, `options`, `allow_custom`, `multiple` are rejected on `json`. | A masked JSON editor (later, TODO). |
 | D5 | `json` is rejected in approval action `input` (approver forms). | Shared `JsonField` component now (later, TODO). |
 | D6 | For a `type: task` step, the caller's `input:` (bucket C) follows the **task T's** schema; action defaults (bucket D) follow the wrapping action's schema. | Action schema for both. |
-| D7 | Numeric secret values join the redaction set as their JSON text, and redaction masks **numbers** whose text contains one; `MaskAll` masks numbers. Boolean and null secret values are never redaction values (a one-bit value cannot be hidden by masking it, and masking every boolean would destroy the response) — unchanged from today, now documented. A FILTER-CONVERTED representation of a secret (`\| int` of `"0042"`, `\| upper`, `\| b64encode`, a slice) is not covered — the existing filter-transformed class (CLAUDE.md § Secrets in logs: no finite scrub matches every encoding), unchanged by `json`. | Leave numeric secrets unmasked; mask all booleans; collect derived forms (`"0042"` → also `42`), which only covers the conversions someone thought of. |
+| D7 | Redaction stays strings-only, as today: numbers, booleans and nulls are never masked, and numeric secret values are never collected. A secret written as a YAML number is reported by `stroem validate` (§ 5.4) — quote it to have it masked. A filter-converted representation of a secret (`\| int`, `\| upper`, `\| b64encode`, a slice) is not covered — the existing filter-transformed class (CLAUDE.md § Secrets in logs). | Collect numeric secrets as text and mask numbers (revisions 2–5): false positives, type changes in API responses, float-format mismatch, structural numbers masked under `MaskAll`, a behaviour change for every numeric secret. Mask all booleans. Collect derived forms (`"0042"` → also `42`). |
 | D8 | The Run form gives a `json` field one of three explicit modes — **default** (field omitted; the server applies and renders the default), **replay** (re-run: the field is named in `replay_fields`, D12, and the server replays the source's stored value), **value** (the parsed editor text, always sent). On a re-run the source's value takes precedence over the default. A templated default is never placed in the editor. | Revision 1's "text unchanged from the prefill → omit", which conflated the three intents and could submit masked markers or template text as data. |
 | D9 | Agent tool schema for `json`: a property with **no `type`** keyword. | `"object"` (blocks arrays). |
 | D10 | At claim, the step's persisted `action_spec.input` (F7) is THE action input schema for all of input preparation: which fields of the step's `input:` are `json`, which defaults are merged, which fields are connection-typed. The live action is no longer looked up for input preparation. Same rule `type: task` dispatch already follows (`action_spec.input`, never a live lookup). | Live/pinned lookup before rendering (revision 1); persisted for classification but live for defaults and connections (revision 2 — a retyped field could be classified `json` and then resolved as a connection). |
@@ -389,6 +399,13 @@ message names `json` explicitly). `validate_approval_action`
   declares `json`. For a `type: task` step, the task's schema (D6).
 - **Warning:** a single expression in those places whose last filter is
   `json_encode`.
+- **Warning (any workspace, `json` or not):** a workspace secret, or a
+  `secret: true` property of a connection, whose value is a YAML number —
+  `secret 'PORT' is a number, so it is never masked in job output or
+  errors; quote it ("5432") to have it masked`. Booleans and nulls get the
+  same warning wording with their type. Values inside a secret's object or
+  array are checked too. The check runs on the values as loaded; a `ref+`
+  reference is a string and never warned about.
 - Library (dotted) and cross-workspace actions are skipped, as validation
   already does for them.
 - Server workspace loads still do not run validation (pre-existing gap); the
@@ -605,81 +622,52 @@ path, so the render-path table (Tera 2 spec § 3.4) gains a note, not a row.
 
 ## 9. Secrets and redaction
 
-D2 lets a secret reach a `json` field as a native NUMBER — a numeric secret
-passed through (`{{ secret.PORT }}` with `PORT: 5432`). Masking numbers is
-only useful if numeric secrets are in the set, and today they are not (F11).
-Both halves change (below).
+Redaction stays exactly as it is today: it matches redaction values against
+STRINGS (F11). Numbers, booleans and nulls are never masked, and numeric
+secret values are never collected. Decision D7, revision 7.
 
-What is covered, exactly: a redaction value is matched against the TEXT of
-each string and (new) each number. So a secret's own value — one that IS a
-redaction value: longer than 3 characters in the response sets, and for a
-float, only in the formats the number-text rule below claims — is masked
-wherever its text appears, in a string or in a number whose text equals or
-contains it, including a string secret that `| int` turns into the same
-digits (`"5432"` → `5432`). A conversion that changes the text is NOT
-covered: `"0042" | int` → `42`, `| upper`, `| b64encode`, `| round`, a
-slice. That is the filter-transformed class CLAUDE.md § Secrets in logs
-already names (a filter chain can produce encodings no finite scrub
-matches), and it is not new: the same `{{ secret.PIN | int }}` renders an
-unmasked `"42"` into a STRING field today. `json` adds no new member to the
-class — a string field holds the same digits as text. Collecting derived
-forms (`"0042"` → also `42`) is rejected (D7): it covers only the
-conversions someone listed. `guides/secrets.md` states the rule.
+What that means for `json` fields:
 
-- **Collection.** `collect_strings` (`workspace_set.rs:268`) also collects
-  a `Value::Number` as its JSON text (`n.to_string()`), and is renamed
-  `collect_secret_scalars`. Numeric values whose text has 3 characters or
-  fewer are not collected, in every set (the existing
-  `collect_redaction_values` length rule, `:262`, applied to numbers in the
-  per-config scrub set too, so a secret `RETRIES: 3` cannot scrub every `3`
-  out of an error message). String values keep each collector's current
-  rule. What each set gains is bounded by what its collector WALKS, which
-  does not change:
-  - the response sets — live (`collect_redaction_values`, `:228`) and each
-    pin's (`redaction.rs:395`) — walk workspace secrets AND `secret: true`
-    connection properties (`:230-259`), so both gain their numeric values;
-  - the per-config scrub set (`collect_config_secret_values`, `:103-109`,
-    used by the cascade, dispatch, hooks and event sources) walks workspace
-    secrets ONLY, so it gains numeric workspace secrets. It has never held
-    connection properties; that omission is pre-existing and unchanged
-    (§ 13).
-- **Number text.** Masking compares texts, so it is exact only where the two
-  texts agree. Integers: serde_json and Tera both print plain decimal digits,
-  so an integer secret matches as a number AND inside rendered strings.
-  Floats: number-to-number matching is exact (collection and masking both use
-  `Number::to_string()`), but serde_json formats floats with its own
-  shortest-representation writer (`zmij`, `serde_json-1.0.150/src/number.rs:356`)
-  while Tera prints `f64` with Rust `Debug` (`tera-2.4.0/src/value/mod.rs:498-503`),
-  so a float secret rendered into a STRING is matched only where the two
-  agree — claimed only for the values a test pins (`0.5`, `3.14`, `1e-7`,
-  `1e21`, `-2.0`); anything else is the filter-transformed class above.
-- **Masking.** `redact_value_tree`: a `Value::Number` whose text contains a
-  redaction value (the span rule strings get, `redact_secrets_in_str`) is
-  replaced by the string `"••••••"`. `mask_value_tree` (`MaskAll`) masks
-  numbers too; its "numbers are kept" comment changes.
-- **Booleans and null** are never redaction values (D7): masking a one-bit
-  value hides nothing, and masking every boolean would destroy the response.
-  This is today's behaviour, now stated in `guides/secrets.md`.
-- Pre-existing gaps this closes: a numeric workspace secret rendered into a
-  STRING field (`"port={{ secret.PORT }}"`) is masked from now on, and so is a
-  numeric `secret: true` connection property reaching step input inside a
-  connection object (F3's shortcut).
-- Outlets covered with no change, because they redact through these
-  functions: job detail (`web/api/jobs.rs:392` → `redaction.rs:576`), webhook sync + status poll,
-  MCP `get_job_status`, worker detail. Implementation task: grep every call
-  site of `redact_str` / `redact_secrets_in_str` given a JSON value's TEXT
-  rather than a tree, and confirm none relies on numbers being skipped.
+- A secret's own value stays covered. A string secret passed through
+  (`{{ secret.PIN }}`, `PIN: "5432"`) keeps its type: in a `json` field it is
+  the STRING `"5432"`, masked as today. D2 never turns a string into a
+  number by itself.
+- A secret written as a YAML NUMBER (`PORT: 5432`, or a `secret: true`
+  connection property with a numeric value) is not masked — anywhere, in any
+  field type. That is today's behaviour (`collect_strings` skips numbers,
+  `workspace_set.rs:268`), unchanged; `stroem validate` now WARNS about it
+  (§ 5.4) and `guides/secrets.md` says to quote secret values.
+- A filter that changes a secret's representation is not covered: `| int`
+  (`"5432" | int` → the number `5432`), `| upper`, `| b64encode`, a slice.
+  That is the filter-transformed class CLAUDE.md § Secrets in logs already
+  names (a filter chain can produce encodings no finite scrub matches). The
+  one narrowing `json` brings: `{{ secret.PIN | int }}` rendered into a
+  STRING field gives the text `"5432"`, which IS masked; in a `json` field
+  it gives a number, which is not. It takes an explicit conversion filter,
+  like every other member of the class.
+- Booleans and null are never redaction values (masking a one-bit value
+  hides nothing, and masking every boolean would destroy the response) —
+  today's behaviour, now stated in `guides/secrets.md`.
+- Outlets and scrubs are unchanged: job detail, webhook sync + status poll,
+  MCP `get_job_status`, worker detail, and the claim / dispatch / hook /
+  event-source scrubs all keep their current behaviour; strings inside a
+  `json` value are masked like any other string (the redaction walk already
+  descends into objects and arrays, `redaction.rs:545-570`).
 - A `json` value crossing a workspace boundary is data, not a connection:
   `resolve_provenance_bucket` skips it as a primitive (F2). Owner defaults
   rendered into a `json` field of a cross-workspace action are not persisted
   on a caller-visible parent step when `O != A` (existing rule, CLAUDE.md
   § Cross-Workspace References).
-- Accepted cost: a numeric secret masks every occurrence of its digits in
-  every string and number of a response — secret `5432` masks `154321` and
-  `"port 5432"` — exactly as a string secret `"5432"` does today. In the
-  response redaction set, values of 3 characters or fewer are never
-  redaction values, string or number (F11); in the per-config scrub set the
-  rule applies to numbers only (strings keep today's behaviour there).
+
+Rejected (revisions 2–5): collecting numeric secrets as text and masking
+numbers whose text contains one. It needed a numeric length rule, a
+float-format caveat (serde_json and Tera print floats differently), and
+allow-list entries so that structural numbers (`retry_history[].attempt`,
+loop indices, `approval_fields[].order`) were not masked under `MaskAll`;
+it masked legitimate numbers that merely contained a secret's digits, turned
+numbers into strings in API responses, and changed behaviour for every
+workspace with a numeric secret. Quoting a secret puts it on the path
+redaction already handles reliably.
 
 ## 10. Testing
 
@@ -699,17 +687,13 @@ conversions someone listed. `guides/secrets.md` states the rule.
   before the failing token (columns count characters, not bytes); a
   position inside the wrapper's `PREFIX` or `SUFFIX` yields no position.
 - **validation:** `json` accepted; § 5.3 rejections; a connection type named
-  `json` rejected; § 5.4 error and warning.
-- **redaction / collection:** a numeric workspace secret is collected as
-  text in the live, pinned and per-config sets; a numeric `secret: true`
-  connection property in the live and pinned sets (not the per-config set,
-  which walks no connections, § 9); numeric values of ≤ 3 characters are
-  not; float secrets `0.5`, `3.14`, `1e-7`, `1e21`, `-2.0` rendered into a
-  string field are masked (or the list in § 9 shrinks to the ones that are); a
-  number containing a secret is masked; a string containing a numeric secret
-  is masked; a string secret `"5432"` rendered with `| int` into a `json`
-  field is masked; `"0042" | int` is NOT (pins the documented limit, § 9);
-  booleans and nulls are not collected or masked; `MaskAll` masks numbers.
+  `json` rejected; § 5.4 errors and warnings, including the numeric-secret
+  warning for a top-level numeric workspace secret, a number nested in a
+  secret's object, a numeric `secret: true` connection property, a boolean
+  secret — and NO warning for a quoted `"5432"` or a `ref+` string.
+- **redaction (unchanged behaviour, pinned):** a string secret inside a
+  `json` value (object leaf, array element) is masked in job detail; a
+  numeric value in a `json` field is returned as a number, unmasked.
 - **stroem-agent:** `map_field_type("json")` has no `type`; one provider wire.
 - **stroem-server integration** (new `mod` lines in `tests/main.rs`): claim —
   an object from a previous step's output, `{{ items | length }}` as a
@@ -730,9 +714,8 @@ conversions someone listed. `guides/secrets.md` states the rule.
   whose flow step is removed passes its rendered input through unchanged
   (no second render); cross-workspace owner-default json error withheld, caller
   json error visible; `type: task` buckets C and D; a task `json` default
-  with a secret leaf, masked in job detail; a numeric secret rendered
-  natively, masked in job detail, MCP `get_job_status` and the webhook sync
-  response; `type: task` and plain action hooks; `replay_fields`, on BOTH
+  with a string secret leaf, masked in job detail; `type: task` and plain
+  action hooks; `replay_fields`, on BOTH
   the unpinned and the pinned execute path — a named `json` field takes the
   source's stored (unredacted) value; is absent (default applies) when the
   source had none; 400 for each of: no `source_job_id` (handler), unknown
@@ -772,14 +755,15 @@ conversions someone listed. `guides/secrets.md` states the rule.
 - API reference for `POST /api/workspaces/{ws}/tasks/{name}/execute`:
   `replay_fields`, its four 400s, and the same-task rule for every re-run.
 - `guides/templating.md`: native values in `json` fields.
-- `guides/secrets.md`: numeric secrets are masked (in numbers and in
-  strings); boolean and null secret values are never masked, and why; values
-  of ≤ 3 characters are never masked; a filter that changes a secret's text
-  (`| int` of `"0042"`, `| upper`, `| b64encode`) is not covered, in any
-  field type.
+- `guides/secrets.md`: only STRING secret values are masked — quote a
+  numeric secret (`PORT: "5432"`) to have it masked, and `stroem validate`
+  warns about unquoted ones; boolean and null values are never masked, and
+  why; values of ≤ 3 characters are never masked; a filter that changes a
+  secret's representation (`| int`, `| upper`, `| b64encode`) is not
+  covered, in any field type.
 - Upgrade note under `operations/`: a connection type named `json` is
-  rejected; numeric secrets are now masked everywhere, and a masked number
-  appears as the string `"••••••"`; claim prepares a step's input from the
+  rejected; `stroem validate` now warns about unquoted numeric secrets (they
+  were never masked); claim prepares a step's input from the
   action definition persisted at job creation (an edited default no longer
   reaches in-flight jobs); rollout order (§ 12).
 - `docs/public/llms.txt` regenerated.
@@ -787,7 +771,8 @@ conversions someone listed. `guides/secrets.md` states the rule.
   renderer; the json rule; claim prepares input — `json` classification,
   defaults, connection-typed fields — from the persisted `action_spec.input`;
   wrapper errors are position-mapped, never re-rendered; `replay_fields`)
-  and § Secrets in logs (numeric secrets collected and masked; booleans never).
+  and § Secrets in logs (redaction is strings-only; numeric secrets are
+  warned about, not masked).
 - `CONTEXT.md`: glossary entry **Native value** — the value a `json` field
   takes from a single-expression template.
 - `docs/internal/TODO.md`: § 13.
@@ -802,10 +787,8 @@ conversions someone listed. `guides/secrets.md` states the rule.
 - An older `stroem validate` rejects `type: json` ("references unknown
   type"); upgrade the CLI with the server.
 - Visible changes without `json`: a connection type named `json` is
-  rejected; numeric secrets (workspace secrets and `secret: true` connection
-  properties written as YAML numbers) are now masked in job detail / MCP /
-  webhook responses and scrubbed from error messages — in strings as well as
-  numbers — where today they are shown; claim reads an action's input
+  rejected; `stroem validate` warns about secrets written as YAML numbers;
+  claim reads an action's input
   schema and defaults from the definition persisted at job creation, so an
   action edited mid-job no longer changes that job's unclaimed steps (D10).
 - A re-run whose source is a run of a DIFFERENT task is now 400 on the
@@ -834,7 +817,7 @@ conversions someone listed. `guides/secrets.md` states the rule.
 - The per-config scrub set (`collect_config_secret_values`) walks workspace
   secrets only, never `secret: true` connection properties, so a connection
   secret in a cascade / dispatch / hook / event-source error is not scrubbed
-  there (the response sets do mask it). Pre-existing; § 9.
+  there (the response sets do mask it). Pre-existing.
 - The secret / connection re-run sentinel leaves a field absent when the
   source lacks it, even when the field is required with no default; only
   `replay_fields` returns 400 for that (§ 7). Moving the sentinel onto
