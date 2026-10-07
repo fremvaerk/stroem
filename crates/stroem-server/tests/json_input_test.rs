@@ -642,3 +642,143 @@ tasks:
     assert_eq!(b["input"]["n"], json!(3), "{b}");
     Ok(())
 }
+
+// ─── Dispatch and hooks (spec § 6) ───────────────────────────────────────────
+
+#[tokio::test]
+async fn task_step_passes_native_values_to_the_child() -> Result<()> {
+    let app = app(r#"
+secrets:
+  S: "s-value"
+actions:
+  run-child:
+    type: task
+    task: child
+    input:
+      extra: { type: json, default: { a: "{{ secret.S }}", n: 1 } }
+  noop: { type: script, script: "true" }
+tasks:
+  child:
+    input:
+      info: { type: json }
+      n: { type: json }
+      extra: { type: json }
+    flow:
+      s: { action: noop }
+  parent:
+    input:
+      payload: { type: json }
+    flow:
+      call:
+        action: run-child
+        input:
+          info: "{{ input.payload }}"
+          n: "{{ input.payload.items | length }}"
+"#)
+    .await?;
+    let (s, body) = execute(
+        &app,
+        "parent",
+        json!({"input": {"payload": {"items": [1, 2]}}}),
+    )
+    .await?;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let parent: Uuid = body["job_id"].as_str().unwrap().parse()?;
+    let child = stroem_db::JobRepo::get_child_jobs(&app.pool, parent)
+        .await?
+        .pop()
+        .expect("child job");
+    let input = child.input.expect("child input");
+    assert_eq!(input["info"], json!({"items": [1, 2]}), "{input}");
+    assert_eq!(input["n"], json!(2), "{input}");
+    assert_eq!(input["extra"], json!({"a": "s-value", "n": 1}), "{input}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn hook_inputs_are_typed_by_their_target_schema() -> Result<()> {
+    let app = app(r#"
+actions:
+  noop: { type: script, script: "true" }
+  notify:
+    type: script
+    script: "true"
+    input:
+      count: { type: json }
+  child-hook: { type: task, task: hooked }
+tasks:
+  hooked:
+    input:
+      count: { type: json }
+    flow:
+      s: { action: noop }
+  t:
+    flow:
+      s: { action: noop }
+    on_success:
+      - action: notify
+        input: { count: "{{ hook.status | length }}" }
+      - action: child-hook
+        input: { count: "{{ hook.status | length }}" }
+"#)
+    .await?;
+    let (_, body) = execute(&app, "t", json!({"input": {}})).await?;
+    let job = body["job_id"].as_str().unwrap().to_string();
+    claim(&app).await?;
+    assert_eq!(complete(&app, &job, "s", json!({})).await?, StatusCode::OK);
+
+    let job_id: Uuid = job.parse()?;
+    let mut inputs = Vec::new();
+    for _ in 0..50 {
+        inputs = sqlx::query_scalar::<_, Value>(
+            "SELECT j.input FROM job j WHERE j.source_job_id = $1 AND j.source_type = 'hook'",
+        )
+        .bind(job_id)
+        .fetch_all(&app.pool)
+        .await?;
+        if inputs.len() == 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(inputs.len(), 2, "both hook jobs created: {inputs:?}");
+    for input in inputs {
+        assert_eq!(
+            input["count"],
+            json!(9),
+            "\"completed\" has 9 chars: {input}"
+        );
+    }
+    Ok(())
+}
+
+/// Spec § 9 / D7: redaction is unchanged — a string secret inside a json
+/// value is masked; a number is returned as a number.
+#[tokio::test]
+async fn job_detail_masks_string_secrets_inside_json_values_only() -> Result<()> {
+    let app = app(r#"
+secrets:
+  H: "db-secret-host-value"
+  P: 5432
+actions:
+  noop: { type: script, script: "true" }
+tasks:
+  t:
+    input:
+      db: { type: json, default: { host: "{{ secret.H }}", port: "{{ secret.P }}" } }
+    flow:
+      s: { action: noop }
+"#)
+    .await?;
+    let (_, body) = execute(&app, "t", json!({"input": {}})).await?;
+    let job = body["job_id"].as_str().unwrap();
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!("/api/jobs/{job}"))
+        .body(Body::empty())?;
+    let (s, detail) = call(&app, req).await?;
+    assert_eq!(s, StatusCode::OK, "{detail}");
+    assert_eq!(detail["input"]["db"]["host"], json!("••••••"), "{detail}");
+    assert_eq!(detail["input"]["db"]["port"], json!(5432), "{detail}");
+    Ok(())
+}

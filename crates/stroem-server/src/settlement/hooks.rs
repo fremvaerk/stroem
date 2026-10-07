@@ -5,7 +5,7 @@ use serde::Serialize;
 use sqlx::PgPool;
 use stroem_common::models::job::{ActionType, JobStatus, SourceType, StepStatus};
 use stroem_common::models::workflow::{FlowStep, HookDef, TaskDef, WorkspaceConfig};
-use stroem_common::template::render_input_map;
+use stroem_common::template::render_input_typed;
 use stroem_db::{JobRepo, JobStepRepo, JobStepRow};
 
 /// Context available to `on_suspended` hook templates as `hook.*`
@@ -642,6 +642,18 @@ async fn fire_single_hook(
             )
         })?;
 
+    // The schema the hook input lands in (spec 2026-10-06-json-input-type
+    // § 6): a `type: task` hook's task, else the hook action's own input.
+    let hook_schema = if action.action_type == ActionType::Task.as_ref() {
+        action
+            .task
+            .as_deref()
+            .and_then(|t| workspace_config.tasks.get(t))
+            .map(|t| &t.input)
+    } else {
+        Some(&action.input)
+    };
+
     // Build Tera context: { "hook": <HookContext>, "secret": <workspace secrets> }
     let mut template_context = serde_json::json!({ "hook": ctx_value });
     if !workspace_config.secrets.is_empty() {
@@ -654,7 +666,7 @@ async fn fire_single_hook(
     let rendered_input = if hook.input.is_empty() {
         serde_json::json!({})
     } else {
-        render_input_map(&hook.input, &template_context)
+        render_input_typed(&hook.input, hook_schema, &template_context)
             .context("Failed to render hook input templates")?
     };
 
@@ -843,6 +855,7 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::collections::HashMap;
+    use stroem_common::template::render_input_map;
 
     #[test]
     fn foreign_hook_task_error_distinguishes_foreign_from_malformed() {

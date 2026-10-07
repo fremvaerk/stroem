@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use stroem_common::models::job::{JobStatus, StepStatus};
 use stroem_common::models::workflow::{InputFieldDef, TaskDef, WorkspaceConfig};
 use stroem_common::template::{
-    merge_action_defaults, render_input_map, resolve_task_input_by_provenance_roles, RoleConfig,
-    RoleScope,
+    merge_action_defaults, render_input_map, render_input_typed,
+    resolve_task_input_by_provenance_roles, RoleConfig, RoleScope,
 };
 use stroem_db::{JobRepo, JobRow, JobStepRepo};
 use uuid::Uuid;
@@ -356,7 +356,9 @@ async fn handle_task_steps_pass(
                         .iter()
                         .map(|(k, v)| (k.clone(), v.clone()))
                         .collect();
-                    match render_input_map(&map, context_value) {
+                    // Bucket C lands in task T's input: T's schema decides
+                    // which fields are `json` (spec 2026-10-06-json-input-type D6).
+                    match render_input_typed(&map, Some(&resolved.task.input), context_value) {
                         Ok(rendered) => rendered,
                         Err(e) => {
                             let err = format!(
