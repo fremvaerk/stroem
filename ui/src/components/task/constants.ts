@@ -12,4 +12,5 @@ export const PRIMITIVE_TYPES = new Set([
   "boolean",
   "date",
   "datetime",
+  "json",
 ]);

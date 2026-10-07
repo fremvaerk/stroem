@@ -766,10 +766,7 @@ fn validate_connections(config: &WorkspaceConfig) -> Result<Vec<String>> {
     // input written as `type: <name>` is resolved as a primitive first; if a
     // connection type shadows that name, the reference would silently miss
     // the connection registry.
-    let reserved_type_names = [
-        "string", "text", "integer", "number", "boolean", "bool", "date", "datetime", "array",
-        "object",
-    ];
+    let reserved_type_names = crate::template::RESERVED_TYPE_NAMES;
 
     // Validate connection type definitions
     for (type_name, type_def) in &config.connection_types {
@@ -870,6 +867,21 @@ fn check_input_field_options(
     field: &crate::models::workflow::InputFieldDef,
     warnings: &mut Vec<String>,
 ) -> Result<()> {
+    if field.field_type == crate::template::JSON_TYPE {
+        if field.secret {
+            bail!("{context}: secret is not supported on json fields");
+        }
+        if field.multiple {
+            bail!("{context}: multiple is not supported on json fields");
+        }
+        if field.options.is_some() {
+            bail!("{context}: options are not supported on json fields");
+        }
+        if field.allow_custom {
+            bail!("{context}: allow_custom is not supported on json fields");
+        }
+    }
+
     // Hard errors for `multiple: true` misuse — these have no working semantics.
     if field.multiple {
         if field.secret {
@@ -955,9 +967,7 @@ fn check_input_field_options(
 /// it's treated as a connection type reference and must exist in `connection_types`.
 fn validate_connection_inputs(config: &WorkspaceConfig) -> Result<Vec<String>> {
     let mut warnings = Vec::new();
-    let primitives = [
-        "string", "text", "integer", "number", "boolean", "date", "datetime",
-    ];
+    let primitives = crate::template::PRIMITIVE_TYPES;
 
     fn check(
         config: &WorkspaceConfig,
@@ -1002,7 +1012,7 @@ fn validate_connection_inputs(config: &WorkspaceConfig) -> Result<Vec<String>> {
             check(
                 config,
                 &mut warnings,
-                &primitives,
+                primitives,
                 "Action",
                 action_name,
                 field_name,
@@ -1016,7 +1026,7 @@ fn validate_connection_inputs(config: &WorkspaceConfig) -> Result<Vec<String>> {
             check(
                 config,
                 &mut warnings,
-                &primitives,
+                primitives,
                 "Task",
                 task_name,
                 field_name,
@@ -1815,6 +1825,20 @@ fn validate_approval_action(action: &ActionDef, action_name: &str) -> Result<Vec
         bail!(
             "Action '{}' is type 'approval' but missing 'message' field",
             action_name
+        );
+    }
+
+    // Approver forms render their own field types (ui approval-card.tsx); a
+    // JSON editor there is a follow-up (spec D5).
+    if let Some((field_name, _)) = action
+        .input
+        .iter()
+        .find(|(_, f)| f.field_type == crate::template::JSON_TYPE)
+    {
+        bail!(
+            "Action '{}' is type 'approval' but input '{}' is type json (not supported in approval forms)",
+            action_name,
+            field_name
         );
     }
 
@@ -8365,5 +8389,65 @@ triggers:
 "#,
         );
         assert!(err.contains("invalid `ref`"), "{err}");
+    }
+
+    // --- json input type (spec 2026-10-06-json-input-type § 5) ---
+
+    fn json_cfg(input_yaml: &str) -> WorkspaceConfig {
+        serde_yaml::from_str(&format!(
+            "actions:\n  a:\n    type: script\n    script: \"true\"\n    input:\n{input_yaml}\n\
+             tasks:\n  t:\n    flow:\n      s: {{ action: a }}\n"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn json_input_type_is_accepted() {
+        let cfg = json_cfg("      cfg: { type: json, default: { a: 1, b: [x, y] } }");
+        validate_workflow_config(&cfg).expect("json is a valid input type");
+    }
+
+    #[test]
+    fn json_input_rejects_secret_options_allow_custom_and_multiple() {
+        for (opt, word) in [
+            ("secret: true", "secret"),
+            ("options: [a, b]", "options"),
+            ("allow_custom: true", "allow_custom"),
+            ("multiple: true", "multiple"),
+        ] {
+            let cfg = json_cfg(&format!("      cfg: {{ type: json, {opt} }}"));
+            let err = format!("{:#}", validate_workflow_config(&cfg).unwrap_err());
+            assert!(err.contains("json") && err.contains(word), "{opt}: {err}");
+        }
+    }
+
+    #[test]
+    fn connection_type_named_json_is_rejected() {
+        let cfg: WorkspaceConfig =
+            serde_yaml::from_str("connection_types:\n  json:\n    host:\n      type: string\n")
+                .unwrap();
+        let err = format!("{:#}", validate_workflow_config(&cfg).unwrap_err());
+        assert!(err.contains("reserved"), "{err}");
+    }
+
+    #[test]
+    fn approval_action_rejects_json_input() {
+        let cfg: WorkspaceConfig = serde_yaml::from_str(
+            "actions:\n  gate:\n    type: approval\n    message: \"ok?\"\n    input:\n      \
+             reason: { type: json }\n",
+        )
+        .unwrap();
+        let err = format!("{:#}", validate_workflow_config(&cfg).unwrap_err());
+        assert!(err.contains("approval") && err.contains("json"), "{err}");
+    }
+
+    #[test]
+    fn reserved_type_names_cover_every_primitive() {
+        for t in crate::template::PRIMITIVE_TYPES {
+            assert!(crate::template::RESERVED_TYPE_NAMES.contains(t), "{t}");
+        }
+        for t in ["bool", "array", "object"] {
+            assert!(crate::template::RESERVED_TYPE_NAMES.contains(&t), "{t}");
+        }
     }
 }

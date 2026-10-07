@@ -607,9 +607,20 @@ pub fn merge_defaults(
     Ok(serde_json::Value::Object(result))
 }
 
+/// The `json` input type (spec 2026-10-06-json-input-type): any JSON value; a
+/// string that is exactly one `{{ expression }}` takes the expression's value.
+pub const JSON_TYPE: &str = "json";
+
 /// Primitive type names that are NOT connection type references.
 pub const PRIMITIVE_TYPES: &[&str] = &[
-    "string", "text", "integer", "number", "boolean", "date", "datetime",
+    "string", "text", "integer", "number", "boolean", "date", "datetime", JSON_TYPE,
+];
+
+/// Names a connection type may not take: every primitive, the `bool` alias
+/// (`canonicalize_field_type`) and the agent output-schema types.
+pub const RESERVED_TYPE_NAMES: &[&str] = &[
+    "string", "text", "integer", "number", "boolean", "date", "datetime", JSON_TYPE, "bool",
+    "array", "object",
 ];
 
 /// Resolve connection inputs: replace connection name strings with the full
