@@ -685,6 +685,12 @@ fn validate_workflow_config_inner(
     // Validate input field options
     warnings.extend(validate_input_options(config)?);
 
+    // json field templates (spec 2026-10-06-json-input-type § 5.4)
+    warnings.extend(validate_json_fields(config)?);
+
+    // Secrets redaction cannot mask (spec D7)
+    warnings.extend(warn_non_string_secrets(config));
+
     // Validate secrets
     validate_secrets(
         "",
@@ -834,6 +840,134 @@ fn validate_connections(config: &WorkspaceConfig) -> Result<Vec<String>> {
 /// Validates input field options across all actions and tasks.
 /// Returns warnings for soft issues; bails for unrecoverable misconfigurations
 /// (e.g., `multiple: true` combined with `secret: true` or a non-string `type`).
+/// `json` field templates (spec 2026-10-06-json-input-type § 5.4): a string
+/// that is not literal or a single `{{ expression }}` is an error; a single
+/// expression ending in `json_encode` is a warning.
+fn validate_json_fields(config: &WorkspaceConfig) -> Result<Vec<String>> {
+    use crate::template::JSON_TYPE;
+    let mut warnings = Vec::new();
+    for (action_name, action) in &config.actions {
+        for (name, f) in &action.input {
+            if let (true, Some(d)) = (f.field_type == JSON_TYPE, &f.default) {
+                lint_json(
+                    &format!("Action '{action_name}' input '{name}' default"),
+                    d,
+                    &mut warnings,
+                )?;
+            }
+        }
+    }
+    for (task_name, task) in &config.tasks {
+        for (name, f) in &task.input {
+            if let (true, Some(d)) = (f.field_type == JSON_TYPE, &f.default) {
+                lint_json(
+                    &format!("Task '{task_name}' input '{name}' default"),
+                    d,
+                    &mut warnings,
+                )?;
+            }
+        }
+        for (step_name, step) in &task.flow {
+            let Some(schema) = step_target_schema(config, step) else {
+                continue;
+            };
+            for (key, value) in &step.input {
+                if schema.get(key).is_some_and(|f| f.field_type == JSON_TYPE) {
+                    lint_json(
+                        &format!("Task '{task_name}' step '{step_name}' input '{key}'"),
+                        value,
+                        &mut warnings,
+                    )?;
+                }
+            }
+        }
+    }
+    Ok(warnings)
+}
+
+/// The schema a flow step's `input:` lands in when it resolves locally: the
+/// action's input, or for a `type: task` action the task's (spec D6).
+/// Library (dotted) and cross-workspace names do not resolve here.
+fn step_target_schema<'a>(
+    config: &'a WorkspaceConfig,
+    step: &'a crate::models::workflow::FlowStep,
+) -> Option<&'a HashMap<String, crate::models::workflow::InputFieldDef>> {
+    let action = match &step.inline_action {
+        Some(inline) => inline,
+        None => config.actions.get(&step.action)?,
+    };
+    if action.action_type == "task" {
+        config.tasks.get(action.task.as_deref()?).map(|t| &t.input)
+    } else {
+        Some(&action.input)
+    }
+}
+
+fn lint_json(context: &str, value: &serde_json::Value, warnings: &mut Vec<String>) -> Result<()> {
+    let lint = crate::json_field::lint_json_value(value);
+    if lint.mixed {
+        bail!("{context}: a json field takes a literal value or a single {{{{ expression }}}}");
+    }
+    if lint.encodes_to_text {
+        warnings.push(format!(
+            "{context}: the expression ends in `json_encode`, so the field receives JSON text \
+             (a string); drop `| json_encode()` to pass the value itself"
+        ));
+    }
+    Ok(())
+}
+
+/// Secrets redaction can never mask (spec D7, § 5.4): redaction matches
+/// strings only. Names the secret and the JSON type — never the value.
+fn warn_non_string_secrets(config: &WorkspaceConfig) -> Vec<String> {
+    fn kinds(v: &serde_json::Value, out: &mut Vec<&'static str>) {
+        match v {
+            serde_json::Value::String(_) => {}
+            serde_json::Value::Number(_) => out.push("is a number"),
+            serde_json::Value::Bool(_) => out.push("is a boolean"),
+            serde_json::Value::Null => out.push("is null"),
+            serde_json::Value::Array(a) => a.iter().for_each(|x| kinds(x, out)),
+            serde_json::Value::Object(m) => m.values().for_each(|x| kinds(x, out)),
+        }
+    }
+    const HINT: &str = "so it is never masked in job output or errors; quote it to have it masked";
+    let mut warnings = Vec::new();
+    for (name, value) in &config.secrets {
+        let mut found = Vec::new();
+        kinds(value, &mut found);
+        found.dedup();
+        for k in found {
+            warnings.push(format!("secret '{name}' {k}, {HINT}"));
+        }
+    }
+    for (conn_name, conn) in &config.connections {
+        let Some(type_def) = conn
+            .connection_type
+            .as_ref()
+            .and_then(|t| config.connection_types.get(t))
+        else {
+            continue;
+        };
+        for (prop, def) in &type_def.properties {
+            if !def.secret {
+                continue;
+            }
+            let Some(value) = conn.values.get(prop) else {
+                continue;
+            };
+            let mut found = Vec::new();
+            kinds(value, &mut found);
+            found.dedup();
+            for k in found {
+                warnings.push(format!(
+                    "connection '{conn_name}' secret property '{prop}' {k}, {HINT}"
+                ));
+            }
+        }
+    }
+    warnings
+}
+
 fn validate_input_options(config: &WorkspaceConfig) -> Result<Vec<String>> {
     let mut warnings = Vec::new();
 
@@ -8392,6 +8526,84 @@ triggers:
     }
 
     // --- json input type (spec 2026-10-06-json-input-type § 5) ---
+
+    #[test]
+    fn mixed_template_in_a_json_step_input_is_an_error() {
+        let cfg: WorkspaceConfig = serde_yaml::from_str(
+            "actions:\n  a:\n    type: script\n    script: \"true\"\n    input:\n      \
+             cfg: { type: json }\n\
+             tasks:\n  t:\n    flow:\n      s:\n        action: a\n        input:\n          \
+             cfg: \"id {{ x }}\"\n",
+        )
+        .unwrap();
+        let err = format!("{:#}", validate_workflow_config(&cfg).unwrap_err());
+        assert!(err.contains("Task 't' step 's' input 'cfg'"), "{err}");
+        assert!(err.contains("a json field takes a literal value"), "{err}");
+    }
+
+    #[test]
+    fn mixed_template_in_a_json_default_is_an_error() {
+        let cfg = json_cfg("      cfg: { type: json, default: \"v={{ secret.X }}\" }");
+        let err = format!("{:#}", validate_workflow_config(&cfg).unwrap_err());
+        assert!(err.contains("Action 'a' input 'cfg' default"), "{err}");
+    }
+
+    #[test]
+    fn json_encode_tail_in_a_json_field_is_a_warning() {
+        let cfg: WorkspaceConfig = serde_yaml::from_str(
+            "actions:\n  a:\n    type: script\n    script: \"true\"\n    input:\n      \
+             cfg: { type: json }\n\
+             tasks:\n  t:\n    flow:\n      s:\n        action: a\n        input:\n          \
+             cfg: \"{{ x | json_encode() }}\"\n",
+        )
+        .unwrap();
+        let warnings = validate_workflow_config(&cfg).unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("input 'cfg'") && w.contains("json_encode")),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn task_step_input_is_checked_against_the_task_schema() {
+        let cfg: WorkspaceConfig = serde_yaml::from_str(
+            "actions:\n  call: { type: task, task: child }\n  a: { type: script, script: \"true\" }\n\
+             tasks:\n  child:\n    input:\n      cfg: { type: json }\n    flow:\n      s: { action: a }\n  \
+             parent:\n    flow:\n      c:\n        action: call\n        input:\n          cfg: \"x {{ y }}\"\n",
+        )
+        .unwrap();
+        let err = format!("{:#}", validate_workflow_config(&cfg).unwrap_err());
+        assert!(err.contains("Task 'parent' step 'c' input 'cfg'"), "{err}");
+    }
+
+    #[test]
+    fn numeric_secrets_are_warned_about_by_name_only() {
+        let cfg: WorkspaceConfig = serde_yaml::from_str(
+            "secrets:\n  PORT: 5432\n  FLAG: true\n  NESTED: { pin: 1234 }\n  OK: \"5432\"\n  \
+             REF: \"ref+awsssm://x\"\n\
+             connection_types:\n  pg:\n    host: { type: string }\n    pw: { type: integer, secret: true }\n\
+             connections:\n  db: { type: pg, host: h, pw: 991234 }\n",
+        )
+        .unwrap();
+        let warnings = validate_workflow_config(&cfg).unwrap();
+        let has = |needle: &str| warnings.iter().any(|w| w.contains(needle));
+        assert!(has("secret 'PORT' is a number"), "{warnings:?}");
+        assert!(has("secret 'FLAG' is a boolean"), "{warnings:?}");
+        assert!(has("secret 'NESTED' is a number"), "{warnings:?}");
+        assert!(
+            has("connection 'db' secret property 'pw' is a number"),
+            "{warnings:?}"
+        );
+        assert!(!has("'OK'") && !has("'REF'"), "{warnings:?}");
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.contains("5432") || w.contains("991234") || w.contains("1234")),
+            "a warning must never print a secret value: {warnings:?}"
+        );
+    }
 
     fn json_cfg(input_yaml: &str) -> WorkspaceConfig {
         serde_yaml::from_str(&format!(

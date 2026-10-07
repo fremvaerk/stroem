@@ -196,6 +196,46 @@ fn location(field: &str, path: &[Option<usize>]) -> String {
     }
 }
 
+/// What `stroem validate` reports about one `json` field value (spec § 5.4).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct JsonLint {
+    /// A string that is neither literal nor a single expression (an error).
+    pub mixed: bool,
+    /// A single expression ending in `json_encode` — the field would receive
+    /// JSON TEXT, not the value (a warning).
+    pub encodes_to_text: bool,
+}
+
+pub fn lint_json_value(value: &Value) -> JsonLint {
+    let mut lint = JsonLint::default();
+    lint_walk(value, &mut lint);
+    lint
+}
+
+fn lint_walk(value: &Value, lint: &mut JsonLint) {
+    match value {
+        Value::String(s) => match classify(s) {
+            Classified::Mixed => lint.mixed = true,
+            Classified::Single(expr) if ends_in_json_encode(expr.inner) => {
+                lint.encodes_to_text = true
+            }
+            _ => {}
+        },
+        Value::Object(map) => map.values().for_each(|v| lint_walk(v, lint)),
+        Value::Array(items) => items.iter().for_each(|v| lint_walk(v, lint)),
+        _ => {}
+    }
+}
+
+fn ends_in_json_encode(inner: &str) -> bool {
+    let Some((_, last)) = inner.rsplit_once('|') else {
+        return false;
+    };
+    let last = last.trim();
+    last.strip_prefix("json_encode")
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('('))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -431,5 +471,18 @@ mod tests {
                                                            // `{{ typo }}`'s undefined error is raised in SUFFIX: no position.
         let err = render_json_value(&json!("{{ typo }}"), "f", &json!({})).unwrap_err();
         assert_eq!(template_position(&err), None, "{err:#}");
+    }
+
+    #[test]
+    fn lint_flags_mixed_and_json_encode_tails() {
+        assert_eq!(
+            lint_json_value(&json!({"a": "{{ x }}", "b": 1})),
+            JsonLint::default()
+        );
+        assert!(lint_json_value(&json!(["ok", "id {{ x }}"])).mixed);
+        assert!(lint_json_value(&json!("{{ x | json_encode() }}")).encodes_to_text);
+        assert!(lint_json_value(&json!("{{ x | json_encode(pretty=true) }}")).encodes_to_text);
+        assert!(!lint_json_value(&json!("{{ x | upper }}")).encodes_to_text);
+        assert!(!lint_json_value(&json!("{{ json_encode_count }}")).encodes_to_text);
     }
 }
