@@ -919,6 +919,28 @@ RM_CHILD=$(acurl "$BASE_URL/api/jobs/$RM_CHILD_ID")
 [ "$(echo "$RM_CHILD" | jq -r '.steps[0].output.version')" = "branch-r1" ] || fail "child did not run release/1's files"
 pass "type: task + ref: child job pinned to release/1 ($REFS_R1_SHA)"
 
+# --- 21. json input type: native values between steps, API object input ---
+info "Triggering json-demo (json input type)..."
+EXEC_RESP_JS=$(acurl -X POST "$BASE_URL/api/workspaces/default/tasks/json-demo/execute" \
+    -H "Content-Type: application/json" -d '{"input": {"payload": {"key": "from-api"}}}')
+JS_JOB_ID=$(echo "$EXEC_RESP_JS" | jq -r '.job_id')
+[ -n "$JS_JOB_ID" ] && [ "$JS_JOB_ID" != "null" ] || fail "json-demo execute failed: $EXEC_RESP_JS"
+JS_POLLED=0; JS_STATUS="pending"
+while [ "$JS_STATUS" != "completed" ] && [ "$JS_STATUS" != "failed" ]; do
+    sleep 2; JS_POLLED=$((JS_POLLED + 2))
+    [ "$JS_POLLED" -lt "$MAX_POLL" ] || { acurl "$BASE_URL/api/jobs/$JS_JOB_ID" | jq .; fail "json-demo did not finish"; }
+    JS_DETAIL=$(acurl "$BASE_URL/api/jobs/$JS_JOB_ID"); JS_STATUS=$(echo "$JS_DETAIL" | jq -r '.status'); printf "."
+done; echo ""
+[ "$JS_STATUS" = "completed" ] || { echo "$JS_DETAIL" | jq .; fail "json-demo failed"; }
+JS_LOGS=$(acurl "$BASE_URL/api/jobs/$JS_JOB_ID/logs" | jq -r '.logs')
+echo "$JS_LOGS" | grep -q "REGION=eu" || fail "object did not reach the json field"
+echo "$JS_LOGS" | grep -q "NEXT=4" || fail "nested number was not native"
+echo "$JS_LOGS" | grep -q "COUNT_PLUS=4" || fail "| length did not arrive as a number"
+echo "$JS_LOGS" | grep -q "PAYLOAD_KEY=from-api" || fail "API object input did not pass through"
+[ "$(echo "$JS_DETAIL" | jq -r '.steps[] | select(.step_name=="use") | .input.count')" = "3" ] \
+    || fail "persisted step input count is not the number 3"
+pass "json input: native object, number and API object verified end to end"
+
 # --- Summary ---
 echo ""
 echo -e "${GREEN}========================================${NC}"

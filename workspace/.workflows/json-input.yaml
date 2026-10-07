@@ -1,0 +1,36 @@
+actions:
+  emit-config:
+    type: script
+    script: |
+      echo 'OUTPUT: {"cfg": {"region": "eu", "replicas": 3}, "items": ["a", "b", "c"]}'
+  use-config:
+    type: script
+    script: |
+      echo "REGION={{ input.cfg.region }}"
+      echo "NEXT={{ input.cfg.replicas + 1 }}"
+      echo "COUNT_PLUS={{ input.count + 1 }}"
+      echo "PAYLOAD_KEY={{ input.payload.key }}"
+    input:
+      cfg: { type: json, required: true }
+      count: { type: json }
+      payload: { type: json }
+
+tasks:
+  json-demo:
+    mode: distributed
+    description: Demonstrates the json input type.
+    input:
+      payload:
+        type: json
+        description: Any JSON value
+        default: { key: "from-task-default" }
+    flow:
+      emit:
+        action: emit-config
+      use:
+        action: use-config
+        depends_on: [emit]
+        input:
+          cfg: "{{ emit.output.cfg }}"
+          count: "{{ emit.output.items | length }}"
+          payload: "{{ input.payload }}"

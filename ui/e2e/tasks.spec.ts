@@ -169,4 +169,34 @@ test.describe("Tasks", () => {
     expect(Array.isArray(body.input?.tags)).toBe(true);
     expect(body.input?.tags).toContain("hotfix");
   });
+
+  test("json input submits a parsed object and re-runs it", async ({ page }) => {
+    await page.goto("/workspaces/default/tasks/json-demo");
+    await page.waitForLoadState("networkidle");
+
+    const editor = page.getByLabel("payload");
+    await expect(editor).toHaveValue(/from-task-default/);
+    await editor.fill('{"key": "from-ui"}');
+
+    const isExecute = (req: import("@playwright/test").Request) =>
+      req.url().includes("/tasks/json-demo/execute") && req.method() === "POST";
+    const first = page.waitForRequest(isExecute);
+    await page.getByRole("button", { name: "Run Task" }).click();
+    const body = (await first).postDataJSON() as { input?: { payload?: unknown } };
+    expect(body.input?.payload).toEqual({ key: "from-ui" });
+
+    await page.waitForURL(/\/jobs\/.+/);
+    await page.getByRole("link", { name: "Re-run" }).click();
+    await page.waitForURL(/\/tasks\/json-demo/);
+    await expect(page.getByLabel("payload")).toHaveValue(/from-ui/);
+
+    const second = page.waitForRequest(isExecute);
+    await page.getByRole("button", { name: "Run Task" }).click();
+    const rerun = (await second).postDataJSON() as {
+      input?: { payload?: unknown };
+      source_job_id?: string;
+    };
+    expect(rerun.input?.payload).toEqual({ key: "from-ui" });
+    expect(rerun.source_job_id).toBeTruthy();
+  });
 });
