@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
+libc = "0.2"
 sqlx.workspace = true
 stroem-db.workspace = true
 tokio.workspace = true

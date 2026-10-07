@@ -1,3 +1,5 @@
+use std::io::Write;
+
 use anyhow::{Context, Result};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{AssertSqlSafe, PgPool};
@@ -19,8 +21,9 @@ use uuid::Uuid;
 /// TCP connection, which covers that gap.
 ///
 /// Every container is labelled `stroem.test=true` (what
-/// `scripts/test-clean.sh` removes) and named after the test binary it
-/// serves — see [`container_name`].
+/// `scripts/test-clean.sh` removes when a crashed or interrupted run leaves
+/// one behind) and named after the test binary it serves — see
+/// [`container_name`].
 fn postgres_image() -> ContainerRequest<GenericImage> {
     const READY: &str = "database system is ready to accept connections";
     GenericImage::new("postgres", "11-alpine")
@@ -53,8 +56,8 @@ fn this_container_name() -> String {
 /// `stroem-server-integration-48213-9f3a1c`; `target` is the test binary
 /// without cargo's hash, `unit` for a library's own unit tests. The pid and
 /// the nonce keep it unique: Docker refuses a name any existing container
-/// has, these containers outlive their process (until `test-clean.sh`), and
-/// one process can start several (the tests below).
+/// has, a crashed or interrupted run's container outlives its process (until
+/// `test-clean.sh`), and one process can start several (the tests below).
 fn container_name(package: Option<&str>, exe_stem: Option<&str>, pid: u32, nonce: &str) -> String {
     let target = exe_stem.map(|stem| match stem.rsplit_once('-') {
         Some((name, hash)) if hash.len() == 16 && hash.bytes().all(|b| b.is_ascii_hexdigit()) => {
@@ -98,16 +101,73 @@ pub struct TestDb {
 }
 
 struct SharedContainer {
-    // Kept only to hold the container alive for this binary's process
-    // lifetime; never read directly. `static` values are never dropped at
-    // process exit — this container's eventual removal is
-    // `scripts/test-clean.sh`'s job, not this field's, and that's by
-    // design (see the design spec § 3.1).
-    _container: ContainerAsync<GenericImage>,
+    // Holds the container alive for this binary's process lifetime. A
+    // `static` is never dropped, so `ContainerAsync`'s own removal never
+    // runs; [`remove_shared_container`] removes it at exit instead.
+    container: ContainerAsync<GenericImage>,
     base_url: String,
 }
 
 static SHARED: OnceCell<SharedContainer> = OnceCell::const_new();
+
+/// Registers [`remove_shared_container`] to run when this process exits.
+/// libc runs exit handlers both when libtest returns from `main` and when it
+/// calls `process::exit(101)` after a failed test; a crash, Ctrl-C or
+/// `kill -9` skips them, which is what `scripts/test-clean.sh` is for.
+fn remove_shared_container_at_exit() {
+    // SAFETY: `remove_shared_container` captures nothing and never unwinds.
+    if unsafe { libc::atexit(remove_shared_container) } != 0 {
+        let _ = writeln!(
+            std::io::stderr(),
+            "stroem-test-support: could not register the exit handler; \
+             the test container will outlive this process"
+        );
+    }
+}
+
+/// Exit handler: removes the shared container and its anonymous data volume
+/// (`--volumes`; left behind, those filled the disk). Waits for `docker rm`
+/// so the container is gone once the process is — a hung daemon would
+/// already have hung `start()`. Must never panic: that aborts the process.
+extern "C" fn remove_shared_container() {
+    let Some(shared) = SHARED.get() else {
+        return;
+    };
+    let id = shared.container.id();
+    let removal = std::process::Command::new("docker")
+        .args(["rm", "--force", "--volumes", id])
+        .output();
+    warn_if_not_removed(id, &removal);
+}
+
+/// Prints [`removal_warning`], if any, to stderr. Runs inside an exit
+/// handler: `writeln!` with its result discarded, because `eprintln!` panics
+/// on a closed stderr.
+fn warn_if_not_removed(id: &str, removal: &std::io::Result<std::process::Output>) {
+    if let Some(warning) = removal_warning(id, removal) {
+        let _ = writeln!(std::io::stderr(), "{warning}");
+    }
+}
+
+/// What to tell the user when `docker rm` left container `id` behind.
+fn removal_warning(id: &str, removal: &std::io::Result<std::process::Output>) -> Option<String> {
+    let cause = match removal {
+        Ok(out) if out.status.success() => return None,
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            // Older docker CLIs report a missing container even with --force.
+            if stderr.contains("No such container") {
+                return None;
+            }
+            format!("`docker rm` failed: {}", stderr.trim())
+        }
+        Err(err) => format!("`docker` could not be run: {err}"),
+    };
+    Some(format!(
+        "stroem-test-support: test container {id} was not removed at exit \
+         ({cause}); remove it with scripts/test-clean.sh"
+    ))
+}
 
 async fn default_base_url() -> Result<String> {
     let shared = SHARED
@@ -126,9 +186,10 @@ async fn default_base_url() -> Result<String> {
                 .get_host_port_ipv4(5432)
                 .await
                 .context("get postgres container port")?;
+            remove_shared_container_at_exit();
             let base_url = format!("postgres://postgres:postgres@localhost:{port}");
             Ok::<_, anyhow::Error>(SharedContainer {
-                _container: container,
+                container,
                 base_url,
             })
         })
@@ -354,6 +415,115 @@ mod tests {
             container_name(None, Some("_my test+bin"), 3, "n"),
             "my-test-bin-3-n"
         );
+    }
+
+    /// Makes [`exit_child`] run; without it the test is a no-op.
+    const EXIT_CHILD: &str = "STROEM_TEST_SUPPORT_EXIT_CHILD";
+    const CONTAINER_ID_MARKER: &str = "SHARED_CONTAINER_ID=";
+
+    /// The child process of the exit tests below: starts this binary's
+    /// shared container, prints its id, then passes or fails as told.
+    #[tokio::test]
+    #[ignore = "run as a child process by the shared-container exit tests"]
+    async fn exit_child() {
+        let Ok(outcome) = std::env::var(EXIT_CHILD) else {
+            return;
+        };
+        super::test_pool().await;
+        let id = super::SHARED
+            .get()
+            .expect("shared container")
+            .container
+            .id();
+        println!("{CONTAINER_ID_MARKER}{id}");
+        assert_eq!(outcome, "pass", "this child was told to fail");
+    }
+
+    /// Runs [`exit_child`] in a new process of this test binary and returns
+    /// whether it passed and the id of the container it started.
+    fn run_exit_child(outcome: &str, env: &[(&str, &str)]) -> (bool, String) {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--ignored", "--exact", "tests::exit_child", "--nocapture"])
+            .env(EXIT_CHILD, outcome)
+            .env_remove("TEST_DATABASE_URL")
+            .envs(env.iter().copied())
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let id = stdout
+            .split(CONTAINER_ID_MARKER)
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .unwrap_or_else(|| {
+                panic!(
+                    "the child printed no container id\nstdout:\n{stdout}\nstderr:\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                )
+            });
+        (output.status.success(), id.to_string())
+    }
+
+    fn container_exists(id: &str) -> bool {
+        std::process::Command::new("docker")
+            .args(["container", "inspect", id])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    }
+
+    /// A finished `docker rm` with exit code `code` and stderr `stderr`.
+    fn docker_rm_output(code: i32, stderr: &str) -> std::io::Result<std::process::Output> {
+        use std::os::unix::process::ExitStatusExt;
+        Ok(std::process::Output {
+            status: std::process::ExitStatus::from_raw(code << 8),
+            stdout: Vec::new(),
+            stderr: stderr.as_bytes().to_vec(),
+        })
+    }
+
+    #[test]
+    fn removal_warning_is_silent_when_the_container_is_gone() {
+        assert_eq!(
+            super::removal_warning("abc", &docker_rm_output(0, "")),
+            None
+        );
+        // Older docker CLIs report a missing container even with --force.
+        let gone = docker_rm_output(1, "Error response from daemon: No such container: abc\n");
+        assert_eq!(super::removal_warning("abc", &gone), None);
+    }
+
+    #[test]
+    fn removal_warning_names_the_container_and_the_cause_when_docker_rm_fails() {
+        let failed = docker_rm_output(1, "Cannot connect to the Docker daemon\n");
+        let warning = super::removal_warning("abc", &failed).expect("a warning");
+        assert!(warning.contains("abc"), "{warning}");
+        assert!(
+            warning.contains("Cannot connect to the Docker daemon"),
+            "{warning}"
+        );
+        assert!(warning.contains("scripts/test-clean.sh"), "{warning}");
+    }
+
+    #[test]
+    fn removal_warning_names_the_container_and_the_cause_when_docker_cannot_run() {
+        let not_found = Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+        let warning = super::removal_warning("abc", &not_found).expect("a warning");
+        assert!(warning.contains("abc"), "{warning}");
+        assert!(warning.contains("not found"), "{warning}");
+        assert!(warning.contains("scripts/test-clean.sh"), "{warning}");
+    }
+
+    #[test]
+    fn shared_container_is_removed_when_its_process_exits() {
+        for outcome in ["pass", "fail"] {
+            let (passed, id) = run_exit_child(outcome, &[]);
+            assert_eq!(passed, outcome == "pass", "child told to {outcome}");
+            assert!(
+                !container_exists(&id),
+                "container {id} outlived its process (child told to {outcome})"
+            );
+        }
     }
 
     #[tokio::test]

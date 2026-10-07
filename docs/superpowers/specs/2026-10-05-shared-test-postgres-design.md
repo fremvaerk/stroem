@@ -1,11 +1,27 @@
 # Shared test Postgres container
 
-Status: revision 13, proposed (2026-10-05)
+Status: revision 14, implemented (2026-10-07)
 
 Companion of `docs/internal/TODO.md` § "Integration tests start one Postgres
 container per test" (2026-10-05).
 
 ## Revision history
+
+**Revision 14 (2026-10-07, after implementation).** The per-binary
+container is now removed when its test binary exits. A `static` is still
+never dropped, but libc still runs `atexit` handlers when libtest returns
+from `main` and when it calls `process::exit(101)` after a failed test; the
+handler (`stroem-test-support`'s `remove_shared_container`) runs
+`docker rm --force --volumes` on its OWN container's id and waits for it;
+if that fails it prints a stderr warning naming the container.
+This is not the cut cross-invocation reaper (§ 2 non-goals): no process
+decides whether another process's container is still in use, so none of the
+liveness guessing that sank revisions 2–9 comes back. Nor is it the
+`watchdog` feature (signal handling): a crash, Ctrl-C or `kill -9` still
+skips the handler, and `scripts/test-clean.sh` stays for exactly those
+leftovers — a backstop again, no longer the routine sweep. Prompted by 16
+containers left by one morning's filtered `cargo test` runs. §§ 3.1, 3.2
+and 4 changed.
 
 **Revision 13 (2026-10-05, Codex design review, trivial fix).** Both
 revision 12 fixes confirmed complete. One miss found: § 3.1's manual
@@ -312,13 +328,14 @@ Resolving the base URL:
    container: start one labelled `Postgres::default()` (via
    `ImageExt::with_label`, confirmed present in the pinned `0.27.3`), raised
    server-side `max_connections` (§ 4), then use its URL the same way.
-   - Not expected to be removed by `Drop` at process exit — `static` values
-     are never dropped when a Rust binary exits, for the same reason the
-     original `Box::leak` bug existed in the first place. Cleanup is
-     `scripts/test-clean.sh` (§ 3.2), run by a human. This is the accepted
-     cost of the whole design: roughly one container per test binary
-     (~27-30 for a full workspace run, not hundreds) that needs periodic
-     manual sweeping, in exchange for zero wrapper-script complexity.
+   - Not removed by `Drop` at process exit — `static` values are never
+     dropped when a Rust binary exits, for the same reason the original
+     `Box::leak` bug existed in the first place. Instead the binary
+     registers a libc `atexit` handler once the container is up, which
+     removes that one container (and its data volume) as the process exits
+     normally, whether its tests passed or failed (revision 14). A crash,
+     Ctrl-C or `kill -9` skips the handler; `scripts/test-clean.sh` (§ 3.2)
+     removes those leftovers.
 
 `stroem_test_marker` lives in `postgres`, never in `stroem_template` itself
 — querying it never requires a second connection into the template, which
@@ -401,10 +418,10 @@ cannot know whether an older container is still legitimately in use, only
 how old it is. Running it in good faith (after a `docker ps` glance if in
 doubt) is what makes it a reasonable tool for this problem, not any
 property of the check itself. With the per-binary design as the only
-mechanism (§ 3.1), this is also the **normal, periodic cleanup path**, not
-just a rare crash backstop — running `cargo test --workspace` repeatedly
-over a work session will accumulate roughly one container per distinct
-test binary run, and this is how you sweep them up. Run it after whatever
+mechanism (§ 3.1), revisions 6–13 made this the **normal, periodic
+cleanup path**; since revision 14 a normally exiting binary removes its own
+container, so this is a backstop again — for the containers of runs that
+crashed or were interrupted (Ctrl-C, `kill -9`, a timeout). Run it after whatever
 test run you have in flight has actually finished, not while one is still
 running — the default `--max-age` doesn't know the difference (§ 4).
 
@@ -499,9 +516,11 @@ favor of direct calls — decided during planning).
   possible to hit as an error — `ensure_template_migrated` (§ 3.1) now
   migrates a fresh or stale template the same way for both paths, instead
   of requiring a separate manual bootstrap step.
-- **Crash recovery and routine accumulation**: no automatic recovery for
-  either case — by design (§ 2 non-goals). Both are handled the same way,
-  with `scripts/test-clean.sh` (§ 3.2), a deliberate human decision.
+- **Crash recovery**: no automatic recovery — by design (§ 2 non-goals).
+  A crashed or interrupted binary's container is removed with
+  `scripts/test-clean.sh` (§ 3.2), a deliberate human decision. Routine
+  accumulation no longer happens: a normally exiting binary removes its own
+  container (§ 3.1, revision 14).
 - **A `scripts/test-clean.sh` run while a test is legitimately still
   starting up** (e.g. run from habit in another terminal moments after
   starting a slow `cargo test --workspace`): possible with the default

@@ -5429,6 +5429,7 @@ name = "stroem-test-support"
 version = "0.18.0"
 dependencies = [
  "anyhow",
+ "libc",
  "sqlx",
  "stroem-db",
  "testcontainers",
