@@ -5,7 +5,7 @@ use std::sync::Arc;
 use stroem_common::models::job::StepStatus;
 use stroem_common::models::workflow::resolve_step_retry_config;
 use stroem_common::models::workflow::{
-    ActionDef, BackoffStrategy, FlowStep, TaskDef, WorkspaceConfig,
+    ActionDef, BackoffStrategy, FlowStep, InputFieldDef, TaskDef, WorkspaceConfig,
 };
 use stroem_common::template::{
     merge_defaults, parse_qualified_ref, resolve_connection_inputs, RoleConfig, RoleScope,
@@ -39,9 +39,13 @@ pub enum CreationMode<'a> {
     /// `parent_job_id` — a hook is not a sub-job (it keeps task-level retry and
     /// is not cancelled with the job that fired it).
     Hook { source_job_id: Uuid },
-    /// User clicked Re-run: `••••••` sentinels in `input` are replaced from the
-    /// source's `raw_input`; `source_job_id` is persisted.
-    Rerun { source_job_id: Uuid },
+    /// User clicked Re-run: `••••••` sentinels in secret/connection fields
+    /// and the fields named in `replay_fields` (spec 2026-10-06 D12) take the
+    /// source's stored `raw_input` values; `source_job_id` is persisted.
+    Rerun {
+        source_job_id: Uuid,
+        replay_fields: &'a [String],
+    },
     /// Restart From Step (spec 2026-09-07): `input` is the source's `raw_input`
     /// replayed through the normal pipeline; carried rows are seeded in the
     /// creation transaction; lineage + `restart_from_step` are persisted.
@@ -103,8 +107,118 @@ pub async fn create_job_for_task_detailed(
         None,
         revision,
         match source_job_id {
-            Some(id) => CreationMode::Rerun { source_job_id: id },
+            Some(id) => CreationMode::Rerun {
+                source_job_id: id,
+                replay_fields: &[],
+            },
             None => CreationMode::Normal,
+        },
+        agents_config,
+        defaults,
+        None,
+    )
+    .await
+}
+
+/// A `replay_fields` request that cannot be honoured (spec
+/// 2026-10-06-json-input-type § 7). `classify_execute_error` maps it to 400.
+/// `UnknownField` carries no name: it is request text, not a schema key.
+#[derive(Debug)]
+pub enum ReplayFieldsError {
+    UnknownField,
+    AlsoInInput { field: String },
+    MissingRequired { field: String },
+}
+
+impl std::fmt::Display for ReplayFieldsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownField => {
+                f.write_str("replay_fields names a field the task does not declare")
+            }
+            Self::AlsoInInput { field } => {
+                write!(f, "field '{field}' is both in input and in replay_fields")
+            }
+            Self::MissingRequired { field } => {
+                write!(
+                    f,
+                    "the source job has no value for required field '{field}'"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for ReplayFieldsError {}
+
+/// Each field named in `replay_fields` takes the source's stored value, or
+/// stays absent (its default then applies) when the source had none.
+pub(crate) fn apply_replay_fields(
+    input: &mut serde_json::Value,
+    replay_fields: &[String],
+    source_raw: &serde_json::Value,
+    schema: &HashMap<String, InputFieldDef>,
+) -> std::result::Result<(), ReplayFieldsError> {
+    if replay_fields.is_empty() {
+        return Ok(());
+    }
+    if !input.is_object() {
+        *input = serde_json::json!({});
+    }
+    let map = input.as_object_mut().expect("just made an object");
+    for name in replay_fields {
+        let Some((key, def)) = schema.get_key_value(name.as_str()) else {
+            return Err(ReplayFieldsError::UnknownField);
+        };
+        if map.contains_key(key) {
+            return Err(ReplayFieldsError::AlsoInInput { field: key.clone() });
+        }
+        match source_raw.get(key) {
+            Some(v) => {
+                map.insert(key.clone(), v.clone());
+            }
+            None if def.required && def.default.is_none() => {
+                return Err(ReplayFieldsError::MissingRequired { field: key.clone() });
+            }
+            None => {}
+        }
+    }
+    Ok(())
+}
+
+/// Re-run of `source_job_id` (spec D12): sentinels and `replay_fields` are
+/// resolved against the source's stored `raw_input`.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_job_for_rerun(
+    workspaces: &WorkspaceManager,
+    pool: &PgPool,
+    workspace_config: &WorkspaceConfig,
+    workspace_name: &str,
+    task_name: &str,
+    input: serde_json::Value,
+    source_type: &str,
+    source_id: Option<&str>,
+    revision: Option<&str>,
+    source_job_id: Uuid,
+    replay_fields: &[String],
+    agents_config: Option<&AgentsConfig>,
+    defaults: JobDefaults,
+) -> Result<CreatedJob> {
+    create_job_for_task_inner(
+        workspaces,
+        pool,
+        workspace_config,
+        workspace_name,
+        task_name,
+        input,
+        source_type,
+        source_id,
+        None,
+        None,
+        revision,
+        CreationMode::Rerun {
+            source_job_id,
+            replay_fields,
         },
         agents_config,
         defaults,
@@ -357,7 +471,10 @@ pub(crate) fn create_job_for_task_inner<'a>(
         let (lineage_source_job_id, restart_from_step): (Option<Uuid>, Option<&str>) = match &mode {
             CreationMode::Normal | CreationMode::Retry { .. } => (None, None),
             CreationMode::Hook { source_job_id } => (Some(*source_job_id), None),
-            CreationMode::Rerun { source_job_id } => {
+            CreationMode::Rerun {
+                source_job_id,
+                replay_fields,
+            } => {
                 let src_id = *source_job_id;
                 let source_job = stroem_db::JobRepo::get(pool, src_id)
                     .await
@@ -378,6 +495,13 @@ pub(crate) fn create_job_for_task_inner<'a>(
                         src_id
                     ),
                 };
+                apply_replay_fields(
+                    &mut effective_input,
+                    replay_fields,
+                    &source_raw,
+                    &task.input,
+                )
+                .map_err(anyhow::Error::new)?;
                 effective_input = stroem_common::template::resolve_rerun_sentinels(
                     &effective_input,
                     &source_raw,
@@ -1390,6 +1514,63 @@ pub(crate) async fn precheck_task_step_literals(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    #[test]
+    fn apply_replay_fields_copies_the_source_value_whole() {
+        let mut schema = HashMap::new();
+        schema.insert(
+            "cfg".to_string(),
+            serde_yaml::from_str::<InputFieldDef>("type: json").unwrap(),
+        );
+        let mut input = json!({});
+        apply_replay_fields(
+            &mut input,
+            &["cfg".into()],
+            &json!({"cfg": {"a": "••••••x"}}),
+            &schema,
+        )
+        .unwrap();
+        assert_eq!(input, json!({"cfg": {"a": "••••••x"}}));
+    }
+
+    #[test]
+    fn apply_replay_fields_rejects_bad_requests_without_echoing_unknown_names() {
+        let mut schema = HashMap::new();
+        schema.insert(
+            "cfg".to_string(),
+            serde_yaml::from_str::<InputFieldDef>("type: json").unwrap(),
+        );
+        schema.insert(
+            "req".to_string(),
+            serde_yaml::from_str::<InputFieldDef>("{ type: json, required: true }").unwrap(),
+        );
+        let src = json!({});
+        let unknown = apply_replay_fields(&mut json!({}), &["canary-name".into()], &src, &schema)
+            .unwrap_err();
+        assert!(matches!(unknown, ReplayFieldsError::UnknownField));
+        assert!(!unknown.to_string().contains("canary"), "{unknown}");
+        let both = apply_replay_fields(&mut json!({"cfg": 1}), &["cfg".into()], &src, &schema)
+            .unwrap_err();
+        assert_eq!(
+            both.to_string(),
+            "field 'cfg' is both in input and in replay_fields"
+        );
+        let missing =
+            apply_replay_fields(&mut json!({}), &["req".into()], &src, &schema).unwrap_err();
+        assert_eq!(
+            missing.to_string(),
+            "the source job has no value for required field 'req'"
+        );
+        let mut absent = json!({});
+        apply_replay_fields(&mut absent, &["cfg".into()], &src, &schema).unwrap();
+        assert_eq!(
+            absent,
+            json!({}),
+            "absent in source → absent (default applies)"
+        );
+    }
 
     #[test]
     fn precheck_rejects_literal_unshared_ref_and_ignores_templates() {

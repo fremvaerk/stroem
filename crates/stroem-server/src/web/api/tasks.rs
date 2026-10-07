@@ -104,6 +104,11 @@ pub struct ExecuteTaskRequest {
     pub input: HashMap<String, serde_json::Value>,
     #[serde(default)]
     pub source_job_id: Option<Uuid>,
+    /// Fields whose value is replayed from the source job's stored
+    /// `raw_input` (spec 2026-10-06-json-input-type D12). Requires
+    /// `source_job_id`.
+    #[serde(default)]
+    pub replay_fields: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -447,6 +452,12 @@ pub async fn execute_task(
         }
     };
 
+    if !req.replay_fields.is_empty() && req.source_job_id.is_none() {
+        return Err(AppError::BadRequest(
+            "replay_fields requires source_job_id".into(),
+        ));
+    }
+
     // 1b. Re-run of a PINNED source (spec § 7.3): its task may exist only at
     //     the source's ref, so it takes its own path before any live lookup.
     //     An unknown or unpinned source falls through to today's checks below
@@ -495,6 +506,14 @@ pub async fn execute_task(
                 "Not authorized to read source job".into(),
             ));
         }
+        // Same task as the source, on both paths (spec D12): a re-run copies
+        // stored values only between runs of one task.
+        if source_job.task_name != name {
+            return Err(AppError::BadRequest(format!(
+                "Source job {} is a run of task '{}', not '{}'",
+                source_job.job_id, source_job.task_name, name
+            )));
+        }
         effective_source_type = "rerun";
     }
 
@@ -502,21 +521,43 @@ pub async fn execute_task(
 
     // 5. Create job + steps via shared function
     let revision = state.workspaces.get_revision(&ws);
-    let created = create_job_for_task_detailed(
-        &state.workspaces,
-        &state.pool,
-        &workspace,
-        &ws,
-        &name,
-        input_value,
-        effective_source_type,
-        source_id.as_deref(),
-        revision.as_deref(),
-        req.source_job_id,
-        state.config.agents.as_ref(),
-        JobDefaults::from(state.config.as_ref()),
-    )
-    .await
+    let created = match req.source_job_id {
+        Some(src_id) => {
+            crate::job_creator::create_job_for_rerun(
+                &state.workspaces,
+                &state.pool,
+                &workspace,
+                &ws,
+                &name,
+                input_value,
+                effective_source_type,
+                source_id.as_deref(),
+                revision.as_deref(),
+                src_id,
+                &req.replay_fields,
+                state.config.agents.as_ref(),
+                JobDefaults::from(state.config.as_ref()),
+            )
+            .await
+        }
+        None => {
+            create_job_for_task_detailed(
+                &state.workspaces,
+                &state.pool,
+                &workspace,
+                &ws,
+                &name,
+                input_value,
+                effective_source_type,
+                source_id.as_deref(),
+                revision.as_deref(),
+                None,
+                state.config.agents.as_ref(),
+                JobDefaults::from(state.config.as_ref()),
+            )
+            .await
+        }
+    }
     .map_err(classify_execute_error)?;
     let job_id = created.job_id;
 
@@ -646,6 +687,7 @@ async fn execute_pinned_rerun(
         &source_pin.pin.git_ref,
         CreationMode::Rerun {
             source_job_id: source_job.job_id,
+            replay_fields: &req.replay_fields,
         },
         state.config.agents.as_ref(),
         JobDefaults::from(state.config.as_ref()),

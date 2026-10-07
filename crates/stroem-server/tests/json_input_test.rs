@@ -782,3 +782,224 @@ tasks:
     assert_eq!(detail["input"]["db"]["port"], json!(5432), "{detail}");
     Ok(())
 }
+
+// ─── Re-run (spec § 7, D12) ──────────────────────────────────────────────────
+
+const RERUN: &str = r#"
+actions:
+  noop: { type: script, script: "true" }
+tasks:
+  t:
+    input:
+      payload: { type: json }
+      tok: { type: string, secret: true }
+      need: { type: json, required: true }
+    flow:
+      s: { action: noop }
+  other:
+    input:
+      payload: { type: json }
+      tok: { type: string, secret: true }
+    flow:
+      s: { action: noop }
+"#;
+
+async fn source_job(app: &App) -> Result<String> {
+    let (s, body) = execute(
+        app,
+        "t",
+        json!({"input": {"payload": {"k": [1, "v"]}, "tok": "secret-tok", "need": 1}}),
+    )
+    .await?;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    Ok(body["job_id"].as_str().unwrap().to_string())
+}
+
+#[tokio::test]
+async fn replay_fields_copies_the_stored_source_value() -> Result<()> {
+    let app = app(RERUN).await?;
+    let src = source_job(&app).await?;
+    let (s, body) = execute(
+        &app,
+        "t",
+        json!({"input": {"need": 2}, "source_job_id": src, "replay_fields": ["payload"]}),
+    )
+    .await?;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let job: Uuid = body["job_id"].as_str().unwrap().parse()?;
+    let row = stroem_db::JobRepo::get(&app.pool, job).await?.unwrap();
+    assert_eq!(row.input.unwrap()["payload"], json!({"k": [1, "v"]}));
+    assert_eq!(row.raw_input.unwrap()["payload"], json!({"k": [1, "v"]}));
+    Ok(())
+}
+
+#[tokio::test]
+async fn replay_fields_rejects_bad_requests_with_400() -> Result<()> {
+    let app = app(RERUN).await?;
+    let src = source_job(&app).await?;
+    for (body, needle) in [
+        (
+            json!({"input": {"need": 1}, "replay_fields": ["payload"]}),
+            "requires source_job_id",
+        ),
+        (
+            json!({"input": {"need": 1}, "source_job_id": src, "replay_fields": ["canary-field"]}),
+            "does not declare",
+        ),
+        (
+            json!({"input": {"need": 1, "payload": 1}, "source_job_id": src, "replay_fields": ["payload"]}),
+            "both in input and in replay_fields",
+        ),
+    ] {
+        let (s, resp) = execute(&app, "t", body).await?;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{resp}");
+        let text = resp.to_string();
+        assert!(text.contains(needle), "{text}");
+        assert!(
+            !text.contains("canary-field"),
+            "the unknown name is never echoed: {text}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn replay_fields_missing_required_value_is_400() -> Result<()> {
+    let app = app(RERUN).await?;
+    // A source without `need` (creation does not check required fields).
+    let (_, body) = execute(&app, "t", json!({"input": {"payload": 1}})).await?;
+    let src = body["job_id"].as_str().unwrap().to_string();
+    let (s, resp) = execute(
+        &app,
+        "t",
+        json!({"input": {}, "source_job_id": src, "replay_fields": ["need"]}),
+    )
+    .await?;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{resp}");
+    assert!(
+        resp.to_string()
+            .contains("no value for required field 'need'"),
+        "{resp}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn masked_text_in_a_json_value_is_plain_data() -> Result<()> {
+    let app = app(RERUN).await?;
+    let src = source_job(&app).await?;
+    let (s, body) = execute(
+        &app,
+        "t",
+        json!({"input": {"need": 1, "payload": {"a": "••••••"}}, "source_job_id": src}),
+    )
+    .await?;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let job: Uuid = body["job_id"].as_str().unwrap().parse()?;
+    let row = stroem_db::JobRepo::get(&app.pool, job).await?.unwrap();
+    assert_eq!(row.input.unwrap()["payload"], json!({"a": "••••••"}));
+    Ok(())
+}
+
+#[tokio::test]
+async fn rerun_into_another_task_is_400_for_replay_and_sentinels() -> Result<()> {
+    let app = app(RERUN).await?;
+    let src = source_job(&app).await?;
+    for body in [
+        json!({"input": {}, "source_job_id": src, "replay_fields": ["payload"]}),
+        json!({"input": {"tok": "••••••"}, "source_job_id": src}),
+        json!({"input": {}, "source_job_id": src}),
+    ] {
+        let (s, resp) = execute(&app, "other", body).await?;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{resp}");
+        assert!(
+            resp.to_string()
+                .contains("is a run of task 't', not 'other'"),
+            "{resp}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn mixed_acl_caller_cannot_replay_across_tasks() -> Result<()> {
+    use stroem_db::{UserGroupRepo, UserRepo};
+    use stroem_server::config::{AclAction, AclRule};
+    let auth = AuthConfig {
+        jwt_secret: "json-test-jwt-secret".to_string(),
+        refresh_secret: "json-test-refresh-secret".to_string(),
+        base_url: None,
+        providers: HashMap::new(),
+        initial_user: None,
+        rate_limit: Default::default(),
+    };
+    let acl = AclConfig {
+        default: AclAction::Deny,
+        rules: vec![
+            AclRule {
+                workspace: "default".to_string(),
+                tasks: vec!["t".to_string()],
+                action: AclAction::View,
+                groups: vec!["mixed".to_string()],
+                users: vec![],
+            },
+            AclRule {
+                workspace: "default".to_string(),
+                tasks: vec!["other".to_string()],
+                action: AclAction::Run,
+                groups: vec!["mixed".to_string()],
+                users: vec![],
+            },
+        ],
+    };
+    let app = app_with(RERUN, Some(auth), Some(acl)).await?;
+    let hash = stroem_server::auth::hash_password("json-test-password-123")?;
+    let admin = Uuid::new_v4();
+    UserRepo::create(&app.pool, admin, "json-admin@test.com", Some(&hash), None).await?;
+    UserRepo::set_admin(&app.pool, admin, true).await?;
+    let user = Uuid::new_v4();
+    UserRepo::create(&app.pool, user, "json-mixed@test.com", Some(&hash), None).await?;
+    UserGroupRepo::add(&app.pool, user, "mixed").await?;
+    let login = |email: &'static str| {
+        api(
+            "POST",
+            "/api/auth/login",
+            json!({"email": email, "password": "json-test-password-123"}),
+            None,
+        )
+    };
+    let (_, a) = call(&app, login("json-admin@test.com")).await?;
+    let admin_token = a["access_token"].as_str().unwrap().to_string();
+    let (_, u) = call(&app, login("json-mixed@test.com")).await?;
+    let user_token = u["access_token"].as_str().unwrap().to_string();
+
+    let (s, body) = call(
+        &app,
+        api(
+            "POST",
+            "/api/workspaces/default/tasks/t/execute",
+            json!({"input": {"payload": {"k": 1}, "need": 1}}),
+            Some(&admin_token),
+        ),
+    )
+    .await?;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let src = body["job_id"].as_str().unwrap();
+
+    let (s, resp) = call(
+        &app,
+        api(
+            "POST",
+            "/api/workspaces/default/tasks/other/execute",
+            json!({"input": {}, "source_job_id": src, "replay_fields": ["payload"]}),
+            Some(&user_token),
+        ),
+    )
+    .await?;
+    assert_eq!(
+        s,
+        StatusCode::BAD_REQUEST,
+        "View on t + Run on other must not replay: {resp}"
+    );
+    Ok(())
+}

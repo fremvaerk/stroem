@@ -439,6 +439,9 @@ pub(crate) fn classify_execute_error(e: anyhow::Error) -> AppError {
     {
         return AppError::BadRequest(format!("{:#}", e));
     }
+    if let Some(r) = e.downcast_ref::<crate::job_creator::ReplayFieldsError>() {
+        return AppError::BadRequest(r.to_string());
+    }
     let chain = format!("{:#}", e);
     if chain.contains("is not available") {
         return AppError::Internal(e);
