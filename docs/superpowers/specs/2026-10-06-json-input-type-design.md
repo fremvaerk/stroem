@@ -1,12 +1,22 @@
 # `json` input type
 
-Status: revision 4, proposed (2026-10-06)
+Status: revision 5, proposed (2026-10-07)
 
 A new task/action input field type, `type: json`, that holds any JSON value
 and keeps it structured through templates. Facts below are verified at
 `b310bb44` (v0.18.0).
 
 ## Revision history
+
+**Revision 5 (2026-10-07, Codex spec review round 4, verdict "yes").** The
+three implementation notes applied. (1) `ReplayFieldsError::UnknownField`
+echoed request text — a name that is NOT a schema key — in a 400: its public
+message is now fixed and names no field (§ 7). (2) A malformed persisted
+`action_spec.input` consumes the step's configured retries, like every other
+claim-time render failure (`fail_claimed_step` → `claimed_step_failed` →
+`fail_or_retry`); stated as the policy and pinned by a test (§ 6, § 10).
+(3) § 9's "masked wherever it appears" qualified by the length and
+number-text rules that follow it.
 
 **Revision 4 (2026-10-06, Codex spec review round 3, verdict "no").** All
 five findings verified. (1) `replay_fields` could copy a stored value from a
@@ -411,7 +421,14 @@ owner's config still says what a connection name resolves to.
   action definition has an unreadable input schema`: no serde text (which
   can quote the stored value), no value. Same outcome as dispatch's
   (`dispatch.rs:400-410`), minus its serde detail. Reachable only through a
-  row written by a different server version or by hand.
+  row written by a different server version or by hand. Retry: the failure
+  takes the ordinary claim-failure route (`fail_claimed_step` →
+  `Settlement::claimed_step_failed` → `JobStepRepo::fail_or_retry`), so a
+  step with `retry:` configured is retried until its attempts run out, like
+  every other claim-time render failure; each attempt fails the same way.
+  It never takes the transient pin-release path (`JobStepRepo::release_claim`),
+  which is for pin loads only. Failing such a step without retry would be a
+  new claim-failure category; not worth one for a hand-damaged row.
 - The task / flow-step early returns (`rendering.rs:64-77` in rendering,
   `:102`, `:114` in preparation) are unchanged: when rendering passes the
   stored input through, preparation does too (F13; see "Removed task or flow
@@ -508,10 +525,18 @@ the pinned one directly (`web/api/tasks.rs:647`). Checks, in order:
    - otherwise the field takes the source's `raw_input` value; when the
      source has none, the field is left absent, and if it is `required`
      with no `default` → `ReplayFieldsError::MissingRequired`.
-   `ReplayFieldsError` is a typed error naming the field (a schema key) and
-   never a value; `classify_execute_error` (`web/api/mod.rs:420`) downcasts
-   it to 400 in its typed tier, before the phrase tiers, so no message text
-   is matched.
+   `ReplayFieldsError` is a typed error; `classify_execute_error`
+   (`web/api/mod.rs:420`) downcasts it to 400 in its typed tier, before the
+   phrase tiers, so no message text is matched. Its public messages:
+   - `UnknownField` — fixed, names no field: ``replay_fields names a field
+     the task does not declare``. The rejected name is request text, not a
+     schema key, so it is never echoed (the variant carries no string);
+   - `AlsoInInput { field }` — ``field '{field}' is both in input and in
+     replay_fields``;
+   - `MissingRequired { field }` — ``the source job has no value for
+     required field '{field}'``.
+   The two that name a field do so only after it matched a schema key, and
+   print the SCHEMA's key (author config), never a value.
 
 `replay_fields` is accepted for every field type: the server has no reason
 to refuse it, and it is what the secret / connection sentinel would be if
@@ -568,9 +593,11 @@ only useful if numeric secrets are in the set, and today they are not (F11).
 Both halves change (below).
 
 What is covered, exactly: a redaction value is matched against the TEXT of
-each string and (new) each number. So a secret's own value is masked
-wherever it appears, as a string or as a number whose text equals or
-contains it — including a string secret that `| int` turns into the same
+each string and (new) each number. So a secret's own value — one that IS a
+redaction value: longer than 3 characters in the response sets, and for a
+float, only in the formats the number-text rule below claims — is masked
+wherever its text appears, in a string or in a number whose text equals or
+contains it, including a string secret that `| int` turns into the same
 digits (`"5432"` → `5432`). A conversion that changes the text is NOT
 covered: `"0042" | int` → `42`, `| upper`, `| b64encode`, `| round`, a
 slice. That is the filter-transformed class CLAUDE.md § Secrets in logs
@@ -676,8 +703,10 @@ conversions someone listed. `guides/secrets.md` states the rule.
   prepared input sent to the worker equals the input prepared from the
   persisted `action_spec` (types, defaults, connection-typed fields); a
   step whose `action_spec.input` is present but not an input schema fails at
-  claim with the fixed § 6 message (no serde text, no value), while one with
-  no `input` key, `input: null` or `{}` is claimed with no preparation;
+  claim with the fixed § 6 message (no serde text, no value) — with
+  `retry: { max_attempts: 2 }` it fails twice, through `fail_or_retry`, and is
+  never released back to `ready` by the pin-release path — while one with no
+  `input` key, `input: null` or `{}` is claimed with no preparation;
   F13 — a removed flow step on a first claim still passes `step.input`
   through unrendered (pins today's behaviour, § 6), and a re-claimed step
   whose flow step is removed passes its rendered input through unchanged
@@ -689,7 +718,8 @@ conversions someone listed. `guides/secrets.md` states the rule.
   the unpinned and the pinned execute path — a named `json` field takes the
   source's stored (unredacted) value; is absent (default applies) when the
   source had none; 400 for each of: no `source_job_id` (handler), unknown
-  field, field also in `input`, and a required field with no default that
+  field (the response body does not contain the supplied name — a canary
+  string), field also in `input`, and a required field with no default that
   the source lacks (`ReplayFieldsError`, classified in the typed tier); a
   `json` value containing `"••••••"` sent in `input` on a re-run is stored as
   text; same-task rule — a re-run whose source is a run of ANOTHER task in
