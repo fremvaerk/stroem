@@ -305,6 +305,22 @@ async fn pinned_rerun_authorises_against_the_source_task_folder() -> Result<()> 
         assert_eq!(st, StatusCode::NOT_FOUND, "{resp}");
         assert!(!resp.to_string().contains("only-on-release"), "{resp}");
 
+        // A missing source answers exactly like the denied pinned one.
+        let (mst, mresp) = api_req(
+            &fx.router,
+            "POST",
+            "/api/workspaces/etl/tasks/something-else/execute",
+            Some(&live),
+            Some(json!({"input": {}, "source_job_id": Uuid::new_v4()})),
+        )
+        .await;
+        assert_eq!(mst, st, "missing vs denied status");
+        assert_eq!(mresp, resp, "missing vs denied body");
+        assert!(
+            mresp.to_string().contains("Source job not found"),
+            "{mresp}"
+        );
+
         let (st, resp) = api_req(&fx.router, "POST", uri, Some(&rel), Some(body)).await;
         assert_eq!(st, StatusCode::OK, "rel-folder user re-runs: {resp}");
         Ok(())

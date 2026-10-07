@@ -458,10 +458,12 @@ pub async fn execute_task(
         ));
     }
 
-    // 1b. Re-run of a PINNED source (spec § 7.3): its task may exist only at
-    //     the source's ref, so it takes its own path before any live lookup.
-    //     An unknown or unpinned source falls through to today's checks below
-    //     (an unknown one keeps today's status), reusing this one read.
+    // 1b. Re-run source: its job row is read once. The existence + ACL check
+    //     below runs FIRST, before the pinned/unpinned branch and before any
+    //     destination task lookup; a missing source and a denied one answer
+    //     the same 404 `Source job not found` (spec 2026-10-06-json-input-type,
+    //     revision 10). A PINNED source then takes its own path, since its
+    //     task may exist only at the source's ref.
     let source_row = match req.source_job_id {
         Some(src_id) => stroem_db::JobRepo::get(&state.pool, src_id)
             .await
