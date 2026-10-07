@@ -1005,6 +1005,95 @@ async fn mixed_acl_caller_cannot_replay_across_tasks() -> Result<()> {
 }
 
 #[tokio::test]
+async fn denied_source_gets_the_acl_403_before_any_source_shape_check() -> Result<()> {
+    use stroem_db::{UserGroupRepo, UserRepo};
+    use stroem_server::config::{AclAction, AclRule};
+    let auth = AuthConfig {
+        jwt_secret: "json-test-jwt-secret".to_string(),
+        refresh_secret: "json-test-refresh-secret".to_string(),
+        base_url: None,
+        providers: HashMap::new(),
+        initial_user: None,
+        rate_limit: Default::default(),
+    };
+    let acl = AclConfig {
+        default: AclAction::Deny,
+        rules: vec![AclRule {
+            workspace: "default".to_string(),
+            tasks: vec!["other".to_string()],
+            action: AclAction::Run,
+            groups: vec!["runner".to_string()],
+            users: vec![],
+        }],
+    };
+    let app = app_with(RERUN, Some(auth), Some(acl)).await?;
+    let hash = stroem_server::auth::hash_password("json-test-password-123")?;
+    let admin = Uuid::new_v4();
+    UserRepo::create(&app.pool, admin, "json-admin2@test.com", Some(&hash), None).await?;
+    UserRepo::set_admin(&app.pool, admin, true).await?;
+    let user = Uuid::new_v4();
+    UserRepo::create(&app.pool, user, "json-runner@test.com", Some(&hash), None).await?;
+    UserGroupRepo::add(&app.pool, user, "runner").await?;
+    let login = |email: &'static str| {
+        api(
+            "POST",
+            "/api/auth/login",
+            json!({"email": email, "password": "json-test-password-123"}),
+            None,
+        )
+    };
+    let (_, a) = call(&app, login("json-admin2@test.com")).await?;
+    let admin_token = a["access_token"].as_str().unwrap().to_string();
+    let (_, u) = call(&app, login("json-runner@test.com")).await?;
+    let user_token = u["access_token"].as_str().unwrap().to_string();
+
+    let (s, body) = call(
+        &app,
+        api(
+            "POST",
+            "/api/workspaces/default/tasks/t/execute",
+            json!({"input": {"payload": {"k": 1}, "need": 1}}),
+            Some(&admin_token),
+        ),
+    )
+    .await?;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let src = body["job_id"].as_str().unwrap().to_string();
+    // Make the source fail the shape check (not a top-level source type).
+    sqlx::query("UPDATE job SET source_type = 'hook' WHERE job_id = $1::uuid")
+        .bind(&src)
+        .execute(&app.pool)
+        .await?;
+
+    let req = json!({"input": {}, "source_job_id": src, "replay_fields": ["payload"]});
+    let (s, resp) = call(
+        &app,
+        api(
+            "POST",
+            "/api/workspaces/default/tasks/other/execute",
+            req.clone(),
+            Some(&user_token),
+        ),
+    )
+    .await?;
+    assert_eq!(s, StatusCode::FORBIDDEN, "ACL must come first: {resp}");
+
+    // An authorized caller does see the shape error.
+    let (s, resp) = call(
+        &app,
+        api(
+            "POST",
+            "/api/workspaces/default/tasks/other/execute",
+            req,
+            Some(&admin_token),
+        ),
+    )
+    .await?;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{resp}");
+    Ok(())
+}
+
+#[tokio::test]
 async fn replay_field_absent_in_the_source_takes_the_default() -> Result<()> {
     let app = app(r#"
 actions:

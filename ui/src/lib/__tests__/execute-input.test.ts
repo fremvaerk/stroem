@@ -73,6 +73,11 @@ describe("buildExecutePayload — json fields", () => {
       replayFields: [],
     });
   });
+  it("replay mode with a large-integer source never puts the value in input", () => {
+    const payload = buildExecutePayload({ cfg: st("replay") }, jf);
+    expect(payload.input).toEqual({});
+    expect(payload.replayFields).toEqual(["cfg"]);
+  });
   it("sends a value equal to the default (it is the user's literal)", () => {
     expect(buildExecutePayload({ cfg: st("value", '{"a":1}') }, jf).input).toEqual({ cfg: { a: 1 } });
   });

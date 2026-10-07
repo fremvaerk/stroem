@@ -7,4 +7,4 @@ description: Behaviour that changes with the json input type release
 - **A connection type named `json` is rejected.**
 - **Claim uses the action definition from job creation.** Defaults and input types of an action are read from the definition stored when the job was created; editing an action no longer changes the unclaimed steps of jobs already running (as `type: task` steps already behaved).
 - **Re-run requires the source's own task.** `source_job_id` of a run of another task now answers `400` on every re-run.
-- **`stroem validate` warns about numeric secrets.** Secrets written as YAML numbers were never masked; quote them to have them masked.
+- **`stroem validate` warns about numeric secrets.** Secrets written as YAML numbers were never masked; quote them to have them masked (values of 3 characters or fewer are never masked).

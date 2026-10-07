@@ -498,14 +498,15 @@ pub async fn execute_task(
     if let Some(src_id) = req.source_job_id {
         let source_job = source_row
             .ok_or_else(|| AppError::BadRequest(format!("Source job {} not found", src_id)))?;
-        check_rerun_source(&source_job, &ws)?;
-        // Authorization: user must have at least View on the source job's task path.
+        // Authorization first: nothing about the source (workspace, shape,
+        // input) is revealed to a caller who may not read it.
         let perm = crate::web::api::jobs::check_job_acl(&state, &auth_user, &source_job).await?;
         if matches!(perm, TaskPermission::Deny) {
             return Err(AppError::Forbidden(
                 "Not authorized to read source job".into(),
             ));
         }
+        check_rerun_source(&source_job, &ws)?;
         // Same task as the source, on both paths (spec D12): a re-run copies
         // stored values only between runs of one task.
         if source_job.task_name != name {

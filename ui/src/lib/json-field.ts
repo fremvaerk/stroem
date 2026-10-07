@@ -40,8 +40,8 @@ export function toEditorText(v: unknown): string {
 /** Initial mode, first match wins (spec § 7): the source's value beats the default. */
 export function initialJsonFieldState(field: InputField, source?: ReplaySource): JsonFieldState {
   if (source) {
-    if (hasMask(source.value)) return { kind: "json", mode: "replay", text: "" };
-    return { kind: "json", mode: "value", text: toEditorText(source.value) };
+    // Always replay (spec rev 9): the server reuses the stored value exactly.
+    return { kind: "json", mode: "replay", text: "" };
   }
   if (field.default !== undefined && hasTemplate(field.default)) {
     return { kind: "json", mode: "default", text: "" };

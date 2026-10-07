@@ -19,17 +19,11 @@ describe("initialJsonFieldState (spec § 7, first match wins)", () => {
   it("re-run with a masked source AND a templated default still replays (source wins)", () => {
     expect(initialJsonFieldState(templated, { value: ["••••••"] }).mode).toBe("replay");
   });
-  it("prefills an unmasked source value in value mode", () => {
-    expect(initialJsonFieldState(templated, { value: { k: 2 } })).toEqual({
-      kind: "json",
-      mode: "value",
-      text: JSON.stringify({ k: 2 }, null, 2),
-    });
+  it("replays an unmasked source value too (exact server-side replay)", () => {
+    expect(initialJsonFieldState(templated, { value: { k: 2 } })).toEqual({ kind: "json", mode: "replay", text: "" });
   });
-  it("re-run with a source value equal to the default still sends it", () => {
-    const s = initialJsonFieldState(plain, { value: { a: 1 } });
-    expect(s.mode).toBe("value");
-    expect(s.text).toBe(JSON.stringify({ a: 1 }, null, 2));
+  it("re-run with a source value equal to the default replays", () => {
+    expect(initialJsonFieldState(plain, { value: { a: 1 } }).mode).toBe("replay");
   });
   it("uses default mode for a templated default when the source lacks the field", () => {
     expect(initialJsonFieldState(templated).mode).toBe("default");

@@ -279,6 +279,16 @@ mod tests {
         assert!(matches!(classify("\n  {{ x }}\n"), Classified::Single(_)));
     }
 
+    #[test]
+    fn parsed_yaml_block_scalar_renders_to_a_native_number() {
+        let doc: serde_json::Value =
+            serde_yaml::from_str("cfg: |\n  {{ items | length }}\n").unwrap();
+        let raw = doc.get("cfg").unwrap();
+        assert!(raw.as_str().unwrap().ends_with('\n'));
+        let ctx = json!({"items": [1, 2, 3]});
+        assert_eq!(render_json_value(raw, "cfg", &ctx).unwrap(), json!(3));
+    }
+
     /// Spec § 4.1: a delimiter inside a string literal of the expression
     /// classifies as Mixed — the documented, pinned false negative.
     #[test]

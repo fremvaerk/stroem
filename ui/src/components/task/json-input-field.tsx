@@ -26,14 +26,13 @@ export function JsonInputField({ id, fieldKey, field, value, onChange, replaySou
   const override = () => onChange({ kind: "json", mode: "value", text: "" });
   const useDefault =
     field.default !== undefined ? () => onChange({ kind: "json", mode: "default", text: "" }) : undefined;
-  const usePrevious = replaySource
-    ? () =>
-        onChange(
-          hasMask(replaySource.value)
-            ? { kind: "json", mode: "replay", text: "" }
-            : { kind: "json", mode: "value", text: toEditorText(replaySource.value) },
-        )
-    : undefined;
+  const usePrevious = replaySource ? () => onChange({ kind: "json", mode: "replay", text: "" }) : undefined;
+  const edit = () =>
+    onChange({
+      kind: "json",
+      mode: "value",
+      text: replaySource && !hasMask(replaySource.value) ? toEditorText(replaySource.value) : "",
+    });
 
   const header = (
     <Label htmlFor={id}>
@@ -61,10 +60,22 @@ export function JsonInputField({ id, fieldKey, field, value, onChange, replaySou
     return (
       <div className="space-y-2">
         {header}
-        <p className="text-sm text-muted-foreground">The previous run&apos;s value (contains masked secrets) is reused.</p>
-        <Button type="button" variant="outline" size="sm" onClick={override}>
-          Override
-        </Button>
+        <p className="text-sm text-muted-foreground">The previous run&apos;s value is reused.</p>
+        {replaySource && (
+          <pre data-testid={`json-replay-${fieldKey}`} className="max-h-48 overflow-auto rounded-md border bg-muted px-3 py-2 font-mono text-xs">
+            {toEditorText(replaySource.value)}
+          </pre>
+        )}
+        <div className="flex gap-2">
+          <Button type="button" variant="outline" size="sm" onClick={edit}>
+            Edit
+          </Button>
+          {useDefault && (
+            <Button type="button" variant="outline" size="sm" onClick={useDefault}>
+              Use default
+            </Button>
+          )}
+        </div>
       </div>
     );
   }

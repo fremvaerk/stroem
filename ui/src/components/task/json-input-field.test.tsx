@@ -43,4 +43,41 @@ describe("JsonInputField", () => {
     fireEvent.click(screen.getByRole("button", { name: "Use previous value" }));
     expect(onChange).toHaveBeenCalledWith({ kind: "json", mode: "replay", text: "" });
   });
+
+  it("replay mode shows the source value; Edit prefills it when unmasked", () => {
+    const onChange = vi.fn();
+    render(
+      <JsonInputField
+        id="i"
+        fieldKey="cfg"
+        field={{ type: "json", default: { a: 1 } }}
+        value={value("replay")}
+        onChange={onChange}
+        replaySource={{ value: JSON.parse('{"n": 9007199254740993}') }}
+      />,
+    );
+    expect(screen.getByTestId("json-replay-cfg").textContent).toContain("n");
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(onChange).toHaveBeenCalledWith({ kind: "json", mode: "value", text: JSON.stringify({ n: 9007199254740992 }, null, 2) });
+    fireEvent.click(screen.getByRole("button", { name: "Use default" }));
+    expect(onChange).toHaveBeenCalledWith({ kind: "json", mode: "default", text: "" });
+  });
+
+  it("Edit starts empty when the source is masked", () => {
+    const onChange = vi.fn();
+    render(
+      <JsonInputField id="i" fieldKey="cfg" field={{ type: "json" }} value={value("replay")} onChange={onChange} replaySource={{ value: { t: "••••••" } }} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(onChange).toHaveBeenCalledWith({ kind: "json", mode: "value", text: "" });
+  });
+
+  it("Use previous value replays even for an unmasked source", () => {
+    const onChange = vi.fn();
+    render(
+      <JsonInputField id="i" fieldKey="cfg" field={{ type: "json" }} value={value("value", "{}")} onChange={onChange} replaySource={{ value: { a: 1 } }} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Use previous value" }));
+    expect(onChange).toHaveBeenCalledWith({ kind: "json", mode: "replay", text: "" });
+  });
 });

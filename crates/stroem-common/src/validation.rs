@@ -935,7 +935,7 @@ fn warn_non_string_secrets(config: &WorkspaceConfig) -> Vec<String> {
             serde_json::Value::Object(m) => m.values().for_each(|x| kinds(x, out)),
         }
     }
-    const HINT: &str = "so it is never masked in job output or errors; quote it to have it masked";
+    const HINT: &str = "so it is never masked in job output or errors; quote it to have it masked (values of 3 characters or fewer are never masked)";
     let mut warnings = Vec::new();
     for (name, value) in &config.secrets {
         let mut found = Vec::new();

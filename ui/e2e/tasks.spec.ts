@@ -188,15 +188,17 @@ test.describe("Tasks", () => {
     await page.waitForURL(/\/jobs\/.+/);
     await page.getByRole("link", { name: "Re-run" }).click();
     await page.waitForURL(/\/tasks\/json-demo/);
-    await expect(page.getByLabel("payload")).toHaveValue(/from-ui/);
+    await expect(page.getByText("The previous run's value is reused.")).toBeVisible();
 
     const second = page.waitForRequest(isExecute);
     await page.getByRole("button", { name: "Run Task" }).click();
     const rerun = (await second).postDataJSON() as {
       input?: { payload?: unknown };
       source_job_id?: string;
+      replay_fields?: string[];
     };
-    expect(rerun.input?.payload).toEqual({ key: "from-ui" });
+    expect(rerun.replay_fields).toContain("payload");
+    expect(rerun.input?.payload).toBeUndefined();
     expect(rerun.source_job_id).toBeTruthy();
   });
 });
