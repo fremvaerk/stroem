@@ -1,12 +1,24 @@
 # `json` input type
 
-Status: revision 9, approved for implementation (2026-10-07)
+Status: revision 10, approved for implementation (2026-10-07)
 
 A new task/action input field type, `type: json`, that holds any JSON value
 and keeps it structured through templates. Facts below are verified at
 `b310bb44` (v0.18.0).
 
 ## Revision history
+
+**Revision 10 (2026-10-07, Codex implementation review round 2; user
+decision to fix in this branch).** Revision 9's "learns nothing" overclaimed:
+a missing source answered 400, a denied unpinned source 403 and a denied
+pinned source 404, so a caller who knew a job's UUID could tell it exists and
+whether it is pinned. Now, on BOTH execute paths, a source job that does not
+exist and one the caller may not view (ACL Deny) get one identical response:
+404 `Source job not found` — the same status `GET /api/jobs/{id}` uses for
+Deny. (A caller with View on a pinned source still gets the pinned path's
+403 `View-only access`: it can see the source.) The replay preview in the
+Run form is labelled as the job-detail rendering — large integers may show
+rounded there while the stored value is replayed exactly.
 
 **Revision 9 (2026-10-07, Codex implementation review round 1).** (1) A re-run
 of a `json` field now ALWAYS starts in **replay** mode (masked or not): the
