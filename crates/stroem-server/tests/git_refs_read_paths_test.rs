@@ -1504,7 +1504,8 @@ async fn pinned_job_in_denied_folder_is_denied_on_every_rest_path() -> Result<()
 
         // Re-run source: RUNNER may Run the live `nightly`, but a pinned
         // source is authorised FIRST by its own folder (§ 7.3, § 7.8); a
-        // denied one answers like a denied task.
+        // denied pinned source answers exactly like a missing source job
+        // (404 `Source job not found`, spec 2026-10-06-json-input-type rev 10).
         sqlx::query("UPDATE job SET raw_input = '{}'::jsonb WHERE job_id = ANY($1)")
             .bind(vec![jobs.pin23, jobs.pin24])
             .execute(&fx.pool)
@@ -1521,7 +1522,7 @@ async fn pinned_job_in_denied_folder_is_denied_on_every_rest_path() -> Result<()
         )
         .await;
         assert_eq!(s, StatusCode::NOT_FOUND, "{b}");
-        assert_eq!(b["error"], json!("Task not found"), "{b}");
+        assert_eq!(b["error"], json!("Source job not found"), "{b}");
         let (s, b) = api_req(
             &fx.router,
             "POST",
