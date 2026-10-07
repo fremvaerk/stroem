@@ -250,6 +250,8 @@ Full analysis + the decided peek policy: `docs/superpowers/specs/2026-09-17-work
 - [ ] Jobs page: workspace filter (API already supports `?workspace=`); make the per-row workspace badge link to `/jobs?workspace=` once it exists. Deliberately left out of the 2026-09-09 navigation change.
 - [ ] Sidebar active-state: `/workspaces/:ws/tasks/:name` highlights *Workspaces* (prefix match). Acceptable under the workspace-as-level model; revisit if a task-centric entry point is added.
 - [ ] Log download filename does not sanitise `/` in step names (`ui/src/lib/api.ts::downloadStepLog`).
+- [x] Date/datetime inputs (2026-10-07): typeable ISO `YYYY-MM-DD` box + calendar with month/year dropdowns (`ui/src/components/task/date-input.tsx`, parser `ui/src/lib/iso-date.ts`). Fixed `calendar.tsx`'s Tailwind v3 `-[--cell-size]` classes along the way (v4 emits `height: --cell-size`, an invalid declaration — the calendar rendered cramped).
+- [x] **Same Tailwind v3 CSS-variable shorthand elsewhere** — fixed 2026-10-07: `w-(--radix-popover-trigger-width)` (`components/task/combobox-field.tsx`, `multi-select-field.tsx`: the dropdown now matches the trigger's width instead of the popover's fixed `w-72`) and `origin-(--radix-…-transform-origin)` (`components/ui/popover.tsx`, `tooltip.tsx`: open animation origin). No `-[--…]` class is left in `ui/src`.
 
 ## CLI: `stroem run` (local task execution, 2026-03-25)
 

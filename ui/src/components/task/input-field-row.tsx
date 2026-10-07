@@ -1,19 +1,10 @@
-import { format, parse } from "date-fns";
-import { CalendarIcon } from "lucide-react";
-import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Calendar } from "@/components/ui/calendar";
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@/components/ui/popover";
-import { cn } from "@/lib/utils";
 import { ComboboxField } from "@/components/task/combobox-field";
 import { MultiSelectField } from "@/components/task/multi-select-field";
+import { DateInput, DateTimeInput } from "@/components/task/date-input";
 import type { InputField } from "@/lib/types";
 import { PRIMITIVE_TYPES, REDACTED_SENTINEL } from "@/components/task/constants";
 import { JsonInputField } from "@/components/task/json-input-field";
@@ -177,101 +168,21 @@ export function InputFieldRow({
     );
   }
 
-  if (field.type === "date") {
-    const strVal = String(value ?? "");
-    const dateObj = strVal
-      ? parse(strVal, "yyyy-MM-dd", new Date())
-      : undefined;
-    const validDate =
-      dateObj && !isNaN(dateObj.getTime()) ? dateObj : undefined;
-
+  if (field.type === "date" || field.type === "datetime") {
+    const Control = field.type === "date" ? DateInput : DateTimeInput;
     return (
       <div className="space-y-2">
-        <Label>{displayLabel}{field.required && <span className="ml-1 text-destructive">*</span>}</Label>
-        <Popover>
-          <PopoverTrigger asChild>
-            <Button
-              variant="outline"
-              className={cn(
-                "w-full justify-start font-normal",
-                !validDate && "text-muted-foreground",
-              )}
-            >
-              <CalendarIcon className="mr-2 h-4 w-4" />
-              {validDate ? validDate.toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" }) : <span>{field.description || "Pick a date"}</span>}
-            </Button>
-          </PopoverTrigger>
-          <PopoverContent align="start" className="w-auto p-0">
-            <Calendar
-              mode="single"
-              weekStartsOn={1}
-              selected={validDate}
-              onSelect={(d) => onChange(d ? format(d, "yyyy-MM-dd") : "")}
-              autoFocus
-            />
-          </PopoverContent>
-        </Popover>
-        {field.description && (
-          <p className="text-xs text-muted-foreground">{field.description}</p>
-        )}
-      </div>
-    );
-  }
-
-  if (field.type === "datetime") {
-    // value format: "YYYY-MM-DDTHH:MM"
-    const strVal = String(value ?? "");
-    const [datePart, timePart] = strVal.split("T");
-    const dateObj = datePart
-      ? parse(datePart, "yyyy-MM-dd", new Date())
-      : undefined;
-    const validDate =
-      dateObj && !isNaN(dateObj.getTime()) ? dateObj : undefined;
-    const timeVal = timePart ?? "";
-
-    const updateDate = (d: Date | undefined) => {
-      const newDate = d ? format(d, "yyyy-MM-dd") : "";
-      onChange(newDate && timeVal ? `${newDate}T${timeVal}` : newDate);
-    };
-    const updateTime = (t: string) => {
-      const dp = validDate ? format(validDate, "yyyy-MM-dd") : "";
-      onChange(dp && t ? `${dp}T${t}` : dp);
-    };
-
-    return (
-      <div className="space-y-2">
-        <Label>{displayLabel}{field.required && <span className="ml-1 text-destructive">*</span>}</Label>
-        <div className="flex gap-2">
-          <Popover>
-            <PopoverTrigger asChild>
-              <Button
-                variant="outline"
-                className={cn(
-                  "flex-1 justify-start font-normal",
-                  !validDate && "text-muted-foreground",
-                )}
-              >
-                <CalendarIcon className="mr-2 h-4 w-4" />
-                {validDate ? validDate.toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" }) : <span>{field.description || "Pick a date"}</span>}
-              </Button>
-            </PopoverTrigger>
-            <PopoverContent align="start" className="w-auto p-0">
-              <Calendar
-                mode="single"
-                weekStartsOn={1}
-                selected={validDate}
-                onSelect={updateDate}
-                autoFocus
-              />
-            </PopoverContent>
-          </Popover>
-          <Input
-            type="time"
-            value={timeVal}
-            onChange={(e) => updateTime(e.target.value)}
-            className="w-auto"
-          />
-        </div>
+        <Label htmlFor={id}>
+          {displayLabel}
+          {field.required && <span className="ml-1 text-destructive">*</span>}
+        </Label>
+        <Control
+          id={id}
+          label={displayLabel}
+          value={String(value ?? "")}
+          onChange={onChange}
+          required={field.required}
+        />
         {field.description && (
           <p className="text-xs text-muted-foreground">{field.description}</p>
         )}
