@@ -529,6 +529,38 @@ pub fn render_input_map(
     Ok(serde_json::Value::Object(result))
 }
 
+pub use crate::json_field::render_json_value;
+
+/// Render a step/hook input map against `schema` (spec
+/// 2026-10-06-json-input-type § 4.4): fields the schema types `json` by the
+/// json rule, every other field exactly as [`render_input_map`] does.
+pub fn render_input_typed(
+    input_map: &HashMap<String, serde_json::Value>,
+    schema: Option<&HashMap<String, InputFieldDef>>,
+    context: &serde_json::Value,
+) -> Result<serde_json::Value> {
+    let is_json = |k: &str| {
+        schema
+            .and_then(|s| s.get(k))
+            .is_some_and(|f| f.field_type == JSON_TYPE)
+    };
+    let (json_fields, rest): (
+        HashMap<String, serde_json::Value>,
+        HashMap<String, serde_json::Value>,
+    ) = input_map
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .partition(|(k, _)| is_json(k));
+    let mut out = render_input_map(&rest, context)?;
+    let map = out
+        .as_object_mut()
+        .expect("render_input_map always returns an object");
+    for (k, v) in &json_fields {
+        map.insert(k.clone(), render_json_value(v, k, context)?);
+    }
+    Ok(out)
+}
+
 /// Check if a template string is a simple variable reference like `{{ input.db }}`.
 /// Returns the variable path (e.g. "input.db") if it matches, None otherwise.
 /// Does NOT match templates with filters, surrounding text, or multiple expressions.
@@ -581,21 +613,30 @@ pub fn merge_defaults(
         }
 
         if let Some(ref default_value) = field_def.default {
-            let resolved = match default_value {
-                serde_json::Value::String(s) => {
-                    if s.contains("{{") {
-                        let rendered = render_template(s, context).with_context(|| {
-                            format!(
-                                "Failed to render default template for input field '{}'",
-                                field_name
-                            )
-                        })?;
-                        serde_json::Value::String(rendered)
-                    } else {
-                        default_value.clone()
+            let resolved = if field_def.field_type == JSON_TYPE {
+                render_json_value(default_value, field_name, context).with_context(|| {
+                    format!(
+                        "Failed to render default template for input field '{}'",
+                        field_name
+                    )
+                })?
+            } else {
+                match default_value {
+                    serde_json::Value::String(s) => {
+                        if s.contains("{{") {
+                            let rendered = render_template(s, context).with_context(|| {
+                                format!(
+                                    "Failed to render default template for input field '{}'",
+                                    field_name
+                                )
+                            })?;
+                            serde_json::Value::String(rendered)
+                        } else {
+                            default_value.clone()
+                        }
                     }
+                    _ => default_value.clone(),
                 }
-                _ => default_value.clone(),
             };
             result.insert(field_name.clone(), resolved);
         }
@@ -854,11 +895,15 @@ pub fn merge_action_defaults(
         let Some(default_value) = &field_def.default else {
             continue;
         };
-        let rendered = match default_value {
-            serde_json::Value::String(s) if s.contains("{{") => {
-                render_template(s, context).map(serde_json::Value::String)
+        let rendered = if field_def.field_type == JSON_TYPE {
+            render_json_value(default_value, field_name, context)
+        } else {
+            match default_value {
+                serde_json::Value::String(s) if s.contains("{{") => {
+                    render_template(s, context).map(serde_json::Value::String)
+                }
+                _ => render_value_deep(default_value, context),
             }
-            _ => render_value_deep(default_value, context),
         }
         .with_context(|| {
             format!("Failed to render default template for input field '{field_name}'")
@@ -4736,5 +4781,99 @@ mod tests {
                 "action owner: workspace 'b' is not available"
             );
         }
+    }
+
+    // --- json input type (spec 2026-10-06-json-input-type § 4.4–4.5) ---
+
+    #[test]
+    fn render_input_typed_matches_render_input_map_without_json_fields() {
+        let mut input = HashMap::new();
+        input.insert("obj".to_string(), json!("{{ o }}"));
+        input.insert("len".to_string(), json!("{{ l | length }}"));
+        input.insert("lit".to_string(), json!(7));
+        input.insert("txt".to_string(), json!("a {{ s }}"));
+        let ctx = json!({"o": {"a": 1}, "l": [1, 2], "s": "b"});
+        let mut schema = HashMap::new();
+        schema.insert("obj".to_string(), field("string", false, None));
+        schema.insert("len".to_string(), field("integer", false, None));
+        let plain = render_input_map(&input, &ctx).unwrap();
+        assert_eq!(
+            render_input_typed(&input, Some(&schema), &ctx).unwrap(),
+            plain
+        );
+        assert_eq!(render_input_typed(&input, None, &ctx).unwrap(), plain);
+    }
+
+    #[test]
+    fn render_input_typed_gives_json_fields_native_values() {
+        let mut input = HashMap::new();
+        input.insert("n".to_string(), json!("{{ l | length }}"));
+        input.insert("s".to_string(), json!("{{ l | length }}"));
+        let mut schema = HashMap::new();
+        schema.insert("n".to_string(), field("json", false, None));
+        schema.insert("s".to_string(), field("string", false, None));
+        let out = render_input_typed(&input, Some(&schema), &json!({"l": [1, 2, 3]})).unwrap();
+        assert_eq!(out["n"], json!(3));
+        assert_eq!(out["s"], json!("3"));
+    }
+
+    #[test]
+    fn merge_defaults_renders_a_json_default_natively() {
+        let mut schema = HashMap::new();
+        schema.insert(
+            "db".to_string(),
+            field(
+                "json",
+                false,
+                Some(json!({"host": "{{ secret.H }}", "port": "{{ secret.P }}"})),
+            ),
+        );
+        let ctx = json!({"secret": {"H": "db.local", "P": 5432}});
+        let out = merge_defaults(&json!({}), &schema, &ctx).unwrap();
+        assert_eq!(out["db"], json!({"host": "db.local", "port": 5432}));
+    }
+
+    #[test]
+    fn merge_action_defaults_renders_a_json_default_natively() {
+        let mut schema = HashMap::new();
+        schema.insert(
+            "n".to_string(),
+            field("json", false, Some(json!("{{ secret.P }}"))),
+        );
+        let out =
+            merge_action_defaults(&json!({}), &schema, &json!({"secret": {"P": 42}})).unwrap();
+        assert_eq!(out["n"], json!(42));
+    }
+
+    /// R26 for json: a default whose single expression yields text that is
+    /// itself a template is NOT rendered again.
+    #[test]
+    fn merge_action_defaults_renders_a_json_default_exactly_once() {
+        const CANARY: &str = "owner-secret-canary";
+        let mut schema = HashMap::new();
+        schema.insert(
+            "copy".to_string(),
+            field("json", false, Some(json!("{{ input.note }}"))),
+        );
+        let context = json!({
+            "secret": {"TOKEN": CANARY},
+            "input": {"note": "{{ secret.TOKEN }}"},
+        });
+        let merged = merge_action_defaults(&json!({}), &schema, &context).unwrap();
+        assert_eq!(merged["copy"], "{{ secret.TOKEN }}", "{merged}");
+        assert!(!merged.to_string().contains(CANARY), "{merged}");
+    }
+
+    #[test]
+    fn a_json_default_with_a_mixed_template_fails_without_its_text() {
+        let mut schema = HashMap::new();
+        schema.insert(
+            "cfg".to_string(),
+            field("json", false, Some(json!("v={{ secret.T }}"))),
+        );
+        let err = merge_defaults(&json!({}), &schema, &json!({"secret": {"T": "x"}})).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("a json field takes a literal value"), "{msg}");
+        assert!(!msg.contains("secret.T"), "{msg}");
     }
 }
