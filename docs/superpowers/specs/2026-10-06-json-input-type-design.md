@@ -689,7 +689,7 @@ redaction already handles reliably.
 - **stroem-common unit:** § 4.1 classification table (literal, single,
   mixed, trimming, `{{-`/`-}}`, YAML `|` trailing newline, `{%`/`{#`, the
   pinned false negative); § 4.2 native values (object, array, integer, float,
-  bool, null, string, missing → null, `default(value={})`, `length`,
+  bool, null, string, missing field → error (revision 8), `default(value=none)` → null, `length`,
   `json_encode` → string, `each.item`); recursion and `[i]` locations;
   canary secret in the context and canary text in the template never appear
   in any error; § 4.5 parity test; the R26 render-once test extended to a
