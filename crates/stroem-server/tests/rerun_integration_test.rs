@@ -4,7 +4,8 @@
 //! - source_job_id pulls connection names + secret values from source.raw_input
 //!   when the UI submits the redaction sentinel `••••••`.
 //! - GET /api/jobs/{id} returns raw_input with workspace secret values redacted.
-//! - Cross-workspace + unknown source_job_id rejected with 400.
+//! - Cross-workspace source_job_id rejected with 400; unknown source_job_id
+//!   answers 404 "Source job not found" (same as a source the caller is denied).
 
 use anyhow::Result;
 use axum::body::Body;
@@ -421,9 +422,9 @@ async fn rerun_replays_connection_and_secret_from_source() -> Result<()> {
     Ok(())
 }
 
-/// Negative: unknown source_job_id → 400 Bad Request.
+/// Negative: unknown source_job_id → 404 "Source job not found".
 #[tokio::test(flavor = "multi_thread")]
-async fn rerun_with_unknown_source_job_returns_400() -> Result<()> {
+async fn rerun_with_unknown_source_job_returns_404() -> Result<()> {
     let app = build_test_app("default", build_rerun_workspace()).await?;
 
     let (status, body) = execute_task(
@@ -438,9 +439,10 @@ async fn rerun_with_unknown_source_job_returns_400() -> Result<()> {
     .await?;
     assert_eq!(
         status,
-        StatusCode::BAD_REQUEST,
-        "expected 400 for unknown source_job_id, got: {body:?}"
+        StatusCode::NOT_FOUND,
+        "expected 404 for unknown source_job_id, got: {body:?}"
     );
+    assert_eq!(body["error"], "Source job not found", "{body:?}");
     Ok(())
 }
 

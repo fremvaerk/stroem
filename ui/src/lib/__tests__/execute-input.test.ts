@@ -77,6 +77,10 @@ describe("buildExecutePayload — json fields", () => {
     const payload = buildExecutePayload({ cfg: st("replay") }, jf);
     expect(payload.input).toEqual({});
     expect(payload.replayFields).toEqual(["cfg"]);
+    // The browser-parsed source (rounded) is never re-sent: only the field name travels.
+    const source = JSON.parse('{"n": 9007199254740993}');
+    expect(JSON.stringify(payload)).not.toContain(String(source.n));
+    expect(JSON.stringify(payload)).not.toContain("90071992547");
   });
   it("sends a value equal to the default (it is the user's literal)", () => {
     expect(buildExecutePayload({ cfg: st("value", '{"a":1}') }, jf).input).toEqual({ cfg: { a: 1 } });

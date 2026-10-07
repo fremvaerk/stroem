@@ -66,6 +66,11 @@ export function JsonInputField({ id, fieldKey, field, value, onChange, replaySou
             {toEditorText(replaySource.value)}
           </pre>
         )}
+        {replaySource && (
+          <p data-testid={`json-replay-note-${fieldKey}`} className="text-xs text-muted-foreground">
+            Shown as in the job detail; very large numbers may display rounded here — the stored value is reused exactly.
+          </p>
+        )}
         <div className="flex gap-2">
           <Button type="button" variant="outline" size="sm" onClick={edit}>
             Edit

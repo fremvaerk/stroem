@@ -834,6 +834,38 @@ async fn replay_fields_copies_the_stored_source_value() -> Result<()> {
 }
 
 #[tokio::test]
+async fn replay_keeps_a_large_integer_exact() -> Result<()> {
+    let app = app(RERUN).await?;
+    let raw = r#"{"input": {"payload": {"n": 9007199254740993}, "need": 1}}"#;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/workspaces/default/tasks/t/execute")
+        .header("Content-Type", "application/json")
+        .body(Body::from(raw))?;
+    let (s, body) = call(&app, req).await?;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let src = body["job_id"].as_str().unwrap().to_string();
+    let (s, body) = execute(
+        &app,
+        "t",
+        json!({"input": {"need": 2}, "source_job_id": src, "replay_fields": ["payload"]}),
+    )
+    .await?;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let job: Uuid = body["job_id"].as_str().unwrap().parse()?;
+    let row = stroem_db::JobRepo::get(&app.pool, job).await?.unwrap();
+    assert_eq!(
+        row.raw_input.unwrap()["payload"]["n"].as_u64(),
+        Some(9007199254740993)
+    );
+    assert_eq!(
+        row.input.unwrap()["payload"]["n"].as_u64(),
+        Some(9007199254740993)
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn replay_fields_rejects_bad_requests_with_400() -> Result<()> {
     let app = app(RERUN).await?;
     let src = source_job(&app).await?;
@@ -1005,7 +1037,7 @@ async fn mixed_acl_caller_cannot_replay_across_tasks() -> Result<()> {
 }
 
 #[tokio::test]
-async fn denied_source_gets_the_acl_403_before_any_source_shape_check() -> Result<()> {
+async fn denied_source_answers_like_a_missing_source_before_any_shape_check() -> Result<()> {
     use stroem_db::{UserGroupRepo, UserRepo};
     use stroem_server::config::{AclAction, AclRule};
     let auth = AuthConfig {
@@ -1076,7 +1108,22 @@ async fn denied_source_gets_the_acl_403_before_any_source_shape_check() -> Resul
         ),
     )
     .await?;
-    assert_eq!(s, StatusCode::FORBIDDEN, "ACL must come first: {resp}");
+    assert_eq!(s, StatusCode::NOT_FOUND, "ACL must come first: {resp}");
+    // A missing source answers identically: same status AND body.
+    let (ms, mresp) = call(
+        &app,
+        api(
+            "POST",
+            "/api/workspaces/default/tasks/other/execute",
+            json!({"input": {}, "source_job_id": Uuid::new_v4().to_string(),
+                   "replay_fields": ["payload"]}),
+            Some(&user_token),
+        ),
+    )
+    .await?;
+    assert_eq!(ms, s, "missing vs denied status");
+    assert_eq!(mresp, resp, "missing vs denied body");
+    assert_eq!(resp["error"], "Source job not found", "{resp}");
 
     // An authorized caller does see the shape error.
     let (s, resp) = call(

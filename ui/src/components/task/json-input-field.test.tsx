@@ -57,6 +57,7 @@ describe("JsonInputField", () => {
       />,
     );
     expect(screen.getByTestId("json-replay-cfg").textContent).toContain("n");
+    expect(screen.getByTestId("json-replay-note-cfg").textContent).toContain("reused exactly");
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
     expect(onChange).toHaveBeenCalledWith({ kind: "json", mode: "value", text: JSON.stringify({ n: 9007199254740992 }, null, 2) });
     fireEvent.click(screen.getByRole("button", { name: "Use default" }));

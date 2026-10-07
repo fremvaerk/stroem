@@ -495,16 +495,13 @@ pub async fn execute_task(
     // 4. Re-run validation: source_job_id must reference a job in this workspace
     //    that the user is allowed to view. Authorization mirrors GET /api/jobs/{id}.
     let mut effective_source_type = source_type;
-    if let Some(src_id) = req.source_job_id {
-        let source_job = source_row
-            .ok_or_else(|| AppError::BadRequest(format!("Source job {} not found", src_id)))?;
+    if req.source_job_id.is_some() {
+        let source_job = source_row.ok_or_else(source_job_not_found)?;
         // Authorization first: nothing about the source (workspace, shape,
         // input) is revealed to a caller who may not read it.
         let perm = crate::web::api::jobs::check_job_acl(&state, &auth_user, &source_job).await?;
         if matches!(perm, TaskPermission::Deny) {
-            return Err(AppError::Forbidden(
-                "Not authorized to read source job".into(),
-            ));
+            return Err(source_job_not_found());
         }
         check_rerun_source(&source_job, &ws)?;
         // Same task as the source, on both paths (spec D12): a re-run copies
@@ -605,6 +602,13 @@ pub(crate) async fn require_task_run(
     }
 }
 
+/// The one answer for a re-run source that does not exist AND for one the
+/// caller may not read (pinned or not): same status, same body, so neither
+/// existence nor pinned status is observable.
+fn source_job_not_found() -> AppError {
+    AppError::NotFound("Source job not found".into())
+}
+
 /// The source checks every re-run makes, pinned or not: same workspace, a
 /// top-level job, and a `raw_input` to replay.
 fn check_rerun_source(source_job: &stroem_db::JobRow, ws: &str) -> Result<(), AppError> {
@@ -651,7 +655,7 @@ async fn execute_pinned_rerun(
     source_job: &stroem_db::JobRow,
 ) -> Result<Json<ExecuteTaskResponse>, AppError> {
     match crate::web::api::jobs::check_job_acl(state, auth_user, source_job).await? {
-        TaskPermission::Deny => return Err(AppError::not_found("Task")),
+        TaskPermission::Deny => return Err(source_job_not_found()),
         TaskPermission::View => return Err(AppError::Forbidden("View-only access".into())),
         TaskPermission::Run => {}
     }
