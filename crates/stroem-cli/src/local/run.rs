@@ -7,8 +7,8 @@ use stroem_common::gate::{gate, DepOutcome, Gate};
 use stroem_common::models::job::SkipReason;
 use stroem_common::models::workflow::{ActionDef, FlowStep, TaskDef, WorkspaceConfig};
 use stroem_common::template::{
-    evaluate_condition, merge_defaults, prepare_action_input, render_env_map, render_input_map,
-    render_template, resolve_connection_inputs,
+    evaluate_condition, merge_defaults, prepare_action_input, render_env_map, render_template,
+    resolve_connection_inputs,
 };
 use stroem_common::workspace_loader;
 use stroem_runner::{
@@ -506,8 +506,9 @@ async fn execute_step(
     cancel_token: &CancellationToken,
 ) -> Result<RunResult> {
     // Render step input
-    let rendered_input = render_input_map(&step.input, ctx)
-        .with_context(|| format!("Step '{}': failed to render input", step_name))?;
+    let rendered_input =
+        stroem_common::template::render_input_typed(&step.input, Some(&action.input), ctx)
+            .with_context(|| format!("Step '{}': failed to render input", step_name))?;
 
     // Prepare action input (merge action defaults + resolve connections)
     let lookup = stroem_common::template::SingleWorkspace {

@@ -2,4 +2,5 @@
 //! module here (`autotests = false` in Cargo.toml), never its own target.
 
 mod cli_error_report;
+mod json_input;
 mod run_exit_code;
