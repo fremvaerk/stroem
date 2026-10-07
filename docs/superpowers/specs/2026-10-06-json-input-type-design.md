@@ -1,12 +1,23 @@
 # `json` input type
 
-Status: revision 7, approved for implementation (2026-10-07)
+Status: revision 8, approved for implementation (2026-10-07)
 
 A new task/action input field type, `type: json`, that holds any JSON value
 and keeps it structured through templates. Facts below are verified at
 `b310bb44` (v0.18.0).
 
 ## Revision history
+
+**Revision 8 (2026-10-07, found while implementing Task 2).** Two engine
+facts, measured on the shared `tera_engine`: (1) a missing map key is
+UNDEFINED, not `none` — a plain `{{ o.missing }}` fails with "undefined
+variable or field" (line 1, column 6), so revision 6's "a missing field is
+`null`" was false. The wrapper is unchanged and already right: a missing
+field or variable in a `json` field is an error exactly as in every other
+field, and `| default(...)` covers it (`{{ o.missing | default(value=none) }}`
+gives `null`). (2) Unknown-filter / unknown-function errors carry no
+position, so § 10's position fixtures use errors raised while EVALUATING the
+expression (slicing an undefined value, a failing `| int`), which do.
 
 **Revision 7 (2026-10-07, user decision).** Numeric secret masking dropped
 (D7, § 9): redaction stays strings-only as today. The user weighed the
@@ -25,7 +36,8 @@ raises "Tried to render a variable that is undefined"
 (`tera-2.4.0/src/vm/interpreter.rs:350-356`), so `{% set v = typo %}` then
 `json_encode` hid a typo that fails `{{ typo }}` in every other field. The
 suffix now writes the value out when it is undefined, re-raising exactly
-that error; a missing FIELD (`a.missing`, `none`) still becomes `null`.
+that error. (Revision 8: a missing FIELD is undefined too, so it errors as
+well; only `none` / `null` values become `null`.)
 
 **Revision 5 (2026-10-07, Codex spec review round 4, verdict "yes").** The
 three implementation notes applied. (1) `ReplayFieldsError::UnknownField`
@@ -314,10 +326,13 @@ Every path renders exactly once. The result is never rendered again (R26,
 
 ### 4.3 Values
 
-- A missing FIELD is `null` (`{{ a.missing }}`: Tera 2 renders it as `""`
-  and `json_encode` of it as `null`, `upgrade-tera-2.md:115`). An UNDEFINED
-  top-level variable (`{{ typo }}`) is an error, as in every other field
-  (step 1's `is undefined` branch).
+- A missing field (`{{ a.missing }}`) and an undefined variable
+  (`{{ typo }}`) are errors, exactly as in every other field (Tera 2 treats
+  both as undefined; step 1's `is undefined` branch keeps `json_encode` from
+  turning them into `null`). `| default(...)` handles an optional value:
+  `{{ a.missing | default(value=none) }}` is `null`,
+  `{{ a.missing | default(value=[]) }}` is `[]`. A value that IS `null` in
+  the context stays `null`.
 - `{{ x | json_encode() }}` yields the JSON **text**, a string — exactly what
   the expression means. `stroem validate` warns about it (§ 5.4) because
   `for_each` taught authors to add that filter.

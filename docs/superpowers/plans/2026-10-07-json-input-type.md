@@ -25,7 +25,7 @@
 ## Review Focus
 
 1. A `json` value written as a YAML block scalar (`cfg: |` then `{{ x }}` on the next line) carries a trailing newline — it must classify as a single expression, not Mixed. (Task 2 test `yaml_block_scalar_trailing_newline_is_single`.)
-2. `{{ typo }}` (undefined top-level variable) in a `json` field must FAIL like in any other field, while `{{ obj.missing }}` (missing field) is `null`. (Task 2 tests `undefined_top_level_variable_is_an_error_not_null` and `single_expressions_keep_native_values`.)
+2. `{{ typo }}` and `{{ obj.missing }}` in a `json` field must FAIL like in any other field (both are undefined in Tera 2, spec revision 8), while `{{ obj.missing | default(value=none) }}` is `null`. (Task 2 tests `undefined_top_level_variable_is_an_error_not_null` and `single_expressions_keep_native_values`.)
 3. Re-run in the UI of a `json` field whose source value happens to equal the task default must REPLAY the source value (value mode, sent), never silently fall back to the default. (Task 10 test `re-run with a source value equal to the default still sends it`.)
 4. A `for_each` instance passing `{{ each.item }}` (an object) and `{{ each.index }}` into `json` fields must get an object and a number in every instance. (Task 5 test `for_each_instances_get_native_item_and_index`.)
 5. An action whose `json` field is retyped to a connection type after job creation must not make claim try to resolve the native value as a connection name. (Task 5 test `claim_ignores_a_live_retype_to_a_connection_type`.)
@@ -3462,7 +3462,7 @@ tasks:
 Rules for every string inside a `json` value (also inside its objects and arrays):
 
 - **Literal text** (no `{{`, `{%` or `{#`) is used as is.
-- **Exactly one `{{ expression }}`** takes the expression's value — object, array, number, boolean, string or `null`. A missing field (`{{ obj.missing }}`) is `null`; an undefined variable (`{{ typo }}`) is an error, as everywhere.
+- **Exactly one `{{ expression }}`** takes the expression's value — object, array, number, boolean, string or `null`. A missing field (`{{ obj.missing }}`) or undefined variable (`{{ typo }}`) is an error, as everywhere; use `{{ obj.missing | default(value=none) }}` for an optional value (gives `null`).
 - **Anything else** (`"id {{ x }}"`, two expressions, `{% if %}` blocks) is an error. Build text inside one expression instead: `{{ 'id ' ~ x }}`.
 - `| json_encode()` gives JSON *text* — the field then holds a string. Leave it out to pass the value; `stroem validate` warns about it.
 
