@@ -763,7 +763,7 @@ redaction already handles reliably.
 ## 11. Documentation
 
 - `guides/input-and-output.md`: `json` row in Supported types; a "JSON
-  inputs" section (literal / single expression / error, `null` for missing,
+  inputs" section (literal / single expression / error, missing field → error, `default(value=none)` → `null`,
   `json_encode` gives text, the Run form's three modes, D4/D5 limits).
 - `guides/rerun-and-restart.md`: a `json` value with masked secrets is
   replayed whole (*Use previous value*); the API's `replay_fields`.
