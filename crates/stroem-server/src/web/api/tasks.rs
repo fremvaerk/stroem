@@ -468,6 +468,16 @@ pub async fn execute_task(
             .context("load source job for re-run")?,
         None => None,
     };
+    // The source check runs BEFORE the pinned/unpinned branch and before any
+    // destination lookup: a missing source and a source the caller may not
+    // read (pinned or not) answer identically for every destination.
+    if req.source_job_id.is_some() {
+        let source_job = source_row.as_ref().ok_or_else(source_job_not_found)?;
+        let perm = crate::web::api::jobs::check_job_acl(&state, &auth_user, source_job).await?;
+        if matches!(perm, TaskPermission::Deny) {
+            return Err(source_job_not_found());
+        }
+    }
     if let Some(source_job) = source_row.as_ref().filter(|j| j.git_ref.is_some()) {
         return execute_pinned_rerun(
             &state,
@@ -497,12 +507,6 @@ pub async fn execute_task(
     let mut effective_source_type = source_type;
     if req.source_job_id.is_some() {
         let source_job = source_row.ok_or_else(source_job_not_found)?;
-        // Authorization first: nothing about the source (workspace, shape,
-        // input) is revealed to a caller who may not read it.
-        let perm = crate::web::api::jobs::check_job_acl(&state, &auth_user, &source_job).await?;
-        if matches!(perm, TaskPermission::Deny) {
-            return Err(source_job_not_found());
-        }
         check_rerun_source(&source_job, &ws)?;
         // Same task as the source, on both paths (spec D12): a re-run copies
         // stored values only between runs of one task.

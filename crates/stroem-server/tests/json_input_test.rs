@@ -1124,6 +1124,31 @@ async fn denied_source_answers_like_a_missing_source_before_any_shape_check() ->
     assert_eq!(ms, s, "missing vs denied status");
     assert_eq!(mresp, resp, "missing vs denied body");
     assert_eq!(resp["error"], "Source job not found", "{resp}");
+    // Same for a destination task that does not exist.
+    let (ds, dresp) = call(
+        &app,
+        api(
+            "POST",
+            "/api/workspaces/default/tasks/no-such-task/execute",
+            json!({"input": {}, "source_job_id": src, "replay_fields": ["payload"]}),
+            Some(&user_token),
+        ),
+    )
+    .await?;
+    let (dms, dmresp) = call(
+        &app,
+        api(
+            "POST",
+            "/api/workspaces/default/tasks/no-such-task/execute",
+            json!({"input": {}, "source_job_id": Uuid::new_v4().to_string(),
+                   "replay_fields": ["payload"]}),
+            Some(&user_token),
+        ),
+    )
+    .await?;
+    assert_eq!((ds, &dresp), (dms, &dmresp), "nonexistent destination");
+    assert_eq!(ds, StatusCode::NOT_FOUND);
+    assert_eq!(dresp["error"], "Source job not found", "{dresp}");
 
     // An authorized caller does see the shape error.
     let (s, resp) = call(
