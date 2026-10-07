@@ -90,8 +90,8 @@ export default defineConfig({
               slug: "operations/migration-049-050",
             },
             {
-              label: "Upgrading to 0.19 — JSON Inputs",
-              slug: "operations/upgrade-0-19-json-input",
+              label: "Upgrading to 0.18.1 — JSON Inputs",
+              slug: "operations/upgrade-0-18-1-json-input",
             },
           ],
         },
