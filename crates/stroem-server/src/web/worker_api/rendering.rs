@@ -2154,4 +2154,36 @@ mod tests {
         let result = render_step_input(&ctx, &prep).unwrap();
         assert_eq!(result, Some(json!({"rev": ""})));
     }
+
+    fn step_with_spec(spec: Option<serde_json::Value>) -> JobStepRow {
+        let mut step = make_step_row("s", None);
+        step.action_spec = spec;
+        step
+    }
+
+    #[test]
+    fn step_input_schema_absent_is_none() {
+        assert!(step_input_schema(&step_with_spec(None)).unwrap().is_none());
+        let no_key = step_with_spec(Some(json!({"type": "script"})));
+        assert!(step_input_schema(&no_key).unwrap().is_none());
+        let null = step_with_spec(Some(json!({"input": null})));
+        assert!(step_input_schema(&null).unwrap().is_none());
+    }
+
+    #[test]
+    fn step_input_schema_reads_empty_and_json_maps() {
+        let empty = step_with_spec(Some(json!({"input": {}})));
+        assert!(step_input_schema(&empty).unwrap().unwrap().is_empty());
+        let spec = step_with_spec(Some(json!({"input": {"cfg": {"type": "json"}}})));
+        let schema = step_input_schema(&spec).unwrap().unwrap();
+        assert_eq!(schema["cfg"].field_type, "json");
+    }
+
+    #[test]
+    fn step_input_schema_unreadable_is_fixed_and_value_free() {
+        let step = step_with_spec(Some(json!({"input": "garbage-canary"})));
+        let err = step_input_schema(&step).unwrap_err();
+        assert_eq!(err.to_string(), UNREADABLE_INPUT_SCHEMA);
+        assert!(!format!("{err:#} {err:?}").contains("garbage-canary"));
+    }
 }

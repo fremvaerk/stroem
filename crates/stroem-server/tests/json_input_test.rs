@@ -521,3 +521,124 @@ tasks:
     }
     Ok(())
 }
+
+// ─── No schema, F13 pass-through, library actions ────────────────────────────
+
+#[tokio::test]
+async fn claim_with_no_persisted_schema_passes_the_rendered_input_through() -> Result<()> {
+    for sql_null in [false, true] {
+        let app = app(SINGLE).await?;
+        let (_, body) = execute(&app, "t", json!({"input": {"cfg": {"items": [1, 2, 3]}}})).await?;
+        let job_id: Uuid = body["job_id"].as_str().unwrap().parse()?;
+        let q = if sql_null {
+            "UPDATE job_step SET action_spec = NULL WHERE job_id = $1 AND step_name = 'b'"
+        } else {
+            "UPDATE job_step SET action_spec = jsonb_set(action_spec, '{input}', 'null'::jsonb) \
+             WHERE job_id = $1 AND step_name = 'b'"
+        };
+        sqlx::query(q).bind(job_id).execute(&app.pool).await?;
+        let (s, b) = claim(&app).await?;
+        assert_eq!(s, StatusCode::OK, "sql_null={sql_null}: {b}");
+        // Rendered (no schema: strings), no defaults merged.
+        assert_eq!(b["input"], json!({"n": "3"}), "sql_null={sql_null}: {b}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn claim_after_the_flow_step_is_removed_passes_the_stored_input_through() -> Result<()> {
+    let app = app(SINGLE).await?;
+    let (_, body) = execute(&app, "t", json!({"input": {"cfg": {"items": [1, 2, 3]}}})).await?;
+    let job = body["job_id"].as_str().unwrap().to_string();
+    let stored = step_row(&app, &job, "b").await?.input;
+    app.mgr
+        .replace_config_for_test(
+            "default",
+            workspace(&SINGLE.replace("      b:\n", "      renamed:\n")),
+        )
+        .await;
+    let (s, b) = claim(&app).await?;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    assert_eq!(Some(b["input"].clone()), stored, "{b}");
+    assert!(
+        b["input"]["n"].as_str().is_some_and(|t| t.contains("{{")),
+        "raw template text is passed through unrendered: {b}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn reclaim_after_the_flow_step_is_removed_does_not_render_again() -> Result<()> {
+    let yaml = r#"
+secrets:
+  S: "must-not-render"
+actions:
+  use:
+    type: script
+    script: "true"
+    input:
+      msg: { type: string }
+tasks:
+  t:
+    input:
+      raw: { type: string }
+    flow:
+      b:
+        action: use
+        input:
+          msg: "{{ input.raw }}"
+"#;
+    let app = app(yaml).await?;
+    let (_, body) = execute(&app, "t", json!({"input": {"raw": "{{ secret.S }}"}})).await?;
+    let job = body["job_id"].as_str().unwrap().to_string();
+    let job_id: Uuid = job.parse()?;
+    let (s, first) = claim(&app).await?;
+    assert_eq!(s, StatusCode::OK, "{first}");
+    assert_eq!(first["input"]["msg"], json!("{{ secret.S }}"), "{first}");
+
+    sqlx::query(
+        "UPDATE job_step SET status = 'ready', worker_id = NULL, started_at = NULL, \
+         ready_at = NOW() WHERE job_id = $1 AND step_name = 'b'",
+    )
+    .bind(job_id)
+    .execute(&app.pool)
+    .await?;
+    app.mgr
+        .replace_config_for_test(
+            "default",
+            workspace(&yaml.replace("      b:\n", "      renamed:\n")),
+        )
+        .await;
+    let (s, again) = claim(&app).await?;
+    assert_eq!(s, StatusCode::OK, "{again}");
+    assert_eq!(again["input"], first["input"], "{again}");
+    assert!(!again.to_string().contains("must-not-render"), "{again}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn claim_types_json_fields_of_a_library_action() -> Result<()> {
+    let app = app(r#"
+actions:
+  common.use:
+    type: script
+    script: "true"
+    input:
+      n: { type: json }
+tasks:
+  t:
+    input:
+      cfg: { type: json }
+    flow:
+      b:
+        action: common.use
+        input:
+          n: "{{ input.cfg.items | length }}"
+"#)
+    .await?;
+    execute(&app, "t", json!({"input": {"cfg": {"items": [1, 2, 3]}}})).await?;
+    let (s, b) = claim(&app).await?;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    assert_eq!(b["input"]["n"], json!(3), "{b}");
+    Ok(())
+}
