@@ -16,6 +16,8 @@ import { ComboboxField } from "@/components/task/combobox-field";
 import { MultiSelectField } from "@/components/task/multi-select-field";
 import type { InputField } from "@/lib/types";
 import { PRIMITIVE_TYPES, REDACTED_SENTINEL } from "@/components/task/constants";
+import { JsonInputField } from "@/components/task/json-input-field";
+import { type JsonFieldState, type ReplaySource } from "@/lib/json-field";
 
 export interface InputFieldRowProps {
   fieldKey: string;
@@ -23,6 +25,7 @@ export interface InputFieldRowProps {
   value: unknown;
   onChange: (v: unknown) => void;
   connections?: Record<string, string[]>;
+  replaySource?: ReplaySource;
 }
 
 export function InputFieldRow({
@@ -31,10 +34,24 @@ export function InputFieldRow({
   value,
   onChange,
   connections,
+  replaySource,
 }: InputFieldRowProps) {
   const id = `input-${fieldKey}`;
 
   const displayLabel = field.name ?? fieldKey;
+
+  if (field.type === "json") {
+    return (
+      <JsonInputField
+        id={id}
+        fieldKey={fieldKey}
+        field={field}
+        value={value as JsonFieldState}
+        onChange={onChange}
+        replaySource={replaySource}
+      />
+    );
+  }
 
   // Connection type input: render dropdown of available connections
   const connectionOptions = !PRIMITIVE_TYPES.has(field.type) ? connections?.[field.type] : undefined;

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildExecuteInput } from "../execute-input";
+import { buildExecuteInput, buildExecutePayload, ExecuteFormError } from "../execute-input";
 import { SECRET_SENTINEL, REDACTED_SENTINEL } from "@/components/task/constants";
 import type { InputField } from "../types";
 
@@ -54,5 +54,37 @@ describe("buildExecuteInput", () => {
 
   it("omits an unselected connection field with no default", () => {
     expect(buildExecuteInput({ clickhouse: "" }, fields)).toEqual({});
+  });
+});
+
+describe("buildExecutePayload — json fields", () => {
+  const jf: Record<string, InputField> = {
+    cfg: { type: "json", default: { a: 1 } },
+    need: { type: "json", required: true },
+    opt: { type: "json" },
+  };
+  const st = (mode: "default" | "replay" | "value", text = "") => ({ kind: "json" as const, mode, text });
+
+  it("omits default mode, lists replay mode, sends value mode parsed", () => {
+    expect(buildExecutePayload({ cfg: st("default") }, jf)).toEqual({ input: {}, replayFields: [] });
+    expect(buildExecutePayload({ cfg: st("replay") }, jf)).toEqual({ input: {}, replayFields: ["cfg"] });
+    expect(buildExecutePayload({ cfg: st("value", '{"a": 1}') }, jf)).toEqual({
+      input: { cfg: { a: 1 } },
+      replayFields: [],
+    });
+  });
+  it("sends a value equal to the default (it is the user's literal)", () => {
+    expect(buildExecutePayload({ cfg: st("value", '{"a":1}') }, jf).input).toEqual({ cfg: { a: 1 } });
+  });
+  it("omits empty text; blocks it when required without a default", () => {
+    expect(buildExecutePayload({ opt: st("value", "  ") }, jf).input).toEqual({});
+    expect(() => buildExecutePayload({ need: st("value", "") }, jf)).toThrow(ExecuteFormError);
+  });
+  it("blocks invalid JSON", () => {
+    expect(() => buildExecutePayload({ opt: st("value", "{oops") }, jf)).toThrow(/Invalid JSON/);
+  });
+  it("sends masked text and template text as data", () => {
+    expect(buildExecutePayload({ opt: st("value", '"••••••"') }, jf).input).toEqual({ opt: "••••••" });
+    expect(buildExecutePayload({ opt: st("value", '"{{ x }}"') }, jf).input).toEqual({ opt: "{{ x }}" });
   });
 });

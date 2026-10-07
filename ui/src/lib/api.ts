@@ -282,10 +282,11 @@ export async function executeTask(
   workspace: string,
   name: string,
   input: Record<string, unknown>,
-  opts?: { sourceJobId?: string },
+  opts?: { sourceJobId?: string; replayFields?: string[] },
 ): Promise<ExecuteTaskResponse> {
   const body: Record<string, unknown> = { input };
   if (opts?.sourceJobId) body.source_job_id = opts.sourceJobId;
+  if (opts?.sourceJobId && opts.replayFields?.length) body.replay_fields = opts.replayFields;
   return apiFetch<ExecuteTaskResponse>(
     `/api/workspaces/${encodeURIComponent(workspace)}/tasks/${encodeURIComponent(name)}/execute`,
     {

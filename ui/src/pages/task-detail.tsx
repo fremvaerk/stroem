@@ -25,7 +25,8 @@ import { DurationInsightsCard } from "@/components/duration-insights-card";
 import { InputFieldRow } from "@/components/task/input-field-row";
 import { SECRET_SENTINEL } from "@/components/task/constants";
 import { getTask, listJobs, executeTask } from "@/lib/api";
-import { buildExecuteInput } from "@/lib/execute-input";
+import { buildExecutePayload } from "@/lib/execute-input";
+import { initialJsonFieldState } from "@/lib/json-field";
 import { useTitle } from "@/hooks/use-title";
 import { collectDependsOnNames, type TaskDetail, type JobListItem, type FlowStep } from "@/lib/types";
 import { formatActionName } from "@/lib/utils";
@@ -118,6 +119,14 @@ export function TaskDetailPage() {
           setTask(data);
           const defaults: Record<string, unknown> = {};
           for (const [key, field] of Object.entries(data.input)) {
+            const hasSource = !!rawInput && Object.prototype.hasOwnProperty.call(rawInput, key);
+            if (field.type === "json") {
+              defaults[key] = initialJsonFieldState(
+                field,
+                hasSource ? { value: rawInput![key] } : undefined,
+              );
+              continue;
+            }
             const prefillVal =
               rawInput && Object.prototype.hasOwnProperty.call(rawInput, key)
                 ? rawInput[key]
@@ -189,7 +198,7 @@ export function TaskDetailPage() {
     setSubmitError("");
     setSubmitting(true);
     try {
-      const input = buildExecuteInput(values, task.input);
+      const { input, replayFields } = buildExecutePayload(values, task.input);
       // Only forward sourceJobId when the source job actually carries raw_input.
       // For legacy sources (raw_input === null) the server would reject with 400;
       // the form already shows defaults via the legacy banner, so submit a normal run.
@@ -197,7 +206,7 @@ export function TaskDetailPage() {
         workspace,
         task.id,
         input,
-        sourceJobId && rawInput ? { sourceJobId } : undefined,
+        sourceJobId && rawInput ? { sourceJobId, replayFields } : undefined,
       );
       navigate(`/jobs/${res.job_id}`);
     } catch (err) {
@@ -300,6 +309,11 @@ export function TaskDetailPage() {
                     value={values[key]}
                     onChange={(v) => setValues((prev) => ({ ...prev, [key]: v }))}
                     connections={task.connections}
+                    replaySource={
+                      rawInput && Object.prototype.hasOwnProperty.call(rawInput, key)
+                        ? { value: rawInput[key] }
+                        : undefined
+                    }
                   />
                 ))}
               </div>
