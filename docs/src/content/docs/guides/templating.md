@@ -154,6 +154,8 @@ See the [Tera 2 documentation](https://keats.github.io/tera/) for the full featu
 - Render arrays and objects with `| json_encode()` when you need JSON; a bare
   `{{ obj }}` renders `{"k": v}` and a string array renders `["a", "b"]`.
 
+In a `json` input field, a string that is exactly one `{{ expression }}` keeps the expression's native value — see [JSON inputs](/guides/input-and-output/#json-inputs).
+
 ### Template errors
 
 Template errors are **value-free**: they carry a category, the position

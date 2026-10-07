@@ -89,6 +89,10 @@ export default defineConfig({
               label: "Migrations 049–050 — Git Refs",
               slug: "operations/migration-049-050",
             },
+            {
+              label: "Upgrading to 0.19 — JSON Inputs",
+              slug: "operations/upgrade-0-19-json-input",
+            },
           ],
         },
         {

@@ -113,6 +113,14 @@ Any backend supported by vals works:
 - If `vals` is not installed and a `ref+` value is encountered, the template render fails with a clear error
 - Each `| vals` usage invokes the vals CLI once
 
+### What is masked
+
+Job detail, webhook and MCP responses mask secret values that appear in **strings** — including strings inside JSON input values. Numbers, booleans and `null` are never masked:
+
+- Quote numeric secrets (`PORT: "5432"`) so they are masked; `stroem validate` warns about unquoted ones.
+- A filter that changes a secret's form — `| int`, `| upper`, `| b64encode`, a slice — produces a value that is not masked, in any field type.
+- Values of 3 characters or fewer are never masked.
+
 ### API redaction
 
 Secret values are automatically redacted from API responses. When you view a job via `GET /api/jobs/:id`, every field except identifiers (ids, names, statuses, revisions, timestamps) — job input/output, step input/output, approval messages, conditions — that contains a known secret value will have it replaced with `••••••`. Substring matches are also redacted. Additionally, unresolved `ref+` references are redacted to avoid leaking secret-manager paths.

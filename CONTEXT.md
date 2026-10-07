@@ -37,3 +37,4 @@ holds what the words mean. Keep both in sync when a term is added or sharpened.
 - **Log source** — which source answered a read: `local`, `archive`, `merged` or `none` (`X-Stroem-Log-Source`).
 
 See `CLAUDE.md` for how these pieces fit together (architecture, conventions, key patterns).
+- **Native value** — the value a `json` input field takes from a string that is exactly one `{{ expression }}`: the expression's JSON value (object, array, number, …), not its rendered text.

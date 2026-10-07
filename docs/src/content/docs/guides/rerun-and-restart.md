@@ -13,6 +13,8 @@ The **Re-run** button on a job's detail page opens the task's execute form prefi
 
 The new job records `source_type: "rerun"` and `source_job_id` pointing at the job it was re-run from, so the job detail page shows **re-run of `<id>`** under the job title (and in the **Source** card), linking back to the source job. A restarted job shows **restart of `<id>` from `<step>`** the same way. Re-run is only offered for jobs whose `raw_input` was captured — jobs created before this feature (or via legacy clients) show "This job predates Re-run prefill" and fall back to blank defaults.
 
+A `json` field whose previous value contains masked secrets is replayed whole (*Use previous value*): the server copies the source job's stored value. API clients do the same with `replay_fields`: `{"source_job_id": "…", "replay_fields": ["cfg"], "input": {…}}`. A re-run must use a source job of the same task; `replay_fields` needs `source_job_id`, may only name the task's fields, may not repeat a field given in `input`, and fails when the source has no value for a required field with no default — each a `400`.
+
 Use Re-run when you want to change input, or when the failure is unrelated to which steps already succeeded. To skip re-running steps that already succeeded, use Restart from a step instead.
 
 ## Restart from a step

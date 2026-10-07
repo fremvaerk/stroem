@@ -39,8 +39,9 @@ The optional `description` field is displayed in the web UI as helper text below
 | `boolean`  | True/false. Renders as a checkbox in the UI. Also accepts `bool` as an alias |
 | `date`     | Date value (`YYYY-MM-DD`). Renders as a date picker in the UI |
 | `datetime` | Date and time. Renders as a datetime picker in the UI          |
+| `json`     | Any JSON value (object, array, string, number, boolean, null). Renders as a JSON editor in the UI |
 
-If the `type` is not one of the primitives above, it is treated as a [connection type](/guides/connections/) reference. The UI renders a searchable dropdown of matching connections in the workspace.
+If the `type` is not one of the types above, it is treated as a [connection type](/guides/connections/) reference. The UI renders a searchable dropdown of matching connections in the workspace.
 
 Both `string` and `text` are treated identically at runtime — the difference is only in how the UI renders the input field. Use `text` for values that benefit from multiline editing such as SQL queries, scripts, or markdown content.
 
@@ -95,6 +96,43 @@ Fields marked `required: true` without a default will produce an error if not pr
 A field left empty in the **Run task** form is treated the same way as an API call that omits the key. If the field has no `default`, the key is not sent at all, so `{{ input.field | default(value='x') }}` applies the fallback and a plain `{{ input.field }}` fails to render, exactly as it would for an API, CLI or MCP caller that left the field out. If the field *has* a `default`, clearing it sends an empty string, which is an explicit override.
 
 Tera's `default` filter fires for an *absent* or `null` variable, never for an empty string, so a template that must tolerate both should test the value: `{% if input.field %}{{ input.field }}{% else %}x{% endif %}`.
+
+### JSON inputs
+
+A `json` field holds any JSON value and keeps it structured through templates.
+
+```yaml
+actions:
+  deploy:
+    type: script
+    script: echo "{{ input.cfg.region }} x{{ input.replicas + 1 }}"
+    input:
+      cfg: { type: json }
+      replicas: { type: json }
+tasks:
+  release:
+    input:
+      targets: { type: json, default: [eu, us] }
+    flow:
+      plan: { action: make-plan }
+      go:
+        action: deploy
+        depends_on: [plan]
+        input:
+          cfg: "{{ plan.output.cfg }}"            # an object
+          replicas: "{{ plan.output.hosts | length }}"   # a number
+```
+
+Rules for every string inside a `json` value (also inside its objects and arrays):
+
+- **Literal text** (no `{{`, `{%` or `{#`) is used as is.
+- **Exactly one `{{ expression }}`** takes the expression's value — object, array, number, boolean, string or `null`. A missing field (`{{ obj.missing }}`) or undefined variable (`{{ typo }}`) is an error, as everywhere; use `{{ obj.missing | default(value=none) }}` for an optional value (gives `null`).
+- **Anything else** (`"id {{ x }}"`, two expressions, `{% if %}` blocks) is an error. Build text inside one expression instead: `{{ 'id ' ~ x }}`.
+- `| json_encode()` gives JSON *text* — the field then holds a string. Leave it out to pass the value; `stroem validate` warns about it.
+
+Values sent through the API, a webhook's `body`, the CLI `--input`, MCP and agent tools are used exactly as given. A `json` field cannot be `secret`, have `options`/`allow_custom`/`multiple`, or be used in an approval form.
+
+In the **Run task** form a `json` field is a JSON editor. A default that contains templates is shown read-only ("evaluated when the job runs"); *Override* opens an empty editor. An empty editor sends nothing (the default applies) — type `""` or `null` to send those values.
 
 ### Secret inputs
 

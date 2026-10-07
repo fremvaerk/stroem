@@ -4,6 +4,8 @@
 
 Strøm is a unified workflow/task orchestration platform replacing RunDeck, Windmill, CircleCI, GitHub Actions, and Kubernetes CronJobs. This is a complete rewrite of the original Strøm project. Backend in Rust, frontend in React + shadcn/ui. GitOps-based workflow definitions in YAML, PostgreSQL as the single backend.
 
+Status: json input type — complete (spec 2026-10-06-json-input-type).
+
 ---
 
 ## 1. Cargo Workspace Structure
