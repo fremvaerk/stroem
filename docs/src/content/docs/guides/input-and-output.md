@@ -129,6 +129,9 @@ Rules for every string inside a `json` value (also inside its objects and arrays
 - **Exactly one `{{ expression }}`** takes the expression's value — object, array, number, boolean, string or `null`. A missing field (`{{ obj.missing }}`) or undefined variable (`{{ typo }}`) is an error, as everywhere; use `{{ obj.missing | default(value=none) }}` for an optional value (gives `null`).
 - **Anything else** (`"id {{ x }}"`, two expressions, `{% if %}` blocks) is an error. Build text inside one expression instead: `{{ 'id ' ~ x }}`.
 - `| json_encode()` gives JSON *text* — the field then holds a string. Leave it out to pass the value; `stroem validate` warns about it.
+- **Known limitation:** a `}}` or `{{` inside a string literal of the expression (e.g. `{{ x | default(value="}}") }}`) makes the string count as more than one expression. Use a variable instead.
+
+`json_encode` belongs in a script body, not in the field. To pass a whole json input to a script as JSON text, write `{{ input.cfg | json_encode() }}` there; a bare `{{ input.cfg }}` in a script renders Tera's own format, which is not JSON.
 
 Values sent through the API, a webhook's `body`, the CLI `--input`, MCP and agent tools are used exactly as given. A `json` field cannot be `secret`, have `options`/`allow_custom`/`multiple`, or be used in an approval form.
 

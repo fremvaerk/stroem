@@ -15,10 +15,11 @@ pub struct PrepareContext<'a> {
     pub task_name: &'a str,
     pub step: &'a JobStepRow,
     pub job_input: Option<&'a serde_json::Value>,
-    /// Owner workspace config for cross-workspace steps. When set, the action
-    /// definition + connection-typed inputs are resolved against this workspace
-    /// (the action body's owner) instead of the caller `workspace`. `None` ⇒
-    /// local step: resolve against `workspace` (byte-for-byte today's behaviour).
+    /// Owner workspace config for cross-workspace steps. When set, connection
+    /// VALUES are resolved against this workspace (the action body's owner)
+    /// instead of the caller `workspace`; the input schema is not looked up
+    /// here, it is the persisted `input_schema`. `None` ⇒ local step: resolve
+    /// against `workspace`.
     pub action_workspace: Option<&'a WorkspaceConfig>,
     /// Name of the owner workspace when `action_workspace` is set. `Some`
     /// with `action_workspace: None` means the owner is not loaded: input
@@ -119,9 +120,10 @@ pub fn render_step_input(
 
 /// Merge action-level input defaults and prepare final input.
 ///
-/// Looks up the action definition for this step and applies defaults and
-/// connection resolution. Falls through to the rendered input unchanged if
-/// no action is found or if the action has no input schema.
+/// Applies the action's input defaults and connection resolution using the
+/// step's PERSISTED input schema (`ctx.input_schema` = `action_spec.input`),
+/// not a live action lookup. Falls through to the rendered input unchanged if
+/// there is no schema, or the task / flow step is gone (F13).
 pub fn prepare_step_action_input(
     rendered_input: Option<serde_json::Value>,
     ctx: &PrepareContext,
@@ -1341,7 +1343,7 @@ mod tests {
     }
 
     #[test]
-    fn test_prepare_step_action_input_action_not_found_returns_rendered_input() {
+    fn test_prepare_step_action_input_no_schema_returns_rendered_input() {
         let mut task = TaskDef {
             name: None,
             description: None,
@@ -1807,12 +1809,10 @@ mod tests {
     fn test_prepare_step_action_input_resolves_local_library_dotted_action() {
         use stroem_common::models::workflow::{ConnectionDef, ConnectionTypeDef};
 
-        // A LOCAL library-imported action is stored under its full DOTTED key
-        // (`common.pg-query`) — library flattening never stores the bare name.
-        // The step references it by the dotted name and is LOCAL
-        // (`action_workspace: None`). Resolution must use the FULL key, not the
-        // bare `pg-query`, or connection-typed inputs would silently pass through
-        // unresolved. This is the byte-for-byte backward-compat guarantee.
+        // A LOCAL library-imported action (`common.pg-query`) uses the
+        // persisted input schema like any other step (`action_workspace: None`),
+        // so its connection-typed inputs resolve against the caller's
+        // connections; nothing is looked up by action name.
         let mut lib_action = make_action("script");
         lib_action
             .input

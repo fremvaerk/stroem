@@ -837,9 +837,6 @@ fn validate_connections(config: &WorkspaceConfig) -> Result<Vec<String>> {
     Ok(warnings)
 }
 
-/// Validates input field options across all actions and tasks.
-/// Returns warnings for soft issues; bails for unrecoverable misconfigurations
-/// (e.g., `multiple: true` combined with `secret: true` or a non-string `type`).
 /// `json` field templates (spec 2026-10-06-json-input-type § 5.4): a string
 /// that is not literal or a single `{{ expression }}` is an error; a single
 /// expression ending in `json_encode` is a warning.
@@ -868,6 +865,10 @@ fn validate_json_fields(config: &WorkspaceConfig) -> Result<Vec<String>> {
             }
         }
         for (step_name, step) in &task.flow {
+            // A ref'd step resolves at job creation against another commit.
+            if step.git_ref.is_some() {
+                continue;
+            }
             let Some(schema) = step_target_schema(config, step) else {
                 continue;
             };
@@ -897,6 +898,10 @@ fn step_target_schema<'a>(
         None => config.actions.get(&step.action)?,
     };
     if action.action_type == "task" {
+        // A ref'd task action targets another commit's task schema.
+        if action.git_ref.is_some() {
+            return None;
+        }
         config.tasks.get(action.task.as_deref()?).map(|t| &t.input)
     } else {
         Some(&action.input)
@@ -935,6 +940,7 @@ fn warn_non_string_secrets(config: &WorkspaceConfig) -> Vec<String> {
     for (name, value) in &config.secrets {
         let mut found = Vec::new();
         kinds(value, &mut found);
+        found.sort_unstable();
         found.dedup();
         for k in found {
             warnings.push(format!("secret '{name}' {k}, {HINT}"));
@@ -957,6 +963,7 @@ fn warn_non_string_secrets(config: &WorkspaceConfig) -> Vec<String> {
             };
             let mut found = Vec::new();
             kinds(value, &mut found);
+            found.sort_unstable();
             found.dedup();
             for k in found {
                 warnings.push(format!(
@@ -968,6 +975,9 @@ fn warn_non_string_secrets(config: &WorkspaceConfig) -> Vec<String> {
     warnings
 }
 
+/// Validates input field options across all actions and tasks.
+/// Returns warnings for soft issues; bails for unrecoverable misconfigurations
+/// (e.g., `multiple: true` combined with `secret: true` or a non-string `type`).
 fn validate_input_options(config: &WorkspaceConfig) -> Result<Vec<String>> {
     let mut warnings = Vec::new();
 
@@ -8576,6 +8586,37 @@ triggers:
         .unwrap();
         let err = format!("{:#}", validate_workflow_config(&cfg).unwrap_err());
         assert!(err.contains("Task 'parent' step 'c' input 'cfg'"), "{err}");
+    }
+
+    #[test]
+    fn ref_pinned_step_is_not_linted_against_the_local_json_schema() {
+        let cfg: WorkspaceConfig = serde_yaml::from_str(
+            "actions:\n  a:\n    type: script\n    script: \"true\"\n    input:\n      cfg: { type: json }\n\
+             tasks:\n  t:\n    flow:\n      s:\n        action: a\n        ref: main\n        input:\n          cfg: \"x {{ y }}\"\n",
+        )
+        .unwrap();
+        validate_workflow_config(&cfg).unwrap();
+    }
+
+    #[test]
+    fn ref_pinned_task_action_is_not_linted_against_the_local_task_schema() {
+        let cfg: WorkspaceConfig = serde_yaml::from_str(
+            "actions:\n  call: { type: task, task: child, ref: main }\n  a: { type: script, script: \"true\" }\n\
+             tasks:\n  child:\n    input:\n      cfg: { type: json }\n    flow:\n      s: { action: a }\n  \
+             parent:\n    flow:\n      c:\n        action: call\n        input:\n          cfg: \"x {{ y }}\"\n",
+        )
+        .unwrap();
+        validate_workflow_config(&cfg).unwrap();
+    }
+
+    #[test]
+    fn non_adjacent_numeric_secret_kinds_warn_once_each() {
+        let cfg: WorkspaceConfig =
+            serde_yaml::from_str("secrets:\n  S: { a: 1, b: true, c: 2 }\n").unwrap();
+        let warnings = validate_workflow_config(&cfg).unwrap();
+        let n = |needle: &str| warnings.iter().filter(|w| w.contains(needle)).count();
+        assert_eq!(n("secret 'S' is a number"), 1, "{warnings:?}");
+        assert_eq!(n("secret 'S' is a boolean"), 1, "{warnings:?}");
     }
 
     #[test]

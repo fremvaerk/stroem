@@ -467,8 +467,10 @@ mod tests {
         assert_eq!(map_position(&expr, (1, p)), None);
         assert_eq!(map_position(&expr, (1, p + 1)), Some((1, 3)));
         assert_eq!(map_position(&expr, (1, p + 3)), Some((1, 5)));
-        assert_eq!(map_position(&expr, (1, p + 4)), None); // first SUFFIX char
-                                                           // `{{ typo }}`'s undefined error is raised in SUFFIX: no position.
+        // First SUFFIX char.
+        assert_eq!(map_position(&expr, (1, p + 4)), None);
+
+        // `{{ typo }}`'s undefined error is raised in SUFFIX: no position.
         let err = render_json_value(&json!("{{ typo }}"), "f", &json!({})).unwrap_err();
         assert_eq!(template_position(&err), None, "{err:#}");
     }

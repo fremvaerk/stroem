@@ -35,6 +35,6 @@ holds what the words mean. Keep both in sync when a term is added or sharpened.
 - **Tail read** — the newest whole lines of a log, at most `tail_bytes` (256 KiB by default), with `truncated` (exact when `false`) and `total_bytes` (an upper bound). What every log reader gets by default.
 - **Full read** — the whole log as an NDJSON stream (`?full=true`); for a finished job the in-memory union of local and archive while it fits `merge_max_bytes`/`merge_max_lines`, else one source.
 - **Log source** — which source answered a read: `local`, `archive`, `merged` or `none` (`X-Stroem-Log-Source`).
+- **Native value** — the value a `json` input field takes from a string that is exactly one `{{ expression }}`: the expression's JSON value (object, array, number, …), not its rendered text.
 
 See `CLAUDE.md` for how these pieces fit together (architecture, conventions, key patterns).
-- **Native value** — the value a `json` input field takes from a string that is exactly one `{{ expression }}`: the expression's JSON value (object, array, number, …), not its rendered text.

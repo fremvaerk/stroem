@@ -118,12 +118,17 @@ pub async fn dispatch_agent_loop(
     let max_turns = action_spec.max_turns.unwrap_or(DEFAULT_MAX_TURNS).min(100);
 
     // Build tool definitions
-    let tool_defs = build_tool_definitions(
+    let mut tool_defs = build_tool_definitions(
         action_spec,
         task_tool_infos,
         #[cfg(feature = "mcp")]
         mcp_client,
     );
+    if provider_config.provider_type == "gemini" {
+        for def in &mut tool_defs {
+            type_untyped_properties(&mut def.parameters);
+        }
+    }
 
     // Initialize or restore conversation state
     let mut conv_state = resume_state.unwrap_or_default();
@@ -508,6 +513,25 @@ pub async fn dispatch_agent_loop(
     }
 }
 
+/// Gemini's schema converter turns a property with no `type` (a `json` input,
+/// spec D9) into `"type": ""`, which Gemini rejects. Give each such property
+/// of a tool's top-level `properties` the type `object` (spec D9 fallback).
+fn type_untyped_properties(parameters: &mut serde_json::Value) {
+    let Some(props) = parameters
+        .get_mut("properties")
+        .and_then(|p| p.as_object_mut())
+    else {
+        return;
+    };
+    for prop in props.values_mut() {
+        if let Some(obj) = prop.as_object_mut() {
+            if !obj.contains_key("type") {
+                obj.insert("type".to_string(), serde_json::json!("object"));
+            }
+        }
+    }
+}
+
 /// Build tool definitions from action spec and task tool infos.
 fn build_tool_definitions(
     action_spec: &ActionDef,
@@ -770,6 +794,59 @@ mod tests {
         let cfg = &body["tools"][0]["function"]["parameters"]["properties"]["cfg"];
         assert!(cfg.is_object(), "{body}");
         assert!(cfg.get("type").is_none(), "{body}");
+    }
+
+    #[test]
+    fn untyped_properties_get_object_type() {
+        let mut p = serde_json::json!({"type": "object", "properties": {
+            "cfg": {"description": "x"}, "n": {"type": "integer"}}});
+        type_untyped_properties(&mut p);
+        assert_eq!(p["properties"]["cfg"]["type"], "object");
+        assert_eq!(p["properties"]["n"]["type"], "integer");
+    }
+
+    /// Gemini rejects a typeless property: the json parameter goes out as
+    /// `object`, on both the fallback and the pre-built schema paths.
+    #[tokio::test]
+    async fn gemini_json_tool_parameter_gets_an_object_type() {
+        for prebuilt in [false, true] {
+            let (base_url, server) = capture_one_request().await;
+            let mut provider = openai_provider(base_url);
+            provider.provider_type = "gemini".to_string();
+            let action: ActionDef = serde_json::from_value(serde_json::json!({
+                "type": "agent", "tools": [{"task": "deploy"}]
+            }))
+            .unwrap();
+            let infos = vec![TaskToolInfo {
+                name: "deploy".to_string(),
+                description: None,
+                input: std::collections::HashMap::from([(
+                    "cfg".to_string(),
+                    serde_yaml::from_str("type: json").unwrap(),
+                )]),
+                parameters_schema: prebuilt
+                    .then(|| serde_json::json!({"type": "object", "properties": {"cfg": {}}})),
+            }];
+            let _ = dispatch_agent_loop(
+                &NoopContext,
+                Uuid::new_v4(),
+                "agent",
+                &action,
+                &provider,
+                "test-model",
+                "Deploy it",
+                None,
+                None,
+                None,
+                Vec::new(),
+                &infos,
+            )
+            .await;
+            let body = server.await.unwrap().body;
+            let cfg =
+                &body["tools"][0]["functionDeclarations"][0]["parameters"]["properties"]["cfg"];
+            assert_eq!(cfg["type"], "object", "prebuilt={prebuilt}: {body}");
+        }
     }
 
     /// A step suspended by a rig-core 0.36 worker resumes on this one with

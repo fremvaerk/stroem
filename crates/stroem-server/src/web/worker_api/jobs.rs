@@ -1056,11 +1056,10 @@ pub async fn claim_job(
             step: &step,
             job_input: job.input.as_ref(),
             // Gate on the DB column (the TRUE cross-workspace signal), NOT on
-            // whether `owner_config` is populated. For a LOCAL step the column is
-            // NULL but `owner_config == Some(caller)`; passing that here would make
-            // `prepare_step_action_input` strip a dotted library action name to its
-            // bare form and miss it, silently skipping default-merge + connection
-            // resolution. `None` for local steps ⇒ full-key lookup (today's behaviour).
+            // whether `owner_config` is populated: for a LOCAL step the column
+            // is NULL but `owner_config == Some(caller)`. `None` keeps
+            // `action_owner` unset for local steps (role scoping); nothing is
+            // looked up by action name any more (the schema is persisted).
             action_workspace: if step.action_workspace.is_some() {
                 owner_config.as_deref()
             } else {

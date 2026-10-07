@@ -117,6 +117,7 @@ Any backend supported by vals works:
 
 Job detail, webhook and MCP responses mask secret values that appear in **strings** — including strings inside JSON input values. Numbers, booleans and `null` are never masked:
 
+- A boolean or `null` cannot be hidden by masking: it carries one bit, and masking every `true`, `false` or `null` in a response would destroy it.
 - Quote numeric secrets (`PORT: "5432"`) so they are masked; `stroem validate` warns about unquoted ones.
 - A filter that changes a secret's form — `| int`, `| upper`, `| b64encode`, a slice — produces a value that is not masked, in any field type.
 - Values of 3 characters or fewer are never masked.
