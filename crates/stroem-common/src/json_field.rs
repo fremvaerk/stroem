@@ -344,6 +344,44 @@ mod tests {
         assert_eq!(calls.get(), 1);
     }
 
+    /// Runs the REAL wrapper through a real engine: a counting filter proves the
+    /// expression is evaluated once, not once per mention in SUFFIX.
+    #[test]
+    fn the_wrapper_evaluates_the_expression_exactly_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let mut engine = crate::tera_engine::render_engine(
+            crate::budget::LoadBudget::unbounded(),
+            Arc::new(Mutex::new(None)),
+        );
+        let c = count.clone();
+        engine.register_filter(
+            "count",
+            move |v: &tera::Value, _kw: tera::Kwargs, _st: &tera::State| {
+                c.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, tera::Error>(v.clone())
+            },
+        );
+        let ctx = tera::Context::from_serialize(&json!({"x": "not a number"})).unwrap();
+        let render = |tpl: &str| -> Result<String> {
+            engine.render_str(tpl, &ctx, false).map_err(|e| {
+                anyhow::Error::new(TemplateError::from_tera(&e, Some(tpl), None))
+                    .context("Failed to render template")
+            })
+        };
+
+        let ok = render_json_value_with(&json!("{{ x | count }}"), "f", &render).unwrap();
+        assert_eq!(ok, json!("not a number"));
+        assert_eq!(count.load(Ordering::SeqCst), 1, "success path");
+
+        count.store(0, Ordering::SeqCst);
+        let err = render_json_value_with(&json!("{{ x | count | int }}"), "f", &render);
+        assert!(err.is_err());
+        assert_eq!(count.load(Ordering::SeqCst), 1, "failure path");
+    }
+
     fn template_position(err: &anyhow::Error) -> Option<(usize, usize)> {
         err.chain()
             .find_map(|c| c.downcast_ref::<TemplateError>())
