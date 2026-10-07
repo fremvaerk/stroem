@@ -56,6 +56,7 @@ pub fn ask_user_tool_definition() -> ToolDefinition {
 /// - `number` → `"number"`
 /// - `boolean` → `"boolean"`
 /// - `date`, `datetime` → `"string"` (with format)
+/// - `json` → no type (any JSON value)
 /// - anything else (connection types) → `"object"`
 pub fn input_schema_to_json_schema(input: &HashMap<String, InputFieldDef>) -> serde_json::Value {
     if input.is_empty() {
@@ -72,16 +73,34 @@ pub fn input_schema_to_json_schema(input: &HashMap<String, InputFieldDef>) -> se
         let mut prop = serde_json::Map::new();
 
         let (json_type, format) = map_field_type(&field.field_type);
-        prop.insert("type".to_string(), serde_json::Value::String(json_type));
+        if let Some(json_type) = json_type {
+            prop.insert("type".to_string(), serde_json::Value::String(json_type));
+        }
         if let Some(fmt) = format {
             prop.insert("format".to_string(), serde_json::Value::String(fmt));
         }
 
-        if let Some(ref desc) = field.description {
-            prop.insert(
-                "description".to_string(),
-                serde_json::Value::String(desc.clone()),
-            );
+        let is_json = field.field_type == stroem_common::template::JSON_TYPE;
+        match (&field.description, is_json) {
+            (Some(desc), true) => {
+                prop.insert(
+                    "description".to_string(),
+                    serde_json::Value::String(format!("{desc} Any JSON value.")),
+                );
+            }
+            (None, true) => {
+                prop.insert(
+                    "description".to_string(),
+                    serde_json::Value::String("Any JSON value.".to_string()),
+                );
+            }
+            (Some(desc), false) => {
+                prop.insert(
+                    "description".to_string(),
+                    serde_json::Value::String(desc.clone()),
+                );
+            }
+            (None, false) => {}
         }
 
         if let Some(ref default) = field.default {
@@ -114,15 +133,18 @@ pub fn input_schema_to_json_schema(input: &HashMap<String, InputFieldDef>) -> se
 }
 
 /// Map a Strøm field type to a (JSON Schema type, optional format) pair.
-fn map_field_type(field_type: &str) -> (String, Option<String>) {
+/// `json` has no type: any JSON value (spec 2026-10-06-json-input-type D9).
+fn map_field_type(field_type: &str) -> (Option<String>, Option<String>) {
+    let t = |s: &str| Some(s.to_string());
     match field_type {
-        "string" | "text" => ("string".to_string(), None),
-        "integer" => ("integer".to_string(), None),
-        "number" => ("number".to_string(), None),
-        "boolean" => ("boolean".to_string(), None),
-        "date" => ("string".to_string(), Some("date".to_string())),
-        "datetime" => ("string".to_string(), Some("date-time".to_string())),
-        _ => ("object".to_string(), None), // Connection types or unknown
+        "string" | "text" => (t("string"), None),
+        "integer" => (t("integer"), None),
+        "number" => (t("number"), None),
+        "boolean" => (t("boolean"), None),
+        "date" => (t("string"), t("date")),
+        "datetime" => (t("string"), t("date-time")),
+        stroem_common::template::JSON_TYPE => (None, None),
+        _ => (t("object"), None), // Connection types or unknown
     }
 }
 
@@ -208,23 +230,29 @@ mod tests {
 
     #[test]
     fn test_map_field_type_coverage() {
-        assert_eq!(map_field_type("string"), ("string".to_string(), None));
-        assert_eq!(map_field_type("text"), ("string".to_string(), None));
-        assert_eq!(map_field_type("integer"), ("integer".to_string(), None));
-        assert_eq!(map_field_type("number"), ("number".to_string(), None));
-        assert_eq!(map_field_type("boolean"), ("boolean".to_string(), None));
-        assert_eq!(
-            map_field_type("date"),
-            ("string".to_string(), Some("date".to_string()))
+        let t = |s: &str| Some(s.to_string());
+        assert_eq!(map_field_type("string"), (t("string"), None));
+        assert_eq!(map_field_type("text"), (t("string"), None));
+        assert_eq!(map_field_type("integer"), (t("integer"), None));
+        assert_eq!(map_field_type("number"), (t("number"), None));
+        assert_eq!(map_field_type("boolean"), (t("boolean"), None));
+        assert_eq!(map_field_type("date"), (t("string"), t("date")));
+        assert_eq!(map_field_type("datetime"), (t("string"), t("date-time")));
+        assert_eq!(map_field_type("my_connection_type"), (t("object"), None));
+    }
+
+    #[test]
+    fn json_field_has_no_type_keyword() {
+        assert_eq!(map_field_type("json"), (None, None));
+        let mut input = HashMap::new();
+        input.insert(
+            "cfg".to_string(),
+            serde_yaml::from_str::<InputFieldDef>("{ type: json, description: Config }").unwrap(),
         );
-        assert_eq!(
-            map_field_type("datetime"),
-            ("string".to_string(), Some("date-time".to_string()))
-        );
-        assert_eq!(
-            map_field_type("my_connection_type"),
-            ("object".to_string(), None)
-        );
+        let schema = input_schema_to_json_schema(&input);
+        let cfg = &schema["properties"]["cfg"];
+        assert!(cfg.get("type").is_none(), "{schema}");
+        assert_eq!(cfg["description"], "Config Any JSON value.");
     }
 
     fn default_task() -> TaskDef {

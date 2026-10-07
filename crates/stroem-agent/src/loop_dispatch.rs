@@ -733,6 +733,45 @@ mod tests {
         }
     }
 
+    /// The OpenAI wire carries a `json` tool parameter without `type`.
+    #[tokio::test]
+    async fn json_task_tool_parameter_reaches_the_wire_without_a_type() {
+        let (base_url, server) = capture_one_request().await;
+        let provider = openai_provider(format!("{base_url}/v1"));
+        let action: ActionDef = serde_json::from_value(serde_json::json!({
+            "type": "agent", "tools": [{"task": "deploy"}]
+        }))
+        .unwrap();
+        let infos = vec![TaskToolInfo {
+            name: "deploy".to_string(),
+            description: None,
+            input: std::collections::HashMap::from([(
+                "cfg".to_string(),
+                serde_yaml::from_str("type: json").unwrap(),
+            )]),
+            parameters_schema: None,
+        }];
+        let _ = dispatch_agent_loop(
+            &NoopContext,
+            Uuid::new_v4(),
+            "agent",
+            &action,
+            &provider,
+            "test-model",
+            "Deploy it",
+            None,
+            None,
+            None,
+            Vec::new(),
+            &infos,
+        )
+        .await;
+        let body = server.await.unwrap().body;
+        let cfg = &body["tools"][0]["function"]["parameters"]["properties"]["cfg"];
+        assert!(cfg.is_object(), "{body}");
+        assert!(cfg.get("type").is_none(), "{body}");
+    }
+
     /// A step suspended by a rig-core 0.36 worker resumes on this one with
     /// its whole conversation: both assistant tool calls and both answers
     /// reach the provider, each answer paired with its call.
