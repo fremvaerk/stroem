@@ -101,6 +101,20 @@ impl TemplateError {
         &self.message
     }
 
+    /// 1-based `(line, column)` of the error, when Tera reported one.
+    pub fn position(&self) -> Option<(usize, usize)> {
+        self.line.zip(self.column)
+    }
+
+    /// The same error at another position (`None` drops it). The category,
+    /// `vals` failure and raw detail are unchanged, so the message stays
+    /// value-free (spec 2026-10-06-json-input-type § 4.2 step 3).
+    pub(crate) fn with_position(mut self, pos: Option<(usize, usize)>) -> Self {
+        self.line = pos.map(|p| p.0);
+        self.column = pos.map(|p| p.1);
+        self
+    }
+
     pub fn is_vals_failure(&self) -> bool {
         self.vals.is_some()
     }
@@ -417,6 +431,7 @@ pub(crate) fn raw_detail_contains(tpl: &str, ctx: &serde_json::Value, needle: &s
 
 #[cfg(test)]
 mod tests {
+    use super::TemplateError;
     use crate::template::render_template;
     use serde_json::json;
 
@@ -662,5 +677,20 @@ mod tests {
         );
         let m = msg("{{ missing[:1] }}", json!({}));
         assert_eq!(m, "Cannot slice an undefined value (line 1, column 4)");
+    }
+
+    #[test]
+    fn with_position_replaces_only_the_position() {
+        let err = crate::template::render_template("{{ missing[:1] }}", &serde_json::json!({}))
+            .unwrap_err();
+        let te = err
+            .downcast::<TemplateError>()
+            .expect("render errors carry a TemplateError under their context");
+        let message = te.message().to_string();
+        assert!(te.position().is_some(), "{te}");
+        let moved = te.with_position(Some((7, 9)));
+        assert_eq!(moved.position(), Some((7, 9)));
+        assert_eq!(moved.message(), message);
+        assert_eq!(moved.with_position(None).to_string(), message);
     }
 }

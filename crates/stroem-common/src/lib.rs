@@ -7,6 +7,7 @@ pub mod duration;
 pub mod format;
 pub mod gate;
 pub mod git_ref;
+pub mod json_field;
 pub mod language;
 pub mod models;
 pub mod secret;
