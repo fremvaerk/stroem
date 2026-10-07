@@ -759,3 +759,78 @@ async fn rerun_of_a_retry_masks_a_secret_of_the_retried_commit() -> Result<()> {
     })
     .await
 }
+
+const RR_JSON_MAIN: &str = r#"
+triggers:
+  nightly:
+    type: scheduler
+    cron: "0 0 1 1 *"
+    task: json-on-release
+    ref: release/2.3
+    input:
+      cfg: { k: [1, "v"] }
+"#;
+
+const RR_JSON_RELEASE: &str = r#"
+actions:
+  a:
+    type: script
+    script: "echo a"
+tasks:
+  json-on-release:
+    folder: rel
+    input:
+      cfg: { type: json }
+    flow:
+      a:
+        action: a
+"#;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pinned_rerun_replays_a_json_field_from_the_source() -> Result<()> {
+    rr_bounded(async {
+        let fx = pinned_workspace_fixture(PinnedFixtureOpts {
+            etl_main: Some(RR_JSON_MAIN.to_string()),
+            etl_release: Some(RR_JSON_RELEASE.to_string()),
+            ..Default::default()
+        })
+        .await?;
+        let source = fire_etl_trigger(&fx, "nightly").await?;
+        let src_row = JobRepo::get(&fx.pool, source).await?.expect("source");
+        assert_eq!(
+            src_row.raw_input.as_ref().unwrap()["cfg"],
+            json!({"k": [1, "v"]})
+        );
+
+        let (st, body) = api_req(
+            &fx.router,
+            "POST",
+            "/api/workspaces/etl/tasks/json-on-release/execute",
+            None,
+            Some(json!({"input": {}, "source_job_id": source, "replay_fields": ["cfg"]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        let id: Uuid = body["job_id"].as_str().unwrap().parse()?;
+        let row = JobRepo::get(&fx.pool, id).await?.expect("new job");
+        assert_eq!(row.input.unwrap()["cfg"], json!({"k": [1, "v"]}));
+        assert_eq!(row.raw_input.unwrap()["cfg"], json!({"k": [1, "v"]}));
+
+        let (st, body) = api_req(
+            &fx.router,
+            "POST",
+            "/api/workspaces/etl/tasks/json-on-release/execute",
+            None,
+            Some(
+                json!({"input": {}, "source_job_id": source, "replay_fields": ["canary-unknown"]}),
+            ),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+        let text = body.to_string();
+        assert!(text.contains("does not declare"), "{text}");
+        assert!(!text.contains("canary-unknown"), "{text}");
+        Ok(())
+    })
+    .await
+}

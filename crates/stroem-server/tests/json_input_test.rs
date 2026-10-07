@@ -1003,3 +1003,34 @@ async fn mixed_acl_caller_cannot_replay_across_tasks() -> Result<()> {
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn replay_field_absent_in_the_source_takes_the_default() -> Result<()> {
+    let app = app(r#"
+actions:
+  noop: { type: script, script: "true" }
+tasks:
+  t:
+    input:
+      cfg: { type: json, default: { d: 1 } }
+      other: { type: string }
+    flow:
+      s: { action: noop }
+"#)
+    .await?;
+    let (s, body) = execute(&app, "t", json!({"input": {"other": "x"}})).await?;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let src = body["job_id"].as_str().unwrap().to_string();
+    let (s, body) = execute(
+        &app,
+        "t",
+        json!({"input": {}, "source_job_id": src, "replay_fields": ["cfg"]}),
+    )
+    .await?;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let job: Uuid = body["job_id"].as_str().unwrap().parse()?;
+    let row = stroem_db::JobRepo::get(&app.pool, job).await?.unwrap();
+    assert_eq!(row.input.unwrap()["cfg"], json!({"d": 1}));
+    assert!(row.raw_input.unwrap().get("cfg").is_none());
+    Ok(())
+}
