@@ -1,12 +1,21 @@
 # `json` input type
 
-Status: revision 5, proposed (2026-10-07)
+Status: revision 6, approved for implementation (2026-10-07)
 
 A new task/action input field type, `type: json`, that holds any JSON value
 and keeps it structured through templates. Facts below are verified at
 `b310bb44` (v0.18.0).
 
 ## Revision history
+
+**Revision 6 (2026-10-07, found while planning).** The § 4.2 wrapper would
+have turned an UNDEFINED top-level variable into `null`: Tera's `LoadName`
+pushes `Undefined` without failing and only writing it out (`WriteTop`)
+raises "Tried to render a variable that is undefined"
+(`tera-2.4.0/src/vm/interpreter.rs:350-356`), so `{% set v = typo %}` then
+`json_encode` hid a typo that fails `{{ typo }}` in every other field. The
+suffix now writes the value out when it is undefined, re-raising exactly
+that error; a missing FIELD (`a.missing`, `none`) still becomes `null`.
 
 **Revision 5 (2026-10-07, Codex spec review round 4, verdict "yes").** The
 three implementation notes applied. (1) `ReplayFieldsError::UnknownField`
@@ -251,10 +260,17 @@ object or array is walked.
 
 With `inner` from § 4.1:
 
-1. Render `{% set __stroem_v = <inner> %}{{ __stroem_v | json_encode() }}`
-   through `render_template` (the shared `tera_engine` compile path, so every
-   registered filter — `vals`, compat ports — is available). F5 guarantees
-   `set` accepts exactly the expressions `{{ }}` accepts.
+1. Render `PREFIX + inner + SUFFIX` through `render_template` (the shared
+   `tera_engine` compile path, so every registered filter — `vals`, compat
+   ports — is available), with
+   `PREFIX` = `{% set __stroem_v = ` and
+   `SUFFIX` = ` %}{% if __stroem_v is undefined %}{{ __stroem_v }}{% endif %}{{ __stroem_v | json_encode() }}`.
+   F5 guarantees `set` accepts exactly the expressions `{{ }}` accepts. The
+   `is undefined` branch (Tera 2 registers the test, `tera.rs:524`) writes
+   an undefined value out, so an undefined top-level variable raises the
+   same "Tried to render a variable that is undefined" error as `{{ typo }}`
+   does in any other field (`vm/interpreter.rs:350-356`); its position lies
+   in `SUFFIX` and is dropped (step 3).
 2. Decode the output with `serde_json::from_str`. That is the field's value.
 3. If step 1 fails, its `TemplateError` is returned with its position
    MAPPED to the author's string `s` (D11) — the expression is never
@@ -288,8 +304,10 @@ Every path renders exactly once. The result is never rendered again (R26,
 
 ### 4.3 Values
 
-- A missing variable is `null` (Tera 2 renders a missing field as `""` and
-  `json_encode` of it as `null`, `upgrade-tera-2.md:115`).
+- A missing FIELD is `null` (`{{ a.missing }}`: Tera 2 renders it as `""`
+  and `json_encode` of it as `null`, `upgrade-tera-2.md:115`). An UNDEFINED
+  top-level variable (`{{ typo }}`) is an error, as in every other field
+  (step 1's `is undefined` branch).
 - `{{ x | json_encode() }}` yields the JSON **text**, a string — exactly what
   the expression means. `stroem validate` warns about it (§ 5.4) because
   `for_each` taught authors to add that filter.
