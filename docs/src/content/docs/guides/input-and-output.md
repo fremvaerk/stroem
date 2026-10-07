@@ -37,8 +37,8 @@ The optional `description` field is displayed in the web UI as helper text below
 | `integer`  | Whole number                                                   |
 | `number`   | Numeric value (integer or decimal)                             |
 | `boolean`  | True/false. Renders as a checkbox in the UI. Also accepts `bool` as an alias |
-| `date`     | Date value (`YYYY-MM-DD`). Renders as a date picker in the UI |
-| `datetime` | Date and time. Renders as a datetime picker in the UI          |
+| `date`     | Date value (`YYYY-MM-DD`). Renders as a date field in the UI   |
+| `datetime` | Date and time (`YYYY-MM-DDTHH:MM`). Renders as a date field plus a time field in the UI |
 | `json`     | Any JSON value (object, array, string, number, boolean, null). Renders as a JSON editor in the UI |
 
 If the `type` is not one of the types above, it is treated as a [connection type](/guides/connections/) reference. The UI renders a searchable dropdown of matching connections in the workspace.
@@ -46,6 +46,8 @@ If the `type` is not one of the types above, it is treated as a [connection type
 Both `string` and `text` are treated identically at runtime — the difference is only in how the UI renders the input field. Use `text` for values that benefit from multiline editing such as SQL queries, scripts, or markdown content.
 
 Both `date` and `datetime` are treated as strings at runtime. The `date` type produces values like `2026-01-15`, while `datetime` produces values like `2026-01-15T14:30`.
+
+In the UI, type the date as `YYYY-MM-DD` (for example `2026-01-15`; `2026-1-5` is accepted and tidied to `2026-01-05`), or pick it from the calendar button at the end of the field. The calendar has month and year dropdowns (100 years back to 20 years ahead) and a **Today** button. Text that isn't a real date, such as `2026-02-31`, is marked invalid and the form won't submit until it is fixed or cleared.
 
 ### Task-level input
 
