@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { HIGHLIGHT_MAX_CHARS, highlightSegments } from "./code-language";
+import { HIGHLIGHT_MAX_CHARS, HIGHLIGHT_MAX_SEGMENTS, highlightSegments } from "./code-language";
 
 const join = (code: string) =>
   highlightSegments(code, "json")
@@ -53,5 +53,17 @@ describe("highlightSegments", () => {
   it("returns one plain segment above the size cap", () => {
     const code = `"${"x".repeat(HIGHLIGHT_MAX_CHARS)}"`;
     expect(highlightSegments(code, "json")).toEqual([{ text: code, cls: "" }]);
+  });
+
+  it("returns one plain segment when the text has too many tokens to render", () => {
+    // ~2 styled segments per element: well under the size cap, far over the token cap.
+    const code = `[${Array.from({ length: HIGHLIGHT_MAX_SEGMENTS }, (_, i) => i % 10).join(",")}]`;
+    expect(code.length).toBeLessThan(HIGHLIGHT_MAX_CHARS);
+    expect(highlightSegments(code, "json")).toEqual([{ text: code, cls: "" }]);
+  });
+
+  it("still highlights text just under the token cap", () => {
+    const code = `[${Array.from({ length: HIGHLIGHT_MAX_SEGMENTS / 4 }, () => 1).join(",")}]`;
+    expect(highlightSegments(code, "json").length).toBeGreaterThan(1);
   });
 });

@@ -205,4 +205,25 @@ test.describe("Tasks", () => {
     expect(rerun.input?.payload).toBeUndefined();
     expect(rerun.source_job_id).toBeTruthy();
   });
+
+  test("json editor keeps focus when CodeMirror replaces the loading textarea", async ({ page }) => {
+    // Hold the lazy CodeMirror chunk back so the user types into the fallback first.
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    await page.route(/code-editor-impl-[^/]*\.js$/, async (route) => {
+      await held;
+      await route.continue();
+    });
+
+    await page.goto("/workspaces/default/tasks/json-demo");
+    const fallback = page.locator("textarea#input-payload");
+    await fallback.fill("[1");
+    await expect(fallback).toBeFocused();
+
+    release();
+    const editor = page.locator(".cm-content");
+    await expect(editor).toBeFocused();
+    await page.keyboard.type(", 2]");
+    await expect(editor).toHaveText("[1, 2]");
+  });
 });

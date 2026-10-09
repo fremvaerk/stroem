@@ -1,13 +1,13 @@
-import { useEffect, useEffectEvent, useRef } from "react";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { json } from "@codemirror/lang-json";
 import { bracketMatching, indentOnInput, syntaxHighlighting } from "@codemirror/language";
-import { Annotation, EditorState, type Extension } from "@codemirror/state";
+import { Annotation, Compartment, EditorSelection, EditorState, type Extension } from "@codemirror/state";
 import { EditorView, keymap, placeholder as placeholderText } from "@codemirror/view";
 import { classHighlighter } from "@lezer/highlight";
 import type { CodeLanguage } from "@/lib/code-language";
 import { cn } from "@/lib/utils";
-import type { CodeEditorProps } from "./code-editor";
+import type { EditorImplProps } from "./code-editor";
 
 const languageSupport: Record<CodeLanguage, () => Extension> = {
   json: () => json(),
@@ -26,6 +26,20 @@ const baseTheme = EditorView.theme({
   ".cm-placeholder": { color: "var(--muted-foreground)" },
 });
 
+type ConfigProps = Pick<EditorImplProps, "id" | "labelId" | "language" | "placeholder"> & { rows: number };
+
+/** The prop-driven extensions, swapped in place through a compartment when a prop changes. */
+function configExtensions({ id, labelId, language, placeholder, rows }: ConfigProps): Extension {
+  const attrs: Record<string, string> = { id };
+  if (labelId) attrs["aria-labelledby"] = labelId;
+  return [
+    languageSupport[language](),
+    EditorView.contentAttributes.of(attrs),
+    placeholder ? placeholderText(placeholder) : [],
+    EditorView.theme({ ".cm-content": { minHeight: `${rows}lh` } }),
+  ];
+}
+
 /** CodeMirror 6 editor; loaded lazily through `CodeEditor`. */
 export default function CodeEditorImpl({
   id,
@@ -36,32 +50,35 @@ export default function CodeEditorImpl({
   rows = 8,
   placeholder,
   className,
-}: CodeEditorProps) {
+  handoffRef,
+}: EditorImplProps) {
   const host = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
+  const [config] = useState(() => new Compartment());
   const report = useEffectEvent((text: string) => onChange(text));
-  const currentValue = useEffectEvent(() => value);
+  const initialDoc = useEffectEvent(() => value);
+  const initialConfig = useEffectEvent(() => configExtensions({ id, labelId, language, placeholder, rows }));
+  const takeHandoff = useEffectEvent(() => {
+    const pending = handoffRef?.current ?? null;
+    if (handoffRef) handoffRef.current = null;
+    return pending;
+  });
 
   useEffect(() => {
-    const attrs: Record<string, string> = { id };
-    if (labelId) attrs["aria-labelledby"] = labelId;
     const view = new EditorView({
       parent: host.current!,
       state: EditorState.create({
-        doc: currentValue(),
+        doc: initialDoc(),
         extensions: [
           history(),
           keymap.of([...defaultKeymap, ...historyKeymap]),
           indentOnInput(),
           bracketMatching(),
-          languageSupport[language](),
           syntaxHighlighting(classHighlighter),
           EditorView.lineWrapping,
-          EditorView.contentAttributes.of(attrs),
           EditorState.tabSize.of(2),
-          placeholder ? placeholderText(placeholder) : [],
           baseTheme,
-          EditorView.theme({ ".cm-content": { minHeight: `${rows}lh` } }),
+          config.of(initialConfig()),
           EditorView.updateListener.of((u) => {
             if (u.docChanged && !u.transactions.some((t) => t.annotation(fromProps))) {
               report(u.state.doc.toString());
@@ -71,11 +88,26 @@ export default function CodeEditorImpl({
       }),
     });
     viewRef.current = view;
+
+    // The loading textarea had focus when it was swapped out: continue where it left off.
+    const pending = takeHandoff();
+    if (pending) {
+      const len = view.state.doc.length;
+      view.dispatch({ selection: EditorSelection.single(Math.min(pending.anchor, len), Math.min(pending.head, len)) });
+      view.focus();
+    }
+
     return () => {
       view.destroy();
       viewRef.current = null;
     };
-  }, [id, labelId, language, placeholder, rows]);
+  }, [config]);
+
+  useEffect(() => {
+    viewRef.current?.dispatch({
+      effects: config.reconfigure(configExtensions({ id, labelId, language, placeholder, rows })),
+    });
+  }, [config, id, labelId, language, placeholder, rows]);
 
   useEffect(() => {
     const view = viewRef.current;
