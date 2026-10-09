@@ -125,6 +125,25 @@
   }
 }
 
+/* Syntax highlighting. lezer's classHighlighter emits these tok-* classes for
+   every language (lib/code-language.ts, components/code-editor-impl.tsx).
+   `.code-dark` forces the dark palette on an always-dark panel (JsonViewer). */
+:root {
+  /* TODO(palette): light-theme colours for keys, strings, numbers,
+     true/false/null and punctuation. */
+}
+.dark,
+.code-dark {
+  /* TODO(palette): dark-theme colours, readable on zinc-950 (JsonViewer) and
+     on the dark --background (the editor). */
+}
+.tok-propertyName { color: var(--tok-key); }
+.tok-string { color: var(--tok-string); }
+.tok-number { color: var(--tok-number); }
+.tok-bool,
+.tok-keyword { color: var(--tok-literal); }
+.tok-punctuation { color: var(--tok-punct); }
+
 /* React Flow dark mode overrides */
 .dark .react-flow__controls button {
   background: var(--card);

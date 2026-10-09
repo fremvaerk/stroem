@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { EditorView } from "@codemirror/view";
 import { JsonInputField } from "./json-input-field";
 import type { JsonFieldState } from "@/lib/json-field";
 
@@ -10,6 +11,25 @@ describe("JsonInputField", () => {
     render(<JsonInputField id="i" fieldKey="cfg" field={{ type: "json" }} value={value("value", "{oops")} onChange={() => {}} />);
     expect(screen.getByLabelText("cfg").className).toContain("font-mono");
     expect(screen.getByRole("alert").textContent).toMatch(/^Invalid JSON/);
+  });
+
+  it("edits go through the labelled code editor once it loads", async () => {
+    const onChange = vi.fn();
+    render(<JsonInputField id="i" fieldKey="cfg" field={{ type: "json" }} value={value("value", "[1]")} onChange={onChange} />);
+    const content = await waitFor(() => {
+      const el = document.querySelector<HTMLElement>(".cm-content");
+      expect(el).not.toBeNull();
+      return el!;
+    });
+    expect(screen.getByRole("textbox", { name: "cfg" })).toBe(content);
+    const view = EditorView.findFromDOM(content)!;
+    view.dispatch({ changes: { from: 2, insert: ", 2" } });
+    expect(onChange).toHaveBeenLastCalledWith({ kind: "json", mode: "value", text: "[1, 2]" });
+  });
+
+  it("highlights the read-only default", () => {
+    render(<JsonInputField id="i" fieldKey="cfg" field={{ type: "json", default: { a: 1 } }} value={value("default")} onChange={() => {}} />);
+    expect(screen.getByTestId("json-default-cfg").querySelector(".tok-propertyName")?.textContent).toBe('"a"');
   });
 
   it("shows a templated default read-only; Override opens an empty editor", () => {

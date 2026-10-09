@@ -1,6 +1,7 @@
+import { CodeEditor } from "@/components/code-editor";
+import { HighlightedCode } from "@/components/highlighted-code";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import type { InputField } from "@/lib/types";
 import {
   type JsonFieldState,
@@ -23,6 +24,7 @@ export interface JsonInputFieldProps {
 /** The three-mode `json` field (spec 2026-10-06-json-input-type § 7). */
 export function JsonInputField({ id, fieldKey, field, value, onChange, replaySource }: JsonInputFieldProps) {
   const label = field.name ?? fieldKey;
+  const labelId = `${id}-label`;
   const override = () => onChange({ kind: "json", mode: "value", text: "" });
   const useDefault =
     field.default !== undefined ? () => onChange({ kind: "json", mode: "default", text: "" }) : undefined;
@@ -35,7 +37,7 @@ export function JsonInputField({ id, fieldKey, field, value, onChange, replaySou
     });
 
   const header = (
-    <Label htmlFor={id}>
+    <Label id={labelId} htmlFor={id}>
       {label}
       {field.required && field.default === undefined && <span className="ml-1 text-destructive">*</span>}
     </Label>
@@ -46,7 +48,7 @@ export function JsonInputField({ id, fieldKey, field, value, onChange, replaySou
       <div className="space-y-2">
         {header}
         <pre data-testid={`json-default-${fieldKey}`} className="max-h-48 overflow-auto rounded-md border bg-muted px-3 py-2 font-mono text-xs">
-          {toEditorText(field.default)}
+          <HighlightedCode code={toEditorText(field.default)} language="json" />
         </pre>
         <p className="text-xs text-muted-foreground">The task&apos;s default — evaluated when the job runs.</p>
         <Button type="button" variant="outline" size="sm" onClick={override}>
@@ -63,7 +65,7 @@ export function JsonInputField({ id, fieldKey, field, value, onChange, replaySou
         <p className="text-sm text-muted-foreground">The previous run&apos;s value is reused.</p>
         {replaySource && (
           <pre data-testid={`json-replay-${fieldKey}`} className="max-h-48 overflow-auto rounded-md border bg-muted px-3 py-2 font-mono text-xs">
-            {toEditorText(replaySource.value)}
+            <HighlightedCode code={toEditorText(replaySource.value)} language="json" />
           </pre>
         )}
         {replaySource && (
@@ -90,13 +92,14 @@ export function JsonInputField({ id, fieldKey, field, value, onChange, replaySou
   return (
     <div className="space-y-2">
       {header}
-      <Textarea
+      <CodeEditor
         id={id}
+        labelId={labelId}
+        language="json"
         rows={8}
-        className="font-mono text-xs"
         value={value.text}
         placeholder={fieldKey}
-        onChange={(e) => onChange({ kind: "json", mode: "value", text: e.target.value })}
+        onChange={(text) => onChange({ kind: "json", mode: "value", text })}
       />
       {parsed && !parsed.ok && (
         <p role="alert" className="text-xs text-destructive">
