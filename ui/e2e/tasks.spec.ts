@@ -207,10 +207,12 @@ test.describe("Tasks", () => {
   });
 
   test("json editor keeps focus when CodeMirror replaces the loading textarea", async ({ page }) => {
-    // Hold the lazy CodeMirror chunk back so the user types into the fallback first.
+    // Hold the lazy CodeMirror chunk back so the user types into the fallback
+    // first. Matches the built chunk and the Vite dev module (where StrictMode's
+    // effect replay also runs: BASE_URL=http://localhost:5173).
     let release!: () => void;
     const held = new Promise<void>((resolve) => (release = resolve));
-    await page.route(/code-editor-impl-[^/]*\.js$/, async (route) => {
+    await page.route(/code-editor-impl(-[^/]*\.js|\.tsx)(\?.*)?$/, async (route) => {
       await held;
       await route.continue();
     });

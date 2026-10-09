@@ -1,4 +1,4 @@
-import { createRef } from "react";
+import { createRef, Fragment, StrictMode } from "react";
 import { render, screen, waitFor } from "@testing-library/react";
 import { EditorView } from "@codemirror/view";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -12,15 +12,16 @@ beforeEach(async () => {
   mod = await import("./code-editor");
 });
 
-function setup(value: string, onChange = vi.fn()) {
+function setup(value: string, onChange = vi.fn(), { strict = false } = {}) {
+  const Wrapper = strict ? StrictMode : Fragment;
   const ui = (v: string, labelId = "ed-label") => (
-    <>
+    <Wrapper>
       <label id="ed-label" htmlFor="ed">
         cfg
       </label>
       <label id="other-label">other</label>
       <mod.CodeEditor id="ed" labelId={labelId} language="json" value={v} onChange={onChange} />
-    </>
+    </Wrapper>
   );
   const utils = render(ui(value));
   return {
@@ -72,8 +73,11 @@ describe("CodeEditor", () => {
     expect(onChange).not.toHaveBeenCalled();
   });
 
-  it("moves focus and selection from the loading textarea into the editor", async () => {
-    setup("[1, 2, 3]");
+  it.each([
+    ["", false],
+    [" under StrictMode (development effect replay destroys the first view)", true],
+  ])("moves focus and selection from the loading textarea into the editor%s", async (_, strict) => {
+    setup("[1, 2, 3]", vi.fn(), { strict });
     const textarea = screen.getByLabelText("cfg") as HTMLTextAreaElement;
     textarea.focus();
     textarea.setSelectionRange(1, 3, "backward");
@@ -83,8 +87,8 @@ describe("CodeEditor", () => {
     expect(view.state.selection.main.head).toBe(1);
   });
 
-  it("does not grab focus when the loading textarea was not focused", async () => {
-    setup("[1]");
+  it.each([false, true])("does not grab focus when the loading textarea was not focused (strict: %s)", async (strict) => {
+    setup("[1]", vi.fn(), { strict });
     const view = await editorView();
     expect(view.hasFocus).toBe(false);
   });
@@ -101,13 +105,16 @@ describe("CodeEditor", () => {
 });
 
 describe("PlainCodeEditor", () => {
-  it("takes over a pending focus handoff when it mounts", () => {
+  it.each([false, true])("takes over a pending focus handoff when it mounts (strict: %s)", (strict) => {
+    const Wrapper = strict ? StrictMode : Fragment;
     const handoffRef = createRef<CodeEditorModule.FocusHandoff | null>() as {
       current: CodeEditorModule.FocusHandoff | null;
     };
     handoffRef.current = { anchor: 3, head: 1 };
     render(
-      <mod.PlainCodeEditor id="p" language="json" value="[1, 2]" onChange={() => {}} handoffRef={handoffRef} />,
+      <Wrapper>
+        <mod.PlainCodeEditor id="p" language="json" value="[1, 2]" onChange={() => {}} handoffRef={handoffRef} />
+      </Wrapper>,
     );
     const textarea = document.getElementById("p") as HTMLTextAreaElement;
     expect(document.activeElement).toBe(textarea);

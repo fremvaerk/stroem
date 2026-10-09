@@ -58,11 +58,6 @@ export default function CodeEditorImpl({
   const report = useEffectEvent((text: string) => onChange(text));
   const initialDoc = useEffectEvent(() => value);
   const initialConfig = useEffectEvent(() => configExtensions({ id, labelId, language, placeholder, rows }));
-  const takeHandoff = useEffectEvent(() => {
-    const pending = handoffRef?.current ?? null;
-    if (handoffRef) handoffRef.current = null;
-    return pending;
-  });
 
   useEffect(() => {
     const view = new EditorView({
@@ -89,8 +84,9 @@ export default function CodeEditorImpl({
     });
     viewRef.current = view;
 
-    // The loading textarea had focus when it was swapped out: continue where it left off.
-    const pending = takeHandoff();
+    // The editor swapped out before this one had focus: continue where it left off.
+    const pending = handoffRef?.current;
+    if (handoffRef) handoffRef.current = null;
     if (pending) {
       const len = view.state.doc.length;
       view.dispatch({ selection: EditorSelection.single(Math.min(pending.anchor, len), Math.min(pending.head, len)) });
@@ -98,10 +94,16 @@ export default function CodeEditorImpl({
     }
 
     return () => {
+      // Hand focus on like the textarea does: StrictMode's development replay
+      // destroys this view and mounts a new one right after.
+      if (handoffRef && view.hasFocus) {
+        const { anchor, head } = view.state.selection.main;
+        handoffRef.current = { anchor, head };
+      }
       view.destroy();
       viewRef.current = null;
     };
-  }, [config]);
+  }, [config, handoffRef]);
 
   useEffect(() => {
     viewRef.current?.dispatch({
