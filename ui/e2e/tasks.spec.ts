@@ -174,8 +174,12 @@ test.describe("Tasks", () => {
     await page.goto("/workspaces/default/tasks/json-demo");
     await page.waitForLoadState("networkidle");
 
-    const editor = page.getByLabel("payload");
-    await expect(editor).toHaveValue(/from-task-default/);
+    // CodeMirror loads lazily (a plain textarea stands in until then); its
+    // editable element is a div, so assert on text, not value.
+    const editor = page.locator(".cm-content");
+    await expect(editor).toHaveAccessibleName("payload");
+    await expect(editor).toContainText("from-task-default");
+    await expect(editor.locator(".tok-propertyName").first()).toHaveText('"key"');
     await editor.fill('{"key": "from-ui"}');
 
     const isExecute = (req: import("@playwright/test").Request) =>
