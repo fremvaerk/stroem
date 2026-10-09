@@ -128,14 +128,22 @@
 /* Syntax highlighting. lezer's classHighlighter emits these tok-* classes for
    every language (lib/code-language.ts, components/code-editor-impl.tsx).
    `.code-dark` forces the dark palette on an always-dark panel (JsonViewer). */
+/* Muted mid-chroma hues to sit in the neutral theme; every colour is at least
+   4.5:1 (WCAG AA) on white and --muted (light), --background and zinc-950 (dark). */
 :root {
-  /* TODO(palette): light-theme colours for keys, strings, numbers,
-     true/false/null and punctuation. */
+  --tok-key: oklch(0.48 0.13 255);
+  --tok-string: oklch(0.5 0.12 150);
+  --tok-number: oklch(0.52 0.14 55);
+  --tok-literal: oklch(0.5 0.16 300);
+  --tok-punct: oklch(0.52 0 0);
 }
 .dark,
 .code-dark {
-  /* TODO(palette): dark-theme colours, readable on zinc-950 (JsonViewer) and
-     on the dark --background (the editor). */
+  --tok-key: oklch(0.78 0.1 250);
+  --tok-string: oklch(0.8 0.12 150);
+  --tok-number: oklch(0.8 0.12 65);
+  --tok-literal: oklch(0.76 0.13 305);
+  --tok-punct: oklch(0.6 0 0);
 }
 .tok-propertyName { color: var(--tok-key); }
 .tok-string { color: var(--tok-string); }
