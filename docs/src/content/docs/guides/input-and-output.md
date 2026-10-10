@@ -137,7 +137,7 @@ Rules for every string inside a `json` value (also inside its objects and arrays
 
 Values sent through the API, a webhook's `body`, the CLI `--input`, MCP and agent tools are used exactly as given. A `json` field cannot be `secret`, have `options`/`allow_custom`/`multiple`, or be used in an approval form.
 
-In the **Run task** form a `json` field is a JSON editor. A default that contains templates is shown read-only ("evaluated when the job runs"); *Override* opens an empty editor. An empty editor sends nothing (the default applies) — type `""` or `null` to send those values. On a re-run the field starts in *replay*: the previous run's value is reused exactly; *Edit* opens it in the editor. A value typed in the form is parsed by the browser, so integers beyond 2^53 lose precision there — use the API or replay for those.
+In the **Run task** form a `json` field is a JSON editor with syntax highlighting (job and step input/output on the job page are highlighted too). A default that contains templates is shown read-only ("evaluated when the job runs"); *Override* opens an empty editor. An empty editor sends nothing (the default applies) — type `""` or `null` to send those values. On a re-run the field starts in *replay*: the previous run's value is reused exactly; *Edit* opens it in the editor. A value typed in the form is parsed by the browser, so integers beyond 2^53 lose precision there — use the API or replay for those.
 
 ### Secret inputs
 

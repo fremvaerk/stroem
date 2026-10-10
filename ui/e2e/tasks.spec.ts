@@ -174,8 +174,12 @@ test.describe("Tasks", () => {
     await page.goto("/workspaces/default/tasks/json-demo");
     await page.waitForLoadState("networkidle");
 
-    const editor = page.getByLabel("payload");
-    await expect(editor).toHaveValue(/from-task-default/);
+    // CodeMirror loads lazily (a plain textarea stands in until then); its
+    // editable element is a div, so assert on text, not value.
+    const editor = page.locator(".cm-content");
+    await expect(editor).toHaveAccessibleName("payload");
+    await expect(editor).toContainText("from-task-default");
+    await expect(editor.locator(".tok-propertyName").first()).toHaveText('"key"');
     await editor.fill('{"key": "from-ui"}');
 
     const isExecute = (req: import("@playwright/test").Request) =>
@@ -200,5 +204,28 @@ test.describe("Tasks", () => {
     expect(rerun.replay_fields).toContain("payload");
     expect(rerun.input?.payload).toBeUndefined();
     expect(rerun.source_job_id).toBeTruthy();
+  });
+
+  test("json editor keeps focus when CodeMirror replaces the loading textarea", async ({ page }) => {
+    // Hold the lazy CodeMirror chunk back so the user types into the fallback
+    // first. Matches the built chunk and the Vite dev module (where StrictMode's
+    // effect replay also runs: BASE_URL=http://localhost:5173).
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    await page.route(/code-editor-impl(-[^/]*\.js|\.tsx)(\?.*)?$/, async (route) => {
+      await held;
+      await route.continue();
+    });
+
+    await page.goto("/workspaces/default/tasks/json-demo");
+    const fallback = page.locator("textarea#input-payload");
+    await fallback.fill("[1");
+    await expect(fallback).toBeFocused();
+
+    release();
+    const editor = page.locator(".cm-content");
+    await expect(editor).toBeFocused();
+    await page.keyboard.type(", 2]");
+    await expect(editor).toHaveText("[1, 2]");
   });
 });

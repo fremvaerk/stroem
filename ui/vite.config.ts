@@ -43,6 +43,11 @@ export default defineConfig({
           if (id.includes("/@xyflow/react/") || id.includes("/@dagrejs/dagre/")) {
             return "vendor-xyflow";
           }
+          // Parsers for read-only highlighting; also shared with the lazy
+          // CodeMirror chunk (`code-editor-impl`), which must stay out of here.
+          if (id.includes("/node_modules/@lezer/")) {
+            return "vendor-lezer";
+          }
           if (
             id.includes("/node_modules/react/") ||
             id.includes("/node_modules/react-dom/") ||

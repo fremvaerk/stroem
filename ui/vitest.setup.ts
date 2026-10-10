@@ -26,6 +26,14 @@ if (typeof Element !== "undefined") {
   }
 }
 
+// CodeMirror measures text through Range rects, which jsdom does not implement.
+if (typeof Range !== "undefined" && !Range.prototype.getClientRects) {
+  const emptyRect = () => new DOMRect(0, 0, 0, 0);
+  Range.prototype.getBoundingClientRect = emptyRect;
+  Range.prototype.getClientRects = () =>
+    Object.assign([], { item: () => null }) as unknown as DOMRectList;
+}
+
 // Node 22+ exposes an experimental `localStorage` global that is `undefined`
 // unless started with --localstorage-file, and it shadows jsdom's. Provide an
 // in-memory Storage so components that persist UI preferences can be tested.

@@ -252,6 +252,9 @@ Full analysis + the decided peek policy: `docs/superpowers/specs/2026-09-17-work
 - [ ] Log download filename does not sanitise `/` in step names (`ui/src/lib/api.ts::downloadStepLog`).
 - [x] Date/datetime inputs (2026-10-07): typeable ISO `YYYY-MM-DD` box + calendar with month/year dropdowns (`ui/src/components/task/date-input.tsx`, parser `ui/src/lib/iso-date.ts`). Fixed `calendar.tsx`'s Tailwind v3 `-[--cell-size]` classes along the way (v4 emits `height: --cell-size`, an invalid declaration — the calendar rendered cramped).
 - [x] **Same Tailwind v3 CSS-variable shorthand elsewhere** — fixed 2026-10-07: `w-(--radix-popover-trigger-width)` (`components/task/combobox-field.tsx`, `multi-select-field.tsx`: the dropdown now matches the trigger's width instead of the popover's fixed `w-72`) and `origin-(--radix-…-transform-origin)` (`components/ui/popover.tsx`, `tooltip.tsx`: open animation origin). No `-[--…]` class is left in `ui/src`.
+- [x] Syntax highlighting (2026-10-09): JSON in the `json` field editor (CodeMirror 6, lazy chunk `code-editor-impl`) and in every read-only JSON view (job/step input/output, json default/replay) via lezer `highlightCode` (`vendor-lezer`). Languages are keyed by `CodeLanguage` in `ui/src/lib/code-language.ts`.
+- [ ] Breadcrumbs nest `<li>` in `<li>`: `app-layout.tsx` renders `<BreadcrumbSeparator />` (an `<li>`) inside `<BreadcrumbItem>`; React logs "`<li>` cannot be a descendant of `<li>`" on every page. Render the separator as a sibling of the item.
+- [ ] Root dev configs are stale: `server-config.yaml` uses the removed `workspace:` key (now `workspaces:`) and `worker-config.yaml` has no `capabilities:`, so neither binary starts from them.
 
 ## CLI: `stroem run` (local task execution, 2026-03-25)
 
