@@ -24,6 +24,35 @@ const K8S_NAME_MAX: usize = 63;
 /// sanitized form (`step[0]` → `step-0`); annotation values have no character restrictions.
 const STEP_NAME_ANNOTATION: &str = "stroem.io/step-name";
 
+/// Where the `workspace-init` container saves the tarball before extracting it.
+const INIT_ARCHIVE_PATH: &str = "/tmp/workspace.tar.gz";
+
+/// Download attempts of the `workspace-init` container, `INIT_DOWNLOAD_RETRY_DELAY_SECS`
+/// apart — the budget of the worker's own pinned download (`PINNED_503_ATTEMPTS`): a
+/// replica still loading a pinned revision answers 503 + `Retry-After: 5`.
+const INIT_DOWNLOAD_ATTEMPTS: u32 = 12;
+const INIT_DOWNLOAD_RETRY_DELAY_SECS: u32 = 5;
+
+/// Shell script of the `workspace-init` container: download `url` to the file
+/// `archive`, then extract it into `dest`.
+///
+/// A file, not a pipe into `tar`: a retried transfer starts the file over
+/// instead of appending to a stream `tar` is already reading, and `&&` fails
+/// the container when the download fails (a pipe's status is `tar`'s, which
+/// can be 0 on empty input).
+fn workspace_init_script(url: &str, archive: &str, dest: &str) -> String {
+    format!(
+        "curl -sSf --retry {retries} --retry-delay {delay} \
+         -H \"Authorization: Bearer $STROEM_WORKER_TOKEN\" -o {archive} {url} \
+         && tar xzf {archive} -C {dest}",
+        retries = INIT_DOWNLOAD_ATTEMPTS - 1,
+        delay = INIT_DOWNLOAD_RETRY_DELAY_SECS,
+        archive = shell_escape(archive),
+        url = shell_escape(url),
+        dest = shell_escape(dest),
+    )
+}
+
 /// FNV-1a (32-bit): a tiny hash that is stable across processes and Rust versions,
 /// which `DefaultHasher` does not promise.
 fn fnv1a_32(bytes: impl IntoIterator<Item = u8>) -> u32 {
@@ -67,6 +96,23 @@ impl KubeRunner {
     pub fn with_startup_configmap(mut self, configmap: String) -> Self {
         self.startup_configmap = Some(configmap);
         self
+    }
+
+    /// URL of the workspace tarball the init container fetches: the step's own
+    /// revision (the claim's), else — a server that predates revision pinning
+    /// sends none — the server's live workspace.
+    fn workspace_tarball_url(&self, workspace_name: &str, revision: Option<&str>) -> String {
+        let url = format!(
+            "{}/worker/workspace/{}.tar.gz",
+            self.server_url, workspace_name
+        );
+        match revision {
+            Some(rev) => format!(
+                "{url}?revision={}",
+                url::form_urlencoded::byte_serialize(rev.as_bytes()).collect::<String>()
+            ),
+            None => url,
+        }
     }
 
     /// Build the pod JSON for `RunnerMode::WithWorkspace` (script action: shell in pod with workspace).
@@ -123,10 +169,8 @@ impl KubeRunner {
             vec!["echo".to_string(), "No command specified".to_string()]
         };
 
-        let tarball_url = format!(
-            "{}/worker/workspace/{}.tar.gz",
-            self.server_url, workspace_name
-        );
+        let tarball_url =
+            self.workspace_tarball_url(workspace_name, config.workspace_revision.as_deref());
 
         // Build volume mounts for the step container.
         let mut volume_mounts =
@@ -174,9 +218,10 @@ impl KubeRunner {
                 "initContainers": [{
                     "name": "workspace-init",
                     "image": self.init_image,
-                    "command": ["sh", "-c", format!(
-                        "curl -sSf -H \"Authorization: Bearer $STROEM_WORKER_TOKEN\" '{}' | tar xz -C /workspace",
-                        tarball_url
+                    "command": ["sh", "-c", workspace_init_script(
+                        &tarball_url,
+                        INIT_ARCHIVE_PATH,
+                        "/workspace",
                     )],
                     "env": [{
                         "name": "STROEM_WORKER_TOKEN",
@@ -1827,6 +1872,7 @@ mod tests {
             global_state_dir: None,
             global_state_out_dir: None,
             artifacts_out_dir: None,
+            workspace_revision: None,
         };
 
         let mut labels = HashMap::new();
@@ -1905,6 +1951,7 @@ mod tests {
             global_state_dir: None,
             global_state_out_dir: None,
             artifacts_out_dir: None,
+            workspace_revision: None,
         };
 
         let mut labels = HashMap::new();
@@ -1960,6 +2007,7 @@ mod tests {
             global_state_dir: None,
             global_state_out_dir: None,
             artifacts_out_dir: None,
+            workspace_revision: None,
         };
 
         let mut labels = HashMap::new();
@@ -2012,6 +2060,7 @@ mod tests {
             global_state_dir: None,
             global_state_out_dir: None,
             artifacts_out_dir: None,
+            workspace_revision: None,
         };
 
         let mut labels = HashMap::new();
@@ -2083,6 +2132,7 @@ mod tests {
             global_state_dir: None,
             global_state_out_dir: None,
             artifacts_out_dir: None,
+            workspace_revision: None,
         };
 
         let mut labels = HashMap::new();
@@ -2156,6 +2206,7 @@ mod tests {
             global_state_dir: None,
             global_state_out_dir: None,
             artifacts_out_dir: None,
+            workspace_revision: None,
         };
 
         let labels = HashMap::new();
@@ -2234,6 +2285,7 @@ mod tests {
             global_state_dir: None,
             global_state_out_dir: None,
             artifacts_out_dir: None,
+            workspace_revision: None,
         };
 
         let labels = HashMap::new();
@@ -2307,6 +2359,7 @@ mod tests {
             global_state_dir: Some("/tmp/global-state".to_string()),
             global_state_out_dir: Some("/tmp/global-state-out".to_string()),
             artifacts_out_dir: None,
+            workspace_revision: None,
         };
 
         let labels = HashMap::new();
@@ -2389,6 +2442,7 @@ mod tests {
             global_state_dir: None,
             global_state_out_dir: None,
             artifacts_out_dir: None,
+            workspace_revision: None,
         };
 
         let labels = HashMap::new();
@@ -2449,6 +2503,7 @@ mod tests {
             global_state_dir: None,
             global_state_out_dir: None,
             artifacts_out_dir: None,
+            workspace_revision: None,
         };
 
         let result = runner
@@ -2488,6 +2543,7 @@ mod tests {
             global_state_dir: None,
             global_state_out_dir: None,
             artifacts_out_dir: None,
+            workspace_revision: None,
         };
 
         let pod_json = runner.build_pod_json_with_workspace(
@@ -2525,6 +2581,227 @@ mod tests {
         assert_eq!(token_env["value"], "super-secret-token");
     }
 
+    // --- workspace revision tests ---
+
+    fn workspace_pod_config(revision: Option<&str>) -> RunConfig {
+        RunConfig {
+            cmd: Some("echo hello".to_string()),
+            script: None,
+            env: HashMap::new(),
+            workdir: "/tmp".to_string(),
+            action_type: "script".to_string(),
+            image: Some("alpine:latest".to_string()),
+            runner_mode: RunnerMode::WithWorkspace,
+            runner_image: None,
+            entrypoint: None,
+            command: None,
+            pod_manifest_overrides: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
+            args: vec![],
+            state_dir: None,
+            state_out_dir: None,
+            global_state_dir: None,
+            global_state_out_dir: None,
+            artifacts_out_dir: None,
+            workspace_revision: revision.map(str::to_string),
+        }
+    }
+
+    fn init_script(pod_json: &serde_json::Value) -> String {
+        let command = pod_json["spec"]["initContainers"][0]["command"]
+            .as_array()
+            .expect("init container command should be an array");
+        assert_eq!(command.len(), 3, "expected [sh, -c, script]: {command:?}");
+        command[2].as_str().unwrap().to_string()
+    }
+
+    fn test_runner(server_url: &str) -> KubeRunner {
+        KubeRunner::new(
+            "stroem".to_string(),
+            server_url.to_string(),
+            "test-token".to_string(),
+        )
+    }
+
+    #[test]
+    fn test_init_container_fetches_the_steps_revision() {
+        // prod 2026-10-12: `ref: beta` steps ran the workspace's live files
+        // because the init container asked for the tarball without a revision.
+        let runner = test_runner("http://stroem-server:8080");
+        let config = workspace_pod_config(Some("aa285b06dd0276a9d4449d22c868ba7eaf63cc61"));
+
+        let pod_json = runner.build_pod_json_with_workspace(
+            "test-pod",
+            &config,
+            "jobs",
+            &HashMap::new(),
+            "alpine:latest",
+            &[],
+        );
+
+        let script = init_script(&pod_json);
+        assert!(
+            script.contains(
+                "http://stroem-server:8080/worker/workspace/jobs.tar.gz\
+                 ?revision=aa285b06dd0276a9d4449d22c868ba7eaf63cc61"
+            ),
+            "init container must request the step's revision, got: {script}"
+        );
+    }
+
+    #[test]
+    fn test_init_container_without_revision_fetches_live_workspace() {
+        // A server that predates revision pinning sends no revision: the pod
+        // keeps fetching the live workspace, as before.
+        let runner = test_runner("http://stroem-server:8080");
+        let config = workspace_pod_config(None);
+
+        let pod_json = runner.build_pod_json_with_workspace(
+            "test-pod",
+            &config,
+            "jobs",
+            &HashMap::new(),
+            "alpine:latest",
+            &[],
+        );
+
+        let script = init_script(&pod_json);
+        assert!(
+            script.contains("http://stroem-server:8080/worker/workspace/jobs.tar.gz"),
+            "got: {script}"
+        );
+        assert!(!script.contains("revision="), "got: {script}");
+    }
+
+    #[test]
+    fn test_workspace_tarball_url_encodes_revision() {
+        let runner = test_runner("http://stroem-server:8080");
+        assert_eq!(
+            runner.workspace_tarball_url("jobs", Some("a b&c=d")),
+            "http://stroem-server:8080/worker/workspace/jobs.tar.gz?revision=a+b%26c%3Dd"
+        );
+    }
+
+    /// Builds a gzipped tarball holding `hello.txt`, the way the server
+    /// serves a workspace.
+    fn tiny_workspace_tarball(dir: &std::path::Path) -> Vec<u8> {
+        let src = dir.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("hello.txt"), "hi from the pinned revision").unwrap();
+        let archive = dir.join("served.tar.gz");
+        let status = std::process::Command::new("tar")
+            .arg("czf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(&src)
+            .arg(".")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        std::fs::read(&archive).unwrap()
+    }
+
+    /// Runs the init container's script on this host against `server_url`,
+    /// with the archive and destination moved into `dir`.
+    async fn run_init_script(
+        server_url: &str,
+        revision: &str,
+        dir: &std::path::Path,
+    ) -> std::process::ExitStatus {
+        let runner = test_runner(server_url);
+        let url = runner.workspace_tarball_url("jobs", Some(revision));
+        let dest = dir.join("workspace");
+        std::fs::create_dir_all(&dest).unwrap();
+        let script = workspace_init_script(
+            &url,
+            dir.join("download.tar.gz").to_str().unwrap(),
+            dest.to_str().unwrap(),
+        );
+        tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .env("STROEM_WORKER_TOKEN", "test-token")
+            .status()
+            .await
+            .unwrap()
+    }
+
+    fn have_curl_and_tar() -> bool {
+        which::which("curl").is_ok() && which::which("tar").is_ok()
+    }
+
+    #[tokio::test]
+    async fn test_workspace_init_script_retries_unavailable_pin_then_extracts() {
+        // A replica answers 503 + Retry-After while it loads a pinned
+        // revision it has not cached yet (`serve_pinned_revision`).
+        use wiremock::matchers::{header, method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        if !have_curl_and_tar() {
+            eprintln!("skipping: curl or tar not on PATH");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let body = tiny_workspace_tarball(tmp.path());
+        let server = MockServer::start().await;
+        let tarball = || {
+            Mock::given(method("GET"))
+                .and(path("/worker/workspace/jobs.tar.gz"))
+                .and(query_param("revision", "abc123"))
+                .and(header("Authorization", "Bearer test-token"))
+        };
+        tarball()
+            .respond_with(ResponseTemplate::new(503).insert_header("Retry-After", "1"))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        tarball()
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let status = run_init_script(&server.uri(), "abc123", tmp.path()).await;
+
+        assert!(status.success(), "init script failed: {status}");
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("workspace/hello.txt")).unwrap(),
+            "hi from the pinned revision"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_workspace_init_script_fails_when_revision_is_gone() {
+        // A 404 (commit no longer on the remote) must fail the pod, never
+        // fall back to other files.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        if !have_curl_and_tar() {
+            eprintln!("skipping: curl or tar not on PATH");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/worker/workspace/jobs.tar.gz"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let status = run_init_script(&server.uri(), "abc123", tmp.path()).await;
+
+        assert!(!status.success());
+        assert_eq!(
+            std::fs::read_dir(tmp.path().join("workspace"))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
     // --- script file handling tests ---
 
     #[test]
@@ -2557,6 +2834,7 @@ mod tests {
             global_state_dir: None,
             global_state_out_dir: None,
             artifacts_out_dir: None,
+            workspace_revision: None,
         };
 
         let pod_json = runner.build_pod_json_with_workspace(
@@ -2622,6 +2900,7 @@ mod tests {
             global_state_dir: None,
             global_state_out_dir: None,
             artifacts_out_dir: None,
+            workspace_revision: None,
         };
 
         let pod_json = runner.build_pod_json_with_workspace(
@@ -2668,6 +2947,7 @@ mod tests {
             global_state_dir: None,
             global_state_out_dir: None,
             artifacts_out_dir: None,
+            workspace_revision: None,
         };
 
         let pod_json = runner.build_pod_json_with_workspace(
@@ -2767,6 +3047,7 @@ mod tests {
             global_state_dir: None,
             global_state_out_dir: None,
             artifacts_out_dir: None,
+            workspace_revision: None,
         }
     }
 
@@ -2916,6 +3197,7 @@ mod tests {
             global_state_dir: None,
             global_state_out_dir: None,
             artifacts_out_dir: None,
+            workspace_revision: None,
         };
         let pod = runner
             .build_pod_spec("test-pod", &config, "default", make_labels())
@@ -3053,6 +3335,7 @@ mod tests {
             global_state_dir: None,
             global_state_out_dir: None,
             artifacts_out_dir: None,
+            workspace_revision: None,
         };
         let pod = runner
             .build_pod_spec("test-pod", &config, "default", make_labels())
@@ -3113,6 +3396,7 @@ mod tests {
             global_state_dir: None,
             global_state_out_dir: None,
             artifacts_out_dir: None,
+            workspace_revision: None,
         };
         let pod = runner
             .build_pod_spec("test-pod", &config, "default", make_labels())
@@ -3185,6 +3469,7 @@ mod tests {
             global_state_dir: None,
             global_state_out_dir: None,
             artifacts_out_dir: None,
+            workspace_revision: None,
         };
         let pod = runner
             .build_pod_spec("test-pod", &config, "default", make_labels())
@@ -3233,6 +3518,7 @@ mod tests {
             global_state_dir: None,
             global_state_out_dir: None,
             artifacts_out_dir: None,
+            workspace_revision: None,
         };
         let pod = runner
             .build_pod_spec("test-pod", &config, "default", make_labels())
@@ -3280,6 +3566,7 @@ mod tests {
             global_state_dir: None,
             global_state_out_dir: None,
             artifacts_out_dir: None,
+            workspace_revision: None,
         };
         let pod = runner
             .build_pod_spec("test-pod", &config, "default", make_labels())
@@ -4134,6 +4421,7 @@ mod tests {
             global_state_dir: None,
             global_state_out_dir: None,
             artifacts_out_dir: None,
+            workspace_revision: None,
         };
 
         let pod = runner.build_pod_json_with_workspace(
@@ -4185,6 +4473,7 @@ mod tests {
             global_state_dir: None,
             global_state_out_dir: None,
             artifacts_out_dir: None,
+            workspace_revision: None,
         };
 
         let token = CancellationToken::new();

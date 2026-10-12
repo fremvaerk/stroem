@@ -76,6 +76,10 @@ pub struct RunConfig {
     /// docker NoWorkspace). Unset for Kube modes (deferred) and for
     /// agent/approval/task actions.
     pub artifacts_out_dir: Option<String>,
+    /// Workspace revision the step runs at (the claim's `revision`). Runners
+    /// that fetch the workspace themselves (KubeRunner's init container) must
+    /// request exactly this revision; `None` means the server's live one.
+    pub workspace_revision: Option<String>,
 }
 
 /// A callback for receiving log lines as they're produced

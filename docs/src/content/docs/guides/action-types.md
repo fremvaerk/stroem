@@ -307,7 +307,7 @@ This allows you to pre-bake tools, dependencies, and configurations into a custo
 
 ## Script in Kubernetes
 
-Runs scripts as a Kubernetes pod with the workspace downloaded via an init container:
+Runs scripts as a Kubernetes pod with the workspace downloaded via an init container, at the step's revision (see [Runners](/guides/runners/#kubernetes-runner)):
 
 ```yaml
 actions:
