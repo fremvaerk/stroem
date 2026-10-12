@@ -54,6 +54,9 @@ up to 12 attempts. If the revision can no longer be served (a commit
 force-pushed away, or a folder workspace that changed since the job was
 created, on a replica that did not cache the old revision), the init
 container fails and so does the step; it never runs another revision's files.
+This holds as long as the action's [`manifest`](/guides/action-types/) does
+not replace the `workspace-init` container's `command`: an override of it
+is merged in as written, and Strøm cannot add the revision to it.
 
 ### Worker config
 
