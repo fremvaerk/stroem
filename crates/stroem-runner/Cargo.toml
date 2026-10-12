@@ -23,11 +23,12 @@ futures-util = { workspace = true, optional = true }
 # Kubernetes runner (optional)
 kube = { workspace = true, optional = true }
 k8s-openapi = { workspace = true, optional = true }
+url = { workspace = true, optional = true }
 
 [features]
 default = ["docker", "kubernetes"]
 docker = ["bollard", "futures-util"]
-kubernetes = ["kube", "k8s-openapi", "futures-util"]
+kubernetes = ["kube", "k8s-openapi", "futures-util", "url"]
 
 [dev-dependencies]
 tempfile = "3"

@@ -506,6 +506,7 @@ impl StepExecutor {
             global_state_dir: None,
             global_state_out_dir: None,
             artifacts_out_dir: None,
+            workspace_revision: step.revision.clone(),
         })
     }
 }
@@ -655,6 +656,33 @@ mod tests {
         // Both should be present — the runner decides which to use
         assert_eq!(config.cmd, Some("echo hello".to_string()));
         assert_eq!(config.script, Some("/workspace/run.sh".to_string()));
+    }
+
+    #[test]
+    fn test_build_run_config_carries_claimed_revision() {
+        // The pod runner fetches the workspace itself; without the claim's
+        // revision it got the server's live files (prod 2026-10-12).
+        let executor = StepExecutor::new();
+        let mut step = test_step(Some(serde_json::json!({ "script": "echo test" })));
+        step.runner = Some("pod".to_string());
+        step.revision = Some("aa285b06dd0276a9d4449d22c868ba7eaf63cc61".to_string());
+
+        let config = executor.build_run_config(&step, "/tmp/test").unwrap();
+
+        assert_eq!(
+            config.workspace_revision.as_deref(),
+            Some("aa285b06dd0276a9d4449d22c868ba7eaf63cc61")
+        );
+    }
+
+    #[test]
+    fn test_build_run_config_without_claimed_revision() {
+        let executor = StepExecutor::new();
+        let step = test_step(Some(serde_json::json!({ "script": "echo test" })));
+
+        let config = executor.build_run_config(&step, "/tmp/test").unwrap();
+
+        assert_eq!(config.workspace_revision, None);
     }
 
     #[test]

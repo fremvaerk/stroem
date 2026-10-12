@@ -217,6 +217,13 @@ loaded, it answers `503` with `Retry-After: 5`, and the worker tries again
 every 5 seconds — up to 12 attempts in all, about a minute — before it fails
 the step.
 
+A `runner: pod` step's pod downloads the files itself, in its
+`workspace-init` container. It asks for the same commit and retries a `503`
+the same way. Workers released before this was fixed asked for the live
+workspace instead, so a pod step ran the **default branch's files** with the
+pinned commit's definitions (env, `source:` path). Upgrade the workers to
+fix it; the server needs no change.
+
 ### Settlement
 
 Moving a pinned job forward after a step (promoting the next steps, firing

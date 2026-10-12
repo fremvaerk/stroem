@@ -46,6 +46,18 @@ runner_image: "ghcr.io/fremvaerk/stroem-runner:latest"
 3. The worker needs in-cluster credentials or a kubeconfig with permissions to create/get/delete pods
 4. The server must be reachable from inside the pod (the init container downloads workspace tarballs)
 
+The init container downloads the workspace at the step's revision: the job's
+revision, or the commit a [`ref:`](/guides/git-refs/) step is pinned to — the
+same files a `local` or `docker` step gets. While a server replica answers
+`503` (it is still loading a pinned commit), it tries again every 5 seconds,
+up to 12 attempts. If the revision can no longer be served (a commit
+force-pushed away, or a folder workspace that changed since the job was
+created, on a replica that did not cache the old revision), the init
+container fails and so does the step; it never runs another revision's files.
+This holds as long as the action's [`manifest`](/guides/action-types/) does
+not replace the `workspace-init` container's `command`: an override of it
+is merged in as written, and Strøm cannot add the revision to it.
+
 ### Worker config
 
 ```yaml

@@ -679,6 +679,7 @@ fn build_run_config(
         global_state_dir: None,
         global_state_out_dir: None,
         artifacts_out_dir: None,
+        workspace_revision: None,
     })
 }
 

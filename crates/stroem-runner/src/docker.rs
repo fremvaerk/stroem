@@ -543,6 +543,7 @@ mod tests {
             global_state_dir: None,
             global_state_out_dir: None,
             artifacts_out_dir: None,
+            workspace_revision: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -592,6 +593,7 @@ mod tests {
             global_state_dir: None,
             global_state_out_dir: None,
             artifacts_out_dir: None,
+            workspace_revision: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -624,6 +626,7 @@ mod tests {
             global_state_dir: None,
             global_state_out_dir: None,
             artifacts_out_dir: None,
+            workspace_revision: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -662,6 +665,7 @@ mod tests {
             global_state_dir: None,
             global_state_out_dir: None,
             artifacts_out_dir: None,
+            workspace_revision: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -709,6 +713,7 @@ mod tests {
             global_state_dir: None,
             global_state_out_dir: None,
             artifacts_out_dir: None,
+            workspace_revision: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -743,6 +748,7 @@ mod tests {
             global_state_dir: None,
             global_state_out_dir: None,
             artifacts_out_dir: None,
+            workspace_revision: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -777,6 +783,7 @@ mod tests {
             global_state_dir: None,
             global_state_out_dir: None,
             artifacts_out_dir: None,
+            workspace_revision: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -816,6 +823,7 @@ mod tests {
             global_state_dir: None,
             global_state_out_dir: None,
             artifacts_out_dir: None,
+            workspace_revision: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -860,6 +868,7 @@ mod tests {
             global_state_dir: None,
             global_state_out_dir: None,
             artifacts_out_dir: None,
+            workspace_revision: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -898,6 +907,7 @@ mod tests {
             global_state_dir: None,
             global_state_out_dir: None,
             artifacts_out_dir: None,
+            workspace_revision: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -938,6 +948,7 @@ mod tests {
             global_state_dir: None,
             global_state_out_dir: None,
             artifacts_out_dir: None,
+            workspace_revision: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -970,6 +981,7 @@ mod tests {
             global_state_dir: None,
             global_state_out_dir: None,
             artifacts_out_dir: None,
+            workspace_revision: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -1007,6 +1019,7 @@ mod tests {
             global_state_dir: None,
             global_state_out_dir: None,
             artifacts_out_dir: None,
+            workspace_revision: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -1041,6 +1054,7 @@ mod tests {
             global_state_dir: None,
             global_state_out_dir: None,
             artifacts_out_dir: None,
+            workspace_revision: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -1091,6 +1105,7 @@ mod tests {
             global_state_dir: None,
             global_state_out_dir: None,
             artifacts_out_dir: None,
+            workspace_revision: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -1135,6 +1150,7 @@ mod tests {
             global_state_dir: None,
             global_state_out_dir: None,
             artifacts_out_dir: None,
+            workspace_revision: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -1174,6 +1190,7 @@ mod tests {
             global_state_dir: None,
             global_state_out_dir: None,
             artifacts_out_dir: None,
+            workspace_revision: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -1208,6 +1225,7 @@ mod tests {
             global_state_dir: Some("/tmp/global-state".to_string()),
             global_state_out_dir: Some("/tmp/global-state-out".to_string()),
             artifacts_out_dir: None,
+            workspace_revision: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -1251,6 +1269,7 @@ mod tests {
             global_state_dir: None,
             global_state_out_dir: None,
             artifacts_out_dir: Some("/tmp/art-abc".to_string()),
+            workspace_revision: None,
         };
         let container = DockerRunner::build_container_config(&config);
         let binds = container
@@ -1286,6 +1305,7 @@ mod tests {
             global_state_dir: None,
             global_state_out_dir: None,
             artifacts_out_dir: Some("/tmp/art-xyz".to_string()),
+            workspace_revision: None,
         };
         let container = DockerRunner::build_container_config(&config);
         let binds = container.host_config.unwrap().binds.unwrap();
@@ -1319,6 +1339,7 @@ mod tests {
             global_state_dir: None,
             global_state_out_dir: None,
             artifacts_out_dir: None,
+            workspace_revision: None,
         };
 
         let result = runner
@@ -1352,6 +1373,7 @@ mod tests {
             global_state_dir: None,
             global_state_out_dir: None,
             artifacts_out_dir: None,
+            workspace_revision: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -1389,6 +1411,7 @@ mod tests {
             global_state_dir: None,
             global_state_out_dir: None,
             artifacts_out_dir: None,
+            workspace_revision: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -1429,6 +1452,7 @@ mod tests {
             global_state_dir: None,
             global_state_out_dir: None,
             artifacts_out_dir: None,
+            workspace_revision: None,
         };
 
         let token = CancellationToken::new();
