@@ -36,10 +36,11 @@ const INIT_DOWNLOAD_RETRY_DELAY_SECS: u32 = 5;
 /// Shell script of the `workspace-init` container: download `url` to the file
 /// `archive`, then extract it into `dest`.
 ///
-/// A file, not a pipe into `tar`: a retried transfer starts the file over
-/// instead of appending to a stream `tar` is already reading, and `&&` fails
-/// the container when the download fails (a pipe's status is `tar`'s, which
-/// can be 0 on empty input).
+/// A file, not a pipe into `tar`: `tar` reads only a download curl finished
+/// (`&&` — a pipe's status is `tar`'s, which can be 0 on empty input), and a
+/// retry starts the file over instead of appending to a stream `tar` is
+/// already reading. curl retries timeouts and HTTP 408/429/5xx only; any
+/// other failure (a 404, a reset mid-body) fails the container.
 fn workspace_init_script(url: &str, archive: &str, dest: &str) -> String {
     format!(
         "curl -sSf --retry {retries} --retry-delay {delay} \
@@ -2736,6 +2737,8 @@ mod tests {
     async fn test_workspace_init_script_retries_unavailable_pin_then_extracts() {
         // A replica answers 503 + Retry-After while it loads a pinned
         // revision it has not cached yet (`serve_pinned_revision`).
+        // Takes INIT_DOWNLOAD_RETRY_DELAY_SECS (5 s): curl really waits
+        // before its retry. Do not drop the retry to make it faster.
         use wiremock::matchers::{header, method, path, query_param};
         use wiremock::{Mock, MockServer, ResponseTemplate};
         if !have_curl_and_tar() {
