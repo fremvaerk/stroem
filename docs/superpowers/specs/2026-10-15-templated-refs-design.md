@@ -1,6 +1,6 @@
 # Templated refs (`ref: "{{ … }}"`)
 
-Status: draft, revision 3 (2026-10-15)
+Status: draft, revision 4 (2026-10-15)
 Builds on: `2026-10-02-git-refs-design.md` (the git-refs spec, cited as GR),
 `2026-10-06-tera-2-upgrade-design.md` (cited as T2),
 `2026-09-11-render-context-owner-design.md`.
@@ -115,6 +115,7 @@ containing `{{` or `{%` (`crates/stroem-common/src/git_ref.rs:55`).
 | D9 | How a deferred step stays unclaimable | `action_type = 'deferred'` **and** `required_ability = 'deferred'`; claim SQL and index unchanged; the claim handler rejects a capability outside `KNOWN_ABILITIES`, as register does | Add `'deferred'` to the claim `NOT IN` list (needs a new partial index on `job_step`) |
 | D10 | Secrets | No context contains `secret`; a rendered ref that contains a value of the job's *ref secret set* (§ 10.3) is rejected | Masking the identifier columns; the full redaction closure as the check set (a closure walk per step, and a `MaskAll` outcome) |
 | D11 | Owner of a templated flow-step ref | Decided from the action name by `refs::ref_owner`, at creation; the template selects only the commit | A template that also selects the workspace |
+| D12 | One resolver per deferred step | A lease column, `job_step.resolve_lease_until`, taken with a guarded `UPDATE` | A recovery threshold only (a cold resolve can outlast any fixed threshold); unguarded concurrent resolution |
 
 ## 4. YAML surface and semantics
 
@@ -146,6 +147,11 @@ Hooks, event sources and agent task tools still reject every `ref:`
    constructor in the same module, `render_context::webhook_ref(input: &Value) -> RenderContext`,
    builds a context holding only `input`. `RenderContext` stays opaque and is
    constructed only in `render_context.rs`.
+   No ref render can call `vals` either: `vals` fetches secret values from
+   external stores, and a ref is an identifier. Validation rejects the `vals`
+   filter in a `ref:` template, and every ref render (including the § 5.6 ref
+   input) uses a render mode in which `vals` is not registered, so a use is a
+   render error.
 3. **Post-render check.** The rendered value is trimmed, then:
    - empty → error (D6);
    - contains a known secret value → error (§ 10.3);
@@ -175,7 +181,9 @@ does not call `resolve_step_action`. It builds a **deferred row**:
 | `action_workspace` | the owner (§ 4.2 rule 4) |
 | `action_name` | the action's name in the owner (the part after `ws.`, or the whole name) |
 | `ref_template` (new) | the template as written |
-| `action_spec`, `action_image`, `runner`, `action_revision`, `action_ref`, `task_*` | `NULL` / empty |
+| `runner` | `'none'` (the column is `NOT NULL` with the check `local, docker, pod, none`, `004_tags_runner.sql:7`, `:22-23`) |
+| `action_spec`, `action_image`, `action_revision`, `action_ref`, `task_*` | `NULL` |
+| `resolve_lease_until` (new) | `NULL` |
 | `required_tags` | `[]` |
 | `input`, `timeout_secs`, `when_condition`, `for_each_expr` | from the flow step, as today |
 | retry columns | from the flow step's `retry:` when present; otherwise filled at resolution |
@@ -202,9 +210,13 @@ CREATE TABLE job_ref_pin (
 
 - At creation, inside the creation transaction, every `RefMemo` entry is
   written: the job's own pin and every static ref the creation resolved.
-- At resolution: read `(job_id, owner, rendered)`. If absent, resolve through
-  the PinStore, then `INSERT … ON CONFLICT DO NOTHING`, then read again — the
-  first writer decides the commit for the rest of the job.
+- At resolution: read `(job_id, owner, rendered)`. On a miss, the pass
+  resolves through the PinStore and loads and checks the selected commit
+  (§ 5.3 steps 3–4) BEFORE it writes the memo: `INSERT … ON CONFLICT DO NOTHING`,
+  then read again. If the stored commit differs (another resolver wrote
+  first), the pass loads THAT commit and repeats the check. The first writer
+  decides the commit for the rest of the job. A value that fails a check is
+  never written to the memo.
 - Keyed by the string as written, like `RefMemo` (`release/2.3` and
   `refs/heads/release/2.3` are two keys).
 - A child job (`type: task`) has its own memo, seeded at its creation, as
@@ -238,8 +250,8 @@ the `init` call, the headline case — a root step with
 
 Consequences of the `init` call:
 
-- A resolution failure of a root step is a per-step failure (`mark_failed` +
-  cascade, § 5.5), exactly like a root `type: task` dispatch failure inside
+- A resolution failure of a root step is a per-step failure
+  (`fail_deferred_tx` + cascade, § 5.5), exactly like a root `type: task` dispatch failure inside
   `handle_task_steps`. It is NOT the coordinated
   `[creation] initialisation failed` path; only an error that escapes the pass
   (a DB error) reaches that path.
@@ -253,18 +265,27 @@ Consequences of the `init` call:
 
 For each `ready` step of the job with `action_type = 'deferred'`:
 
+0. **Take the lease** (D12):
+   `UPDATE job_step SET resolve_lease_until = NOW() + $lease WHERE job_id = $1 AND step_name = $2 AND status = 'ready' AND action_type = 'deferred' AND (resolve_lease_until IS NULL OR resolve_lease_until < NOW())`.
+   Zero rows → another advance holds the lease, or the step has moved on;
+   skip the step. `$lease` = `3 × workspace_reload.load_timeout_secs + 60 s`
+   (the ls-remote, the fetch and the checkout / config load are each bounded
+   by `load_timeout_secs`), so the lease of a live resolver does not expire
+   under it. The lease is not released: on success the step is no longer
+   deferred, on failure it is failed. Only the holder runs steps 1–7.
 1. Build the context with `render_context::build(job, steps, loop_slot, Scope::StepRef)`
    from the same `Snapshots` the advance already holds (`loop_slot` set for a
    `for_each` instance).
 2. Render `ref_template`; apply the post-render check (§ 4.2 rule 3).
 3. Look up `(job_id, owner, rendered)` in `job_ref_pin`; on a miss, resolve
-   `owner@rendered` with `PinStore::resolve` and insert (§ 5.2). The rendered
-   value never reaches a span, a log line or an error text (§ 5.5).
-4. Load the owner's config at the commit (`config_for_user`), then check the
-   rendered value once more against that commit's own secrets
-   (`pin_redaction_values` of the new pin) before anything is written (§ 10.3).
-   If the check fails, the memo row from step 3 stays (it holds a commit, not
-   the value's meaning) and the step fails.
+   `owner@rendered` with `PinStore::resolve` (no memo write yet). Until the
+   value passes the check in step 4 it is private: it reaches no span, log
+   line or error text (§ 5.5).
+4. Load the owner's config at the commit through the private pin-load path
+   (§ 5.5), then check the rendered value against that commit's own secrets
+   (`pin_redaction_values` of the selected pin, § 10.3). Only then write the
+   memo (§ 5.2); if the stored commit differs, repeat this step with it. A
+   failed check fails the step and writes no memo row.
 5. Find the action and build the row values with the SAME code creation
    uses. `resolve_step_action` and the per-step part of
    `create_job_for_task_inner` are refactored into one function,
@@ -273,13 +294,17 @@ For each `ready` step of the job with `action_type = 'deferred'`:
    `type: task` action it calls `resolve_task_for_step` as creation does.
 6. Run the moved creation checks: literal connection inputs against the
    resolved action's schema; `type: agent` is rejected.
-7. Write the real columns in one guarded statement:
-   `UPDATE job_step SET … WHERE job_id = $1 AND step_name = $2 AND status = 'ready' AND action_type = 'deferred' AND EXISTS (SELECT 1 FROM job WHERE job_id = $1 AND status IN ('pending', 'running'))`.
-   Zero rows → another advance resolved or failed the step, or the step or its
-   job was cancelled or timed out; the pass moves on. The job-status
-   condition makes a resolution that runs after `JobRepo::cancel` committed
-   write nothing; it cannot close the window between a successful resolution
-   and `cancel_pending_steps` — see § 5.7.
+7. Write the real columns in one transaction, `JobStepRepo::resolve_deferred_tx`:
+   first `SELECT status FROM job WHERE job_id = $1 FOR SHARE` — the lock order
+   of `JobStepRepo::release_claim` (`job_step.rs:934-960`), which serialises
+   with `JobRepo::cancel`'s write of the job row; if the job is not `pending`
+   or `running`, write nothing; otherwise
+   `UPDATE job_step SET … WHERE job_id = $1 AND step_name = $2 AND status = 'ready' AND action_type = 'deferred'`.
+   Zero rows → the step was cancelled or timed out; the pass moves on. With the
+   job row held `FOR SHARE`, `JobRepo::cancel` either commits first (the pass
+   sees a terminal job and writes nothing) or waits until the resolution
+   commits (and `cancel_pending_steps` then cancels the resolved `ready` row,
+   § 5.7).
 
 After the pass, a step whose real type is `task` or `approval` is picked up
 by the dispatch passes that follow it in the same `advance` / `init`; a worker
@@ -311,9 +336,12 @@ its context. Instances that render the same value share one commit through
   invalid name, ref not found, commit not found, a non-git owner, a missing
   action, `type: agent`, a failed connection pre-check, and a temporary
   `PinUnavailable` (D7) — fails the step through a NEW guarded write,
-  `JobStepRepo::fail_deferred_tx`:
+  `JobStepRepo::fail_deferred_tx`, in the same transaction shape as § 5.3
+  step 7: the job row `FOR SHARE`, nothing written unless the job is `pending`
+  or `running`, then
   `UPDATE job_step SET status = 'failed', error_message = $3, completed_at = NOW() WHERE job_id = $1 AND step_name = $2 AND status = 'ready' AND action_type = 'deferred'`,
-  returning whether it changed a row. Plain `mark_failed`
+  returning whether it changed a row. A failure that loses to a cancellation
+  writes nothing, so the step ends `cancelled`, not `failed`. Plain `mark_failed`
   (`crates/stroem-db/src/repos/job_step.rs:781-790`) is NOT used: it matches
   on job and step name alone and would overwrite a row a concurrent advance
   has already resolved, a worker has claimed, or a step that has completed.
@@ -325,22 +353,42 @@ its context. Instances that render the same value share one commit through
   name the step, the owner workspace and the error kind, never the rendered
   value. Example: `[ref] step 'publish': the rendered ref was not found in workspace 'billing'`.
   Template errors are already value-free (`TemplateError`).
-- **The pin resolver is not value-free today**, and the pass must not depend
-  on it being so: `PinStore::resolve` records `git_ref` as a span field
-  (`crates/stroem-server/src/workspace/pins.rs:761`), and `PinError`'s
-  `Display` prints it (`RefNotFound`, `pins.rs:317`; `PinUnavailable` carries
-  the ref in its text, `pins.rs:799-804`). Two changes:
-  1. `PinStore::resolve` stops recording `git_ref` in its span (`workspace`
-     stays). Static-ref callers that want the ref in their own span add it
-     there — they hold a YAML value, not a rendered one.
-  2. The pass, the § 5.6 dispatch and the webhook path classify every
-     resolution error with `downcast_ref::<PinError>()` / `GitRefError` and
-     write a fixed sentence per variant (`not found`, `not a git workspace`,
-     `temporarily unavailable`, …). They never format the error with
-     `Display` / `{:#}` — not to the job log, not to `error_message`, not to
-     `tracing`. An untyped error gets the fixed sentence
-     `the rendered ref could not be resolved`. Static-ref paths keep their
-     current messages.
+- **A rendered value is private until it passes both secret checks**
+  (§ 10.3). After that it is an identifier, like a static ref, and appears
+  wherever `action_ref` / `task_ref` / the job's `ref` appears — job detail,
+  and spans such as `create_job_for_task_pinned`'s `git_ref` field
+  (`job_creator.rs:343`). Before that, no span, log line or error text may
+  carry it. Today's pin code does not meet this:
+  - `PinStore::resolve` records `git_ref` as a span field
+    (`crates/stroem-server/src/workspace/pins.rs:761`);
+  - `PinError`'s `Display` prints it (`RefNotFound`, `pins.rs:317`;
+    `PinUnavailable`'s text, `pins.rs:799-804`);
+  - `pin_label` names a pin `ws@ref (sha)` (`pins.rs:345-347`), and
+    `WorkspaceManager::pin_error_for_user` logs that label with the loader
+    chain on a `PinLoadFailed` (`workspace/mod.rs:570-585`);
+  - the webhook handler logs and classifies errors by their text
+    (`web/hooks.rs:102`, `web/api/mod.rs:424`).
+
+  Changes:
+  1. `PinStore::resolve` stops recording `git_ref` in its span, for every
+     caller (`workspace` stays). No caller reads that field; for static refs
+     this only changes what the server log shows.
+  2. **A private pin-load path.** The pass, § 5.6 and the webhook load the
+     selected config with the pin marked private (for example a
+     `PinDisplay::CommitOnly` flag on `PinRef`). For such a pin, `pin_label`
+     prints `ws (sha)`, and `pin_error_for_user` logs the scrubbed chain under
+     that commit-only label. Static refs keep `ws@ref (sha)`.
+  3. **One typed error leaves the new paths.** They classify every resolution
+     error with `downcast_ref` (`PinError`, `GitRefError`, `PinLoadWithheld`,
+     `RefResolveError`, `TemplateError`) and turn it into a new
+     `RenderedRefError { kind }`, whose `Display` is a fixed sentence per kind
+     (`Empty`, `Invalid`, `SecretValue`, `NotFound`, `NotGit`, `NoAction`,
+     `AgentAction`, `LoadWithheld`, `Unavailable`, `Render`, `Unresolvable` for
+     an untyped error). It is the only error that leaves a resolution
+     function, so the job log, `error_message`, `tracing`, the webhook's error
+     log and `classify_execute_error` see only that text.
+     `classify_execute_error` gets a branch for it: `Unavailable` → 500, every
+     other kind → 400. Static-ref paths keep their current messages.
 
 ### 5.6 A `type: task` action with a templated `ref:`
 
@@ -362,35 +410,42 @@ value, other fields strings — `render_input_typed`,
 task ref would make that circular, so the ref gets its own, schema-free input.
 The order is a constraint:
 
-1. **ref input**: render the caller's step `input:` map with
-   `render_input_map` — string semantics, no schema, no action defaults —
-   under `Scope::ChildTaskInput`'s context (job input, caller secrets as
-   today for step input). This value is used ONLY to build the ref context;
-   it is never persisted, logged or passed to the child;
+1. **ref input**: a recursive, schema-free projection of the caller's step
+   `input:` map (new `template::render_ref_projection`): every string leaf,
+   at any depth, is rendered as a string; other leaves are copied. Its
+   context is a new `Scope::TaskRefInput` — `Scope::ChildTaskInput`'s context
+   WITHOUT `secret` — and `vals` is unavailable (§ 4.2 rule 2). A leaf whose
+   render fails (it reads `secret`, calls `vals`, or has any other error) is
+   left out, with no error; a ref that reads it then fails as an undefined
+   variable. It is not `render_input_map`, which renders top-level strings
+   only (`template.rs:484-495`). The projection is used ONLY to build the ref
+   context; it is never persisted, logged or passed to the child;
 2. render the ref with `Scope::TaskActionRef { ref_input }` (no `secret`) and
    apply the post-render check;
 3. resolve the task owner `T` syntactically from `action_spec.task` relative
-   to the action owner `O` (as `refs::ref_owner` does for a static ref), then
-   `T@rendered` through the parent job's `job_ref_pin`, then check the value
-   against `T`'s pin secrets (§ 10.3);
-4. load `T`'s config at that commit and find the task;
+   to the action owner `O` (as `refs::ref_owner` does for a static ref); look
+   up `T@rendered` in the parent job's `job_ref_pin` or resolve it; load
+   `T`'s config at that commit through the private path (§ 5.5); check the
+   value against `T`'s pin secrets (§ 10.3); only then write the memo (§ 5.2);
+4. find the task in that config;
 5. from here the existing path runs unchanged: render the step input with
    `T`'s schema, merge the action defaults (bucket `D`, rendered once — spec
    R26), `resolve_task_input_by_provenance(_roles)`, stamp `task_*` on the
    parent step, create the child pinned.
 
-Consequences: the caller's step input is rendered twice. A template whose
-value can change between two renders (`now()`, a `vals` lookup) can give the
-ref a different value than the child input; the ref uses the first render.
+Consequences: the caller's step input is rendered twice. With no `secret`
+and no `vals` in the projection, only a time-dependent function (`now()`) can
+give the ref a different value than the child input; the ref uses the first
+render.
 Action defaults are not visible to the ref — an action that wants a default
 branch writes `{{ input.branch | default(value="main") }}`. This also keeps
 the owner's secrets, which bucket `D` renders with, out of the ref context.
 The ref-input render's own errors are caller-side (bucket `C`, never
 withheld) and go through `fail_task_step`.
 
-Failures go through `fail_task_step` (whose `mark_failed` is safe here: a
-`type: task` step is dispatched by one pass, and the known double-dispatch
-window is unchanged). The ref template is written by the action owner `O`, so
+Failures go through `fail_task_step`, as every dispatch failure does today;
+its unguarded `mark_failed` is part of the known double-dispatch gap (§ 14),
+which this spec neither fixes nor widens. The ref template is written by the action owner `O`, so
 its render error is withheld when `O != A` (owner-side origin, CLAUDE.md
 § Cross-Workspace References); a post-render error is value-free in every
 case.
@@ -427,32 +482,29 @@ action, § 5.6 resolves the task at dispatch.
 
 ### 5.8 Recovery
 
-Two crash windows leave a `ready` server-side step that no worker can claim
-and no sweep revisits — the unmatched-step sweep excludes server-dispatched
-kinds (`job_step.rs:1330-1335`) and Phase 4.5 skips jobs that have a `ready`
-step (`job.rs:1395-1398`):
+A crash — or an advance that dies — after the cascade or creation commit and
+before the pass writes leaves a `ready` deferred row that no worker can claim
+and no sweep revisits: the unmatched-step sweep excludes it (§ 8), and Phase
+4.5 skips jobs that have a `ready` step (`job.rs:1395-1398`).
 
-- a crash between the cascade (or creation) commit and the pass: a `ready`
-  **deferred** row;
-- a crash between the pass's `UPDATE` (real type `task` / `approval`) and the
-  dispatch that follows it: a `ready` **task / approval** row. This window
-  already exists today for every `type: task` / `type: approval` step that a
-  cascade promotes.
-
-New recovery phase 4.6, `readvance_ready_server_steps` (leader only, next to
-Phase 4.5, `crates/stroem-server/src/recovery.rs:338`): list non-terminal
-jobs that have a step with
-`status = 'ready' AND action_type IN ('deferred', 'task', 'approval') AND ready_at < NOW() - unmatched_step_timeout_secs`
+New recovery phase 4.6, `readvance_deferred_steps` (leader only, next to Phase
+4.5, `crates/stroem-server/src/recovery.rs:338`): list non-terminal jobs that
+have a step with
+`status = 'ready' AND action_type = 'deferred' AND ready_at < NOW() - unmatched_step_timeout_secs AND (resolve_lease_until IS NULL OR resolve_lease_until < NOW())`
 and `advance` each. Bounded and resumable like Phase 4.5
-(`StalledSweepBounds`, a cursor on `AppState`, one heartbeat per job). For
-`deferred` rows the guarded writes and the first-writer memo make a concurrent
-resolution harmless. For `task` / `approval` rows, re-advancing a row that is
-still `ready` after the threshold re-runs its dispatch; dispatch moves the step
-with `mark_running_server` (guarded `status IN ('pending', 'ready')`,
-`job_step.rs:727`), so it inherits — and does not widen — the known
-double-dispatch window (a crash after a child job commits and before
-`mark_running_server`; lifecycle-hardening spec 2026-09-16). This also closes
-the pre-existing gap for cascade-promoted `type: task` / `type: approval` steps.
+(`StalledSweepBounds`, a cursor on `AppState`, one heartbeat per job). Only a
+lease holder resolves (§ 5.3 step 0), so recovery never starts a second
+resolution beside a live one: a slow cold resolve keeps its lease.
+
+**Out of scope (cut after Codex round 2).** A crash between the pass's
+`UPDATE` (real type `task` / `approval`) and the dispatch that follows leaves
+a `ready` task / approval row. Every cascade-promoted `type: task` /
+`type: approval` step has the same window today. Re-advancing such rows from
+recovery is unsafe while dispatch is not idempotent: `mark_running_server` and
+`mark_suspended` do not report whether they won their guarded update
+(`job_step.rs:722-735`, `:1385`), so two dispatchers can both create a child
+or both fire `on_suspended` hooks. Both belong to the lifecycle-hardening spec
+(`2026-09-16-task-step-lifecycle-hardening-design.md`) and TODO.md (§ 14).
 
 ## 6. Webhook trigger `ref:`
 
@@ -464,14 +516,16 @@ config snapshot, re-authenticate against the fresh secret. Then:
 2. If the trigger's `ref:` is a template, render it with the
    `render_context::webhook_ref` context (§ 4.2 rule 2) and apply the post-render check (§ 4.2 rule 3; the secret check uses the
    live redaction set).
-3. Call `trigger_target::resolve_trigger_target` with the rendered value. It
-   loads the target pin; check the rendered value against that pin's secrets
-   (§ 10.3) before the job is created. From here on it is exactly a
-   static-ref webhook. Resolution errors are classified by type and written
-   as fixed sentences (§ 5.5), never with the rendered value.
+3. Call `trigger_target::resolve_trigger_target` with the rendered value,
+   through the private pin-load path (§ 5.5). Check the rendered value
+   against the selected pin's secrets (§ 10.3) before the job is created.
+   From here on it is exactly a static-ref webhook. Every resolution error
+   leaves as a `RenderedRefError` (§ 5.5) before it reaches the handler's
+   error log (`web/hooks.rs:102`) or `classify_execute_error`.
 
-Errors go through `classify_execute_error`: an empty value, an invalid value,
-a render error and a ref that is not found are 400; `PinUnavailable` is 500.
+Errors go through `classify_execute_error`'s `RenderedRefError` branch: an
+empty value, an invalid value, a render error, a secret value and a ref that
+is not found are 400; `Unavailable` is 500.
 No job is created. The job is an ordinary pinned job: `job.git_ref` holds the
 rendered value, so state partitions, redaction and re-run/restart (which
 re-resolve `job.git_ref`, `web/api/pinned_source.rs::resolve_source_pin`) need
@@ -504,7 +558,17 @@ rejects it, and `resolve_trigger_target` fails on one with `GitRefError::Templat
 ## 8. Storage — migration `051_templated_refs.sql` (additive)
 
 - `ALTER TABLE job_step ADD COLUMN ref_template TEXT;`
+- `ALTER TABLE job_step ADD COLUMN resolve_lease_until TIMESTAMPTZ;` (§ 5.3
+  step 0).
 - `CREATE TABLE job_ref_pin …` (§ 5.2).
+- Widen `job_step_action_type_check` (last set by `026_event_source.sql:9-10`)
+  with `'deferred'`: migration 051 drops it and adds the wider check
+  `NOT VALID` (no table scan); migration `052_templated_refs_validate.sql`
+  runs `VALIDATE CONSTRAINT`, which scans under a `SHARE UPDATE EXCLUSIVE`
+  lock, so writes continue. They are two migrations because sqlx runs each in
+  its own transaction, and a `VALIDATE` in 051's transaction would hold the
+  `ACCESS EXCLUSIVE` lock of the `ADD` for the whole scan. `runner` keeps its
+  `NOT NULL` and its check; deferred rows use `'none'`.
 - No index on `job_step` changes (D9). The claim SQL and
   `idx_job_step_ready_claim` keep their predicate: a deferred row is in the
   index but never matches a claim, because no claim can carry the ability
@@ -569,10 +633,19 @@ contains any value of the **ref secret set**:
 - for a webhook: the live set before resolution, then the selected commit's
   secrets before the job is created (§ 6).
 
-Before the second check, the value has been passed to `PinStore::resolve`,
-which no longer records it (§ 5.5); a secret that exists ONLY in the selected
-commit therefore reaches nothing but the memo row's `git_ref` key — and the
-memo row is never exposed (no API or log reads it).
+Before the second check, the value has been passed to `PinStore::resolve`
+and the pin loader, which do not record a private value (§ 5.5), and it is
+not written to the memo until it passes (§ 5.2). The memo itself has no API,
+log or metric outlet; its readers are resolution and the PinStore keep-set.
+
+**Transformed secrets.** No ref context contains `secret` or can call `vals`
+(§ 4.2 rule 2, § 5.6). A ref can therefore carry a secret only if a value
+already in its context does: the job input, or an earlier step's output.
+Those values are content elsewhere — job detail shows them, masked only where
+a secret value appears verbatim — so a transformed secret in them (upper-cased
+or encoded by a step) is already visible there, and the value check cannot
+catch it in `action_ref` either (redaction matches exact values, CLAUDE.md
+§ Secrets in logs). This adds no new exposure class; accepted.
 
 Why not `redaction::job_redaction_values` (the full redaction closure): it walks
 the job's whole lineage (hook chains, restarts, re-runs, up to
@@ -653,7 +726,21 @@ in `tests/main.rs`; `PinnedFixture`):
 - Cancel while deferred: the pass writes nothing (job-status condition).
 - A failing resolution racing a successful one never overwrites the resolved,
   claimed or completed row (`fail_deferred_tx` changes no row).
-- Phase 4.6 also advances a `ready` `type: task` row left undispatched.
+- Migration 051/052: a deferred row (`action_type = 'deferred'`,
+  `runner = 'none'`) inserts; the constraint is valid after 052.
+- Lease: two concurrent advances — exactly one takes the lease and resolves;
+  Phase 4.6 skips a row whose lease is live and advances it once the lease
+  has expired.
+- Private path: a `PinLoadFailed` on a rendered ref logs the commit-only label
+  (`ws (sha)`); no captured span, log line, error message or HTTP body carries
+  the rendered value before it passes the checks; the webhook's error log and
+  response carry only `RenderedRefError` text.
+- `vals` in a ref template is a validation error, and a render error at
+  runtime.
+- Ref projection (§ 5.6): nested string leaves render; a leaf that reads
+  `secret` or calls `vals` is left out; the ref then fails as undefined.
+- A resolution failure that loses to a cancellation writes nothing (the step
+  ends `cancelled`).
 - Ref secret set: a value equal to a secret that exists only in the selected
   commit is rejected after the config load, and nothing is written; no span,
   log line or error text carries the rendered value (assert on captured
@@ -700,6 +787,10 @@ UI (Vitest): the `ref:` label on a deferred step row.
 - The claim SQL does not read the job's status, so a `ready` step can be
   claimed in the window between `JobRepo::cancel` and
   `cancel_pending_steps` (pre-existing, every step kind; § 5.7).
+- Idempotent `type: task` / `type: approval` dispatch (winner-only
+  `mark_running_server` / `mark_suspended`, one child per parent step, atomic
+  suspend + message), and then recovery of a `ready` task / approval row left
+  by a crash (§ 5.8; Codex round 2 N4/N5; lifecycle-hardening spec).
 - Templated refs on hooks, event sources, agent task tools, scheduler triggers.
 
 ## Revision history
@@ -722,3 +813,14 @@ UI (Vitest): the `ref:` label on a deferred step row.
   schema-free string render of the caller's step input (§ 5.6); restart is an
   explicit exception to criterion 4; rollout covers old-replica claims
   (§ 11); citations fixed (claim SQL, root-step status, `RefMemo` range).
+- **4 (2026-10-15)** — Codex round 2: migration 051 widens
+  `job_step_action_type_check` (`NOT VALID`, validated by 052) and deferred
+  rows use `runner = 'none'` (§ 5.1, § 8); a rendered value is private until
+  both checks pass — commit-only pin labels on a private pin-load path and one
+  typed `RenderedRefError` leaving every new path (§ 5.5, § 6); no ref render
+  has `secret` or `vals`, and the § 5.6 ref input is a recursive projection
+  that drops failing leaves (§ 4.2, § 5.6, § 10.3); both resolution writes
+  take the job row `FOR SHARE` first (§ 5.3, § 5.5); a resolution lease (D12);
+  the memo is written only after the checks (§ 5.2); **scope cut**: Phase 4.6
+  re-advances deferred rows only, task / approval dispatch idempotency moves
+  to the lifecycle-hardening spec (§ 5.8, § 14).
