@@ -1,6 +1,6 @@
 # Templated refs (`ref: "{{ … }}"`)
 
-Status: draft, revision 7 (2026-10-15)
+Status: revision 8 (2026-10-15) — Codex: MERGE-READY (round 6); awaiting user review
 Builds on: `2026-10-02-git-refs-design.md` (the git-refs spec, cited as GR),
 `2026-10-06-tera-2-upgrade-design.md` (cited as T2),
 `2026-09-11-render-context-owner-design.md`.
@@ -558,7 +558,7 @@ The handler order is unchanged (CLAUDE.md § Git refs → Triggers): authenticat
 against the cached secret, `force_refresh` if configured, re-match on one
 config snapshot, re-authenticate against the fresh secret. Then:
 
-1. Build the webhook job input (`crates/stroem-server/src/web/hooks.rs:608-645`).
+1. Build the webhook job input (`crates/stroem-server/src/web/hooks.rs:608-646`).
 2. If the trigger's `ref:` is a template, render it with the
    `render_context::webhook_ref` context (§ 4.2 rule 2) and apply the post-render check (§ 4.2 rule 3; the secret check uses the
    live redaction set).
@@ -607,7 +607,7 @@ rejects it, and `resolve_trigger_target` fails on one with `GitRefError::Templat
 - `ALTER TABLE job_step ADD COLUMN resolve_lease_owner UUID, ADD COLUMN resolve_lease_until TIMESTAMPTZ;`
   (§ 5.3 step 0).
 - `CREATE TABLE job_ref_pin …` (§ 5.2).
-- Widen `job_step_action_type_check` (last set by `026_event_source.sql:9-10`)
+- Widen `job_step_action_type_check` (last set by `026_event_source.sql:9-11`)
   with `'deferred'`: migration 051 drops it and adds the wider check
   `NOT VALID` (no table scan); migration `052_templated_refs_validate.sql`
   runs `VALIDATE CONSTRAINT`, which scans under a `SHARE UPDATE EXCLUSIVE`
@@ -823,10 +823,11 @@ in `tests/main.rs`; `PinnedFixture`):
   4.6 resolves the row once the lease has expired.
 - A resolution failure that loses to a cancellation writes nothing (the step
   ends `cancelled`).
-- Ref secret set: a value equal to a secret that exists only in the selected
-  commit is rejected after the config load, and nothing is written; no span,
-  log line or error text carries the rendered value (assert on captured
-  `tracing` output and `job_step.error_message`).
+- Ref secret set: a BRANCH or TAG value equal to a secret that exists only in
+  the selected commit is rejected after the config load, and nothing is
+  written; no span, log line or error text carries the rendered value (assert
+  on captured `tracing` output and `job_step.error_message`). (A full-SHA
+  value is the accepted exception of § 10.3.)
 - `type: task` action ref: the ref input is the caller's step input rendered
   as strings; a `json` field of the task still reaches the child as a native
   value; action defaults are not in the ref context.
@@ -938,3 +939,6 @@ UI (Vitest): the `ref:` label on a deferred step row.
   the tests name the full-SHA exception of § 10.3; citations fixed
   (`web/hooks.rs:113`, `job_step.rs:791`). Round 5 found no stranding,
   double-write, migration or SQL defect.
+- **8 (2026-10-15)** — Codex round 6: **MERGE-READY**. Editorial only: the
+  selected-secret test names a branch or tag value; two citation ranges
+  extended (`hooks.rs:608-646`, `026_event_source.sql:9-11`).
