@@ -1,6 +1,6 @@
 # Templated refs (`ref: "{{ … }}"`)
 
-Status: draft, revision 1 (2026-10-15)
+Status: draft, revision 2 (2026-10-15)
 Builds on: `2026-10-02-git-refs-design.md` (the git-refs spec, cited as GR),
 `2026-10-06-tera-2-upgrade-design.md` (cited as T2),
 `2026-09-11-render-context-owner-design.md`.
@@ -66,9 +66,14 @@ containing `{{` or `{%` (`crates/stroem-common/src/git_ref.rs:55`).
   (`crates/stroem-db/migrations/044_claim_index_agent.sql:9`) and the
   unmatched-step sweep (`job_step.rs:1335`) carry the same
   `action_type NOT IN ('task', 'approval', 'event_source')` predicate.
-- **Abilities are a closed set.** The worker API rejects any capability not in
+- **Abilities are a closed set at registration only.** `/worker/register`
+  rejects any capability not in
   `KNOWN_ABILITIES = ["script", "docker", "kubernetes", "agent"]`
   (`crates/stroem-server/src/web/worker_api/jobs.rs:272`, check at `:339`).
+  The claim SQL, however, matches the capabilities sent in the CLAIM request
+  (`$1::jsonb @> to_jsonb(required_ability)`, `job_step.rs:657`), and
+  `claim_job` (`worker_api/jobs.rs:819-858`) rejects only an empty list — it
+  never checks the values.
 - **Server-dispatched kinds.** `type: task` and `type: approval` steps are
   promoted to `ready` like any step; the claim excludes them and
   `Settlement::advance` dispatches them after the cascade
@@ -102,8 +107,8 @@ containing `{{` or `{%` (`crates/stroem-common/src/git_ref.rs:55`).
 | D6 | Empty rendered value | Error | Treat as "no ref" (follow-up, § 14); the git source's default branch (surprising inside a pinned job) |
 | D7 | Temporary git failure while resolving at promotion | Fail the step (like `type: task` dispatch) | Keep `ready`, retry with a cap, recovery re-advances |
 | D8 | Creation-time pre-check of templated refs | **None** | Syntax rule (`{{ input.x }}` resolves at creation); a template-text scanner; a reduced-context test render (unsound: `default` hides undefined variables, § 2) |
-| D9 | How a deferred step stays unclaimable | `action_type = 'deferred'` **and** `required_ability = 'deferred'`; claim SQL and index unchanged | Add `'deferred'` to the claim `NOT IN` list (needs a new partial index on `job_step`) |
-| D10 | Secrets | No context contains `secret`; a rendered ref that contains a known secret value is rejected | Masking the identifier columns |
+| D9 | How a deferred step stays unclaimable | `action_type = 'deferred'` **and** `required_ability = 'deferred'`; claim SQL and index unchanged; the claim handler rejects a capability outside `KNOWN_ABILITIES`, as register does | Add `'deferred'` to the claim `NOT IN` list (needs a new partial index on `job_step`) |
+| D10 | Secrets | No context contains `secret`; a rendered ref that contains a value of the job's *ref secret set* (§ 10.3) is rejected | Masking the identifier columns; the full redaction closure as the check set (a closure walk per step, and a `MaskAll` outcome) |
 | D11 | Owner of a templated flow-step ref | Decided from the action name by `refs::ref_owner`, at creation; the template selects only the commit | A template that also selects the workspace |
 
 ## 4. YAML surface and semantics
@@ -203,16 +208,41 @@ CREATE TABLE job_ref_pin (
   the `job_ref_pin` commits of non-terminal jobs, so a resolved commit stays
   in the PinStore until its step is claimed.
 
-### 5.3 At promotion: `resolve_deferred_steps`
+### 5.3 When the step is `ready`: `resolve_deferred_steps`
 
-The cascade does not change: it promotes a deferred step to `ready` as it
-promotes any step (its `when` is evaluated first; a skipped step is never
-resolved). `Settlement::advance` step 1 gets a new pass, run before task
-dispatch:
+A deferred step reaches `ready` in two ways, and neither changes:
+
+- a **root** step (no `depends_on`) is inserted `ready` at creation
+  (`job_step.rs:368`);
+- a **dependent** step is promoted by the cascade like any step (its `when` is
+  evaluated first; a skipped step is never resolved).
+
+So the new pass `resolve_deferred_steps` runs in BOTH places that dispatch
+server-side steps today, after the cascade and before task dispatch:
 
 ```
-cascade_and_settle → resolve_deferred_steps → task dispatch → reconcile → approval dispatch
+Settlement::advance step 1:  cascade_and_settle → resolve_deferred_steps → task dispatch → reconcile → approval dispatch
+dispatch::init (creation):   cascade::execute   → resolve_deferred_steps → task dispatch → approval dispatch
 ```
+
+(`settlement/mod.rs:321-474` and `settlement/dispatch.rs:1001-1047`.) Without
+the `init` call, the headline case — a root step with
+`ref: "{{ input.branch }}"` — would wait for recovery (§ 5.8).
+
+Consequences of the `init` call:
+
+- A resolution failure of a root step is a per-step failure (`mark_failed` +
+  cascade, § 5.5), exactly like a root `type: task` dispatch failure inside
+  `handle_task_steps`. It is NOT the coordinated
+  `[creation] initialisation failed` path; only an error that escapes the pass
+  (a DB error) reaches that path.
+- With no pre-check (D8), an HTTP execute whose root templated ref names a
+  wrong branch returns the created job (200); its root step is already failed.
+- An agent task-tool child whose only root step fails resolution at `init` is
+  born terminal: `agent_child_created` returns `Err(BornTerminal)` → 500 to
+  the worker, as for a server-dispatched root step that fails today.
+- `init` runs inside the creating request, so a cold pin resolve lengthens that
+  request — the same cost a static ref has today.
 
 For each `ready` step of the job with `action_type = 'deferred'`:
 
@@ -237,7 +267,8 @@ For each `ready` step of the job with `action_type = 'deferred'`:
    moves on.
 
 After the pass, a step whose real type is `task` or `approval` is picked up
-by the dispatch passes of the same `advance`; a worker type is claimable.
+by the dispatch passes that follow it in the same `advance` / `init`; a worker
+type is claimable.
 
 The pass loops like `handle_task_steps`: a failure (§ 5.5) re-cascades, which
 can promote further deferred steps; the loop repeats while it makes progress,
@@ -281,21 +312,30 @@ its context. Instances that render the same value share one commit through
 
 The step is an ordinary `type: task` step. At creation `resolve_task_for_step`
 is not called for it (today it would fail with `GitRefError::Templated`); its
-`task_*` columns stay `NULL`. `action_spec` carries the action definition,
-including `ref` (the template).
+`task_*` columns stay `NULL`. `action_spec` carries the whole action
+definition — `build_step` stores `serde_json::to_value(action)`
+(`job_creator.rs:886`), and `ActionDef.git_ref` serializes as `ref` when set
+(`crates/stroem-common/src/models/workflow.rs:265-266`) — so the template is
+on the row.
 
 At dispatch, `handle_task_steps_pass`
-(`settlement/dispatch.rs:188`) classifies `action_spec.ref`. For a template it:
+(`settlement/dispatch.rs:188`) classifies `action_spec.ref`. For a template,
+the order is a constraint, not a suggestion — the task's schema is only known
+once the task's commit is:
 
-1. builds the prepared input as today (caller bucket `C` + action defaults
-   bucket `D`, rendered once — spec R26);
-2. renders the ref with `Scope::TaskActionRef { prepared_input }` and applies
+1. build the action-side input as today: the caller's rendered step input
+   (bucket `C`) with the action's own `input` defaults (bucket `D`, rendered
+   once — spec R26). This needs only the action's persisted schema, never the
+   task's;
+2. render the ref with `Scope::TaskActionRef { prepared_input: C+D }` and apply
    the post-render check;
-3. resolves the task owner `T` syntactically from `action_spec.task`
-   relative to the action owner `O` (as `refs::ref_owner` does for a static
-   ref), then `T@rendered` through the parent job's `job_ref_pin`;
-4. continues exactly as a static-ref `type: task` step (`task_*` stamped on
-   the parent step, child created pinned).
+3. resolve the task owner `T` syntactically from `action_spec.task` relative
+   to the action owner `O` (as `refs::ref_owner` does for a static ref), then
+   `T@rendered` through the parent job's `job_ref_pin`;
+4. load `T`'s config at that commit and find the task;
+5. only now run `resolve_task_input_by_provenance(_roles)` against that task's
+   schema, then continue exactly as a static-ref `type: task` step (`task_*`
+   stamped on the parent step, child created pinned).
 
 Failures go through `fail_task_step`. The template is written by the action
 owner `O`, so a render error is withheld when `O != A` (owner-side origin,
@@ -325,8 +365,8 @@ action, § 5.6 resolves the task at dispatch.
 
 ### 5.8 Recovery
 
-A crash between the cascade commit and the pass leaves a `ready` deferred step
-that no worker can claim and nothing else revisits. New recovery phase 4.6,
+A crash between the cascade (or creation) commit and the pass leaves a
+`ready` deferred step that no worker can claim and nothing else revisits. New recovery phase 4.6,
 `readvance_deferred_steps` (leader only, next to Phase 4.5,
 `crates/stroem-server/src/recovery.rs:338`): list non-terminal jobs that have a
 step with `status = 'ready' AND action_type = 'deferred' AND ready_at < NOW() - unmatched_step_timeout_secs`
@@ -374,8 +414,12 @@ rejects it, and `resolve_trigger_target` fails on one with `GitRefError::Templat
   warning, like a static ref today
   (`crates/stroem-common/src/validation.rs:128`, `:216`):
   `… at a templated ref - validation skipped (resolved when the step starts)`.
-- Job creation does not render or check a templated flow-step / task-action
-  ref beyond syntax (D8).
+- Job creation calls `check_template_syntax` on every templated flow-step ref
+  (`ref_template`) and every templated `type: task` action ref it meets (no
+  I/O, no render); a syntax error or an unknown filter is a 400 at creation.
+  Validation is not wired into server loads, so without this a typo would
+  first show as a failed step. Creation does not render or resolve a templated
+  ref (D8).
 - `stroem run` does not read `git_ref` today (it runs the local action) and does
   not read a templated one either. The user guide states this.
 
@@ -385,13 +429,18 @@ rejects it, and `resolve_trigger_target` fails on one with `GitRefError::Templat
 - `CREATE TABLE job_ref_pin …` (§ 5.2).
 - No index on `job_step` changes (D9). The claim SQL and
   `idx_job_step_ready_claim` keep their predicate: a deferred row is in the
-  index but never matches a worker, because no worker can have the ability
-  `deferred`. The unmatched-step sweep (`get_unmatched_ready_steps`,
+  index but never matches a claim, because no claim can carry the ability
+  `deferred`. That needs one handler change: `claim_job` rejects (400) a
+  capability outside `KNOWN_ABILITIES` after the legacy-tags migration, with
+  the same message `register` uses — today it checks only for an empty list
+  (§ 2). The worker always sends its registered (validated) capabilities, so
+  no legitimate claim changes. The unmatched-step sweep (`get_unmatched_ready_steps`,
   `job_step.rs:1321`) keeps its `NOT IN` list unchanged and gains a separate
   `AND js.action_type <> 'deferred'` clause — an added conjunct still implies
   the index predicate. The plan includes an `EXPLAIN` check that both queries
   still use the index.
-- A regression test fails if `KNOWN_ABILITIES` ever contains `"deferred"`.
+- Regression tests: `KNOWN_ABILITIES` never contains `"deferred"`; a claim
+  carrying `"deferred"` (or any unknown capability) is a 400.
 - The `job_step` column list (`job_step.rs:12`) and `JobStepRow` gain
   `ref_template`.
 
@@ -430,12 +479,24 @@ on the row (its error message is value-free). No change.
 ### 10.3 Secret values in a rendered ref
 
 `action_ref`, `task_ref` and the job's `ref` are identifiers and skip
-redaction (§ 2). A rendered ref is therefore rejected (value-free error) if
-it contains any value of the job's redaction set
-(`redaction::job_redaction_values` for a step; the live set,
-`workspace_set::collect_redaction_values`, for a webhook). A transient failure
-to build a step's set (`RedactionUnavailable`) fails the step (D7). The live
-set of a webhook comes from the loaded configs and has no transient failure.
+redaction (§ 2). A rendered ref is therefore rejected (value-free error) if it
+contains any value of the **ref secret set**:
+
+- for a step: the live set (`workspace_set::collect_redaction_values`) plus
+  `pin_redaction_values` of the job's own pin (`job.git_ref`) and of every
+  commit in the job's `job_ref_pin` — the commits this job's steps run under;
+- for a webhook: the live set.
+
+Why not `redaction::job_redaction_values` (the full redaction closure): it walks
+the job's whole lineage (hook chains, restarts, re-runs, up to
+`MAX_REDACTION_CLOSURE_JOBS`) and can load cold pins, once per deferred step,
+including inside `init`, to check one string; and it has a third outcome,
+`MaskAll`, with no meaning for a yes/no check. The narrower set is bounded by
+the job's own pins and has two outcomes. A failure to load one of those pins
+fails the step (D7). Residual, accepted: a secret that reaches a step output
+from a pin outside this job's set (e.g. a child job's pin, carried up by a
+`type: task` step's output) is not caught; it is masked everywhere it is
+content, but not in `action_ref`.
 
 ### 10.4 Render-path table
 
@@ -487,8 +548,12 @@ in `tests/main.rs`; `PinnedFixture`):
   `type: agent`, secret in the value, `break_remote` (temporary).
 - Resolved type `task` (child created from `T@ref`) and `approval` (step
   `suspended`).
-- A worker with every ability never claims a deferred step; the unmatched-step
-  sweep ignores it.
+- A worker with every ability never claims a deferred step; a claim request
+  carrying `deferred` is a 400; the unmatched-step sweep ignores it.
+- A ROOT step with a templated ref is resolved by `init` (no recovery wait);
+  its failure fails the step and the job, and the execute call still returns
+  the job; an agent task-tool child whose only root fails is `BornTerminal`.
+- A syntax error in a templated ref is a 400 at creation.
 - Phase 4.6 advances a deferred step left `ready`.
 - Two concurrent `advance`s: one `UPDATE` wins, both see one commit.
 - Cancel while deferred: the pass writes nothing.
@@ -534,3 +599,10 @@ UI (Vitest): the `ref:` label on a deferred step row.
 ## Revision history
 
 - **1 (2026-10-15)** — first draft from the brainstorming session.
+- **2 (2026-10-15)** — self-review + advisor: root steps are inserted `ready`,
+  so `dispatch::init` runs the pass too (§ 5.3); `claim_job` must validate
+  capabilities, because the claim SQL matches the REQUEST's capabilities (D9,
+  § 2, § 8); explicit order for § 5.6 (the ref renders before the task schema
+  is known); the secret check uses the job's own pins, not the redaction
+  closure (§ 10.3); creation runs `check_template_syntax` (§ 7); webhook
+  context has its own constructor (§ 4.2).
