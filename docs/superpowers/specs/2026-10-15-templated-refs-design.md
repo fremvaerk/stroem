@@ -1,6 +1,6 @@
 # Templated refs (`ref: "{{ … }}"`)
 
-Status: draft, revision 6 (2026-10-15)
+Status: draft, revision 7 (2026-10-15)
 Builds on: `2026-10-02-git-refs-design.md` (the git-refs spec, cited as GR),
 `2026-10-06-tera-2-upgrade-design.md` (cited as T2),
 `2026-09-11-render-context-owner-design.md`.
@@ -293,7 +293,8 @@ For each `ready` step of the job with `action_type = 'deferred'`:
 3. Look up `(job_id, owner, rendered)` in `job_ref_pin`; on a miss, resolve
    `owner@rendered` with `PinStore::resolve` (no memo write yet). Until the
    value passes the check in step 4 it is private: it reaches no span, log
-   line or error text (§ 5.5).
+   line or error text (§ 5.5) — with one accepted exception, a full-SHA value,
+   which `ensure` / `ensure_tree` record as the commit (§ 10.3).
 4. Load the owner's config at the commit through the private pin-load path
    (§ 5.5), then check the rendered value against that commit's own secrets
    (`pin_redaction_values` of the selected pin, § 10.3). Only then write the
@@ -357,7 +358,7 @@ its context. Instances that render the same value share one commit through
   `UPDATE job_step SET status = 'failed', error_message = $3, completed_at = NOW() WHERE job_id = $1 AND step_name = $2 AND status = 'ready' AND action_type = 'deferred' AND resolve_lease_owner = $4`,
   returning whether it changed a row. A failure that loses to a cancellation
   writes nothing, so the step ends `cancelled`, not `failed`. Plain `mark_failed`
-  (`crates/stroem-db/src/repos/job_step.rs:781-790`) is NOT used: it matches
+  (`crates/stroem-db/src/repos/job_step.rs:781-791`, `WHERE` at `:791`) is NOT used: it matches
   on job and step name alone and would overwrite a row a concurrent advance
   has already resolved, a worker has claimed, or a step that has completed.
   Only a write that changed a row is followed by `cascade_and_settle` (the
@@ -373,7 +374,8 @@ its context. Instances that render the same value share one commit through
   wherever `action_ref` / `task_ref` / the job's `ref` appears — job detail,
   and spans such as `create_job_for_task_pinned`'s `git_ref` field
   (`job_creator.rs:343`). Before that, no span, log line or error text may
-  carry it. Today's pin code does not meet this:
+  carry it — except the accepted full-SHA residual of § 10.3 (a 40-hex value
+  is the commit, and `ensure` / `ensure_tree` record the commit). Today's pin code does not meet this:
   - `PinStore::resolve` records `git_ref` as a span field
     (`crates/stroem-server/src/workspace/pins.rs:761`);
   - `PinError`'s `Display` prints it (`RefNotFound`, `pins.rs:317`;
@@ -382,7 +384,7 @@ its context. Instances that render the same value share one commit through
     `WorkspaceManager::pin_error_for_user` logs that label with the loader
     chain on a `PinLoadFailed` (`workspace/mod.rs:570-585`);
   - the webhook handler logs and classifies errors by their text
-    (`web/hooks.rs:102`, `web/api/mod.rs:424`).
+    (`web/hooks.rs:113`, `web/api/mod.rs:424`).
 
   Changes:
   1. `PinStore::resolve` stops recording `git_ref` in its span, for every
@@ -435,15 +437,23 @@ The order is a constraint:
      top-level object or array is copied unchanged. A top-level render error
      fails the step through `fail_task_step`, value-free — the child-input
      render would fail on the same field;
-   - **nested — best effort**: inside the copied objects and arrays, every
-     string leaf is rendered as a string where it renders; a nested leaf whose
-     render fails KEEPS ITS RAW TEXT — no error, nothing dropped, array length
-     and order unchanged. The real renderer may never render that leaf (a
-     non-`json` field copies the object, and a connection field accepts it
-     as-is, `template.rs:709-716`), so failing the step on it would reject a
-     valid input. A ref that reads such a leaf gets text that still holds a
-     template marker and is rejected by § 4.2 rule 3; a `default` cannot pick
-     a fallback, because the leaf is defined.
+   - **nested**: inside the copied objects and arrays, every string leaf is
+     rendered as a string; array length and order are unchanged. A nested
+     render error ALSO fails the step, value-free. Keeping the raw text
+     instead (revision 6) cannot be made safe: a ref can strip the delimiters
+     with a filter (`| replace(…)`) and turn the text of a failed leaf into a
+     valid ref name, and dropping the leaf lets a `default` pick a fallback.
+     The step fails rather than selecting a ref from a value that did not
+     render.
+
+     Known limitation, accepted: the real renderer may never render such a
+     leaf (a non-`json` field copies the object, and a connection field
+     accepts it as-is, `template.rs:709-716`). So a nested string that is not
+     valid template text, or that reads an undefined variable, inside an
+     object the real render copies unchanged, fails a step whose action has a
+     templated `ref:` although the same step without one would run. The
+     author escapes such text with `{% raw %}…{% endraw %}`. The error names
+     the input field, never its value. The user guide states this.
 
    It is a caller-side render (bucket `C`, never withheld). The projection is
    used ONLY to build the ref context; it is never persisted, logged or passed
@@ -557,7 +567,7 @@ config snapshot, re-authenticate against the fresh secret. Then:
    against the selected pin's secrets (§ 10.3) before the job is created.
    From here on it is exactly a static-ref webhook. Every resolution error
    leaves as a `RenderedRefError` (§ 5.5) before it reaches the handler's
-   error log (`web/hooks.rs:102`) or `classify_execute_error`.
+   error log (`web/hooks.rs:113`) or `classify_execute_error`.
 
 Errors go through `classify_execute_error`'s `RenderedRefError` branch: an
 empty value, an invalid value, a render error, a secret value and a ref that
@@ -796,16 +806,19 @@ in `tests/main.rs`; `PinnedFixture`):
   or failure; Phase 4.6 advances a row whose lease has expired.
 - Private path: a `PinLoadFailed` on a rendered ref logs the commit-only label
   (`ws (sha)`); no captured span, log line, error message or HTTP body carries
-  the rendered value before it passes the checks; the webhook's error log and
+  a branch or tag value before it passes the checks (a full-SHA value is the
+  accepted exception of § 10.3, asserted separately: only the `ensure` /
+  `ensure_tree` commit fields carry it); the webhook's error log and
   response carry only `RenderedRefError` text.
 - `vals` in a ref template is a validation error, and a render error at
   runtime.
 - Ref projection (§ 5.6): top-level fields equal `render_input_map`'s
-  output; nested string leaves render, arrays keep their order; a nested leaf
-  that fails keeps its raw text and a ref that reads it is rejected (no
-  fallback to a `default`); a malformed `{{` inside a connection object does
-  not fail a step whose ref reads another field; a top-level error fails the
-  step value-free.
+  output; nested string leaves render, arrays keep their order; a top-level
+  or nested render error fails the step value-free, naming the field (no
+  fallback to a `default`, no ref built from unrendered text — including a
+  ref that strips delimiters with `| replace`); a malformed `{{` inside a
+  connection object fails a step with a templated task ref and runs when
+  escaped with `{% raw %}` (the documented limitation).
 - Lease guard: dropping the resolver future mid-resolve stops renewal; Phase
   4.6 resolves the row once the lease has expired.
 - A resolution failure that loses to a cancellation writes nothing (the step
@@ -917,3 +930,11 @@ UI (Vitest): the `ref:` label on a deferred step row.
   follow-up; § 10.3 names template literals as a path. Codex rounds stop
   here by the drift rule: round 4 raised edge cases, no defect in the lease
   or resolution design.
+- **7 (2026-10-15)** — Codex round 5 (requested by the user): a nested
+  projection leaf that fails to render now fails the step — keeping its raw
+  text could be turned into a valid ref by a filter — with the narrow
+  incompatibility (unrendered nested text in a copied object) documented and
+  escapable with `{% raw %}` (§ 5.6); the privacy promises of § 5.3 / § 5.5 and
+  the tests name the full-SHA exception of § 10.3; citations fixed
+  (`web/hooks.rs:113`, `job_step.rs:791`). Round 5 found no stranding,
+  double-write, migration or SQL defect.
