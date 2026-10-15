@@ -1,6 +1,6 @@
 # Templated refs (`ref: "{{ … }}"`)
 
-Status: draft, revision 4 (2026-10-15)
+Status: draft, revision 5 (2026-10-15)
 Builds on: `2026-10-02-git-refs-design.md` (the git-refs spec, cited as GR),
 `2026-10-06-tera-2-upgrade-design.md` (cited as T2),
 `2026-09-11-render-context-owner-design.md`.
@@ -115,7 +115,8 @@ containing `{{` or `{%` (`crates/stroem-common/src/git_ref.rs:55`).
 | D9 | How a deferred step stays unclaimable | `action_type = 'deferred'` **and** `required_ability = 'deferred'`; claim SQL and index unchanged; the claim handler rejects a capability outside `KNOWN_ABILITIES`, as register does | Add `'deferred'` to the claim `NOT IN` list (needs a new partial index on `job_step`) |
 | D10 | Secrets | No context contains `secret`; a rendered ref that contains a value of the job's *ref secret set* (§ 10.3) is rejected | Masking the identifier columns; the full redaction closure as the check set (a closure walk per step, and a `MaskAll` outcome) |
 | D11 | Owner of a templated flow-step ref | Decided from the action name by `refs::ref_owner`, at creation; the template selects only the commit | A template that also selects the workspace |
-| D12 | One resolver per deferred step | A lease column, `job_step.resolve_lease_until`, taken with a guarded `UPDATE` | A recovery threshold only (a cold resolve can outlast any fixed threshold); unguarded concurrent resolution |
+| D12 | One resolver per deferred step | A short renewable lease with an owner token (`job_step.resolve_lease_owner`, `resolve_lease_until`); both final writes fence on the token | A recovery threshold only, or a fixed-length lease (a resolve can wait on the PinStore's resolve lock with no acquire timeout, so no fixed length is safe); unguarded concurrent resolution |
+| D13 | Ref template language | Full Tera, minus `secret` and `vals` (§ 4.2) | A restricted grammar — literal text, variable paths and a literal `default` — that would close the transformed-secret path by construction (§ 10.3). Declined by the user; the risk is accepted (§ 10.1) |
 
 ## 4. YAML surface and semantics
 
@@ -149,9 +150,10 @@ Hooks, event sources and agent task tools still reject every `ref:`
    constructed only in `render_context.rs`.
    No ref render can call `vals` either: `vals` fetches secret values from
    external stores, and a ref is an identifier. Validation rejects the `vals`
-   filter in a `ref:` template, and every ref render (including the § 5.6 ref
-   input) uses a render mode in which `vals` is not registered, so a use is a
-   render error.
+   filter in a `ref:` template, and the ref template is rendered in a mode in
+   which `vals` is not registered, so a use is a render error. (The § 5.6 ref
+   input is a step-input render, not a ref render: it keeps today's
+   step-input context, `secret` and `vals` included.)
 3. **Post-render check.** The rendered value is trimmed, then:
    - empty → error (D6);
    - contains a known secret value → error (§ 10.3);
@@ -183,7 +185,7 @@ does not call `resolve_step_action`. It builds a **deferred row**:
 | `ref_template` (new) | the template as written |
 | `runner` | `'none'` (the column is `NOT NULL` with the check `local, docker, pod, none`, `004_tags_runner.sql:7`, `:22-23`) |
 | `action_spec`, `action_image`, `action_revision`, `action_ref`, `task_*` | `NULL` |
-| `resolve_lease_until` (new) | `NULL` |
+| `resolve_lease_owner`, `resolve_lease_until` (new) | `NULL` |
 | `required_tags` | `[]` |
 | `input`, `timeout_secs`, `when_condition`, `for_each_expr` | from the flow step, as today |
 | retry columns | from the flow step's `retry:` when present; otherwise filled at resolution |
@@ -265,14 +267,20 @@ Consequences of the `init` call:
 
 For each `ready` step of the job with `action_type = 'deferred'`:
 
-0. **Take the lease** (D12):
-   `UPDATE job_step SET resolve_lease_until = NOW() + $lease WHERE job_id = $1 AND step_name = $2 AND status = 'ready' AND action_type = 'deferred' AND (resolve_lease_until IS NULL OR resolve_lease_until < NOW())`.
-   Zero rows → another advance holds the lease, or the step has moved on;
-   skip the step. `$lease` = `3 × workspace_reload.load_timeout_secs + 60 s`
-   (the ls-remote, the fetch and the checkout / config load are each bounded
-   by `load_timeout_secs`), so the lease of a live resolver does not expire
-   under it. The lease is not released: on success the step is no longer
-   deferred, on failure it is failed. Only the holder runs steps 1–7.
+0. **Take the lease** (D12). The resolver makes a fresh token
+   (`Uuid::new_v4()`) and runs
+   `UPDATE job_step SET resolve_lease_owner = $token, resolve_lease_until = NOW() + interval '60 seconds' WHERE job_id = $1 AND step_name = $2 AND status = 'ready' AND action_type = 'deferred' AND (resolve_lease_until IS NULL OR resolve_lease_until < NOW())`.
+   Zero rows → another resolver holds a live lease, or the step has moved on;
+   skip the step. While steps 1–7 run, a renewal task extends the lease every
+   20 s (`SET resolve_lease_until = NOW() + interval '60 seconds' WHERE … AND resolve_lease_owner = $token AND status = 'ready' AND action_type = 'deferred'`);
+   it stops when the resolution ends. A renewal that changes no row means the
+   lease is lost: the resolver stops before it writes. The lease is never
+   released explicitly — on success the step is no longer deferred, on
+   failure it is failed. Constants `DEFERRED_LEASE_SECS = 60`,
+   `DEFERRED_LEASE_RENEW_SECS = 20`. A resolver that waits a long time (the
+   PinStore's resolve lock has no acquire timeout, `pins.rs:787-788`; a cold
+   load can take several `load_timeout_secs`) keeps its lease by renewing; a
+   resolver whose process dies loses it within 60 s.
 1. Build the context with `render_context::build(job, steps, loop_slot, Scope::StepRef)`
    from the same `Snapshots` the advance already holds (`loop_slot` set for a
    `for_each` instance).
@@ -299,8 +307,10 @@ For each `ready` step of the job with `action_type = 'deferred'`:
    of `JobStepRepo::release_claim` (`job_step.rs:934-960`), which serialises
    with `JobRepo::cancel`'s write of the job row; if the job is not `pending`
    or `running`, write nothing; otherwise
-   `UPDATE job_step SET … WHERE job_id = $1 AND step_name = $2 AND status = 'ready' AND action_type = 'deferred'`.
-   Zero rows → the step was cancelled or timed out; the pass moves on. With the
+   `UPDATE job_step SET … WHERE job_id = $1 AND step_name = $2 AND status = 'ready' AND action_type = 'deferred' AND resolve_lease_owner = $token`.
+   Zero rows → the step was cancelled or timed out, or the lease was lost to
+   another resolver; the pass moves on. The token fence makes a lost lease
+   harmless: only the current holder can write. With the
    job row held `FOR SHARE`, `JobRepo::cancel` either commits first (the pass
    sees a terminal job and writes nothing) or waits until the resolution
    commits (and `cancel_pending_steps` then cancels the resolved `ready` row,
@@ -339,7 +349,7 @@ its context. Instances that render the same value share one commit through
   `JobStepRepo::fail_deferred_tx`, in the same transaction shape as § 5.3
   step 7: the job row `FOR SHARE`, nothing written unless the job is `pending`
   or `running`, then
-  `UPDATE job_step SET status = 'failed', error_message = $3, completed_at = NOW() WHERE job_id = $1 AND step_name = $2 AND status = 'ready' AND action_type = 'deferred'`,
+  `UPDATE job_step SET status = 'failed', error_message = $3, completed_at = NOW() WHERE job_id = $1 AND step_name = $2 AND status = 'ready' AND action_type = 'deferred' AND resolve_lease_owner = $4`,
   returning whether it changed a row. A failure that loses to a cancellation
   writes nothing, so the step ends `cancelled`, not `failed`. Plain `mark_failed`
   (`crates/stroem-db/src/repos/job_step.rs:781-790`) is NOT used: it matches
@@ -412,14 +422,17 @@ The order is a constraint:
 
 1. **ref input**: a recursive, schema-free projection of the caller's step
    `input:` map (new `template::render_ref_projection`): every string leaf,
-   at any depth, is rendered as a string; other leaves are copied. Its
-   context is a new `Scope::TaskRefInput` — `Scope::ChildTaskInput`'s context
-   WITHOUT `secret` — and `vals` is unavailable (§ 4.2 rule 2). A leaf whose
-   render fails (it reads `secret`, calls `vals`, or has any other error) is
-   left out, with no error; a ref that reads it then fails as an undefined
-   variable. It is not `render_input_map`, which renders top-level strings
-   only (`template.rs:484-495`). The projection is used ONLY to build the ref
-   context; it is never persisted, logged or passed to the child;
+   at any depth, is rendered as a string; other leaves are copied; arrays
+   keep their length and order. Its context is exactly the one the real
+   step-input render uses (`Scope::ChildTaskInput`: job input, caller
+   secrets, `vals` available), so a field that works in the child input also
+   works here. ANY leaf error fails the step through `fail_task_step` with a
+   value-free message — nothing is left out, so a `default` in the ref can
+   never pick a fallback because a leaf silently failed. It is a caller-side
+   error (bucket `C`, never withheld). It is not `render_input_map`, which
+   renders top-level strings only (`template.rs:484-495`). The projection is
+   used ONLY to build the ref context; it is never persisted, logged or passed
+   to the child;
 2. render the ref with `Scope::TaskActionRef { ref_input }` (no `secret`) and
    apply the post-render check;
 3. resolve the task owner `T` syntactically from `action_spec.task` relative
@@ -433,15 +446,18 @@ The order is a constraint:
    R26), `resolve_task_input_by_provenance(_roles)`, stamp `task_*` on the
    parent step, create the child pinned.
 
-Consequences: the caller's step input is rendered twice. With no `secret`
-and no `vals` in the projection, only a time-dependent function (`now()`) can
-give the ref a different value than the child input; the ref uses the first
-render.
+Consequences: the caller's step input is rendered twice — every `vals`
+lookup in it runs twice, and a value that can change between two renders
+(`now()`, a `vals` lookup) can give the ref a different value than the child
+input; the ref uses the first render. The projection can hold values derived
+from caller secrets; the ref template itself has no `secret` and no `vals`,
+and a verbatim secret in its output is rejected, but a filter can transform
+one (§ 10.1, accepted).
 Action defaults are not visible to the ref — an action that wants a default
 branch writes `{{ input.branch | default(value="main") }}`. This also keeps
 the owner's secrets, which bucket `D` renders with, out of the ref context.
-The ref-input render's own errors are caller-side (bucket `C`, never
-withheld) and go through `fail_task_step`.
+The ref-input render's errors are caller-side (bucket `C`, never withheld)
+and go through `fail_task_step`, value-free.
 
 Failures go through `fail_task_step`, as every dispatch failure does today;
 its unguarded `mark_failed` is part of the known double-dispatch gap (§ 14),
@@ -494,7 +510,10 @@ have a step with
 and `advance` each. Bounded and resumable like Phase 4.5
 (`StalledSweepBounds`, a cursor on `AppState`, one heartbeat per job). Only a
 lease holder resolves (§ 5.3 step 0), so recovery never starts a second
-resolution beside a live one: a slow cold resolve keeps its lease.
+resolution beside a live one: a slow resolve keeps renewing its lease, and a
+dead resolver's lease expires within `DEFERRED_LEASE_SECS`. Even if a lease
+is lost while its holder still runs, the token fence (§ 5.3 step 7, § 5.5)
+lets only the new holder write.
 
 **Out of scope (cut after Codex round 2).** A crash between the pass's
 `UPDATE` (real type `task` / `approval`) and the dispatch that follows leaves
@@ -558,8 +577,8 @@ rejects it, and `resolve_trigger_target` fails on one with `GitRefError::Templat
 ## 8. Storage — migration `051_templated_refs.sql` (additive)
 
 - `ALTER TABLE job_step ADD COLUMN ref_template TEXT;`
-- `ALTER TABLE job_step ADD COLUMN resolve_lease_until TIMESTAMPTZ;` (§ 5.3
-  step 0).
+- `ALTER TABLE job_step ADD COLUMN resolve_lease_owner UUID, ADD COLUMN resolve_lease_until TIMESTAMPTZ;`
+  (§ 5.3 step 0).
 - `CREATE TABLE job_ref_pin …` (§ 5.2).
 - Widen `job_step_action_type_check` (last set by `026_event_source.sql:9-10`)
   with `'deferred'`: migration 051 drops it and adds the wider check
@@ -609,7 +628,20 @@ now also:
 can make the server run any branch, tag or commit of the owner workspace with
 that commit's secrets and connections. Combined with push access to the owner
 repository, this runs arbitrary code with the owner's secrets. The user guide
-says so in a caution box. Follow-ups: § 14.
+says so in a caution box.
+
+A second accepted risk (D13, user decision 2026-10-15): **a transformed secret
+can appear in a ref identifier.** `action_ref`, `task_ref` and the job's `ref`
+are never masked (§ 2). The check of § 10.3 rejects a rendered ref that
+contains a known secret value verbatim, but a Tera filter in the ref template
+(`| upper`, `| replace(…)`, `| slice(…)`) applied to a context value that
+holds a secret — a job input, an earlier step's output, or a § 5.6 ref input
+rendered with caller secrets — can produce a string that reveals the secret
+without containing it. Example: a secret `abc` submitted as `input.branch` is
+masked in job detail, but `ref: "{{ input.branch | upper }}"` stores `ABC`.
+A restricted ref grammar would have closed this by construction and was
+declined. The user guide says: never pass a secret into a value that a `ref:`
+template reads. Follow-ups: § 14.
 
 ### 10.2 Redaction closure
 
@@ -638,14 +670,21 @@ and the pin loader, which do not record a private value (§ 5.5), and it is
 not written to the memo until it passes (§ 5.2). The memo itself has no API,
 log or metric outlet; its readers are resolution and the PinStore keep-set.
 
-**Transformed secrets.** No ref context contains `secret` or can call `vals`
-(§ 4.2 rule 2, § 5.6). A ref can therefore carry a secret only if a value
-already in its context does: the job input, or an earlier step's output.
-Those values are content elsewhere — job detail shows them, masked only where
-a secret value appears verbatim — so a transformed secret in them (upper-cased
-or encoded by a step) is already visible there, and the value check cannot
-catch it in `action_ref` either (redaction matches exact values, CLAUDE.md
-§ Secrets in logs). This adds no new exposure class; accepted.
+**What the check does not cover.** It matches secret values verbatim. A ref
+template that transforms a context value holding a secret is not caught —
+the accepted risk of § 10.1 (D13). The ref template itself has no `secret`
+and no `vals` (§ 4.2 rule 2), so a secret can only reach it through a value
+already in its context.
+
+**A full-SHA ref needs no extra privacy.** A 40-hex rendered value is used as
+the commit itself, and `PinStore::ensure` / `ensure_tree` record the commit in
+their spans (`pins.rs:957`, `:1005`) before the second check. That is safe:
+the first check (live set and this job's pins) has already passed, and the
+second check is against the selected commit X — whose content cannot contain
+X's own hash, because the hash is computed from the content. If the SHA names
+no commit, the load fails and no commit can define a secret with that value.
+What remains is a secret from a pin outside this job's set, the residual
+accepted above.
 
 Why not `redaction::job_redaction_values` (the full redaction closure): it walks
 the job's whole lineage (hook chains, restarts, re-runs, up to
@@ -729,16 +768,19 @@ in `tests/main.rs`; `PinnedFixture`):
 - Migration 051/052: a deferred row (`action_type = 'deferred'`,
   `runner = 'none'`) inserts; the constraint is valid after 052.
 - Lease: two concurrent advances — exactly one takes the lease and resolves;
-  Phase 4.6 skips a row whose lease is live and advances it once the lease
-  has expired.
+  a resolve held past `DEFERRED_LEASE_SECS` (`PinStore::hold_loads_for_test`)
+  keeps its lease by renewal and Phase 4.6 does not start a second one; a
+  resolver whose lease was taken over cannot write (token fence) for success
+  or failure; Phase 4.6 advances a row whose lease has expired.
 - Private path: a `PinLoadFailed` on a rendered ref logs the commit-only label
   (`ws (sha)`); no captured span, log line, error message or HTTP body carries
   the rendered value before it passes the checks; the webhook's error log and
   response carry only `RenderedRefError` text.
 - `vals` in a ref template is a validation error, and a render error at
   runtime.
-- Ref projection (§ 5.6): nested string leaves render; a leaf that reads
-  `secret` or calls `vals` is left out; the ref then fails as undefined.
+- Ref projection (§ 5.6): nested string leaves render, arrays keep their
+  order; a leaf that reads `secret` renders as it does in the child input;
+  any leaf error fails the step value-free (no fallback to a `default`).
 - A resolution failure that loses to a cancellation writes nothing (the step
   ends `cancelled`).
 - Ref secret set: a value equal to a secret that exists only in the selected
@@ -779,6 +821,8 @@ UI (Vitest): the `ref:` label on a deferred step row.
   it turns an error into a behaviour.
 - A trust gate for templated refs (`ref_allow` globs, or an owner-workspace
   policy — GR roadmap item).
+- Closing the transformed-secret path (§ 10.1, D13): a restricted ref
+  grammar, or masking of ref identifiers in every outlet.
 - Waiting through a temporary git failure at promotion instead of failing
   (D7).
 - A creation-time pre-check for templates that read only `input` (D8).
@@ -824,3 +868,11 @@ UI (Vitest): the `ref:` label on a deferred step row.
   the memo is written only after the checks (§ 5.2); **scope cut**: Phase 4.6
   re-advances deferred rows only, task / approval dispatch idempotency moves
   to the lifecycle-hardening spec (§ 5.8, § 14).
+- **5 (2026-10-15)** — Codex round 3: a short renewable lease with an owner
+  token, and both final writes fence on it (D12, § 5.3, § 5.5, § 5.8); a
+  transformed secret in a ref identifier is an accepted risk by user decision
+  — a restricted grammar was offered and declined (D13, § 10.1, § 10.3; the
+  rev-4 claim that such values were already visible was wrong); the § 5.6 ref
+  input uses the real step-input context and fails on any leaf error, so no
+  leaf is silently dropped; a full-SHA ref needs no extra privacy, with the
+  reason in § 10.3 (round-3 finding 1 answered, not changed).
