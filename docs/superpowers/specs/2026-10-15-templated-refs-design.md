@@ -1,6 +1,6 @@
 # Templated refs (`ref: "{{ … }}"`)
 
-Status: draft, revision 5 (2026-10-15)
+Status: draft, revision 6 (2026-10-15)
 Builds on: `2026-10-02-git-refs-design.md` (the git-refs spec, cited as GR),
 `2026-10-06-tera-2-upgrade-design.md` (cited as T2),
 `2026-09-11-render-context-owner-design.md`.
@@ -273,8 +273,13 @@ For each `ready` step of the job with `action_type = 'deferred'`:
    Zero rows → another resolver holds a live lease, or the step has moved on;
    skip the step. While steps 1–7 run, a renewal task extends the lease every
    20 s (`SET resolve_lease_until = NOW() + interval '60 seconds' WHERE … AND resolve_lease_owner = $token AND status = 'ready' AND action_type = 'deferred'`);
-   it stops when the resolution ends. A renewal that changes no row means the
-   lease is lost: the resolver stops before it writes. The lease is never
+   it stops when the resolution ends. The renewal task is owned by a guard
+   that the resolver holds (`LeaseGuard`); the guard's `Drop` aborts the task,
+   so renewal stops on EVERY exit — success, error, panic, and the resolver
+   future being dropped (for example a cancelled HTTP request during `init`).
+   A detached renewal task that outlives its resolver would keep a `ready`
+   row leased forever, out of Phase 4.6's reach. A renewal that changes no row
+   means the lease is lost: the resolver stops before it writes. The lease is never
    released explicitly — on success the step is no longer deferred, on
    failure it is failed. Constants `DEFERRED_LEASE_SECS = 60`,
    `DEFERRED_LEASE_RENEW_SECS = 20`. A resolver that waits a long time (the
@@ -420,17 +425,27 @@ value, other fields strings — `render_input_typed`,
 task ref would make that circular, so the ref gets its own, schema-free input.
 The order is a constraint:
 
-1. **ref input**: a recursive, schema-free projection of the caller's step
-   `input:` map (new `template::render_ref_projection`): every string leaf,
-   at any depth, is rendered as a string; other leaves are copied; arrays
-   keep their length and order. Its context is exactly the one the real
+1. **ref input**: a schema-free projection of the caller's step `input:` map
+   (new `template::render_ref_projection`), in the context the real
    step-input render uses (`Scope::ChildTaskInput`: job input, caller
-   secrets, `vals` available), so a field that works in the child input also
-   works here. ANY leaf error fails the step through `fail_task_step` with a
-   value-free message — nothing is left out, so a `default` in the ref can
-   never pick a fallback because a leaf silently failed. It is a caller-side
-   error (bucket `C`, never withheld). It is not `render_input_map`, which
-   renders top-level strings only (`template.rs:484-495`). The projection is
+   secrets, `vals` available):
+   - **top level — exactly the real renderer**: the map goes through
+     `render_input_map` (`template.rs:484-525`): a top-level string is
+     rendered (a simple variable reference keeps a structured value), a
+     top-level object or array is copied unchanged. A top-level render error
+     fails the step through `fail_task_step`, value-free — the child-input
+     render would fail on the same field;
+   - **nested — best effort**: inside the copied objects and arrays, every
+     string leaf is rendered as a string where it renders; a nested leaf whose
+     render fails KEEPS ITS RAW TEXT — no error, nothing dropped, array length
+     and order unchanged. The real renderer may never render that leaf (a
+     non-`json` field copies the object, and a connection field accepts it
+     as-is, `template.rs:709-716`), so failing the step on it would reject a
+     valid input. A ref that reads such a leaf gets text that still holds a
+     template marker and is rejected by § 4.2 rule 3; a `default` cannot pick
+     a fallback, because the leaf is defined.
+
+   It is a caller-side render (bucket `C`, never withheld). The projection is
    used ONLY to build the ref context; it is never persisted, logged or passed
    to the child;
 2. render the ref with `Scope::TaskActionRef { ref_input }` (no `secret`) and
@@ -449,7 +464,9 @@ The order is a constraint:
 Consequences: the caller's step input is rendered twice — every `vals`
 lookup in it runs twice, and a value that can change between two renders
 (`now()`, a `vals` lookup) can give the ref a different value than the child
-input; the ref uses the first render. The projection can hold values derived
+input; the ref uses the first render, so a ref can select commit A while the
+child input holds a value that would have selected B (follow-up, § 14). The
+projection can hold values derived
 from caller secrets; the ref template itself has no `secret` and no `vals`,
 and a verbatim secret in its output is rejected, but a filter can transform
 one (§ 10.1, accepted).
@@ -674,17 +691,22 @@ log or metric outlet; its readers are resolution and the PinStore keep-set.
 template that transforms a context value holding a secret is not caught —
 the accepted risk of § 10.1 (D13). The ref template itself has no `secret`
 and no `vals` (§ 4.2 rule 2), so a secret can only reach it through a value
-already in its context.
+in its context, or through the template's own literal text — which is
+written in the YAML, where it is already visible to every reader.
 
-**A full-SHA ref needs no extra privacy.** A 40-hex rendered value is used as
-the commit itself, and `PinStore::ensure` / `ensure_tree` record the commit in
-their spans (`pins.rs:957`, `:1005`) before the second check. That is safe:
-the first check (live set and this job's pins) has already passed, and the
-second check is against the selected commit X — whose content cannot contain
-X's own hash, because the hash is computed from the content. If the SHA names
-no commit, the load fails and no commit can define a secret with that value.
-What remains is a secret from a pin outside this job's set, the residual
-accepted above.
+**A full-SHA ref: one more accepted residual.** A 40-hex rendered value is
+used as the commit itself, and `PinStore::ensure` / `ensure_tree` record the
+commit in their spans (`pins.rs:957`, `:1005`) before the second check. For a
+secret written literally in commit X this is safe: X's content cannot contain
+X's own hash, because the hash is computed from the content; and if the SHA
+names no commit, no commit defines a secret with that value. It is NOT safe
+for a secret that X fetches at load through `vals` (`ref+…`,
+`crates/stroem-common/src/template.rs:12`): the external value can be any
+string, including X's own commit ID. Accepted, not fixed (no privacy flag is
+threaded into `ensure` / `ensure_tree`): such a value is a commit ID of the
+owner repository, visible to everyone who can read that repository, so a
+secret store that holds it holds no secret from them. A secret from a pin
+outside this job's set stays the residual accepted above.
 
 Why not `redaction::job_redaction_values` (the full redaction closure): it walks
 the job's whole lineage (hook chains, restarts, re-runs, up to
@@ -778,9 +800,14 @@ in `tests/main.rs`; `PinnedFixture`):
   response carry only `RenderedRefError` text.
 - `vals` in a ref template is a validation error, and a render error at
   runtime.
-- Ref projection (§ 5.6): nested string leaves render, arrays keep their
-  order; a leaf that reads `secret` renders as it does in the child input;
-  any leaf error fails the step value-free (no fallback to a `default`).
+- Ref projection (§ 5.6): top-level fields equal `render_input_map`'s
+  output; nested string leaves render, arrays keep their order; a nested leaf
+  that fails keeps its raw text and a ref that reads it is rejected (no
+  fallback to a `default`); a malformed `{{` inside a connection object does
+  not fail a step whose ref reads another field; a top-level error fails the
+  step value-free.
+- Lease guard: dropping the resolver future mid-resolve stops renewal; Phase
+  4.6 resolves the row once the lease has expired.
 - A resolution failure that loses to a cancellation writes nothing (the step
   ends `cancelled`).
 - Ref secret set: a value equal to a secret that exists only in the selected
@@ -823,6 +850,10 @@ UI (Vitest): the `ref:` label on a deferred step row.
   policy — GR roadmap item).
 - Closing the transformed-secret path (§ 10.1, D13): a restricted ref
   grammar, or masking of ref identifiers in every outlet.
+- A `type: task` ref and its child input from ONE evaluation of the caller's
+  step input (§ 5.6 renders it twice; a `vals` lookup or `now()` can differ).
+- A privacy flag through `PinStore::ensure` / `ensure_tree` for a full-SHA
+  ref whose value a `vals` secret holds (§ 10.3).
 - Waiting through a temporary git failure at promotion instead of failing
   (D7).
 - A creation-time pre-check for templates that read only `input` (D8).
@@ -876,3 +907,13 @@ UI (Vitest): the `ref:` label on a deferred step row.
   input uses the real step-input context and fails on any leaf error, so no
   leaf is silently dropped; a full-SHA ref needs no extra privacy, with the
   reason in § 10.3 (round-3 finding 1 answered, not changed).
+- **6 (2026-10-15)** — Codex round 4: the full-SHA argument holds only for
+  literal secrets — a `vals`-fetched secret can equal a commit ID, recorded as
+  an accepted residual (§ 10.3, § 14); the § 5.6 projection uses
+  `render_input_map` at the top level and keeps the raw text of a nested leaf
+  that fails, so it accepts every input the real render accepts; the lease
+  renewal task is owned by a `LeaseGuard` that aborts it on every exit
+  (§ 5.3); the two renders of a `type: task` step input are a recorded
+  follow-up; § 10.3 names template literals as a path. Codex rounds stop
+  here by the drift rule: round 4 raised edge cases, no defect in the lease
+  or resolution design.
