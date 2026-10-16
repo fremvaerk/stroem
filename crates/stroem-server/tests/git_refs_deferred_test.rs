@@ -1088,6 +1088,25 @@ const DF_EXTRA_TASKS: &str = r#"
         for_each: ["a..b", "a..c", "a..d"]
         sequential: true
         continue_on_failure: true
+  tr-each-seq-fail-later:
+    flow:
+      first:
+        action: hello
+      run:
+        action: hello
+        ref: "{{ each.item }}"
+        for_each: ["a..b", "a..c", "a..d"]
+        sequential: true
+        continue_on_failure: true
+        depends_on: [first]
+  tr-retry-ref:
+    retry:
+      max_attempts: 2
+      delay: 1s
+    flow:
+      run:
+        action: hello
+        ref: "release/{{ '2.3' }}"
 "#;
 
 /// Dotted local action keys of `etl` release/2.3: `common-ish` is not a
@@ -1136,9 +1155,38 @@ async fn a_self_qualified_dotted_action_resolves_at_a_templated_ref() -> Result<
 /// the flow. A sequential loop with `continue_on_failure` whose instances all
 /// fail resolution needs one pass per instance; all fail inside `init`.
 #[tokio::test]
-async fn every_sequential_instance_that_fails_resolution_fails_in_one_advance() -> Result<()> {
+async fn every_sequential_instance_that_fails_resolution_fails_in_one_init() -> Result<()> {
     let fx = df_extra_fixture().await?;
     let job_id = df_create(&fx, "tr-each-seq-fail", json!({})).await?;
+    for i in 0..3 {
+        let inst = df_step(&fx.pool, job_id, &format!("run[{i}]")).await;
+        assert_eq!(inst.status, "failed", "run[{i}]");
+        assert_eq!(
+            inst.error_message,
+            Some(format!(
+                "[ref] step 'run[{i}]': the rendered ref is not a valid branch, tag or full commit SHA"
+            ))
+        );
+    }
+    Ok(())
+}
+
+/// The same loop behind a step that is still running at creation: `init`
+/// cannot reach it, so the whole chain of failures happens in ONE
+/// `Settlement::advance` (started by the upstream step's completion).
+#[tokio::test]
+async fn every_sequential_instance_that_fails_resolution_fails_in_one_advance() -> Result<()> {
+    let fx = df_extra_fixture().await?;
+    let job_id = df_create(&fx, "tr-each-seq-fail-later", json!({})).await?;
+    assert_eq!(df_step(&fx.pool, job_id, "first").await.status, "ready");
+    assert!(
+        JobStepRepo::get_step(&fx.pool, job_id, "run[0]")
+            .await?
+            .is_none(),
+        "the loop is not expanded before `first` completes"
+    );
+    let worker = register_worker(&fx.router, &["script"]).await;
+    claim_and_complete(&fx, &worker, job_id, "first", json!({})).await;
     for i in 0..3 {
         let inst = df_step(&fx.pool, job_id, &format!("run[{i}]")).await;
         assert_eq!(inst.status, "failed", "run[{i}]");
@@ -1311,15 +1359,19 @@ async fn a_resolver_whose_lease_was_taken_over_cannot_write() -> Result<()> {
                 async move { df_resolve_on(&state, job_id, LeaseTiming::default()).await },
             );
         wait_until(|| hold.entered() > 0).await;
+        // A real takeover: A's lease expires, then a second resolver takes it.
         sqlx::query(
-            "UPDATE job_step SET resolve_lease_owner = $2, \
-                                 resolve_lease_until = NOW() + interval '1 hour' \
+            "UPDATE job_step SET resolve_lease_until = NOW() - interval '1 second' \
              WHERE job_id = $1 AND step_name = 'later'",
         )
         .bind(job_id)
-        .bind(Uuid::new_v4())
         .execute(&fx.pool)
         .await?;
+        let second = Uuid::new_v4();
+        assert!(
+            JobStepRepo::take_resolve_lease(&fx.pool, job_id, "later", second, 3600.0).await?,
+            "{branch}: the second resolver takes the expired lease"
+        );
         drop(hold);
         resolver.await??;
         let later = df_step(&fx.pool, job_id, "later").await;
@@ -1329,6 +1381,17 @@ async fn a_resolver_whose_lease_was_taken_over_cannot_write() -> Result<()> {
             "{branch}"
         );
         assert!(later.error_message.is_none(), "{branch}");
+        let owner: Option<Uuid> = sqlx::query_scalar(
+            "SELECT resolve_lease_owner FROM job_step WHERE job_id = $1 AND step_name = 'later'",
+        )
+        .bind(job_id)
+        .fetch_one(&fx.pool)
+        .await?;
+        assert_eq!(
+            owner,
+            Some(second),
+            "{branch}: the second token still owns it"
+        );
     }
     Ok(())
 }
@@ -1911,5 +1974,65 @@ async fn a_templated_task_ref_to_the_jobs_own_task_and_pin_is_a_self_reference()
         .fetch_one(&fx.pool)
         .await?;
     assert_eq!(children, 0);
+    Ok(())
+}
+
+/// Spec § 12: a task retry is a new job with a new memo; its templates resolve
+/// again, at the branch's CURRENT tip.
+#[tokio::test]
+async fn a_task_retry_resolves_its_templated_ref_again_with_its_own_pins() -> Result<()> {
+    let fx = df_extra_fixture().await?;
+    let first = df_create(&fx, "tr-retry-ref", json!({})).await?;
+    let run1 = df_step(&fx.pool, first, "run").await;
+    assert_eq!(run1.status, "ready", "{:?}", run1.error_message);
+    assert_eq!(run1.action_type, "script");
+    assert_eq!(
+        run1.action_revision.as_deref(),
+        Some(fx.commits.etl_release.as_str())
+    );
+    let pins1 = JobRefPinRepo::list_for_job(&fx.pool, first).await?;
+    assert!(!pins1.is_empty());
+
+    // The branch moves after the first job resolved, before the retry exists.
+    let moved = fx.etl.commit(
+        "release/2.3",
+        "release/2.3",
+        &[(
+            "workflow.yaml",
+            &df_etl_release().replace("echo v1", "echo v4"),
+        )],
+    );
+    assert_ne!(moved, fx.commits.etl_release);
+
+    JobStepRepo::mark_failed(&fx.pool, first, "run", "boom").await?;
+    fx.state.settlement().advance(first).await?;
+
+    let retry_id: Uuid = sqlx::query_scalar("SELECT job_id FROM job WHERE retry_of_job_id = $1")
+        .bind(first)
+        .fetch_one(&fx.pool)
+        .await?;
+    let run2 = df_step(&fx.pool, retry_id, "run").await;
+    assert_eq!(run2.status, "ready", "{:?}", run2.error_message);
+    assert_eq!(
+        run2.action_type, "script",
+        "deferred at creation, resolved again"
+    );
+    assert_eq!(run2.action_ref.as_deref(), Some("release/2.3"));
+    assert_eq!(run2.action_revision.as_deref(), Some(moved.as_str()));
+    assert_eq!(
+        df_step(&fx.pool, first, "run").await.action_revision,
+        run1.action_revision,
+        "the first job keeps its commit"
+    );
+
+    let pins2 = JobRefPinRepo::list_for_job(&fx.pool, retry_id).await?;
+    assert!(!pins2.is_empty(), "the retry has its own pin rows");
+    assert!(pins2.iter().any(|p| p.commit == moved), "{pins2:?}");
+    let pins1_after = JobRefPinRepo::list_for_job(&fx.pool, first).await?;
+    assert_eq!(pins1_after.len(), pins1.len());
+    assert!(pins1_after
+        .iter()
+        .zip(&pins1)
+        .all(|(a, b)| a.commit == b.commit));
     Ok(())
 }
