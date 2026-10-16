@@ -1333,6 +1333,7 @@ fn check_ref_template(label: &str, template: &str) -> Result<()> {
 /// A trigger's `task` (scheduler / webhook). With `ref`, the task is looked up
 /// at that ref by the server when the trigger fires, so it is not checked
 /// here. Without `ref`, `ws.task` is a cross-workspace trigger task.
+#[allow(clippy::too_many_arguments)]
 fn validate_trigger_task(
     trigger_name: &str,
     task: &str,
