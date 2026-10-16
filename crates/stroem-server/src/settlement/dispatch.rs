@@ -21,7 +21,7 @@ use crate::job_creator::{
     compute_depth, create_job_for_task_inner, ref_world_sets, resolve_task_ref, task_at,
     CreationMode, OwnerConfig, ResolvedTask, MAX_TASK_DEPTH,
 };
-use crate::refs::{plan_reference, RefPlan, RefResolveError, RefWorld};
+use crate::refs::{plan_reference, RefPlan, RefWorld};
 use crate::render_context::{self, JobContext, LoopSlot, Scope, Snapshots};
 use crate::settlement::deferred::{ref_secret_set, select_commit};
 use crate::templated_ref::{RenderedRefError, RenderedRefKind};
@@ -281,13 +281,7 @@ async fn resolve_templated_task_ref(
         Ok(RefPlan::Today { .. }) => {
             unreachable!("plan_reference returns AtRef whenever a ref is given")
         }
-        Err(e) => {
-            let ws = match &e {
-                RefResolveError::NotGit(ws) => ws.clone(),
-                _ => base_ws.to_string(),
-            };
-            return Ok(fail(RenderedRefError::from_error(&e.into(), &ws)));
-        }
+        Err(e) => return Ok(fail(RenderedRefError::from_plan_error(e, base_ws))),
     };
     let secrets = match ref_secret_set(workspaces, pool, job).await? {
         Ok(s) => s,
@@ -1202,8 +1196,9 @@ async fn orchestrate_after_server_step_failure(
 }
 
 /// The creator's post-commit initialisation: everything a freshly committed
-/// job owes before it is handed back — root-step cascade, `type: task`
-/// dispatch, `type: approval` dispatch, settlement. Returns the settled
+/// job owes before it is handed back — root-step cascade, then the dispatch
+/// round (deferred pass, `type: task` dispatch, `type: approval` dispatch;
+/// repeated while it promotes a new deferred step), settlement. Returns the settled
 /// status when the job reached a terminal state during initialisation.
 ///
 /// Compensation on `Err` stays with the caller (`create_job_for_task_inner`):
@@ -1243,45 +1238,62 @@ pub async fn init(
         .await
         .context("creation-time step cascade")?;
 
-    // Deferred root steps (spec 2026-10-15 § 5.3): a root step with a
-    // templated `ref:` is inserted `ready`, so without this call it would
-    // wait for recovery. A resolution failure fails only its step; an
-    // escaping (DB) error takes the `[creation] initialisation failed` path.
-    crate::settlement::deferred::resolve_deferred_steps(
-        workspaces,
-        pool,
-        workspace_config,
-        workspace_name,
-        job_id,
-        task,
-        defaults,
-        &snapshots,
-    )
-    .await
-    .context("resolve deferred steps")?;
+    // The dispatch round (spec 2026-10-15 § 5.3), repeated while a round
+    // leaves a NEW deferred `ready` row: a task or approval dispatch failure
+    // re-cascades and can promote a deferred dependent after this round's
+    // deferred pass ran. The cascade is not re-run here.
+    let mut rounds = crate::settlement::deferred::DispatchRounds::start(pool, job_id)
+        .await
+        .context("read deferred steps")?;
+    loop {
+        // Deferred steps: a root step with a templated `ref:` is inserted
+        // `ready`, so without this call it would wait for recovery. A
+        // resolution failure fails only its step; an escaping (DB) error
+        // takes the `[creation] initialisation failed` path.
+        crate::settlement::deferred::resolve_deferred_steps(
+            workspaces,
+            pool,
+            workspace_config,
+            workspace_name,
+            job_id,
+            task,
+            defaults,
+            &snapshots,
+        )
+        .await
+        .context("resolve deferred steps")?;
 
-    handle_task_steps(
-        workspaces,
-        pool,
-        workspace_config,
-        workspace_name,
-        job_id,
-        task,
-        defaults,
-        &snapshots,
-    )
-    .await?;
+        handle_task_steps(
+            workspaces,
+            pool,
+            workspace_config,
+            workspace_name,
+            job_id,
+            task,
+            defaults,
+            &snapshots,
+        )
+        .await?;
 
-    handle_approval_steps(
-        pool,
-        workspace_config,
-        workspace_name,
-        job_id,
-        task,
-        &snapshots,
-    )
-    .await
-    .context("dispatch initial approval steps")?;
+        handle_approval_steps(
+            pool,
+            workspace_config,
+            workspace_name,
+            job_id,
+            task,
+            &snapshots,
+        )
+        .await
+        .context("dispatch initial approval steps")?;
+
+        if !rounds
+            .again(pool, job_id)
+            .await
+            .context("read deferred steps")?
+        {
+            break;
+        }
+    }
 
     let settled = crate::settlement::settle_if_all_terminal(pool, job_id, task)
         .await

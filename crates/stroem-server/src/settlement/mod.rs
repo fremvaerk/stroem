@@ -300,7 +300,10 @@ impl Settlement {
         };
         let resolved = self.resolve(&job).await?;
 
-        // Step 3 — once, not a loop (spec §6.3). Without a flow there is
+        // Step 3 — once, not a loop (spec §6.3): one cascade per advance.
+        // Only the dispatch round after it repeats, while a round leaves a
+        // new deferred `ready` row (`deferred::DispatchRounds`, templated-refs
+        // spec § 5.3). Without a flow there is
         // nothing to execute, but step 4 still runs: `resolve` itself settles
         // a job whose pin can never load (git-refs F4), and that job must
         // still drain, claim and propagate to its parent. Step 4 re-reads the
@@ -321,57 +324,80 @@ impl Settlement {
             // for_each placeholders (inside the cascade), check terminal.
             cascade_and_settle(&self.pool, job_id, task, workspace, &snapshots).await?;
 
-            // Deferred steps (spec 2026-10-15 § 5.3): resolve every templated
-            // `ref:` this cascade promoted, before task / approval dispatch
-            // reads the real action types. An escaping error is a DB error:
-            // logged like a task-dispatch error, never propagated.
-            if let Err(e) = deferred::resolve_deferred_steps(
-                &self.workspaces,
-                &self.pool,
-                workspace,
-                &job.workspace,
-                job_id,
-                task,
-                self.defaults,
-                &snapshots,
-            )
-            .await
-            {
-                tracing::error!(
-                    "Failed to resolve deferred steps for job {}: {:#}",
+            // The dispatch round (spec 2026-10-15 § 5.3), repeated while a
+            // round leaves a NEW deferred `ready` row: a task or approval
+            // dispatch failure re-cascades and can promote a deferred
+            // dependent after this round's deferred pass ran. The cascade
+            // itself is not re-run (the failure paths already cascade). A
+            // failed read of the rows ends the loop: logged, never propagated.
+            let mut rounds = deferred::DispatchRounds::start(&self.pool, job_id)
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::error!("Failed to read deferred steps of job {}: {:#}", job_id, e);
+                    deferred::DispatchRounds::single()
+                });
+            loop {
+                // Deferred steps: resolve every templated `ref:` the cascade
+                // promoted, before task / approval dispatch reads the real
+                // action types. An escaping error is a DB error: logged like
+                // a task-dispatch error, never propagated.
+                if let Err(e) = deferred::resolve_deferred_steps(
+                    &self.workspaces,
+                    &self.pool,
+                    workspace,
+                    &job.workspace,
                     job_id,
-                    e
-                );
-                self.server_log(
-                    job_id,
-                    &format!("[orchestration] Failed to resolve deferred steps: {:#}", e),
+                    task,
+                    self.defaults,
+                    &snapshots,
                 )
-                .await;
-            }
+                .await
+                {
+                    tracing::error!(
+                        "Failed to resolve deferred steps for job {}: {:#}",
+                        job_id,
+                        e
+                    );
+                    self.server_log(
+                        job_id,
+                        &format!("[orchestration] Failed to resolve deferred steps: {:#}", e),
+                    )
+                    .await;
+                }
 
-            // Handle any newly-promoted type: task steps (including loop instances)
-            if let Err(e) = dispatch::handle_task_steps(
-                &self.workspaces,
-                &self.pool,
-                workspace,
-                &job.workspace,
-                job_id,
-                task,
-                self.defaults,
-                &snapshots,
-            )
-            .await
-            {
-                tracing::error!("Failed to handle task steps for job {}: {:#}", job_id, e);
-                self.server_log(
+                // Handle any newly-promoted type: task steps (including loop instances)
+                if let Err(e) = dispatch::handle_task_steps(
+                    &self.workspaces,
+                    &self.pool,
+                    workspace,
+                    &job.workspace,
                     job_id,
-                    &format!("[orchestration] Failed to handle task steps: {:#}", e),
+                    task,
+                    self.defaults,
+                    &snapshots,
                 )
-                .await;
+                .await
+                {
+                    tracing::error!("Failed to handle task steps for job {}: {:#}", job_id, e);
+                    self.server_log(
+                        job_id,
+                        &format!("[orchestration] Failed to handle task steps: {:#}", e),
+                    )
+                    .await;
+                }
+                self.reconcile(job_id).await;
+                self.dispatch_approvals(&job, workspace, task, &snapshots)
+                    .await?;
+
+                match rounds.again(&self.pool, job_id).await {
+                    Ok(true) => {}
+                    Ok(false) => break,
+                    Err(e) => {
+                        tracing::error!("Failed to read deferred steps of job {}: {:#}", job_id, e);
+                        break;
+                    }
+                }
             }
-            self.reconcile(job_id).await;
-            self.dispatch_approvals(&job, workspace, task, &snapshots)
-                .await?;
         }
 
         // Step 4.

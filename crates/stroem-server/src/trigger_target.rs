@@ -135,7 +135,7 @@ pub(crate) async fn resolve_templated_trigger_target(
         Ok(RefPlan::Today { .. }) => {
             unreachable!("plan_reference returns AtRef whenever a ref is given")
         }
-        Err(e) => return Err(RenderedRefError::from_error(&e.into(), defining_ws)),
+        Err(e) => return Err(RenderedRefError::from_plan_error(e, defining_ws)),
     };
     let owner = target.owner.clone();
     let fail = |e: anyhow::Error| RenderedRefError::from_error(&e, &owner);
@@ -284,5 +284,33 @@ mod tests {
             err.downcast_ref::<crate::refs::RefResolveError>(),
             Some(crate::refs::RefResolveError::NotGit(ws)) if ws == "docs"
         ));
+    }
+
+    /// A templated webhook `ref:` on `ws.task` whose `ws` is not git names
+    /// THAT workspace, not the one defining the trigger (as dispatch does).
+    #[tokio::test]
+    async fn templated_ref_on_a_non_git_foreign_owner_names_the_owner() {
+        let mgr = WorkspaceManager::from_configs(vec![
+            ("etl".to_string(), WorkspaceConfig::new(), None),
+            ("docs".to_string(), WorkspaceConfig::new(), None),
+        ]);
+        let cfg = Arc::new(WorkspaceConfig::new());
+        let err = resolve_templated_trigger_target(
+            &mgr,
+            "etl",
+            &cfg,
+            "docs.t",
+            "{{ input.body.ref }}",
+            &serde_json::json!({"body": {"ref": "main"}}),
+        )
+        .await
+        .err()
+        .expect("a folder owner cannot be pinned");
+        assert_eq!(err.kind, RenderedRefKind::NotGit);
+        assert_eq!(err.workspace, "docs");
+        assert_eq!(
+            err.to_string(),
+            "workspace 'docs' is not a git workspace; `ref` needs a git owner"
+        );
     }
 }

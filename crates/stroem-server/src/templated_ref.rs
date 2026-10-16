@@ -64,6 +64,17 @@ impl RenderedRefError {
         Self::new(kind, workspace)
     }
 
+    /// A `refs::plan_reference` failure for a name written in `base_ws`.
+    /// `NotGit` names the owner it found (a `ws.task` whose `ws` is a folder
+    /// workspace); every other kind is labelled with `base_ws`.
+    pub fn from_plan_error(err: RefResolveError, base_ws: &str) -> Self {
+        let ws = match &err {
+            RefResolveError::NotGit(ws) => ws.clone(),
+            _ => base_ws.to_string(),
+        };
+        Self::from_error(&err.into(), &ws)
+    }
+
     /// Classify `err` by type. `err` itself is dropped: its text may carry
     /// the rendered value.
     pub fn from_error(err: &anyhow::Error, workspace: &str) -> Self {
@@ -286,6 +297,23 @@ mod tests {
             RenderedRefError::new(RenderedRefKind::NotFound { short_sha: false }, "billing")
                 .to_string(),
             "the rendered ref was not found in workspace 'billing'"
+        );
+    }
+
+    #[test]
+    fn a_plan_error_names_a_non_git_owner_and_otherwise_the_base() {
+        let e = RenderedRefError::from_plan_error(RefResolveError::NotGit("docs".into()), "etl");
+        assert_eq!(
+            (e.kind, e.workspace.as_str()),
+            (RenderedRefKind::NotGit, "docs")
+        );
+        let e = RenderedRefError::from_plan_error(
+            RefResolveError::UnknownWorkspace("nowhere".into()),
+            "etl",
+        );
+        assert_eq!(
+            (e.kind, e.workspace.as_str()),
+            (RenderedRefKind::Unresolvable, "etl")
         );
     }
 

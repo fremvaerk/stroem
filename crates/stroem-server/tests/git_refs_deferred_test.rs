@@ -257,6 +257,27 @@ const DF_TASKS: &str = r#"
         depends_on: [first]
         input:
           branch: release/2.3
+  tr-after-dispatch-failure:
+    flow:
+      call:
+        action: call-nightly-at
+      after:
+        action: hello
+        ref: "{{ 'release/' ~ '2.3' }}"
+        depends_on:
+          - {step: call, accept: [failed]}
+  tr-after-dispatch-failure-later:
+    flow:
+      first:
+        action: hello
+      call:
+        action: call-nightly-at
+        depends_on: [first]
+      after:
+        action: hello
+        ref: "{{ 'release/' ~ '2.3' }}"
+        depends_on:
+          - {step: call, accept: [failed]}
 "#;
 
 /// `etl` main with the templated-ref actions and tasks.
@@ -747,6 +768,45 @@ async fn a_resolved_approval_step_suspends() -> Result<()> {
     Ok(())
 }
 
+/// Final review finding 1: a `type: task` step that fails at DISPATCH
+/// re-cascades and promotes a deferred dependent (`accept: [failed]`). The
+/// same `init` resolves it — no wait for recovery Phase 4.6.
+#[tokio::test]
+async fn a_deferred_step_promoted_by_a_dispatch_failure_resolves_in_the_same_init() -> Result<()> {
+    let fx = df_fixture().await?;
+    let job_id = df_create(&fx, "tr-after-dispatch-failure", json!({})).await?;
+    let call = df_step(&fx.pool, job_id, "call").await;
+    assert_eq!(call.status, "failed", "{:?}", call.error_message);
+    let after = df_step(&fx.pool, job_id, "after").await;
+    assert_eq!(after.status, "ready");
+    assert_eq!(after.action_type, "script", "resolved inside init");
+    assert_eq!(after.action_ref.as_deref(), Some("release/2.3"));
+    assert_eq!(
+        after.action_revision.as_deref(),
+        Some(fx.commits.etl_release.as_str())
+    );
+    Ok(())
+}
+
+/// Finding 1 through `Settlement::advance`: the dispatch failure happens in
+/// the advance that a completed upstream step starts.
+#[tokio::test]
+async fn a_deferred_step_promoted_by_a_dispatch_failure_resolves_in_the_same_advance() -> Result<()>
+{
+    let fx = df_fixture().await?;
+    let job_id = df_create(&fx, "tr-after-dispatch-failure-later", json!({})).await?;
+    assert_eq!(df_step(&fx.pool, job_id, "call").await.status, "pending");
+    let worker = register_worker(&fx.router, &["script"]).await;
+    claim_and_complete(&fx, &worker, job_id, "first", json!({})).await;
+    let call = df_step(&fx.pool, job_id, "call").await;
+    assert_eq!(call.status, "failed", "{:?}", call.error_message);
+    let after = df_step(&fx.pool, job_id, "after").await;
+    assert_eq!(after.status, "ready");
+    assert_eq!(after.action_type, "script", "resolved inside the advance");
+    assert_eq!(after.action_ref.as_deref(), Some("release/2.3"));
+    Ok(())
+}
+
 /// An agent task-tool child whose only root step fails resolution at `init`
 /// is born terminal (spec § 5.3 consequences).
 #[tokio::test]
@@ -893,6 +953,49 @@ async fn webhook_templated_ref_errors_are_value_free_400s_and_create_nothing() -
         let error = body["error"].as_str().unwrap();
         assert!(error.starts_with(want), "{body_in}: {error}");
     }
+    assert_eq!(df_webhook_jobs(&fx.pool).await, 0);
+    Ok(())
+}
+
+/// Spec § 6 step 3 / § 10.3: the SECOND check. The value passes the live set
+/// (the live config does not define it) but equals a secret of the commit it
+/// selects: 400, no job, and the value never reaches the server log.
+#[tokio::test]
+async fn webhook_value_equal_to_a_secret_of_the_selected_commit_is_refused_privately() -> Result<()>
+{
+    const BRANCH: &str = "zz-hook-sekrit-77";
+    let fx = df_hook_fixture("").await?;
+    fx.etl.commit(
+        BRANCH,
+        "release/2.3",
+        &[(
+            "workflow.yaml",
+            &format!("secrets:\n  hidden: {BRANCH}\n{}", df_etl_release()),
+        )],
+    );
+    let (captured, guard) = capture();
+    let (status, body) = api_req(
+        &fx.router,
+        "POST",
+        "/hooks/push-hook",
+        None,
+        Some(json!({"ref": BRANCH})),
+    )
+    .await;
+    drop(guard);
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error = body["error"].as_str().unwrap();
+    assert!(
+        error.starts_with("the rendered ref contains a secret value"),
+        "{error}"
+    );
+    assert!(!body.to_string().contains(BRANCH), "{body}");
+    let text = captured.text();
+    assert!(
+        text.contains("the rendered ref contains a secret value"),
+        "{text}"
+    );
+    assert!(!text.contains(BRANCH), "{text}");
     assert_eq!(df_webhook_jobs(&fx.pool).await, 0);
     Ok(())
 }
@@ -1719,6 +1822,54 @@ async fn a_nested_render_error_fails_the_step_and_raw_escapes_it() -> Result<()>
     assert!(!msg.contains("{{ bad"), "{msg}");
     let job_id = df_create(&fx, "tr-nested-raw", json!({})).await?;
     assert_eq!(df_step(&fx.pool, job_id, "call").await.status, "running");
+    // The documented cost of the escape: the child-input render copies a
+    // nested object unchanged, so the child receives the `{% raw %}` tags.
+    let child = df_child_of(&fx.pool, job_id).await;
+    assert_eq!(
+        child.input.unwrap()["conn"]["host"],
+        json!("{% raw %}{{ bad{% endraw %}")
+    );
+    Ok(())
+}
+
+/// Final review finding 3: the ref input is rendered WITH caller secrets
+/// (`Scope::ChildTaskInput`), so `{{ secret.X }}` in the step input puts the
+/// secret verbatim into the ref. The live-set check refuses it before any
+/// resolution: no task pin, no memo row, no value in the error or the log.
+#[tokio::test]
+async fn a_task_ref_input_holding_a_caller_secret_is_refused() -> Result<()> {
+    const SECRET: &str = "dep-5e4d3c2b1a";
+    let fx = pinned_workspace_fixture(PinnedFixtureOpts {
+        etl_main: Some(format!(
+            "secrets:\n  deploy: {SECRET}\n{}{}",
+            df_etl_main(),
+            "  tr-task-secret:\n    flow:\n      call:\n        action: call-nightly-at\n        input:\n          branch: \"{{ secret.deploy }}\"\n"
+        )),
+        etl_release: Some(df_etl_release()),
+        ..Default::default()
+    })
+    .await?;
+    let (captured, guard) = capture();
+    let job_id = df_create(&fx, "tr-task-secret", json!({})).await?;
+    drop(guard);
+    let call = df_step(&fx.pool, job_id, "call").await;
+    assert_eq!(call.status, "failed");
+    let msg = call.error_message.unwrap();
+    assert_eq!(
+        msg,
+        "[ref] step 'call': the rendered ref contains a secret value"
+    );
+    assert!(!msg.contains(SECRET), "{msg}");
+    assert!(call.task_ref.is_none() && call.task_revision.is_none());
+    let memo = JobRefPinRepo::list_for_job(&fx.pool, job_id).await?;
+    assert!(memo.iter().all(|e| !e.git_ref.contains(SECRET)), "{memo:?}");
+    let children: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM job WHERE parent_job_id = $1")
+        .bind(job_id)
+        .fetch_one(&fx.pool)
+        .await?;
+    assert_eq!(children, 0);
+    let text = captured.text();
+    assert!(!text.contains(SECRET), "{text}");
     Ok(())
 }
 

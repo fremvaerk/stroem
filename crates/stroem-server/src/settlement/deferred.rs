@@ -11,7 +11,7 @@
 //! line or error text carries it (§ 5.5). Every step failure is a
 //! `RenderedRefError`; only DB errors escape.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -121,6 +121,76 @@ impl Drop for LeaseGuard {
     fn drop(&mut self) {
         self.renew.abort();
     }
+}
+
+/// The dispatch round of `Settlement::advance` and `dispatch::init` (spec
+/// § 5.3): deferred pass → task dispatch → (advance only) reconcile →
+/// approval dispatch. A task or approval dispatch failure re-cascades
+/// (`fail_task_step`, an approval failure) and can promote a deferred
+/// dependent AFTER this round's deferred pass ran; without another round it
+/// would wait for recovery Phase 4.6. The callers run the round again while a
+/// round leaves a NEW deferred `ready` row behind.
+///
+/// "New" is against every row seen so far: a row another resolver holds the
+/// lease of stays `ready` and deferred, and must not keep the loop going
+/// (Phase 4.6 owns it). A row never re-enters the set once it leaves it (a
+/// resolved row is no longer deferred, a failed or cancelled one is
+/// terminal), so the seen set only grows. The bound — at most the job's step
+/// count plus one rounds, the count re-read before every repeat because a
+/// `for_each` expansion adds rows — is a safety net. A job with no deferred
+/// row pays one read per round that matches nothing.
+pub(crate) struct DispatchRounds {
+    /// `None`: the first read failed — run one round only (advance logs it).
+    seen: Option<HashSet<String>>,
+    repeats: usize,
+}
+
+impl DispatchRounds {
+    /// Read the deferred `ready` rows before the first round.
+    pub(crate) async fn start(pool: &PgPool, job_id: Uuid) -> Result<Self> {
+        let ready = JobStepRepo::get_ready_deferred_steps(pool, job_id).await?;
+        Ok(Self {
+            seen: Some(ready.into_iter().map(|s| s.step_name).collect()),
+            repeats: 0,
+        })
+    }
+
+    /// One round, no repeat (the first read failed).
+    pub(crate) fn single() -> Self {
+        Self {
+            seen: None,
+            repeats: 0,
+        }
+    }
+
+    /// After a round: whether another round is owed.
+    pub(crate) async fn again(&mut self, pool: &PgPool, job_id: Uuid) -> Result<bool> {
+        let Some(seen) = self.seen.as_mut() else {
+            return Ok(false);
+        };
+        let ready = JobStepRepo::get_ready_deferred_steps(pool, job_id).await?;
+        if !absorb_new(seen, ready.into_iter().map(|s| s.step_name)) {
+            return Ok(false);
+        }
+        self.repeats += 1;
+        let step_count = JobStepRepo::get_steps_for_job(pool, job_id).await?.len();
+        Ok(within_bound(self.repeats, step_count))
+    }
+}
+
+/// Add `now` to `seen`; whether any name was not there yet.
+fn absorb_new(seen: &mut HashSet<String>, now: impl Iterator<Item = String>) -> bool {
+    let mut new = false;
+    for name in now {
+        new |= seen.insert(name);
+    }
+    new
+}
+
+/// The `repeats`-th repeat is allowed while `repeats <= step_count`: at most
+/// `step_count + 1` rounds in all.
+fn within_bound(repeats: usize, step_count: usize) -> bool {
+    repeats <= step_count
 }
 
 /// Resolve every deferred `ready` step of `job_id` (spec § 5.3). Loops like
@@ -581,5 +651,46 @@ mod tests {
         let written = written_action("etl", "etl", "hello");
         let t = ref_owner("etl", &written, &set(&["etl"]), &configured).unwrap();
         assert_eq!((t.owner.as_str(), t.local_name.as_str()), ("etl", "hello"));
+    }
+
+    fn names(n: &[&str]) -> impl Iterator<Item = String> {
+        n.iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    #[test]
+    fn another_round_is_owed_only_for_a_new_deferred_row() {
+        // A dispatch failure promoted `after`: one more round.
+        let mut seen = set(&[]);
+        assert!(absorb_new(&mut seen, names(&["after"])));
+        // `after` is still there (leased by another resolver): no repeat.
+        assert!(!absorb_new(&mut seen, names(&["after"])));
+        // Nothing left: no repeat.
+        assert!(!absorb_new(&mut seen, names(&[])));
+        // A row seen earlier and gone does not count when it is seen again.
+        assert!(!absorb_new(&mut seen, names(&["after"])));
+        // A second new row does.
+        assert!(absorb_new(&mut seen, names(&["after", "x"])));
+        assert_eq!(seen, set(&["after", "x"]));
+    }
+
+    #[test]
+    fn rounds_are_bounded_by_the_step_count_plus_one() {
+        // Two steps: the first round plus two repeats.
+        assert!(within_bound(1, 2));
+        assert!(within_bound(2, 2));
+        assert!(!within_bound(3, 2));
+    }
+
+    #[tokio::test]
+    async fn a_single_round_never_repeats() {
+        // `again` returns before it touches the pool.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused@127.0.0.1:1/none")
+            .unwrap();
+        let mut rounds = DispatchRounds::single();
+        assert!(!rounds.again(&pool, Uuid::new_v4()).await.unwrap());
     }
 }
