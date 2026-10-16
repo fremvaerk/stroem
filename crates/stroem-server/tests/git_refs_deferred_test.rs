@@ -1561,3 +1561,195 @@ async fn phase_4_6_resolves_the_row_of_a_dropped_resolver_after_expiry() -> Resu
     );
     Ok(())
 }
+
+// ─── A `type: task` action's templated ref (spec § 5.6) ───────────────────
+
+/// main: actions whose own `ref:` is a template, and tasks that call them.
+fn df_task_action_main() -> String {
+    format!(
+        "{}{}",
+        df_etl_main().replace(
+            "actions:\n",
+            "actions:\n  call-json-at:\n    type: task\n    task: takes-json\n    ref: \"{{ input.branch }}\"\n  call-default-at:\n    type: task\n    task: nightly\n    ref: \"{{ input.branch }}\"\n    input:\n      branch:\n        type: string\n        default: release/2.3\n",
+        ),
+        r#"
+  tr-json:
+    input:
+      payload:
+        type: json
+        default: {"a": 1}
+    flow:
+      call:
+        action: call-json-at
+        input:
+          branch: release/2.3
+          cfg: "{{ input.payload }}"
+  tr-default:
+    flow:
+      call:
+        action: call-default-at
+  tr-nested-bad:
+    flow:
+      call:
+        action: call-nightly-at
+        input:
+          branch: release/2.3
+          conn:
+            host: "{{ bad"
+  tr-nested-raw:
+    flow:
+      call:
+        action: call-nightly-at
+        input:
+          branch: release/2.3
+          conn:
+            host: "{% raw %}{{ bad{% endraw %}"
+  tr-cross:
+    flow:
+      call:
+        action: billing.call-at
+"#
+    )
+}
+
+/// release/2.3 plus `takes-json` (a `json` input) and `self-call` (a task
+/// that calls itself through a templated ref) at the end of `tasks:`.
+fn df_task_action_release() -> String {
+    format!(
+        "{}  takes-json:\n    input:\n      cfg:\n        type: json\n    flow:\n      s:\n        action: hello\n  self-call:\n    flow:\n      call:\n        action: call-self-at\n        input:\n          branch: release/2.3\n",
+        df_etl_release().replace(
+            "actions:\n",
+            "actions:\n  call-self-at:\n    type: task\n    task: self-call\n    ref: \"{{ input.branch }}\"\n",
+        )
+    )
+}
+
+async fn df_task_action_fixture() -> Result<PinnedFixture> {
+    pinned_workspace_fixture(PinnedFixtureOpts {
+        etl_main: Some(df_task_action_main()),
+        etl_release: Some(df_task_action_release()),
+        billing_main: Some(BILLING_MAIN.replace(
+            "actions:\n",
+            "actions:\n  call-at:\n    type: task\n    task: nightly\n    ref: \"{{ input.nope }}\"\n",
+        )),
+        ..Default::default()
+    })
+    .await
+}
+
+async fn df_child_of(pool: &PgPool, parent: Uuid) -> stroem_db::JobRow {
+    let id: Uuid = sqlx::query_scalar("SELECT job_id FROM job WHERE parent_job_id = $1")
+        .bind(parent)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    JobRepo::get(pool, id).await.unwrap().unwrap()
+}
+
+#[tokio::test]
+async fn templated_task_action_ref_resolves_at_dispatch_and_stamps_the_pin() -> Result<()> {
+    let fx = df_task_action_fixture().await?;
+    let job_id = df_create(&fx, "tr-task-action", json!({})).await?;
+    let call = df_step(&fx.pool, job_id, "call").await;
+    assert_eq!(call.status, "running", "{:?}", call.error_message);
+    assert_eq!(call.task_workspace.as_deref(), Some("etl"));
+    assert_eq!(call.task_ref.as_deref(), Some("release/2.3"));
+    assert_eq!(
+        call.task_revision.as_deref(),
+        Some(fx.commits.etl_release.as_str())
+    );
+    let child = df_child_of(&fx.pool, job_id).await;
+    assert_eq!(child.git_ref.as_deref(), Some("release/2.3"));
+    assert_eq!(
+        child.revision.as_deref(),
+        Some(fx.commits.etl_release.as_str())
+    );
+    let memo = JobRefPinRepo::list_for_job(&fx.pool, job_id).await?;
+    assert!(memo.iter().any(|e| e.git_ref == "release/2.3"), "{memo:?}");
+    Ok(())
+}
+
+/// The ref reads the caller's step input as strings; the child's `json`
+/// field is still a native value (T's schema decides the real render).
+#[tokio::test]
+async fn the_ref_input_is_schema_free_and_the_child_keeps_native_json() -> Result<()> {
+    let fx = df_task_action_fixture().await?;
+    let job_id = df_create(&fx, "tr-json", json!({})).await?;
+    let call = df_step(&fx.pool, job_id, "call").await;
+    assert_eq!(call.status, "running", "{:?}", call.error_message);
+    let child = df_child_of(&fx.pool, job_id).await;
+    assert_eq!(child.input.unwrap()["cfg"], json!({"a": 1}));
+    Ok(())
+}
+
+/// Action defaults are not visible to the ref (spec § 5.6 consequences).
+#[tokio::test]
+async fn action_defaults_are_not_in_the_ref_context() -> Result<()> {
+    let fx = df_task_action_fixture().await?;
+    let job_id = df_create(&fx, "tr-default", json!({})).await?;
+    let call = df_step(&fx.pool, job_id, "call").await;
+    assert_eq!(call.status, "failed");
+    let msg = call.error_message.unwrap();
+    assert!(
+        msg.starts_with("[ref] step 'call': the ref template could not be rendered"),
+        "{msg}"
+    );
+    Ok(())
+}
+
+/// A nested leaf that does not render fails the step, naming the field only;
+/// the `{% raw %}` escape lets it run (spec § 5.6 known limitation).
+#[tokio::test]
+async fn a_nested_render_error_fails_the_step_and_raw_escapes_it() -> Result<()> {
+    let fx = df_task_action_fixture().await?;
+    let job_id = df_create(&fx, "tr-nested-bad", json!({})).await?;
+    let call = df_step(&fx.pool, job_id, "call").await;
+    assert_eq!(call.status, "failed");
+    let msg = call.error_message.unwrap();
+    assert!(msg.contains("input field 'conn'"), "{msg}");
+    assert!(!msg.contains("{{ bad"), "{msg}");
+    let job_id = df_create(&fx, "tr-nested-raw", json!({})).await?;
+    assert_eq!(df_step(&fx.pool, job_id, "call").await.status, "running");
+    Ok(())
+}
+
+/// The template is the ACTION OWNER's: its render error is withheld when the
+/// owner (billing) is not the job's workspace (etl).
+#[tokio::test]
+async fn an_owner_side_ref_render_error_is_withheld_across_workspaces() -> Result<()> {
+    let fx = df_task_action_fixture().await?;
+    let job_id = df_create(&fx, "tr-cross", json!({})).await?;
+    let call = df_step(&fx.pool, job_id, "call").await;
+    assert_eq!(call.status, "failed");
+    assert_eq!(
+        call.error_message.as_deref(),
+        Some(
+            "Failed to prepare input for task step 'call': rendering in workspace 'billing' failed \
+             (details withheld from this job; see the server log or validate the owner workspace)"
+        )
+    );
+    Ok(())
+}
+
+/// A templated task ref that renders the job's own task at the job's own pin
+/// is a self-reference, refused like a static one at creation; no child job
+/// is created (recursion would otherwise stop only at `MAX_TASK_DEPTH`).
+#[tokio::test]
+async fn a_templated_task_ref_to_the_jobs_own_task_and_pin_is_a_self_reference() -> Result<()> {
+    let fx = df_task_action_fixture().await?;
+    let job_id = fx.create_pinned_etl_job("self-call").await?;
+    let call = df_step(&fx.pool, job_id, "call").await;
+    assert_eq!(call.status, "failed");
+    assert_eq!(
+        call.error_message.as_deref(),
+        Some(
+            "[ref] step 'call': task 'self-call' is a self-reference to 'etl/self-call' (invalid)"
+        )
+    );
+    let children: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM job WHERE parent_job_id = $1")
+        .bind(job_id)
+        .fetch_one(&fx.pool)
+        .await?;
+    assert_eq!(children, 0);
+    Ok(())
+}

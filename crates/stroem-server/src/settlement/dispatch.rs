@@ -6,21 +6,25 @@
 use anyhow::{Context, Result};
 use sqlx::PgPool;
 use std::collections::HashMap;
+use stroem_common::git_ref::{check_rendered_ref, classify_ref, RefKind};
 use stroem_common::models::job::{JobStatus, StepStatus};
 use stroem_common::models::workflow::{InputFieldDef, TaskDef, WorkspaceConfig};
 use stroem_common::template::{
-    merge_action_defaults, render_input_map, render_input_typed,
-    resolve_task_input_by_provenance_roles, RoleConfig, RoleScope,
+    merge_action_defaults, render_input_map, render_input_typed, render_ref_projection,
+    render_ref_template, resolve_task_input_by_provenance_roles, RoleConfig, RoleScope,
 };
 use stroem_db::{JobRepo, JobRow, JobStepRepo};
 use uuid::Uuid;
 
 use crate::config::JobDefaults;
 use crate::job_creator::{
-    compute_depth, create_job_for_task_inner, resolve_task_ref, task_at, CreationMode, OwnerConfig,
-    ResolvedTask, MAX_TASK_DEPTH,
+    compute_depth, create_job_for_task_inner, ref_world_sets, resolve_task_ref, task_at,
+    CreationMode, OwnerConfig, ResolvedTask, MAX_TASK_DEPTH,
 };
+use crate::refs::{plan_reference, RefPlan, RefResolveError, RefWorld};
 use crate::render_context::{self, JobContext, LoopSlot, Scope, Snapshots};
+use crate::settlement::deferred::{ref_secret_set, select_commit};
+use crate::templated_ref::{RenderedRefError, RenderedRefKind};
 use crate::workspace::pins::{cannot_be_loaded, PinRef};
 use crate::workspace::{ConfigHandle, WorkspaceManager};
 use crate::workspace_set::WorkspaceSet;
@@ -182,6 +186,169 @@ async fn resolve_stamped_task(
     })
 }
 
+/// What dispatch made of a `type: task` action's templated `ref:`.
+enum TemplatedTaskRef {
+    /// Resolved, checked and stamped on the parent step: `(T, pin)`.
+    Stamped(String, PinRef),
+    /// Another dispatcher stamped the step first, or it left `ready`: leave
+    /// it alone.
+    Moved,
+    /// Fail the step with `message`; persist `withheld` instead when set.
+    Failed {
+        message: String,
+        withheld: Option<String>,
+    },
+}
+
+/// Spec 2026-10-15 § 5.6 steps 1–4, in this order because the TASK's schema
+/// (which decides the real step-input render) is unknown until the ref is.
+/// `input_ctx` is the step-input context (`Scope::ChildTaskInput`). The
+/// rendered value is private until both secret checks pass (inside
+/// `select_commit`): no message here carries it. The outer `Err` is a DB
+/// error.
+#[allow(clippy::too_many_arguments)]
+async fn resolve_templated_task_ref(
+    workspaces: &WorkspaceManager,
+    pool: &PgPool,
+    job: &JobRow,
+    job_ctx: &JobContext<'_>,
+    input_ctx: &serde_json::Value,
+    step: &stroem_db::JobStepRow,
+    template: &str,
+    task_ref: &str,
+    base_ws: &str,
+    workspace_name: &str,
+) -> Result<TemplatedTaskRef> {
+    let fail = |e: RenderedRefError| TemplatedTaskRef::Failed {
+        message: format!("[ref] step '{}': {}", step.step_name, e),
+        withheld: None,
+    };
+
+    // 1. The ref input: a schema-free projection of the caller's step input,
+    //    in the step-input context (caller secrets, `vals`). Caller-side
+    //    (bucket C, never withheld); used only to build the ref context.
+    let map: HashMap<String, serde_json::Value> = step
+        .input
+        .as_ref()
+        .and_then(|v| v.as_object())
+        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        .unwrap_or_default();
+    let ref_input = match render_ref_projection(&map, input_ctx) {
+        Ok(v) => v,
+        Err(e) => {
+            return Ok(TemplatedTaskRef::Failed {
+                message: format!(
+                    "Failed to render input for task step '{}' (ref input): {:#}",
+                    step.step_name, e
+                ),
+                withheld: None,
+            })
+        }
+    };
+
+    // 2. The ref: no `secret`, no `vals`. The template is the action owner
+    //    O's own: its render error is withheld across the boundary (O != A).
+    let ref_ctx = render_context::build(
+        job_ctx,
+        &[],
+        None,
+        Scope::TaskActionRef {
+            ref_input: &ref_input,
+        },
+    );
+    let rendered = match render_ref_template(template, ref_ctx.as_value()) {
+        Ok(r) => r,
+        Err(e) => {
+            let err = RenderedRefError::from_error(&e, base_ws);
+            return Ok(TemplatedTaskRef::Failed {
+                message: format!("[ref] step '{}': {}", step.step_name, err),
+                withheld: (base_ws != workspace_name)
+                    .then(|| withheld_owner_render_error(&step.step_name, base_ws)),
+            });
+        }
+    };
+
+    // 3. T syntactically, from `task` relative to O; the commit; the private
+    //    load; T's secrets; the memo — the deferred-step helpers.
+    let (libraries, configured, git) = ref_world_sets(workspaces);
+    let world = RefWorld {
+        library_names: &libraries,
+        configured: &configured,
+        git: &git,
+    };
+    let target = match plan_reference(base_ws, None, task_ref, Some(template), &world) {
+        Ok(RefPlan::AtRef { target, .. }) => target,
+        Ok(RefPlan::Today { .. }) => {
+            unreachable!("plan_reference returns AtRef whenever a ref is given")
+        }
+        Err(e) => {
+            let ws = match &e {
+                RefResolveError::NotGit(ws) => ws.clone(),
+                _ => base_ws.to_string(),
+            };
+            return Ok(fail(RenderedRefError::from_error(&e.into(), &ws)));
+        }
+    };
+    let secrets = match ref_secret_set(workspaces, pool, job).await? {
+        Ok(s) => s,
+        Err(e) => return Ok(fail(e)),
+    };
+    let value = match check_rendered_ref(&rendered, &secrets) {
+        Ok(v) => v,
+        Err(r) => return Ok(fail(RenderedRefError::from_rejection(r, &target.owner))),
+    };
+    let pin = match select_commit(workspaces, pool, job.job_id, &target.owner, &value).await? {
+        Ok(p) => p,
+        Err(e) => return Ok(fail(e)),
+    };
+
+    // `value` passed both secret checks: an identifier from here on. The same
+    // task at the job's own pin is a self-reference, refused like a static
+    // one at creation (`job_creator::resolve_step_row`); the same task at
+    // another commit is a different version, bounded by MAX_TASK_DEPTH.
+    if target.owner == job.workspace
+        && target.local_name == job.task_name
+        && PinRef::of_job(job).as_ref() == Some(&pin)
+    {
+        return Ok(TemplatedTaskRef::Failed {
+            message: format!(
+                "[ref] step '{}': task '{}' is a self-reference to '{}/{}' (invalid)",
+                step.step_name, task_ref, job.workspace, job.task_name
+            ),
+            withheld: None,
+        });
+    }
+
+    // 4. The task must exist at that commit; then the stamp the existing
+    //    path reads (and a re-dispatch finds instead of rendering again).
+    let has_task = match workspaces
+        .pinned_config_private(&target.owner, &pin.commit)
+        .await
+    {
+        Ok(p) => p.config.tasks.contains_key(&target.local_name),
+        Err(e) => return Ok(fail(RenderedRefError::from_error(&e, &target.owner))),
+    };
+    if !has_task {
+        return Ok(fail(RenderedRefError::new(
+            RenderedRefKind::NoAction,
+            &target.owner,
+        )));
+    }
+    if !JobStepRepo::stamp_task_pin(
+        pool,
+        job.job_id,
+        &step.step_name,
+        &target.owner,
+        &pin.git_ref,
+        &pin.commit,
+    )
+    .await?
+    {
+        return Ok(TemplatedTaskRef::Moved);
+    }
+    Ok(TemplatedTaskRef::Stamped(target.owner, pin))
+}
+
 /// One dispatch pass over the currently-ready `type: task` steps.
 /// Returns `true` if any step was marked failed during this pass.
 #[allow(clippy::too_many_arguments)]
@@ -302,10 +469,64 @@ async fn handle_task_steps_pass(
             .unwrap_or(workspace_config);
         let mut scrub = crate::workspace_set::collect_config_secret_values(base_cfg);
 
+        // S6: the child task's input context. `each` comes from the step row,
+        // not a post-hoc patch — `build` owns the whole context. A templated
+        // task ref's projection (below) renders in it too.
+        let input_ctx = render_context::build(
+            &job_ctx,
+            &step_views,
+            LoopSlot::of(step),
+            Scope::ChildTaskInput,
+        );
+        let context_value = input_ctx.as_value();
+
         // 2. Task owner T: the `task_*` stamp when there is one (git-refs spec
         //    § 7.3 — never inferred from the parent job), else today's live
         //    resolution.
-        let task_stamp = PinRef::of_step_task(step);
+        let mut task_stamp = PinRef::of_step_task(step);
+        // Spec 2026-10-15 § 5.6: an unstamped step whose action carries a
+        // templated `ref:` is resolved now, and stamped.
+        if task_stamp.is_none() {
+            if let Some(template) = action_spec
+                .get("ref")
+                .and_then(|v| v.as_str())
+                .filter(|r| classify_ref(r) == RefKind::Template)
+            {
+                match resolve_templated_task_ref(
+                    workspaces,
+                    pool,
+                    &job,
+                    &job_ctx,
+                    context_value,
+                    step,
+                    template,
+                    task_ref,
+                    base_ws,
+                    workspace_name,
+                )
+                .await?
+                {
+                    TemplatedTaskRef::Stamped(t_ws, pin) => task_stamp = Some((t_ws, pin)),
+                    TemplatedTaskRef::Moved => continue,
+                    TemplatedTaskRef::Failed { message, withheld } => {
+                        fail_task_step(
+                            pool,
+                            job_id,
+                            &step.step_name,
+                            &message,
+                            task,
+                            workspace_config,
+                            snapshots,
+                            &scrub,
+                            withheld.as_deref(),
+                        )
+                        .await?;
+                        failed_any = true;
+                        continue;
+                    }
+                }
+            }
+        }
         let resolved_result = match &task_stamp {
             Some((t_ws, pin)) => resolve_stamped_task(workspaces, t_ws, pin, task_ref).await,
             None => resolve_task_ref(workspaces, base_ws, base_cfg, task_ref).await,
@@ -336,17 +557,7 @@ async fn handle_task_steps_pass(
         let t_cfg: &WorkspaceConfig = resolved.config(base_cfg);
         scrub.extend(crate::workspace_set::collect_config_secret_values(t_cfg));
 
-        // S6: the child task's input. `each` comes from the step row, not a
-        // post-hoc patch — `build` owns the whole context.
-        let input_ctx = render_context::build(
-            &job_ctx,
-            &step_views,
-            LoopSlot::of(step),
-            Scope::ChildTaskInput,
-        );
-        let context_value = input_ctx.as_value();
-
-        // Render step input templates
+        // Render step input templates (S6, `context_value` above)
         let rendered_input = if let Some(ref input) = step.input {
             if let Some(input_map) = input.as_object() {
                 if input_map.is_empty() {

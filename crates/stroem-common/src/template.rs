@@ -558,6 +558,37 @@ pub fn render_input_map(
     Ok(serde_json::Value::Object(result))
 }
 
+/// The schema-free ref input of a `type: task` step (spec 2026-10-15 § 5.6
+/// step 1): the top level exactly as [`render_input_map`] renders it (a simple
+/// variable reference keeps a structured value; a top-level object or array is
+/// copied), and inside every copied object or array each string leaf rendered
+/// as a string, array length and order kept ([`render_json_strings`]). ANY
+/// render error is returned: no ref is ever built from text that did not
+/// render (a filter could strip the delimiters of a failed leaf, and a dropped
+/// leaf would let `default` pick a fallback). Errors name the input field,
+/// never its value.
+pub fn render_ref_projection(
+    input_map: &HashMap<String, serde_json::Value>,
+    context: &serde_json::Value,
+) -> Result<serde_json::Value> {
+    let serde_json::Value::Object(top) = render_input_map(input_map, context)? else {
+        unreachable!("render_input_map returns an object")
+    };
+    let mut out = serde_json::Map::new();
+    for (key, value) in top {
+        let value = match input_map.get(&key) {
+            Some(serde_json::Value::Object(_)) | Some(serde_json::Value::Array(_)) => {
+                render_json_strings(&value, context).with_context(|| {
+                    format!("Failed to render a template inside input field '{key}'")
+                })?
+            }
+            _ => value,
+        };
+        out.insert(key, value);
+    }
+    Ok(serde_json::Value::Object(out))
+}
+
 pub use crate::json_field::render_json_value;
 
 /// Render a step/hook input map against `schema` (spec
@@ -4937,5 +4968,56 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("a json field takes a literal value"), "{msg}");
         assert!(!msg.contains("secret.T"), "{msg}");
+    }
+
+    fn map_of(pairs: &[(&str, serde_json::Value)]) -> HashMap<String, serde_json::Value> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn ref_projection_top_level_is_exactly_render_input_map() {
+        let ctx = json!({"input": {"b": "release/2.3", "conn": {"host": "h"}}});
+        let map = map_of(&[
+            ("branch", json!("{{ input.b }}")),
+            ("db", json!("{{ input.conn }}")),
+            ("n", json!(3)),
+        ]);
+        assert_eq!(
+            render_ref_projection(&map, &ctx).unwrap(),
+            render_input_map(&map, &ctx).unwrap()
+        );
+    }
+
+    #[test]
+    fn ref_projection_renders_nested_leaves_as_strings_keeping_order() {
+        let ctx = json!({"input": {"b": "release/2.3", "n": 7}});
+        let map = map_of(&[(
+            "cfg",
+            json!({"branch": "{{ input.b }}", "list": ["a", "{{ input.n }}", 1, null]}),
+        )]);
+        assert_eq!(
+            render_ref_projection(&map, &ctx).unwrap(),
+            json!({"cfg": {"branch": "release/2.3", "list": ["a", "7", 1, null]}})
+        );
+    }
+
+    #[test]
+    fn ref_projection_fails_on_any_nested_error_naming_only_the_field() {
+        let ctx = json!({"input": {}});
+        for bad in [json!({"host": "{{ bad"}), json!({"b": "{{ input.nope }}"})] {
+            let err = render_ref_projection(&map_of(&[("conn", bad.clone())]), &ctx).unwrap_err();
+            let shown = format!("{err:#}");
+            assert!(shown.contains("input field 'conn'"), "{shown}");
+            assert!(!shown.contains("{{"), "{shown}");
+        }
+        // The documented escape (spec § 5.6 known limitation).
+        let raw = map_of(&[("conn", json!({"host": "{% raw %}{{ bad{% endraw %}"}))]);
+        assert_eq!(
+            render_ref_projection(&raw, &ctx).unwrap(),
+            json!({"conn": {"host": "{{ bad"}})
+        );
     }
 }
