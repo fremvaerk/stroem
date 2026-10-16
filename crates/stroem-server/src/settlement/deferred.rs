@@ -167,8 +167,13 @@ pub async fn resolve_deferred_steps_with(
     timing: LeaseTiming,
 ) -> Result<()> {
     // Every failing pass retires at least one step, like `handle_task_steps`.
-    for _ in 0..(task.flow.len() + 1) {
-        let failed_any = resolve_pass(
+    // Spec § 5.3: bounded by the number of steps in the JOB, re-read each
+    // pass. The flow size is too small: a `for_each` expansion adds instance
+    // rows, and a sequential loop with `continue_on_failure` whose instances
+    // all fail resolution needs one pass per instance.
+    let mut passes = 0usize;
+    loop {
+        let (failed_any, step_count) = resolve_pass(
             workspaces,
             pool,
             workspace_config,
@@ -180,14 +185,17 @@ pub async fn resolve_deferred_steps_with(
             timing,
         )
         .await?;
-        if !failed_any {
+        passes += 1;
+        if !failed_any || passes > step_count {
             break;
         }
     }
     Ok(())
 }
 
-/// One pass over the deferred `ready` steps. `true` if a step was failed.
+/// One pass over the deferred `ready` steps. Returns whether a step was
+/// failed, and the job's step count as this pass read it (0 when the job has
+/// no deferred `ready` step).
 #[allow(clippy::too_many_arguments)]
 async fn resolve_pass(
     workspaces: &WorkspaceManager,
@@ -199,13 +207,13 @@ async fn resolve_pass(
     defaults: JobDefaults,
     snapshots: &Snapshots,
     timing: LeaseTiming,
-) -> Result<bool> {
+) -> Result<(bool, usize)> {
     let deferred = JobStepRepo::get_ready_deferred_steps(pool, job_id).await?;
     if deferred.is_empty() {
-        return Ok(false);
+        return Ok((false, 0));
     }
     let Some(job) = JobRepo::get(pool, job_id).await? else {
-        return Ok(false);
+        return Ok((false, 0));
     };
     let steps = JobStepRepo::get_steps_for_job(pool, job_id).await?;
     let mut failed_any = false;
@@ -280,7 +288,7 @@ async fn resolve_pass(
             }
         }
     }
-    Ok(failed_any)
+    Ok((failed_any, steps.len()))
 }
 
 /// § 5.3 steps 1–6 for one step.
@@ -349,11 +357,7 @@ async fn resolve_one(
     // row is built by the code creation uses, from the row's own owner and
     // action name (decided at creation) and the job config's flow step.
     let mut written = flow_step.clone();
-    written.action = if owner == workspace_name {
-        step.action_name.clone()
-    } else {
-        format!("{owner}.{}", step.action_name)
-    };
+    written.action = written_action(owner, workspace_name, &step.action_name);
     build_row(
         workspaces,
         pool,
@@ -368,6 +372,22 @@ async fn resolve_one(
         defaults,
     )
     .await
+}
+
+/// The action name to resolve a deferred row with: a spelling that
+/// `refs::ref_owner` maps back to the row's `owner` and `action_name` (both
+/// decided at creation, D11). `ref_owner` splits on the FIRST dot, so a dotted
+/// local name (`common.slack-notify`, or `billing.local` where `billing` is a
+/// configured workspace) must stay qualified with its owner, even in the
+/// job's own workspace; written bare, its first segment would be read as a
+/// library or another workspace. Only an undotted own-workspace name stays
+/// bare, so a library that shares the workspace's name cannot capture it.
+fn written_action(owner: &str, workspace_name: &str, action_name: &str) -> String {
+    if owner == workspace_name && !action_name.contains('.') {
+        action_name.to_string()
+    } else {
+        format!("{owner}.{action_name}")
+    }
 }
 
 /// The ref secret set of a step before resolution (spec § 10.3): the live set
@@ -487,9 +507,11 @@ async fn build_row(
             Ok(row) => row,
             Err(e) => return Ok(Err(RenderedRefError::from_error(&e, owner))),
         };
-        // D11: the owner and the action name were decided at creation. The
-        // live config of an unpinned job can re-point the step's `action:`
-        // before promotion; the deferred row's values must win.
+        // D11: the owner and the action name were decided at creation, and
+        // the deferred row's values must win over the live config of an
+        // unpinned job (which can re-point the step's `action:` before
+        // promotion). `written_action` spells them so that the row keeps
+        // them; this checks the result.
         if row.action_workspace.as_deref() != Some(owner) || row.action_name != action_name {
             return Ok(Err(RenderedRefError::new(
                 RenderedRefKind::Unresolvable,
@@ -516,4 +538,48 @@ async fn build_row(
         RenderedRefKind::Unresolvable,
         owner,
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::refs::ref_owner;
+    use std::collections::HashSet;
+
+    fn set(names: &[&str]) -> HashSet<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// `written_action` round-trips through `ref_owner`: the owner and the
+    /// local name stamped at creation come back unchanged.
+    #[test]
+    fn written_action_round_trips_through_ref_owner() {
+        let configured = set(&["etl", "billing"]);
+        // `common` is a library: written bare, `common.slack-notify` would be
+        // refused as a library item.
+        let libraries = set(&["common"]);
+        for (owner, local, spelled) in [
+            ("etl", "hello", "hello"),
+            ("etl", "common.slack-notify", "etl.common.slack-notify"),
+            ("etl", "billing.local", "etl.billing.local"),
+            ("etl", ".hidden", "etl..hidden"),
+            ("etl", "trailing.", "etl.trailing."),
+            ("billing", "export", "billing.export"),
+            ("billing", "x.y", "billing.x.y"),
+        ] {
+            let written = written_action(owner, "etl", local);
+            assert_eq!(written, spelled);
+            let t = ref_owner("etl", &written, &libraries, &configured).unwrap();
+            assert_eq!(
+                (t.owner.as_str(), t.local_name.as_str()),
+                (owner, local),
+                "{written}"
+            );
+        }
+        // An undotted own name stays bare, so a library named like the job's
+        // workspace cannot capture it.
+        let written = written_action("etl", "etl", "hello");
+        let t = ref_owner("etl", &written, &set(&["etl"]), &configured).unwrap();
+        assert_eq!((t.owner.as_str(), t.local_name.as_str()), ("etl", "hello"));
+    }
 }

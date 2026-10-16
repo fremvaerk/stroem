@@ -957,3 +957,89 @@ async fn job_detail_shows_the_template_of_a_deferred_step() -> Result<()> {
     assert!(!stroem_server::redaction::STEP_IDENTIFIER_KEYS.contains(&"ref_template"));
     Ok(())
 }
+
+// ─── Resolution fixes (Task 10 fix round 1) ───────────────────────────────
+
+/// Extra tasks appended to `df_etl_main()`'s `tasks:` section (its last key).
+const DF_EXTRA_TASKS: &str = r#"
+  tr-dotted:
+    flow:
+      run:
+        action: etl.common-ish.thing
+        ref: "{{ input.branch | default(value='release/2.3') }}"
+  tr-dotted-ws:
+    flow:
+      run:
+        action: etl.billing.local
+        ref: "{{ input.branch | default(value='release/2.3') }}"
+  tr-each-seq-fail:
+    flow:
+      run:
+        action: hello
+        ref: "{{ each.item }}"
+        for_each: ["a..b", "a..c", "a..d"]
+        sequential: true
+        continue_on_failure: true
+"#;
+
+/// Dotted local action keys of `etl` release/2.3: `common-ish` is not a
+/// workspace; `billing` is a configured one.
+const DF_DOTTED_ACTIONS: &str = "\nactions:\n  \"common-ish.thing\":\n    type: script\n    runner: local\n    script: echo dotted\n  \"billing.local\":\n    type: script\n    runner: local\n    script: echo shadow\n";
+
+/// [`df_fixture`] plus [`DF_EXTRA_TASKS`] in main and [`DF_DOTTED_ACTIONS`] in
+/// release/2.3. A variant, so the other tests' configs do not change.
+async fn df_extra_fixture() -> Result<PinnedFixture> {
+    pinned_workspace_fixture(PinnedFixtureOpts {
+        etl_main: Some(format!("{}{DF_EXTRA_TASKS}", df_etl_main())),
+        etl_release: Some(df_etl_release().replacen("\nactions:\n", DF_DOTTED_ACTIONS, 1)),
+        ..Default::default()
+    })
+    .await
+}
+
+/// A self-qualified dotted action (`etl.x.y` written in `etl`) keeps its owner
+/// and its dotted local name at resolution, also when the local name's prefix
+/// is another configured workspace (`billing`).
+#[tokio::test]
+async fn a_self_qualified_dotted_action_resolves_at_a_templated_ref() -> Result<()> {
+    let fx = df_extra_fixture().await?;
+    for (task, local, script) in [
+        ("tr-dotted", "common-ish.thing", "echo dotted"),
+        ("tr-dotted-ws", "billing.local", "echo shadow"),
+    ] {
+        let job_id = df_create(&fx, task, json!({})).await?;
+        let run = df_step(&fx.pool, job_id, "run").await;
+        assert_eq!(run.status, "ready", "{task}: {:?}", run.error_message);
+        assert_eq!(run.action_type, "script", "{task}");
+        assert_eq!(run.action_workspace.as_deref(), Some("etl"), "{task}");
+        assert_eq!(run.action_name, local, "{task}");
+        assert_eq!(run.action_ref.as_deref(), Some("release/2.3"), "{task}");
+        assert_eq!(
+            run.action_revision.as_deref(),
+            Some(fx.commits.etl_release.as_str()),
+            "{task}"
+        );
+        assert_eq!(run.action_spec.as_ref().unwrap()["script"], json!(script));
+    }
+    Ok(())
+}
+
+/// Spec § 5.3: the pass is bounded by the number of steps in the JOB, not in
+/// the flow. A sequential loop with `continue_on_failure` whose instances all
+/// fail resolution needs one pass per instance; all fail inside `init`.
+#[tokio::test]
+async fn every_sequential_instance_that_fails_resolution_fails_in_one_advance() -> Result<()> {
+    let fx = df_extra_fixture().await?;
+    let job_id = df_create(&fx, "tr-each-seq-fail", json!({})).await?;
+    for i in 0..3 {
+        let inst = df_step(&fx.pool, job_id, &format!("run[{i}]")).await;
+        assert_eq!(inst.status, "failed", "run[{i}]");
+        assert_eq!(
+            inst.error_message,
+            Some(format!(
+                "[ref] step 'run[{i}]': the rendered ref is not a valid branch, tag or full commit SHA"
+            ))
+        );
+    }
+    Ok(())
+}
