@@ -14,12 +14,29 @@ ship with [templated refs](/guides/git-refs/#templated-refs).
 |---|---|
 | `job_step` | `ref_template`, `resolve_lease_owner`, `resolve_lease_until` (nullable) |
 | `job_ref_pin` | new: one commit per job, owner workspace and ref |
-| `job_step` | the action-type check accepts `deferred`, added `NOT VALID` (no table scan) |
+| `job_step` | the action-type check accepts `deferred`, added `NOT VALID` (no table scan); skipped when the check already accepts `deferred` |
 
 **052** runs `ALTER TABLE job_step VALIDATE CONSTRAINT job_step_action_type_check`.
-It scans `job_step` under a `SHARE UPDATE EXCLUSIVE` lock, so writes continue.
-They are two migrations because each runs in its own transaction: a
+It scans all of `job_step` under a `SHARE UPDATE EXCLUSIVE` lock, so writes
+continue. They are two migrations because each runs in its own transaction: a
 validation inside 051 would hold 051's exclusive lock for the whole scan.
+
+The scan runs at the first server start of this release, and that start
+waits for it. On a large `job_step` table, run the scan before you deploy:
+
+```sql
+ALTER TABLE job_step DROP CONSTRAINT IF EXISTS job_step_action_type_check;
+ALTER TABLE job_step ADD CONSTRAINT job_step_action_type_check
+  CHECK (action_type IN ('script', 'shell', 'docker', 'pod', 'task', 'agent',
+                         'approval', 'event_source', 'deferred')) NOT VALID;
+ALTER TABLE job_step VALIDATE CONSTRAINT job_step_action_type_check;
+```
+
+The first two statements are 051's widening of the check: a short exclusive
+lock and no scan, and the release you run now writes only values the wider
+check accepts. The third is 052's scan (writes continue). Afterwards 051 sees a check that already
+accepts `deferred` and leaves it as it is, and 052 finds it valid and does
+nothing.
 
 ## Rollout rule
 
@@ -32,6 +49,9 @@ runs this release.**
   `recovery.unmatched_step_timeout_secs`, and an older replica never
   resolves it.
 - Workers do not change: no claim ever returns a deferred step.
+- Give every webhook with a templated `ref:` a `secret`: without one, any
+  caller can force one `ls-remote` per unknown ref value, under the owner
+  workspace's resolve lock.
 
 ## What changes without templated refs
 

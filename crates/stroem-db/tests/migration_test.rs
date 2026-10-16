@@ -278,12 +278,58 @@ async fn test_051_052_templated_refs_schema() -> Result<()> {
     };
     assert!(valid(pool.clone()).await, "052 validated the widened check");
 
+    // A re-run never resets the validated check: 051 skips a check that
+    // already accepts 'deferred' (this is what makes the manual pre-run of
+    // 051's header work).
+    sqlx::raw_sql(include_str!("../migrations/051_templated_refs.sql"))
+        .execute(&pool)
+        .await?;
+    assert!(
+        valid(pool.clone()).await,
+        "051 keeps a check that already accepts 'deferred'"
+    );
+
+    // From the pre-051 check (026), 051 widens NOT VALID and 052 validates.
+    sqlx::query("DELETE FROM job_step WHERE job_id = $1")
+        .bind(job_id)
+        .execute(&pool)
+        .await?;
+    let check_026 = "ALTER TABLE job_step DROP CONSTRAINT job_step_action_type_check; \
+        ALTER TABLE job_step ADD CONSTRAINT job_step_action_type_check \
+        CHECK (action_type IN ('script', 'shell', 'docker', 'pod', 'task', 'agent', 'approval', 'event_source'));";
+    sqlx::raw_sql(check_026).execute(&pool).await?;
     sqlx::raw_sql(include_str!("../migrations/051_templated_refs.sql"))
         .execute(&pool)
         .await?;
     assert!(
         !valid(pool.clone()).await,
-        "051 re-adds the check NOT VALID"
+        "051 widens the old check NOT VALID"
+    );
+    sqlx::raw_sql(include_str!(
+        "../migrations/052_templated_refs_validate.sql"
+    ))
+    .execute(&pool)
+    .await?;
+    assert!(valid(pool.clone()).await);
+
+    // The documented manual pre-run (051's header, upgrade note): afterward
+    // 051 and 052 leave the validated check as it is.
+    sqlx::raw_sql(check_026).execute(&pool).await?;
+    sqlx::raw_sql(
+        "ALTER TABLE job_step DROP CONSTRAINT IF EXISTS job_step_action_type_check; \
+         ALTER TABLE job_step ADD CONSTRAINT job_step_action_type_check \
+         CHECK (action_type IN ('script', 'shell', 'docker', 'pod', 'task', 'agent', 'approval', 'event_source', 'deferred')) NOT VALID; \
+         ALTER TABLE job_step VALIDATE CONSTRAINT job_step_action_type_check;",
+    )
+    .execute(&pool)
+    .await?;
+    assert!(valid(pool.clone()).await, "the pre-run validated the check");
+    sqlx::raw_sql(include_str!("../migrations/051_templated_refs.sql"))
+        .execute(&pool)
+        .await?;
+    assert!(
+        valid(pool.clone()).await,
+        "051 leaves the pre-run's validated check as it is"
     );
     sqlx::raw_sql(include_str!(
         "../migrations/052_templated_refs_validate.sql"
