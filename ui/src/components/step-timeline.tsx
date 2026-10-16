@@ -18,7 +18,7 @@ import type { RestartPlanResponse } from "@/lib/api";
 import { statusIcons } from "@/lib/status-icons";
 import type { JobStep, StepDurationStats } from "@/lib/types";
 import { skipBadgeLabel } from "@/lib/skip-reason";
-import { formatPin, stepPin } from "@/lib/job-ref";
+import { deferredRefLabel, formatPin, stepPin } from "@/lib/job-ref";
 import { cn, formatActionName } from "@/lib/utils";
 
 /** Shared props threaded from the job page down to every restartable row. */
@@ -96,6 +96,7 @@ function StepRow({
   // (the normal path — ticker-driven), compare against it. When absent (SSR /
   // tests without a ticker), skip the comparison to stay render-pure.
   const pin = stepPin(step);
+  const deferredRef = deferredRefLabel(step);
   const isRetryPending =
     step.status === "ready" &&
     step.retry_at != null &&
@@ -174,6 +175,15 @@ function StepRow({
                 className="rounded bg-sky-100 px-1.5 py-0.5 font-mono text-[10px] font-medium text-sky-700 dark:bg-sky-900/30 dark:text-sky-400"
               >
                 {formatPin(pin.ref, pin.commit)}
+              </span>
+            )}
+            {deferredRef && (
+              <span
+                data-testid={`step-deferred-ref-${step.step_name}`}
+                title="The branch, tag or commit is chosen when the step starts"
+                className="rounded bg-violet-100 px-1.5 py-0.5 font-mono text-[10px] font-medium text-violet-700 dark:bg-violet-900/30 dark:text-violet-400"
+              >
+                {deferredRef}
               </span>
             )}
             {step.max_retries != null && step.max_retries > 0 && (

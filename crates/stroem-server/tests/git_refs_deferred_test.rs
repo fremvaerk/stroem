@@ -927,3 +927,33 @@ async fn webhook_unavailable_is_a_500_and_the_log_carries_no_value() -> Result<(
     assert_eq!(df_webhook_jobs(&fx.pool).await, 0);
     Ok(())
 }
+
+// ─── API (spec § 9) ───────────────────────────────────────────────────────
+
+/// Job detail returns the template and the deferred kind of an unresolved
+/// step; `ref_template` is content, not an identifier key (redacted as such).
+#[tokio::test]
+async fn job_detail_shows_the_template_of_a_deferred_step() -> Result<()> {
+    let fx = df_fixture().await?;
+    let job_id = df_create(&fx, "tr-later", json!({})).await?;
+    let (status, detail) = api_req(
+        &fx.router,
+        "GET",
+        &format!("/api/jobs/{job_id}"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    let later = detail["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["step_name"] == "later")
+        .expect("later")
+        .clone();
+    assert_eq!(later["action_type"], json!("deferred"));
+    assert_eq!(later["ref_template"], json!("{{ input.branch }}"));
+    assert!(!stroem_server::redaction::STEP_IDENTIFIER_KEYS.contains(&"ref_template"));
+    Ok(())
+}

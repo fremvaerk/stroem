@@ -173,6 +173,8 @@ export interface JobStep {
   task_workspace: string | null;
   task_ref: string | null;
   task_revision: string | null;
+  /** The `ref:` template of a step created deferred (templated refs). Optional: older servers omit it. */
+  ref_template?: string | null;
   child_jobs?: ChildJobRef[];
 }
 

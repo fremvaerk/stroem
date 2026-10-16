@@ -9,6 +9,14 @@ export function formatPin(
   return commit ? `@ ${ref} · ${commit.substring(0, 7)}` : `@ ${ref}`;
 }
 
+/** `ref: {{ … }}` — a step whose action waits for its templated ref to be resolved. */
+export function deferredRefLabel(
+  step: Pick<JobStep, "action_type" | "ref_template">,
+): string | null {
+  if (step.action_type !== "deferred" || !step.ref_template) return null;
+  return `ref: ${step.ref_template}`;
+}
+
 /** The pin a step row carries: its action's ref, else its `type: task` task's ref. */
 export function stepPin(
   step: Pick<JobStep, "action_ref" | "action_revision" | "task_ref" | "task_revision">,

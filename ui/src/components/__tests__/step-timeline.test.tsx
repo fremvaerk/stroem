@@ -403,4 +403,33 @@ describe("StepTimeline", () => {
     ]);
     expect(screen.getByTestId("step-pin-call").textContent).toBe("@ v4.1.0 · abcdef1");
   });
+
+  it("shows the ref template on a deferred step and no pin badge", () => {
+    renderTimeline([
+      makeStep({
+        step_name: "publish",
+        action_type: "deferred",
+        status: "pending",
+        ref_template: "{{ find.output.branch }}",
+      }),
+    ]);
+    expect(screen.getByTestId("step-deferred-ref-publish").textContent).toBe(
+      "ref: {{ find.output.branch }}",
+    );
+    expect(screen.queryByTestId("step-pin-publish")).toBeNull();
+  });
+
+  it("shows the pin badge, not the template, once the step is resolved", () => {
+    renderTimeline([
+      makeStep({
+        step_name: "publish",
+        action_type: "script",
+        ref_template: "{{ find.output.branch }}",
+        action_ref: "release/2.3",
+        action_revision: "3f2a9c0e1b2c3d4e5f60718293a4b5c6d7e8f901",
+      }),
+    ]);
+    expect(screen.queryByTestId("step-deferred-ref-publish")).toBeNull();
+    expect(screen.getByTestId("step-pin-publish").textContent).toBe("@ release/2.3 · 3f2a9c0");
+  });
 });

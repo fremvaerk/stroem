@@ -345,6 +345,7 @@ pub async fn get_job(
                 "task_workspace": step.task_workspace,
                 "task_ref": step.task_ref,
                 "task_revision": step.task_revision,
+                "ref_template": step.ref_template,
             });
             // For approval and agent steps, always surface approval-specific fields so
             // the UI can show the message and input schema after the step leaves the

@@ -1,5 +1,18 @@
 import { describe, it, expect } from "vitest";
-import { formatPin, stepPin } from "../job-ref";
+import { deferredRefLabel, formatPin, stepPin } from "../job-ref";
+
+describe("deferredRefLabel", () => {
+  it("labels a deferred step with its template", () => {
+    expect(deferredRefLabel({ action_type: "deferred", ref_template: "{{ input.branch }}" })).toBe(
+      "ref: {{ input.branch }}",
+    );
+  });
+  it("is null once the step is resolved, or without a template", () => {
+    expect(deferredRefLabel({ action_type: "script", ref_template: "{{ input.branch }}" })).toBeNull();
+    expect(deferredRefLabel({ action_type: "deferred", ref_template: null })).toBeNull();
+    expect(deferredRefLabel({ action_type: "deferred" })).toBeNull();
+  });
+});
 
 describe("formatPin", () => {
   it("renders ref and short commit", () => {
