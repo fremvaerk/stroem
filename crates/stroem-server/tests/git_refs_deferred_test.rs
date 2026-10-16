@@ -1382,6 +1382,9 @@ async fn a_resolved_step_retries_on_its_commit_without_re_resolution() -> Result
     let worker = register_worker(&fx.router, &["script"]).await;
     let claimed = claim_once(&fx.router, &worker).await;
     assert_eq!(claimed["step_name"], json!("run"), "{claimed}");
+    // The branch moves after the resolution: a re-resolving retry would follow it.
+    let v2 = df_release_v2(&fx);
+    assert_ne!(v2, fx.commits.etl_release);
     let (st, body) = worker_req(
         &fx.router,
         "POST",
@@ -1405,6 +1408,12 @@ async fn a_resolved_step_retries_on_its_commit_without_re_resolution() -> Result
     let again = claim_once(&fx.router, &worker).await;
     assert_eq!(again["step_name"], json!("run"), "{again}");
     assert_eq!(again["revision"], json!(fx.commits.etl_release));
+    assert_ne!(again["revision"], json!(v2));
+    let run = df_step(&fx.pool, job_id, "run").await;
+    assert_eq!(
+        run.action_revision.as_deref(),
+        Some(fx.commits.etl_release.as_str())
+    );
     Ok(())
 }
 
