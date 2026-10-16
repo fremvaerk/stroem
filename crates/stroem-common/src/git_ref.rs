@@ -78,6 +78,57 @@ pub fn short_sha_hint(s: &str) -> Option<&'static str> {
         .then_some("short commit SHAs are not supported; use the full 40-character SHA")
 }
 
+/// Whether a `ref:` value is a template (spec 2026-10-15 § 4.2 rule 1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefKind {
+    Static,
+    Template,
+}
+
+/// `{{` or `{%` makes a `ref:` a template; anything else is a static ref,
+/// parsed by [`parse_git_ref`].
+pub fn classify_ref(s: &str) -> RefKind {
+    if s.contains("{{") || s.contains("{%") {
+        RefKind::Template
+    } else {
+        RefKind::Static
+    }
+}
+
+/// Why a RENDERED ref value is refused (spec 2026-10-15 § 4.2 rule 3). It
+/// carries no part of the value: callers turn it into a value-free message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderedRefRejection {
+    /// Empty after trimming (D6).
+    Empty,
+    /// Contains a value of the ref secret set (§ 10.3).
+    SecretValue,
+    /// Not a branch, a tag or a full commit SHA — a template marker included.
+    Invalid,
+}
+
+/// The post-render check: trim; refuse an empty value; refuse a value that
+/// contains any of `secrets` (empty strings ignored); refuse anything
+/// [`parse_git_ref`] refuses. Returns the trimmed value, which is the string
+/// the ref memo is keyed by.
+pub fn check_rendered_ref(
+    rendered: &str,
+    secrets: &[String],
+) -> Result<String, RenderedRefRejection> {
+    let value = rendered.trim();
+    if value.is_empty() {
+        return Err(RenderedRefRejection::Empty);
+    }
+    if secrets
+        .iter()
+        .any(|s| !s.is_empty() && value.contains(s.as_str()))
+    {
+        return Err(RenderedRefRejection::SecretValue);
+    }
+    parse_git_ref(value).map_err(|_| RenderedRefRejection::Invalid)?;
+    Ok(value.to_string())
+}
+
 fn checked(name: &str, written: &str) -> Result<String, GitRefError> {
     if is_valid_refname(name) {
         Ok(name.to_string())
@@ -225,5 +276,64 @@ mod tests {
         assert!(short_sha_hint("3f2").is_none());
         assert!(short_sha_hint(SHA).is_none());
         assert!(short_sha_hint("release").is_none());
+    }
+
+    #[test]
+    fn classify_ref_sees_expression_and_statement_markers_only() {
+        assert_eq!(classify_ref("release/2.3"), RefKind::Static);
+        assert_eq!(classify_ref("{{ input.branch }}"), RefKind::Template);
+        assert_eq!(classify_ref("{% if a %}x{% endif %}"), RefKind::Template);
+        assert_eq!(classify_ref("rel-{{ input.n }}"), RefKind::Template);
+        // A comment marker alone is not a template (spec § 4.2 rule 1).
+        assert_eq!(classify_ref("{#c#}main"), RefKind::Static);
+    }
+
+    #[test]
+    fn rendered_ref_is_trimmed_before_the_parse() {
+        assert_eq!(
+            check_rendered_ref("  release/2.3\n", &[]),
+            Ok("release/2.3".to_string())
+        );
+        assert_eq!(check_rendered_ref(SHA, &[]), Ok(SHA.to_string()));
+        // An abbreviated SHA is a bare NAME here; resolution answers not-found
+        // with the hint (spec § 12 "short-SHA hint").
+        assert_eq!(
+            check_rendered_ref("3f2a9c0", &[]),
+            Ok("3f2a9c0".to_string())
+        );
+    }
+
+    #[test]
+    fn rendered_ref_rejections_in_spec_order() {
+        assert_eq!(
+            check_rendered_ref(" \n\t", &[]),
+            Err(RenderedRefRejection::Empty)
+        );
+        let secrets = vec!["hunter2-long".to_string(), String::new()];
+        // The secret check runs before the parse, so an invalid name that
+        // carries a secret is reported as the secret.
+        assert_eq!(
+            check_rendered_ref("feature/hunter2-long", &secrets),
+            Err(RenderedRefRejection::SecretValue)
+        );
+        assert_eq!(
+            check_rendered_ref("a..hunter2-long", &secrets),
+            Err(RenderedRefRejection::SecretValue)
+        );
+        // An empty secret never matches everything.
+        assert_eq!(check_rendered_ref("main", &secrets), Ok("main".to_string()));
+        assert_eq!(
+            check_rendered_ref("a..b", &[]),
+            Err(RenderedRefRejection::Invalid)
+        );
+        // A value cannot render into another template.
+        assert_eq!(
+            check_rendered_ref("{{ x }}", &[]),
+            Err(RenderedRefRejection::Invalid)
+        );
+        assert_eq!(
+            check_rendered_ref("refs/pull/1", &[]),
+            Err(RenderedRefRejection::Invalid)
+        );
     }
 }

@@ -109,6 +109,35 @@ pub fn check_template_syntax(src: &str) -> std::result::Result<(), TemplateError
     }
 }
 
+/// [`check_template_syntax`] for a `ref:` template: compiled on the ref engine,
+/// which has no `vals` (spec 2026-10-15 § 4.2 rule 2), so `| vals` is a compile
+/// error here. A runtime error on the empty context means it compiled.
+pub fn check_ref_template_syntax(src: &str) -> std::result::Result<(), TemplateError> {
+    let tera = crate::tera_engine::ref_engine();
+    match tera.render_str(src, &tera::Context::new(), false) {
+        Ok(_) => Ok(()),
+        Err(e) if matches!(e.kind(), tera::ErrorKind::RenderingError(_)) => Ok(()),
+        Err(e) => Err(TemplateError::from_tera(&e, Some(src), None)),
+    }
+}
+
+/// Render a `ref:` template against `context` on the ref engine (no `vals`).
+/// Errors are value-free [`TemplateError`]s, like every render.
+pub fn render_ref_template(template: &str, context: &serde_json::Value) -> Result<String> {
+    let tera = crate::tera_engine::ref_engine();
+    let ctx = tera::Context::from_serialize(context)
+        .map_err(|e| anyhow::Error::new(TemplateError::context_conversion(&e)))
+        .context("Failed to convert JSON to Tera context")?;
+    tera.render_str(template, &ctx, false).map_err(|e| {
+        let outer = if matches!(e.kind(), tera::ErrorKind::SyntaxError(_)) {
+            "Failed to parse template"
+        } else {
+            "Failed to render template"
+        };
+        anyhow::Error::new(TemplateError::from_tera(&e, Some(template), None)).context(outer)
+    })
+}
+
 /// Split a possibly-qualified reference `workspace.item` on the FIRST `.`.
 /// Returns `(Some(workspace), item)` for a qualified name, or `(None, name)`
 /// for a local name or a degenerate form (empty workspace/item).
@@ -1745,6 +1774,39 @@ mod tests {
         let context = json!({});
         let result = render_template(template, &context).unwrap();
         assert_eq!(result, "plain-value");
+    }
+
+    #[test]
+    fn ref_template_syntax_refuses_vals_but_accepts_plain_filters() {
+        // `check_template_syntax` accepts `vals` (identity on the check
+        // engine); a ref template must not (spec 2026-10-15 § 4.2 rule 2).
+        let e = check_ref_template_syntax("{{ input.b | vals }}").unwrap_err();
+        assert_eq!(e.message(), "template uses an unknown filter");
+        assert!(check_ref_template_syntax("{{ input.b | default(value='main') | trim }}").is_ok());
+        assert!(check_ref_template_syntax("rel-{{ input.n }}").is_ok());
+        // A runtime error on the empty context means the template compiled.
+        assert!(check_ref_template_syntax("{{ undefined.field }}").is_ok());
+        assert!(check_ref_template_syntax("{{ input.b ").is_err());
+        assert!(check_ref_template_syntax("{{ input.b | nope }}").is_err());
+    }
+
+    #[test]
+    fn render_ref_template_renders_and_refuses_vals_at_runtime() {
+        let ctx = json!({"input": {"b": "release/2.3"}});
+        assert_eq!(
+            render_ref_template("{{ input.b }}", &ctx).unwrap(),
+            "release/2.3"
+        );
+        let err = render_ref_template("{{ 'ref+vault://x' | vals }}", &ctx).unwrap_err();
+        let te = err
+            .downcast_ref::<TemplateError>()
+            .expect("a TemplateError");
+        assert_eq!(te.message(), "template uses an unknown filter");
+        let err = render_ref_template("{{ input.nope }}", &ctx).unwrap_err();
+        let te = err
+            .downcast_ref::<TemplateError>()
+            .expect("a TemplateError");
+        assert!(te.message().contains("undefined"), "{}", te.message());
     }
 
     #[test]

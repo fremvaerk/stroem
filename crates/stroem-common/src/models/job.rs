@@ -73,6 +73,11 @@ pub fn is_terminal_status(status: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// `job_step.action_type` (and `required_ability`) of a flow step whose `ref:`
+/// is a template and has not been resolved yet (spec 2026-10-15 § 5.1). No
+/// worker can claim it: no claim may carry the ability `deferred`.
+pub const DEFERRED_ACTION_TYPE: &str = "deferred";
+
 /// Job step execution status
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

@@ -45,3 +45,10 @@ pub(crate) fn check_engine() -> tera::Tera {
     );
     t
 }
+
+/// Engine for `ref:` templates (spec 2026-10-15 § 4.2 rule 2): the builtins
+/// and the promised filters, but no `vals` — a ref is an identifier, never a
+/// secret lookup. `| vals` is therefore an unknown filter at compile time.
+pub(crate) fn ref_engine() -> tera::Tera {
+    BASE.clone()
+}
