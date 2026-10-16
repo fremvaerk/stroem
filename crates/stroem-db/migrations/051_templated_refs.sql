@@ -7,7 +7,9 @@
 -- all of `job_step` at the first server start of this release (writes
 -- continue; the start waits for the scan). To run that scan beforehand, run
 -- these statements manually before deploying; the check step of this
--- migration and 052 are no-ops afterward:
+-- migration and 052 are no-ops afterward. Run them one at a time in
+-- autocommit, never in one transaction (the VALIDATE scan would then hold
+-- the ADD's ACCESS EXCLUSIVE lock and block writes for the whole scan):
 --   ALTER TABLE job_step DROP CONSTRAINT IF EXISTS job_step_action_type_check;
 --   ALTER TABLE job_step ADD CONSTRAINT job_step_action_type_check
 --     CHECK (action_type IN ('script', 'shell', 'docker', 'pod', 'task', 'agent', 'approval', 'event_source', 'deferred')) NOT VALID;

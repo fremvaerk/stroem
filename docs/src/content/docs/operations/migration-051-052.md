@@ -22,9 +22,16 @@ continue. They are two migrations because each runs in its own transaction: a
 validation inside 051 would hold 051's exclusive lock for the whole scan.
 
 The scan runs at the first server start of this release, and that start
-waits for it. On a large `job_step` table, run the scan before you deploy:
+waits for it. On a large `job_step` table, run the scan before you deploy.
+Run the three statements one at a time, each in its own transaction
+(autocommit) — not in a `BEGIN … COMMIT` block, `psql -1` or a client that
+wraps a script in one transaction. In one transaction the `VALIDATE` scan
+would run while the `ADD` still holds its exclusive lock, and writes to
+`job_step` would wait for the whole scan. A `SET lock_timeout = '5s';` first
+keeps the two short exclusive statements from queueing behind a long query:
 
 ```sql
+SET lock_timeout = '5s';
 ALTER TABLE job_step DROP CONSTRAINT IF EXISTS job_step_action_type_check;
 ALTER TABLE job_step ADD CONSTRAINT job_step_action_type_check
   CHECK (action_type IN ('script', 'shell', 'docker', 'pod', 'task', 'agent',
@@ -32,11 +39,11 @@ ALTER TABLE job_step ADD CONSTRAINT job_step_action_type_check
 ALTER TABLE job_step VALIDATE CONSTRAINT job_step_action_type_check;
 ```
 
-The first two statements are 051's widening of the check: a short exclusive
+After the `SET`, the first two statements are 051's widening of the check: a short exclusive
 lock and no scan, and the release you run now writes only values the wider
 check accepts. The third is 052's scan (writes continue). Afterwards 051 sees a check that already
 accepts `deferred` and leaves it as it is, and 052 finds it valid and does
-nothing.
+nothing. If a statement stops on the lock timeout, run it again.
 
 ## Rollout rule
 

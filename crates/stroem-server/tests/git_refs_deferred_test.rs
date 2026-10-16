@@ -1862,7 +1862,7 @@ async fn a_task_ref_input_holding_a_caller_secret_is_refused() -> Result<()> {
     assert!(!msg.contains(SECRET), "{msg}");
     assert!(call.task_ref.is_none() && call.task_revision.is_none());
     let memo = JobRefPinRepo::list_for_job(&fx.pool, job_id).await?;
-    assert!(memo.iter().all(|e| !e.git_ref.contains(SECRET)), "{memo:?}");
+    assert!(memo.is_empty(), "{memo:?}");
     let children: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM job WHERE parent_job_id = $1")
         .bind(job_id)
         .fetch_one(&fx.pool)
