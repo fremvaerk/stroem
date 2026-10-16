@@ -1,4 +1,5 @@
 use crate::dag;
+use crate::git_ref::{classify_ref, RefKind};
 use crate::models::workflow::{ActionDef, ConnectionTypeDef, HookDef, TaskDef, WorkspaceConfig};
 use anyhow::{bail, Result};
 use std::collections::HashMap;
@@ -115,7 +116,11 @@ fn validate_workflow_config_inner(
                     action.action_type
                 );
             }
-            check_git_ref(&format!("Action '{action_name}'"), r)?;
+            let label = format!("Action '{action_name}'");
+            match classify_ref(r) {
+                RefKind::Static => check_git_ref(&label, r)?,
+                RefKind::Template => check_ref_template(&label, r)?,
+            }
         }
         warnings.extend(validate_action(action_name, action)?);
 
@@ -126,9 +131,16 @@ fn validate_workflow_config_inner(
                 "task field is required for action_type == task, enforced by validate_action",
             );
             if let Some(r) = action.git_ref.as_deref() {
+                let (at, when) = match classify_ref(r) {
+                    RefKind::Static => (format!("at ref '{r}'"), "resolved at job creation"),
+                    RefKind::Template => (
+                        "at a templated ref".to_string(),
+                        "resolved when the step starts",
+                    ),
+                };
                 warnings.push(format!(
-                    "Action '{}' references task '{}' at ref '{}' - validation skipped (resolved at job creation)",
-                    action_name, task_ref, r
+                    "Action '{}' references task '{}' {} - validation skipped ({})",
+                    action_name, task_ref, at, when
                 ));
             } else if config.tasks.contains_key(task_ref) {
                 // local or library-flattened key
@@ -214,10 +226,21 @@ fn validate_workflow_config_inner(
 
             // Check if it's a library action (contains .)
             if let Some(r) = step.git_ref.as_deref() {
-                check_git_ref(&format!("Task '{task_name}' step '{step_name}'"), r)?;
+                let label = format!("Task '{task_name}' step '{step_name}'");
+                let at = match classify_ref(r) {
+                    RefKind::Static => {
+                        check_git_ref(&label, r)?;
+                        format!("at ref '{r}' - validation skipped (resolved at job creation)")
+                    }
+                    RefKind::Template => {
+                        check_ref_template(&label, r)?;
+                        "at a templated ref - validation skipped (resolved when the step starts)"
+                            .to_string()
+                    }
+                };
                 warnings.push(format!(
-                    "Task '{}' step '{}' references action '{}' at ref '{}' - validation skipped (resolved at job creation)",
-                    task_name, step_name, action_ref, r
+                    "Task '{}' step '{}' references action '{}' {}",
+                    task_name, step_name, action_ref, at
                 ));
             } else if !libraries_resolved && action_ref.contains('.') {
                 // Library actions can't be validated without server context
@@ -456,6 +479,7 @@ fn validate_workflow_config_inner(
                 libraries_resolved,
                 resolver,
                 &mut warnings,
+                matches!(trigger, crate::models::workflow::TriggerDef::Webhook { .. }),
             )?;
         }
 
@@ -1298,6 +1322,14 @@ fn check_git_ref(label: &str, git_ref: &str) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("{label} has invalid `ref` '{git_ref}': {e}"))
 }
 
+/// A templated `ref:` (spec 2026-10-15 § 7): syntax only, on the ref engine —
+/// it has no `vals`, so `| vals` is an unknown filter here.
+fn check_ref_template(label: &str, template: &str) -> Result<()> {
+    crate::template::check_ref_template_syntax(template).map_err(|e| {
+        anyhow::Error::new(e).context(format!("{label} has an invalid `ref` template"))
+    })
+}
+
 /// A trigger's `task` (scheduler / webhook). With `ref`, the task is looked up
 /// at that ref by the server when the trigger fires, so it is not checked
 /// here. Without `ref`, `ws.task` is a cross-workspace trigger task.
@@ -1309,12 +1341,27 @@ fn validate_trigger_task(
     libraries_resolved: bool,
     resolver: Option<&dyn CrossWorkspaceResolver>,
     warnings: &mut Vec<String>,
+    allow_template: bool,
 ) -> Result<()> {
     if let Some(r) = git_ref {
-        check_git_ref(&format!("Trigger '{trigger_name}'"), r)?;
-        warnings.push(format!(
-            "Trigger '{trigger_name}' targets task '{task}' at ref '{r}' - validation skipped (resolved when the trigger fires)"
-        ));
+        let label = format!("Trigger '{trigger_name}'");
+        match classify_ref(r) {
+            RefKind::Static => {
+                check_git_ref(&label, r)?;
+                warnings.push(format!(
+                    "Trigger '{trigger_name}' targets task '{task}' at ref '{r}' - validation skipped (resolved when the trigger fires)"
+                ));
+            }
+            RefKind::Template if allow_template => {
+                check_ref_template(&label, r)?;
+                warnings.push(format!(
+                    "Trigger '{trigger_name}' targets task '{task}' at a templated ref - validation skipped (resolved when the webhook fires)"
+                ));
+            }
+            RefKind::Template => bail!(
+                "Trigger '{trigger_name}': a templated `ref` is only supported on webhook triggers"
+            ),
+        }
         return Ok(());
     }
     if config.tasks.contains_key(task) {
@@ -8256,8 +8303,8 @@ actions:
     }
 
     #[test]
-    fn git_ref_templated_or_invalid_is_rejected() {
-        let err = error_of(
+    fn templated_step_ref_is_accepted_with_a_warning() {
+        let warnings = warnings_of(
             r#"
 actions:
   a:
@@ -8271,7 +8318,17 @@ tasks:
         ref: "{{ input.release }}"
 "#,
         );
-        assert!(err.contains("is a template"), "{err}");
+        assert!(
+            warnings.contains(
+                &"Task 't' step 's' references action 'a' at a templated ref - validation skipped (resolved when the step starts)"
+                    .to_string()
+            ),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn invalid_static_step_ref_is_still_rejected() {
         let err = error_of(
             r#"
 tasks:
@@ -8283,6 +8340,173 @@ tasks:
 "#,
         );
         assert!(err.contains("invalid `ref`"), "{err}");
+    }
+
+    #[test]
+    fn templated_ref_syntax_errors_and_vals_are_rejected() {
+        for (template, needle) in [
+            ("{{ input.release ", "template syntax error"),
+            ("{{ input.release | nope }}", "unknown filter"),
+            ("{{ input.release | vals }}", "unknown filter"),
+        ] {
+            let err = error_of(&format!(
+                r#"
+tasks:
+  t:
+    flow:
+      s:
+        action: a
+        ref: "{template}"
+"#
+            ));
+            assert!(
+                err.contains("has an invalid `ref` template"),
+                "{template}: {err}"
+            );
+            assert!(err.contains(needle), "{template}: {err}");
+        }
+    }
+
+    #[test]
+    fn templated_task_action_ref_is_accepted_with_a_warning() {
+        let warnings = warnings_of(
+            r#"
+actions:
+  call:
+    type: task
+    task: other
+    ref: "{{ input.branch }}"
+tasks:
+  t:
+    flow:
+      s:
+        action: call
+"#,
+        );
+        assert!(
+            warnings.contains(
+                &"Action 'call' references task 'other' at a templated ref - validation skipped (resolved when the step starts)"
+                    .to_string()
+            ),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn templated_ref_on_a_non_task_action_is_rejected() {
+        let err = error_of(
+            r#"
+actions:
+  a:
+    type: script
+    script: echo hi
+    ref: "{{ input.branch }}"
+tasks:
+  t:
+    flow:
+      s:
+        action: a
+"#,
+        );
+        assert!(
+            err.contains("`ref` is only valid on type: task actions"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn templated_webhook_ref_is_accepted_and_scheduler_ref_is_rejected() {
+        let warnings = warnings_of(
+            r#"
+tasks:
+  t:
+    flow:
+      s:
+        action: a
+        ref: main
+triggers:
+  on-push:
+    type: webhook
+    name: push
+    task: t
+    ref: "{{ input.body.ref }}"
+"#,
+        );
+        assert!(
+            warnings.contains(
+                &"Trigger 'on-push' targets task 't' at a templated ref - validation skipped (resolved when the webhook fires)"
+                    .to_string()
+            ),
+            "{warnings:?}"
+        );
+        let err = error_of(
+            r#"
+tasks:
+  t:
+    flow:
+      s:
+        action: a
+        ref: main
+triggers:
+  nightly:
+    type: scheduler
+    cron: "0 0 * * *"
+    task: t
+    ref: "{{ input.branch }}"
+"#,
+        );
+        assert!(
+            err.contains(
+                "Trigger 'nightly': a templated `ref` is only supported on webhook triggers"
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn templated_ref_stays_rejected_where_ref_itself_is() {
+        let hook = error_of(
+            r#"
+actions:
+  a:
+    type: script
+    script: echo hi
+tasks:
+  t:
+    flow:
+      s:
+        action: a
+    on_success:
+      - action: a
+        ref: "{{ input.branch }}"
+"#,
+        );
+        assert!(
+            hook.contains("`ref` is not supported on hooks yet"),
+            "{hook}"
+        );
+        let tool = error_of(
+            r#"
+actions:
+  ask:
+    type: agent
+    provider: anthropic
+    model: m
+    prompt: hi
+    tools:
+      - task: t
+        ref: "{{ input.branch }}"
+tasks:
+  t:
+    flow:
+      s:
+        action: ask
+"#,
+        );
+        assert!(
+            tool.contains("`ref` is not supported on agent task tools yet"),
+            "{tool}"
+        );
     }
 
     #[test]
