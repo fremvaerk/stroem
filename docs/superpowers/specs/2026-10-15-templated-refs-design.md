@@ -242,9 +242,18 @@ So the new pass `resolve_deferred_steps` runs in BOTH places that dispatch
 server-side steps today, after the cascade and before task dispatch:
 
 ```
-Settlement::advance step 1:  cascade_and_settle → resolve_deferred_steps → task dispatch → reconcile → approval dispatch
-dispatch::init (creation):   cascade::execute   → resolve_deferred_steps → task dispatch → approval dispatch
+Settlement::advance step 1:  cascade_and_settle → [resolve_deferred_steps → task dispatch → reconcile → approval dispatch]*
+dispatch::init (creation):   cascade::execute   → [resolve_deferred_steps → task dispatch → approval dispatch]*
 ```
+
+`[…]*` is the dispatch round. It repeats while a round leaves a NEW deferred
+`ready` row behind: a task or approval dispatch failure re-cascades
+(`fail_task_step`, an approval failure) and can promote a deferred dependent
+(`accept: [failed]`, or a `when` on the failed step) after the round's
+deferred pass ran. A row seen in an earlier round (one another resolver
+holds the lease of) does not repeat it, and the cascade is not re-run inside
+the loop. Bounded by the job's step count plus one
+(`settlement::deferred::DispatchRounds`; final-review finding 1).
 
 (`settlement/mod.rs:321-474` and `settlement/dispatch.rs:1001-1047`.) Without
 the `init` call, the headline case — a root step with
@@ -452,8 +461,12 @@ The order is a constraint:
      valid template text, or that reads an undefined variable, inside an
      object the real render copies unchanged, fails a step whose action has a
      templated `ref:` although the same step without one would run. The
-     author escapes such text with `{% raw %}…{% endraw %}`. The error names
-     the input field, never its value. The user guide states this.
+     author escapes such text with `{% raw %}…{% endraw %}`, but the escaped
+     text then reaches the child WITH the `{% raw %}` tags: the real render
+     copies the nested object unchanged (and a `json` field refuses the
+     tags). So literal `{{` / `{%` text nested in an object cannot reach a
+     task whose action has a templated `ref:`. The error names the input
+     field, never its value. The user guide states this.
 
    It is a caller-side render (bucket `C`, never withheld). The projection is
    used ONLY to build the ref context; it is never persisted, logged or passed
@@ -611,7 +624,10 @@ rejects it, and `resolve_trigger_target` fails on one with `GitRefError::Templat
   with `'deferred'`: migration 051 drops it and adds the wider check
   `NOT VALID` (no table scan); migration `052_templated_refs_validate.sql`
   runs `VALIDATE CONSTRAINT`, which scans under a `SHARE UPDATE EXCLUSIVE`
-  lock, so writes continue. They are two migrations because sqlx runs each in
+  lock, so writes continue. 051 skips the widening when the check already
+  accepts `'deferred'`, so an operator can pre-run the widening and the
+  `VALIDATE` before the deploy (051's header, upgrade note) and the scan
+  leaves the first server start; a re-run never resets a validated check. They are two migrations because sqlx runs each in
   its own transaction, and a `VALIDATE` in 051's transaction would hold the
   `ACCESS EXCLUSIVE` lock of the `ADD` for the whole scan. `runner` keeps its
   `NOT NULL` and its check; deferred rows use `'none'`.
@@ -942,3 +958,8 @@ UI (Vitest): the `ref:` label on a deferred step row.
 - **8 (2026-10-15)** — Codex round 6: **MERGE-READY**. Editorial only: the
   selected-secret test names a branch or tag value; two citation ranges
   extended (`hooks.rs:608-646`, `026_event_source.sql:9-11`).
+- **9 (2026-10-16)** — final whole-branch review: the dispatch round of
+  `advance` / `init` repeats while a dispatch failure promotes a new deferred
+  step (§ 5.3); the `{% raw %}` escape reaches the child with its tags
+  (§ 5.6 known limitation); 051 skips a check that already accepts
+  `'deferred'`, so the 052 scan can be pre-run (§ 8).

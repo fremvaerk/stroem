@@ -145,8 +145,12 @@ errors (`500` when git is unreachable) and creates no job.
 
 **`type: task` actions.** The ref reads the step's `input:` rendered as
 strings, before the task is known. A string nested inside an object of the
-step input must render too, even if the task never uses it: escape literal
-template text there with `{% raw %}…{% endraw %}`. The step input is rendered
+step input must render too, even if the task never uses it, or the step
+fails. `{% raw %}…{% endraw %}` makes such a string render, but the child job
+receives the text with the `{% raw %}` tags: the child-input render copies a
+nested object unchanged (and a `json` field refuses the tags). So literal
+`{{` or `{%` text nested in an object cannot reach a task whose action has a
+templated ref. The step input is rendered
 twice — once for the ref, once for the child job — so a value that changes
 between renders (`now()`, a `vals` lookup) can differ. A templated ref that
 resolves to the same owner, the same task and the same commit as the running
@@ -166,6 +170,10 @@ Never pass a secret into a value a ref template reads: a rendered ref is an
 identifier and is never masked. The server rejects a rendered ref that
 contains a known secret value of 4 or more characters, but not a transformed
 one (`| upper`, `| replace`).
+
+Give a webhook with a templated `ref:` a `secret`. Without one, any caller
+can make the server look up a ref that does not exist — one `ls-remote` of
+the owner repository per unknown value, under the workspace's resolve lock.
 :::
 
 Before you merge YAML with a templated `ref:`, every server replica must run
