@@ -85,6 +85,16 @@ tasks:
         ref: v1.0.0
       child:
         action: run-version-task
+  pick-version:
+    mode: distributed
+    input:
+      branch:
+        type: string
+        default: main
+    flow:
+      run:
+        action: which-version
+        ref: "{{ input.branch }}"
 YAML
 echo "main" > "$REFS_WORK/data/version.txt"
 git -C "$REFS_WORK" add -A && git -C "$REFS_WORK" commit -q -m "main"
@@ -918,6 +928,27 @@ RM_CHILD=$(acurl "$BASE_URL/api/jobs/$RM_CHILD_ID")
 [ "$(echo "$RM_CHILD" | jq -r '.revision')" = "$REFS_R1_SHA" ] || fail "child revision is not release/1's tip"
 [ "$(echo "$RM_CHILD" | jq -r '.steps[0].output.version')" = "branch-r1" ] || fail "child did not run release/1's files"
 pass "type: task + ref: child job pinned to release/1 ($REFS_R1_SHA)"
+
+# --- 20b. Templated ref: the Run-form input chooses the branch (spec 2026-10-15) ---
+info "Triggering pick-version with branch=release/1 (templated ref:)..."
+EXEC_RESP_PV=$(acurl -X POST "$BASE_URL/api/workspaces/refs/tasks/pick-version/execute" \
+    -H "Content-Type: application/json" -d '{"input": {"branch": "release/1"}}')
+PV_JOB_ID=$(echo "$EXEC_RESP_PV" | jq -r '.job_id')
+[ -n "$PV_JOB_ID" ] && [ "$PV_JOB_ID" != "null" ] || fail "pick-version execute failed: $EXEC_RESP_PV"
+PV_POLLED=0; PV_STATUS="pending"
+while [ "$PV_STATUS" != "completed" ] && [ "$PV_STATUS" != "failed" ]; do
+    sleep 2; PV_POLLED=$((PV_POLLED + 2))
+    [ "$PV_POLLED" -lt "$MAX_POLL" ] || { acurl "$BASE_URL/api/jobs/$PV_JOB_ID" | jq .; fail "pick-version did not finish"; }
+    PV_DETAIL=$(acurl "$BASE_URL/api/jobs/$PV_JOB_ID"); PV_STATUS=$(echo "$PV_DETAIL" | jq -r '.status'); printf "."
+done; echo ""
+[ "$PV_STATUS" = "completed" ] || { echo "$PV_DETAIL" | jq .; fail "pick-version failed"; }
+PV_STEP() { echo "$PV_DETAIL" | jq -r --arg f "$1" '.steps[] | select(.step_name=="run") | .[$f]'; }
+[ "$(echo "$PV_DETAIL" | jq -r '.steps[] | select(.step_name=="run") | .output.version')" = "branch-r1" ] \
+    || fail "pick-version ran '$(echo "$PV_DETAIL" | jq -r '.steps[0].output.version')', expected branch-r1"
+[ "$(PV_STEP action_ref)" = "release/1" ] || fail "pick-version action_ref is '$(PV_STEP action_ref)'"
+[ "$(PV_STEP action_revision)" = "$REFS_R1_SHA" ] || fail "pick-version pinned $(PV_STEP action_revision), expected $REFS_R1_SHA"
+[ "$(PV_STEP ref_template)" = "{{ input.branch }}" ] || fail "pick-version ref_template is '$(PV_STEP ref_template)'"
+pass "templated ref: the input chose release/1 ($REFS_R1_SHA)"
 
 # --- 21. json input type: native values between steps, API object input ---
 info "Triggering json-demo (json input type)..."

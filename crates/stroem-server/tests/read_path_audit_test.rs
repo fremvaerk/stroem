@@ -614,3 +614,68 @@ async fn job_detail_masks_everything_when_its_redaction_closure_is_truncated() -
     })
     .await
 }
+
+/// Templated refs (spec 2026-10-15 § 10.2): a step whose action was chosen
+/// by a templated ref reads `action_ref` / `action_revision` only after
+/// resolution, and from then on job detail masks that commit's secrets in the
+/// step's output — the same closure as a static ref.
+const TEMPLATED_MAIN: &str = r#"
+actions:
+  hello:
+    type: script
+    runner: local
+    script: echo main
+tasks:
+  pick-a-branch:
+    input:
+      branch:
+        type: string
+        default: release/2.3
+    flow:
+      run:
+        action: leak
+        ref: "{{ input.branch }}"
+"#;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn job_detail_masks_a_secret_of_a_templated_refs_commit() -> Result<()> {
+    bounded(async {
+        let release = format!(
+            "secrets:\n  token: {REF_ONLY_SECRET}\n{}",
+            ETL_RELEASE.replace(
+                "actions:\n  hello:\n",
+                "actions:\n  leak:\n    type: script\n    runner: local\n    script: echo leak\n  hello:\n",
+            )
+        );
+        let fx = pinned_workspace_fixture(PinnedFixtureOpts {
+            etl_main: Some(TEMPLATED_MAIN.to_string()),
+            etl_release: Some(release),
+            ..Default::default()
+        })
+        .await?;
+        let worker = register_worker(&fx.router, &["script"]).await;
+        let (st, body) = execute_task(&fx.router, "etl", "pick-a-branch", json!({}), None).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        let job: Uuid = body["job_id"].as_str().expect("job_id").parse()?;
+        claim_and_complete(
+            &fx,
+            &worker,
+            job,
+            "run",
+            json!({"output": {"said": format!("token is {REF_ONLY_SECRET}")}}),
+        )
+        .await;
+        let detail = assert_detail_masks_ref_only_secret(&fx, job).await;
+        let run = detail["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["step_name"] == "run")
+            .unwrap()
+            .clone();
+        assert_eq!(run["action_ref"], json!("release/2.3"), "identifiers stay readable");
+        assert_eq!(run["output"]["said"], json!(format!("token is {MASK}")));
+        Ok(())
+    })
+    .await
+}
