@@ -47,7 +47,7 @@ the worker token.
 | `stroem_leader_status` | — | `1` if this replica holds the HA leader lock, else `0` |
 | `stroem_workers_active` | — | Count of workers with `status = 'active'` |
 | `stroem_jobs_in_flight` | `status` | Pending and running jobs (both buckets always emitted) |
-| `stroem_steps_ready` | — | Claimable steps (`status = 'ready'`, `retry_at` past or null) |
+| `stroem_steps_ready` | — | Claimable steps (`status = 'ready'`, `retry_at` past or null); deferred steps (templated refs, resolved by the server) are not counted |
 | `stroem_background_task_alive` | `task` | `1` if the named loop is running. Labels: `scheduler`, `recovery`, `event_source` |
 | `stroem_background_task_last_tick_age_seconds` | `task` | Seconds since the named loop's last progress heartbeat (at the top of each iteration, at work-unit boundaries inside it, and before it sleeps). Absent until its first iteration. A loop can be `alive` yet hung — alert on this (e.g. `> 300` for `scheduler`); `/livez` fails on the same condition |
 

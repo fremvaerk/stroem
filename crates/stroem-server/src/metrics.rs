@@ -24,6 +24,7 @@ pub const STROEM_WORKERS_ACTIVE: &str = "stroem_workers_active";
 pub const STROEM_JOBS_IN_FLIGHT: &str = "stroem_jobs_in_flight";
 
 /// `gauge` — claimable steps (status=ready and retry_at is null or due).
+/// Deferred steps (templated refs, resolved by the server) are not counted.
 pub const STROEM_STEPS_READY: &str = "stroem_steps_ready";
 
 /// `gauge` — 1 if a given background task loop is alive, else 0. Label: task.
@@ -219,7 +220,8 @@ async fn sample_jobs_in_flight(state: &AppState) {
 async fn sample_steps_ready(state: &AppState) {
     let query = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*)::BIGINT FROM job_step \
-         WHERE status = 'ready' AND (retry_at IS NULL OR retry_at <= NOW())",
+         WHERE status = 'ready' AND action_type <> 'deferred' \
+         AND (retry_at IS NULL OR retry_at <= NOW())",
     )
     .fetch_one(&state.pool);
 

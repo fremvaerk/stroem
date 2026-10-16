@@ -498,6 +498,15 @@ async fn steps_ready_gauge_reflects_db_state() -> Result<()> {
     .bind(job_id)
     .execute(&h.pool)
     .await?;
+    // A deferred ready row (templated ref) is resolved by the server; no
+    // worker can claim it, so it must not be counted.
+    sqlx::query(
+        "INSERT INTO job_step (job_id, step_name, action_name, status, action_type, required_ability, runner, required_tags) \
+         VALUES ($1, 'deferred', 'noop', 'ready', 'deferred', 'deferred', 'none', '[]'::jsonb)",
+    )
+    .bind(job_id)
+    .execute(&h.pool)
+    .await?;
 
     let body = scrape(&router).await?;
     let expected = format!("{} 3", stroem_server::metrics::STROEM_STEPS_READY);
