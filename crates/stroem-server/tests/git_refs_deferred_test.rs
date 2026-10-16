@@ -9,11 +9,15 @@ use anyhow::Result;
 use axum::http::StatusCode;
 use serde_json::json;
 use sqlx::PgPool;
+use std::time::Duration;
 use stroem_db::{JobRefPinRepo, JobRepo, JobStepRepo, JobStepRow};
 use stroem_server::config::JobDefaults;
 use stroem_server::job_creator::{
     create_child_job_for_task_detailed, create_job_for_task_detailed,
 };
+use stroem_server::render_context::Snapshots;
+use stroem_server::settlement::deferred::{resolve_deferred_steps_with, LeaseTiming};
+use stroem_server::state::AppState;
 use stroem_server::workspace::pins::PinLoadWithheld;
 use uuid::Uuid;
 
@@ -1041,5 +1045,414 @@ async fn every_sequential_instance_that_fails_resolution_fails_in_one_advance() 
             ))
         );
     }
+    Ok(())
+}
+
+// ─── Lease, concurrency, cancel (spec § 5.3 steps 0 and 7, D12) ───────────
+
+/// A `tr-later` job whose `later` step is `ready` but NOT resolved — what a
+/// crash between the cascade and the pass leaves (§ 5.8). No advance runs.
+pub(crate) async fn df_promoted_unresolved(fx: &PinnedFixture, branch: &str) -> Result<Uuid> {
+    let job_id = df_create(fx, "tr-later", json!({"branch": branch})).await?;
+    sqlx::query(
+        "UPDATE job_step SET status = 'completed', output = $2, completed_at = NOW() \
+         WHERE job_id = $1 AND step_name = 'first'",
+    )
+    .bind(job_id)
+    .bind(json!({}))
+    .execute(&fx.pool)
+    .await?;
+    sqlx::query(
+        "UPDATE job_step SET status = 'ready', ready_at = NOW() \
+         WHERE job_id = $1 AND step_name = 'later'",
+    )
+    .bind(job_id)
+    .execute(&fx.pool)
+    .await?;
+    sqlx::query("UPDATE job SET status = 'running' WHERE job_id = $1")
+        .bind(job_id)
+        .execute(&fx.pool)
+        .await?;
+    Ok(job_id)
+}
+
+/// Run the pass for a `tr-later` job on `state`'s replica.
+pub(crate) async fn df_resolve_on(
+    state: &AppState,
+    job_id: Uuid,
+    timing: LeaseTiming,
+) -> Result<()> {
+    let cfg = state
+        .workspaces
+        .get_config("etl")
+        .await
+        .expect("etl loaded");
+    let task = cfg.tasks.get("tr-later").expect("tr-later").clone();
+    resolve_deferred_steps_with(
+        &state.workspaces,
+        &state.pool,
+        &cfg,
+        "etl",
+        job_id,
+        &task,
+        JobDefaults::default(),
+        &Snapshots::default(),
+        timing,
+    )
+    .await
+}
+
+pub(crate) async fn wait_until(mut cond: impl FnMut() -> bool) {
+    for _ in 0..200 {
+        if cond() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("condition not reached within 10 s");
+}
+
+async fn df_lease_live(pool: &PgPool, job_id: Uuid) -> bool {
+    sqlx::query_scalar(
+        "SELECT COALESCE(resolve_lease_until > NOW(), false) FROM job_step \
+         WHERE job_id = $1 AND step_name = 'later'",
+    )
+    .bind(job_id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+const SHORT: LeaseTiming = LeaseTiming {
+    lease: Duration::from_secs(2),
+    renew: Duration::from_millis(300),
+};
+
+/// Two concurrent resolvers: exactly one takes the lease and resolves; the
+/// other skips the step; one commit.
+#[tokio::test]
+async fn two_concurrent_resolvers_resolve_once() -> Result<()> {
+    let fx = df_fixture().await?;
+    let job_id = df_promoted_unresolved(&fx, "release/2.3").await?;
+    let replica = fx.second_replica().await?;
+    let hold = replica.state.workspaces.pins().hold_loads_for_test();
+    let state = replica.state.clone();
+    let first =
+        tokio::spawn(async move { df_resolve_on(&state, job_id, LeaseTiming::default()).await });
+    wait_until(|| hold.entered() > 0).await;
+    df_resolve_on(&fx.state, job_id, LeaseTiming::default()).await?;
+    assert_eq!(
+        df_step(&fx.pool, job_id, "later").await.action_type,
+        "deferred"
+    );
+    drop(hold);
+    first.await??;
+    let later = df_step(&fx.pool, job_id, "later").await;
+    assert_eq!(later.action_type, "script");
+    assert_eq!(
+        later.action_revision.as_deref(),
+        Some(fx.commits.etl_release.as_str())
+    );
+    Ok(())
+}
+
+/// A resolve held past the lease length keeps its lease by renewal, and the
+/// Phase 4.6 listing does not offer the step to a second resolver.
+#[tokio::test]
+async fn a_held_resolve_keeps_its_lease_by_renewal() -> Result<()> {
+    let fx = df_fixture().await?;
+    let job_id = df_promoted_unresolved(&fx, "release/2.3").await?;
+    sqlx::query("UPDATE job_step SET ready_at = NOW() - interval '1 hour' WHERE job_id = $1")
+        .bind(job_id)
+        .execute(&fx.pool)
+        .await?;
+    let replica = fx.second_replica().await?;
+    let hold = replica.state.workspaces.pins().hold_loads_for_test();
+    let state = replica.state.clone();
+    let resolver = tokio::spawn(async move { df_resolve_on(&state, job_id, SHORT).await });
+    wait_until(|| hold.entered() > 0).await;
+    tokio::time::sleep(Duration::from_secs(4)).await; // twice the lease
+    assert!(
+        df_lease_live(&fx.pool, job_id).await,
+        "renewal kept the lease"
+    );
+    assert!(
+        !JobRepo::get_jobs_with_stranded_deferred_steps(&fx.pool, 30.0, None, 100)
+            .await?
+            .contains(&job_id)
+    );
+    drop(hold);
+    resolver.await??;
+    assert_eq!(
+        df_step(&fx.pool, job_id, "later").await.action_type,
+        "script"
+    );
+    Ok(())
+}
+
+/// The token fence: a resolver whose lease was taken over writes nothing,
+/// neither the resolved row nor a failure.
+#[tokio::test]
+async fn a_resolver_whose_lease_was_taken_over_cannot_write() -> Result<()> {
+    let fx = df_fixture().await?;
+    fx.etl
+        .commit("zz-broken", "main", &[("workflow.yaml", DF_BROKEN)]);
+    for branch in ["release/2.3", "zz-broken"] {
+        let job_id = df_promoted_unresolved(&fx, branch).await?;
+        let replica = fx.second_replica().await?;
+        let hold = replica.state.workspaces.pins().hold_loads_for_test();
+        let state = replica.state.clone();
+        let resolver =
+            tokio::spawn(
+                async move { df_resolve_on(&state, job_id, LeaseTiming::default()).await },
+            );
+        wait_until(|| hold.entered() > 0).await;
+        sqlx::query(
+            "UPDATE job_step SET resolve_lease_owner = $2, \
+                                 resolve_lease_until = NOW() + interval '1 hour' \
+             WHERE job_id = $1 AND step_name = 'later'",
+        )
+        .bind(job_id)
+        .bind(Uuid::new_v4())
+        .execute(&fx.pool)
+        .await?;
+        drop(hold);
+        resolver.await??;
+        let later = df_step(&fx.pool, job_id, "later").await;
+        assert_eq!(
+            (later.status.as_str(), later.action_type.as_str()),
+            ("ready", "deferred"),
+            "{branch}"
+        );
+        assert!(later.error_message.is_none(), "{branch}");
+    }
+    Ok(())
+}
+
+/// The lease guard: dropping the resolver future (a cancelled request during
+/// `init`) stops renewal, so the lease expires.
+#[tokio::test]
+async fn dropping_the_resolver_stops_renewal() -> Result<()> {
+    let fx = df_fixture().await?;
+    let job_id = df_promoted_unresolved(&fx, "release/2.3").await?;
+    let replica = fx.second_replica().await?;
+    let hold = replica.state.workspaces.pins().hold_loads_for_test();
+    let state = replica.state.clone();
+    let resolver = tokio::spawn(async move { df_resolve_on(&state, job_id, SHORT).await });
+    wait_until(|| hold.entered() > 0).await;
+    resolver.abort();
+    let _ = resolver.await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(
+        !df_lease_live(&fx.pool, job_id).await,
+        "no renewal after the drop"
+    );
+    drop(hold);
+    Ok(())
+}
+
+/// A cancellation that commits while a resolution runs wins: the resolution
+/// (success or failure) writes nothing and the step ends `cancelled`.
+#[tokio::test]
+async fn a_cancel_during_resolution_wins() -> Result<()> {
+    let fx = df_fixture().await?;
+    fx.etl
+        .commit("zz-broken", "main", &[("workflow.yaml", DF_BROKEN)]);
+    for branch in ["release/2.3", "zz-broken"] {
+        let job_id = df_promoted_unresolved(&fx, branch).await?;
+        let replica = fx.second_replica().await?;
+        let hold = replica.state.workspaces.pins().hold_loads_for_test();
+        let state = replica.state.clone();
+        let resolver =
+            tokio::spawn(
+                async move { df_resolve_on(&state, job_id, LeaseTiming::default()).await },
+            );
+        wait_until(|| hold.entered() > 0).await;
+        fx.state.settlement().cancel(job_id).await?;
+        drop(hold);
+        resolver.await??;
+        let later = df_step(&fx.pool, job_id, "later").await;
+        assert_eq!(later.status, "cancelled", "{branch}");
+        assert_eq!(
+            later.action_type, "deferred",
+            "{branch}: nothing written after the cancel"
+        );
+    }
+    Ok(())
+}
+
+// ─── Privacy of the rendered value (spec § 5.5, § 10.3) ───────────────────
+
+/// A BRANCH value equal to a secret that exists only in the commit it selects
+/// is refused after that commit's config loads; nothing is written; no
+/// captured span, log line or error text carries the value.
+#[tokio::test]
+async fn a_value_equal_to_a_secret_of_the_selected_commit_is_refused_privately() -> Result<()> {
+    const SNEAKY: &str = "zz-sekrit-5150";
+    let fx = df_fixture().await?;
+    fx.etl.commit(
+        SNEAKY,
+        "release/2.3",
+        &[(
+            "workflow.yaml",
+            &format!("secrets:\n  hidden: {SNEAKY}\n{}", df_etl_release()),
+        )],
+    );
+    let job_id = df_promoted_unresolved(&fx, SNEAKY).await?;
+    let (captured, _guard) = capture();
+    fx.state.settlement().advance(job_id).await?;
+    let later = df_step(&fx.pool, job_id, "later").await;
+    assert_eq!(later.status, "failed");
+    assert_eq!(
+        later.error_message.as_deref(),
+        Some("[ref] step 'later': the rendered ref contains a secret value")
+    );
+    assert!(JobRefPinRepo::list_for_job(&fx.pool, job_id)
+        .await?
+        .is_empty());
+    let text = captured.text();
+    assert!(!text.contains(SNEAKY), "{text}");
+    Ok(())
+}
+
+/// A load failure of a rendered ref's commit is labelled `ws (sha)` only.
+#[tokio::test]
+async fn a_rendered_refs_load_failure_names_the_commit_only() -> Result<()> {
+    const BRANCH: &str = "zz-sentinel-9001";
+    let fx = df_fixture().await?;
+    let broken = fx
+        .etl
+        .commit(BRANCH, "main", &[("workflow.yaml", DF_BROKEN)]);
+    let job_id = df_promoted_unresolved(&fx, BRANCH).await?;
+    let (captured, _guard) = capture();
+    fx.state.settlement().advance(job_id).await?;
+    let later = df_step(&fx.pool, job_id, "later").await;
+    assert_eq!(
+        later.error_message.as_deref(),
+        Some("[ref] step 'later': workspace 'etl' at the rendered ref cannot be loaded: its configuration does not load")
+    );
+    let text = captured.text();
+    assert!(
+        text.contains(&format!("[pin] etl ({})", &broken[..7])),
+        "{text}"
+    );
+    assert!(!text.contains(BRANCH), "{text}");
+    Ok(())
+}
+
+/// A full-SHA value is the accepted residual of § 10.3: it resolves, the
+/// resolve span never names it, and only `commit` fields carry it.
+#[tokio::test]
+async fn a_full_sha_ref_resolves_and_only_commit_fields_name_it() -> Result<()> {
+    let fx = df_fixture().await?;
+    let sha = fx.commits.etl_release.clone();
+    let job_id = df_promoted_unresolved(&fx, &sha).await?;
+    let (captured, _guard) = capture();
+    fx.state.settlement().advance(job_id).await?;
+    let later = df_step(&fx.pool, job_id, "later").await;
+    assert_eq!(later.action_revision.as_deref(), Some(sha.as_str()));
+    // `latest_snapshots` records its own `git_ref=None` (the job's pin, never
+    // a rendered value); any other `git_ref` span field would carry the value.
+    assert!(
+        captured
+            .span_fields("git_ref")
+            .iter()
+            .all(|f| f == "git_ref=None"),
+        "{}",
+        captured.text()
+    );
+    for line in captured.text().lines().filter(|l| l.contains(&sha)) {
+        assert!(
+            line.contains("commit="),
+            "only commit fields may name the SHA: {line}"
+        );
+    }
+    Ok(())
+}
+
+// ─── After resolution (spec § 5.7) ────────────────────────────────────────
+
+/// Review Focus 4: a resolved step that fails retries in place on the same
+/// commit; it is never deferred again.
+#[tokio::test]
+async fn a_resolved_step_retries_on_its_commit_without_re_resolution() -> Result<()> {
+    let fx = df_fixture().await?;
+    let job_id = df_create(&fx, "tr-retry", json!({})).await?;
+    let worker = register_worker(&fx.router, &["script"]).await;
+    let claimed = claim_once(&fx.router, &worker).await;
+    assert_eq!(claimed["step_name"], json!("run"), "{claimed}");
+    let (st, body) = worker_req(
+        &fx.router,
+        "POST",
+        &format!("/worker/jobs/{job_id}/steps/run/complete"),
+        Some(json!({"exit_code": 1, "error": "boom"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let run = df_step(&fx.pool, job_id, "run").await;
+    assert_eq!(run.status, "ready", "retried in place");
+    assert_eq!(run.retry_attempt, 1);
+    assert_eq!(run.action_type, "script");
+    assert_eq!(
+        run.action_revision.as_deref(),
+        Some(fx.commits.etl_release.as_str())
+    );
+    assert!(JobStepRepo::get_ready_deferred_steps(&fx.pool, job_id)
+        .await?
+        .is_empty());
+    tokio::time::sleep(Duration::from_millis(1200)).await; // the action's 1 s delay
+    let again = claim_once(&fx.router, &worker).await;
+    assert_eq!(again["step_name"], json!("run"), "{again}");
+    assert_eq!(again["revision"], json!(fx.commits.etl_release));
+    Ok(())
+}
+
+/// Review Focus 5 (spec § 5.7): restart from the templated step resolves it
+/// again (a newer commit); a carried templated row stays terminal and keeps
+/// its deferred kind — the pass never touches it.
+#[tokio::test]
+async fn restart_re_resolves_a_templated_step_and_leaves_a_carried_one() -> Result<()> {
+    let fx = df_fixture().await?;
+    let worker = register_worker(&fx.router, &["script"]).await;
+    let source = df_create(&fx, "tr-chain", json!({})).await?;
+    claim_and_complete(&fx, &worker, source, "a", json!({"output": {}})).await;
+    claim_and_complete(&fx, &worker, source, "b", json!({"output": {}})).await;
+    assert_eq!(
+        JobRepo::get(&fx.pool, source).await?.unwrap().status,
+        "completed"
+    );
+    let v2 = df_release_v2(&fx);
+
+    let (st, body) = api_req(
+        &fx.router,
+        "POST",
+        &format!("/api/jobs/{source}/restart"),
+        None,
+        Some(json!({"from_step": "b"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{body}");
+    let carried: Uuid = body["job_id"].as_str().unwrap().parse()?;
+    let a = df_step(&fx.pool, carried, "a").await;
+    assert_eq!(
+        (a.status.as_str(), a.action_type.as_str()),
+        ("completed", "deferred")
+    );
+    assert!(a.carried_over);
+    assert!(a.action_ref.is_none());
+
+    let (st, body) = api_req(
+        &fx.router,
+        "POST",
+        &format!("/api/jobs/{source}/restart"),
+        None,
+        Some(json!({"from_step": "a"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{body}");
+    let rerun: Uuid = body["job_id"].as_str().unwrap().parse()?;
+    let a = df_step(&fx.pool, rerun, "a").await;
+    assert_eq!(a.action_type, "script");
+    assert_eq!(a.action_revision.as_deref(), Some(v2.as_str()));
     Ok(())
 }
