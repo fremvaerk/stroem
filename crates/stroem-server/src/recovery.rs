@@ -292,6 +292,10 @@ async fn sweep(state: &AppState) -> Result<()> {
     // Phase 4.5 (git refs, R7): re-advance pinned jobs with no live step.
     readvance_stalled_pinned_jobs(state, StalledSweepBounds::default()).await;
 
+    // Phase 4.6 (templated refs, spec 2026-10-15 § 5.8): re-advance jobs whose
+    // deferred step was left `ready` with no live resolution lease.
+    readvance_deferred_steps(state, StalledSweepBounds::default()).await;
+
     // Phase 5: Data retention (rate-limited — runs at most once per retention_interval_secs)
     //
     // Note: with the HA leader gate above, only one replica runs this loop at
@@ -391,6 +395,55 @@ pub async fn readvance_stalled_pinned_jobs(state: &AppState, bounds: StalledSwee
             {
                 unavailable.insert((ws, commit));
             }
+        }
+    }
+}
+
+/// Phase 4.6 (spec 2026-10-15 § 5.8): `advance` every non-terminal job with a
+/// deferred `ready` step that has waited longer than
+/// `unmatched_step_timeout_secs` and holds no live resolution lease — left by
+/// a crash or an advance that died after the cascade committed. The unmatched
+/// sweep ignores deferred rows and Phase 4.5 skips jobs with a `ready` step,
+/// so nothing else re-enters such a job. Only a lease holder resolves (§ 5.3
+/// step 0): a slow resolve keeps renewing its lease and is not listed. Bounded
+/// and resumable like Phase 4.5 (its cursor moves only past advanced jobs);
+/// one beat per job. A failed listing is logged and the sweep continues.
+pub async fn readvance_deferred_steps(state: &AppState, bounds: StalledSweepBounds) {
+    let after = *state
+        .deferred_steps_cursor
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let older_than = state.config.recovery.unmatched_step_timeout_secs as f64;
+    let jobs = match JobRepo::get_jobs_with_stranded_deferred_steps(
+        &state.pool,
+        older_than,
+        after,
+        bounds.max_jobs,
+    )
+    .await
+    {
+        Ok(jobs) => jobs,
+        Err(e) => {
+            tracing::error!("Failed to list jobs with stranded deferred steps: {:#}", e);
+            return;
+        }
+    };
+    let started = std::time::Instant::now();
+    for (i, job_id) in jobs.iter().enumerate() {
+        if i > 0 && started.elapsed() >= bounds.budget {
+            break;
+        }
+        *state
+            .deferred_steps_cursor
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(*job_id);
+        state.background_tasks.recovery_beat.beat();
+        if let Err(e) = state.settlement().advance(*job_id).await {
+            tracing::error!(
+                "Failed to re-advance job {} with a stranded deferred step: {:#}",
+                job_id,
+                e
+            );
         }
     }
 }

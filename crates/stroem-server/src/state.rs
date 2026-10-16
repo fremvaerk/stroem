@@ -141,6 +141,9 @@ pub struct AppState {
     /// Recovery Phase 4.5 cursor: the last stalled pinned job a bounded sweep
     /// visited, so the next sweep resumes after it (git-refs spec § 7.3).
     pub stalled_pinned_cursor: Arc<std::sync::Mutex<Option<Uuid>>>,
+    /// Recovery Phase 4.6 cursor: the last job with a stranded deferred step
+    /// a bounded sweep advanced (spec 2026-10-15 § 5.8).
+    pub deferred_steps_cursor: Arc<std::sync::Mutex<Option<Uuid>>>,
     /// Optional task state snapshot storage (None when feature is not configured).
     pub state_storage: Option<Arc<StateStorage>>,
     /// Shared blob archive backend used by logs, state, and artifacts.
@@ -195,6 +198,7 @@ impl AppState {
             background_tasks: BackgroundTasks::new(),
             last_retention_run: Arc::new(AtomicI64::new(0)),
             stalled_pinned_cursor: Arc::new(std::sync::Mutex::new(None)),
+            deferred_steps_cursor: Arc::new(std::sync::Mutex::new(None)),
             state_storage: state_storage.map(Arc::new),
             blob_archive: None,
             artifact_blob: None,

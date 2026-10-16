@@ -15,6 +15,7 @@ use stroem_server::config::JobDefaults;
 use stroem_server::job_creator::{
     create_child_job_for_task_detailed, create_job_for_task_detailed,
 };
+use stroem_server::recovery::{readvance_deferred_steps, StalledSweepBounds};
 use stroem_server::render_context::Snapshots;
 use stroem_server::settlement::deferred::{resolve_deferred_steps_with, LeaseTiming};
 use stroem_server::state::AppState;
@@ -1454,5 +1455,109 @@ async fn restart_re_resolves_a_templated_step_and_leaves_a_carried_one() -> Resu
     let a = df_step(&fx.pool, rerun, "a").await;
     assert_eq!(a.action_type, "script");
     assert_eq!(a.action_revision.as_deref(), Some(v2.as_str()));
+    Ok(())
+}
+
+// ─── Recovery Phase 4.6 (spec § 5.8) ──────────────────────────────────────
+
+/// Age `later` past the unmatched timeout; with `lease_secs`, give it a lease
+/// of another (dead or live) resolver ending that many seconds from now.
+async fn df_age_and_lease(pool: &PgPool, job_id: Uuid, lease_secs: Option<f64>) {
+    sqlx::query("UPDATE job_step SET ready_at = NOW() - interval '1 hour' WHERE job_id = $1 AND step_name = 'later'")
+        .bind(job_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    if let Some(secs) = lease_secs {
+        sqlx::query(
+            "UPDATE job_step SET resolve_lease_owner = $3, \
+                                 resolve_lease_until = NOW() + make_interval(secs => $2::double precision) \
+             WHERE job_id = $1 AND step_name = 'later'",
+        )
+        .bind(job_id)
+        .bind(secs)
+        .bind(Uuid::new_v4())
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn phase_4_6_resolves_stranded_and_expired_but_not_leased_steps() -> Result<()> {
+    let fx = df_fixture().await?;
+    let stranded = df_promoted_unresolved(&fx, "release/2.3").await?;
+    let expired = df_promoted_unresolved(&fx, "release/2.3").await?;
+    let leased = df_promoted_unresolved(&fx, "release/2.3").await?;
+    df_age_and_lease(&fx.pool, stranded, None).await;
+    df_age_and_lease(&fx.pool, expired, Some(-1.0)).await;
+    df_age_and_lease(&fx.pool, leased, Some(3600.0)).await;
+
+    readvance_deferred_steps(&fx.state, StalledSweepBounds::default()).await;
+
+    assert_eq!(
+        df_step(&fx.pool, stranded, "later").await.action_type,
+        "script"
+    );
+    assert_eq!(
+        df_step(&fx.pool, expired, "later").await.action_type,
+        "script"
+    );
+    assert_eq!(
+        df_step(&fx.pool, leased, "later").await.action_type,
+        "deferred"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn phase_4_6_is_bounded_and_resumes_on_the_next_sweep() -> Result<()> {
+    let fx = df_fixture().await?;
+    let one = df_promoted_unresolved(&fx, "release/2.3").await?;
+    let two = df_promoted_unresolved(&fx, "release/2.3").await?;
+    df_age_and_lease(&fx.pool, one, None).await;
+    df_age_and_lease(&fx.pool, two, None).await;
+    let bounds = StalledSweepBounds {
+        max_jobs: 10,
+        budget: Duration::ZERO,
+    };
+    readvance_deferred_steps(&fx.state, bounds).await;
+    let resolved =
+        |rows: [JobStepRow; 2]| rows.iter().filter(|r| r.action_type == "script").count();
+    let after_one = resolved([
+        df_step(&fx.pool, one, "later").await,
+        df_step(&fx.pool, two, "later").await,
+    ]);
+    assert_eq!(after_one, 1, "the budget stops after the first job");
+    readvance_deferred_steps(&fx.state, bounds).await;
+    let after_two = resolved([
+        df_step(&fx.pool, one, "later").await,
+        df_step(&fx.pool, two, "later").await,
+    ]);
+    assert_eq!(after_two, 2, "the next sweep resumes after the cursor");
+    Ok(())
+}
+
+/// A resolver dropped mid-resolve (Task 11) leaves a leased row; once the
+/// lease expires, Phase 4.6 resolves it.
+#[tokio::test]
+async fn phase_4_6_resolves_the_row_of_a_dropped_resolver_after_expiry() -> Result<()> {
+    let fx = df_fixture().await?;
+    let job_id = df_promoted_unresolved(&fx, "release/2.3").await?;
+    df_age_and_lease(&fx.pool, job_id, None).await;
+    let replica = fx.second_replica().await?;
+    let hold = replica.state.workspaces.pins().hold_loads_for_test();
+    let state = replica.state.clone();
+    let resolver = tokio::spawn(async move { df_resolve_on(&state, job_id, SHORT).await });
+    wait_until(|| hold.entered() > 0).await;
+    resolver.abort();
+    let _ = resolver.await;
+    drop(hold);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    readvance_deferred_steps(&fx.state, StalledSweepBounds::default()).await;
+    assert_eq!(
+        df_step(&fx.pool, job_id, "later").await.action_type,
+        "script"
+    );
     Ok(())
 }
