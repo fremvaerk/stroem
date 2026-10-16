@@ -18,7 +18,7 @@ import type { RestartPlanResponse } from "@/lib/api";
 import { statusIcons } from "@/lib/status-icons";
 import type { JobStep, StepDurationStats } from "@/lib/types";
 import { skipBadgeLabel } from "@/lib/skip-reason";
-import { deferredRefLabel, formatPin, stepPin } from "@/lib/job-ref";
+import { deferredRefLabel, deferredRefTitle, formatPin, stepPin } from "@/lib/job-ref";
 import { cn, formatActionName } from "@/lib/utils";
 
 /** Shared props threaded from the job page down to every restartable row. */
@@ -180,7 +180,7 @@ function StepRow({
             {deferredRef && (
               <span
                 data-testid={`step-deferred-ref-${step.step_name}`}
-                title="The branch, tag or commit is chosen when the step starts"
+                title={deferredRefTitle(step)}
                 className="rounded bg-violet-100 px-1.5 py-0.5 font-mono text-[10px] font-medium text-violet-700 dark:bg-violet-900/30 dark:text-violet-400"
               >
                 {deferredRef}

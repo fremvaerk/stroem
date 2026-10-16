@@ -17,6 +17,18 @@ export function deferredRefLabel(
   return `ref: ${step.ref_template}`;
 }
 
+/**
+ * Tooltip of the deferred label. A deferred row is only waiting while it is
+ * `pending` or `ready`; a row that keeps `action_type: deferred` with any other
+ * status (a carried row of a restart, a failed resolution, a `for_each`
+ * placeholder) was never resolved in this job.
+ */
+export function deferredRefTitle(step: Pick<JobStep, "status">): string {
+  return step.status === "pending" || step.status === "ready"
+    ? "The branch, tag or commit is chosen when the step starts"
+    : "This step's ref was a template; it was not resolved in this job";
+}
+
 /** The pin a step row carries: its action's ref, else its `type: task` task's ref. */
 export function stepPin(
   step: Pick<JobStep, "action_ref" | "action_revision" | "task_ref" | "task_revision">,

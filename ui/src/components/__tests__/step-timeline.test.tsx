@@ -416,7 +416,26 @@ describe("StepTimeline", () => {
     expect(screen.getByTestId("step-deferred-ref-publish").textContent).toBe(
       "ref: {{ find.output.branch }}",
     );
+    expect(screen.getByTestId("step-deferred-ref-publish").getAttribute("title")).toBe(
+      "The branch, tag or commit is chosen when the step starts",
+    );
     expect(screen.queryByTestId("step-pin-publish")).toBeNull();
+  });
+
+  it("keeps the template on a terminal deferred row but says it was not resolved", () => {
+    renderTimeline([
+      makeStep({
+        step_name: "publish",
+        action_type: "deferred",
+        status: "completed",
+        ref_template: "{{ find.output.branch }}",
+      }),
+    ]);
+    const label = screen.getByTestId("step-deferred-ref-publish");
+    expect(label.textContent).toBe("ref: {{ find.output.branch }}");
+    expect(label.getAttribute("title")).toBe(
+      "This step's ref was a template; it was not resolved in this job",
+    );
   });
 
   it("shows the pin badge, not the template, once the step is resolved", () => {

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { deferredRefLabel, formatPin, stepPin } from "../job-ref";
+import { deferredRefLabel, deferredRefTitle, formatPin, stepPin } from "../job-ref";
 
 describe("deferredRefLabel", () => {
   it("labels a deferred step with its template", () => {
@@ -11,6 +11,23 @@ describe("deferredRefLabel", () => {
     expect(deferredRefLabel({ action_type: "script", ref_template: "{{ input.branch }}" })).toBeNull();
     expect(deferredRefLabel({ action_type: "deferred", ref_template: null })).toBeNull();
     expect(deferredRefLabel({ action_type: "deferred" })).toBeNull();
+  });
+});
+
+describe("deferredRefTitle", () => {
+  it("says the ref is chosen later while the step waits", () => {
+    for (const status of ["pending", "ready"]) {
+      expect(deferredRefTitle({ status })).toBe(
+        "The branch, tag or commit is chosen when the step starts",
+      );
+    }
+  });
+  it("says the ref was not resolved on a terminal deferred row", () => {
+    for (const status of ["completed", "failed", "skipped", "cancelled"]) {
+      expect(deferredRefTitle({ status })).toBe(
+        "This step's ref was a template; it was not resolved in this job",
+      );
+    }
   });
 });
 
