@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+use stroem_common::git_ref::{classify_ref, RefKind};
 use stroem_common::models::workflow::TriggerDef;
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
@@ -99,15 +100,34 @@ async fn webhook_handler(
     let input_value = serde_json::to_value(&input).unwrap_or_default();
     let source_id = format!("{}/{}", wh.ws_name, wh.trigger_key);
 
-    let target = match crate::trigger_target::resolve_trigger_target(
-        &state.workspaces,
-        &wh.ws_name,
-        &defining_config,
-        &wh.task,
-        wh.git_ref.as_deref(),
-    )
-    .await
-    {
+    // Spec 2026-10-15 § 6: a templated `ref:` renders from this request's
+    // input through the private path; its errors are value-free
+    // `RenderedRefError`s before they reach this log or the classifier.
+    let resolved = match wh.git_ref.as_deref() {
+        Some(t) if classify_ref(t) == RefKind::Template => {
+            crate::trigger_target::resolve_templated_trigger_target(
+                &state.workspaces,
+                &wh.ws_name,
+                &defining_config,
+                &wh.task,
+                t,
+                &input_value,
+            )
+            .await
+            .map_err(anyhow::Error::new)
+        }
+        static_ref => {
+            crate::trigger_target::resolve_trigger_target(
+                &state.workspaces,
+                &wh.ws_name,
+                &defining_config,
+                &wh.task,
+                static_ref,
+            )
+            .await
+        }
+    };
+    let target = match resolved {
         Ok(t) => t,
         Err(e) => {
             tracing::warn!("Webhook '{}' could not resolve its target: {:#}", name, e);

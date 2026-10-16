@@ -9,7 +9,13 @@ use crate::workspace::pins::PinRef;
 use crate::workspace::{ConfigHandle, WorkspaceManager};
 use anyhow::Result;
 use std::sync::Arc;
+use stroem_common::git_ref::check_rendered_ref;
 use stroem_common::models::workflow::WorkspaceConfig;
+use stroem_common::template::render_ref_template;
+
+use crate::refs::{plan_reference, RefPlan, RefWorld};
+use crate::templated_ref::{RenderedRefError, RenderedRefKind};
+use crate::workspace_set::{collect_redaction_values, WorkspaceSet};
 
 /// Where a trigger fire creates its job.
 pub(crate) struct ResolvedTarget {
@@ -101,6 +107,70 @@ pub(crate) async fn resolve_trigger_target(
         pin,
         task_folder,
         config,
+    })
+}
+
+/// A webhook trigger whose `ref:` is a template (spec 2026-10-15 § 6): render
+/// it from the webhook job input, check it against the live set, resolve it
+/// and load the commit through the private path, check it against the
+/// selected commit's secrets — only then is it an identifier, and the target
+/// is exactly a static-ref one. Every error is a value-free
+/// `RenderedRefError`; nothing is written here.
+pub(crate) async fn resolve_templated_trigger_target(
+    workspaces: &WorkspaceManager,
+    defining_ws: &str,
+    _defining_cfg: &Arc<WorkspaceConfig>,
+    task_ref: &str,
+    template: &str,
+    input: &serde_json::Value,
+) -> std::result::Result<ResolvedTarget, RenderedRefError> {
+    let (libraries, configured, git) = crate::job_creator::ref_world_sets(workspaces);
+    let world = RefWorld {
+        library_names: &libraries,
+        configured: &configured,
+        git: &git,
+    };
+    let target = match plan_reference(defining_ws, None, task_ref, Some(template), &world) {
+        Ok(RefPlan::AtRef { target, .. }) => target,
+        Ok(RefPlan::Today { .. }) => {
+            unreachable!("plan_reference returns AtRef whenever a ref is given")
+        }
+        Err(e) => return Err(RenderedRefError::from_error(&e.into(), defining_ws)),
+    };
+    let owner = target.owner.clone();
+    let fail = |e: anyhow::Error| RenderedRefError::from_error(&e, &owner);
+
+    let ctx = crate::render_context::webhook_ref(input);
+    let rendered = render_ref_template(template, ctx.as_value()).map_err(fail)?;
+    let live = collect_redaction_values(&WorkspaceSet::load(workspaces, defining_ws, None).await);
+    let value = check_rendered_ref(&rendered, &live)
+        .map_err(|r| RenderedRefError::from_rejection(r, &owner))?;
+    let pin = workspaces
+        .pins()
+        .resolve(&owner, &value)
+        .await
+        .map_err(|e| fail(e.into()))?;
+    let pinned = workspaces
+        .pinned_config_private(&owner, &pin.commit)
+        .await
+        .map_err(fail)?;
+    let own = workspaces.pin_redaction_values(&owner, &pinned).await;
+    check_rendered_ref(&value, &own).map_err(|r| RenderedRefError::from_rejection(r, &owner))?;
+    let task = pinned
+        .config
+        .tasks
+        .get(&target.local_name)
+        .cloned()
+        .ok_or_else(|| RenderedRefError::new(RenderedRefKind::NoAction, &owner))?;
+    Ok(ResolvedTarget {
+        workspace: owner,
+        task_name: target.local_name,
+        pin: Some(PinRef {
+            git_ref: value,
+            commit: pin.commit,
+        }),
+        task_folder: task.folder.clone(),
+        config: ConfigHandle::Pinned(pinned),
     })
 }
 

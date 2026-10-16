@@ -805,3 +805,125 @@ async fn a_resolved_action_brings_its_own_retry() -> Result<()> {
     assert_eq!(run.retry_strategy.as_deref(), Some("fixed"));
     Ok(())
 }
+
+// ─── Webhook trigger ref (spec § 6) ───────────────────────────────────────
+
+const DF_HOOK: &str = r#"
+triggers:
+  on-push:
+    type: webhook
+    name: push-hook
+    task: nightly
+    ref: "{{ input.body.ref }}"
+"#;
+
+async fn df_hook_fixture(main_prefix: &str) -> Result<PinnedFixture> {
+    pinned_workspace_fixture(PinnedFixtureOpts {
+        etl_main: Some(format!("{main_prefix}{}{DF_HOOK}", df_etl_main())),
+        etl_release: Some(df_etl_release()),
+        ..Default::default()
+    })
+    .await
+}
+
+async fn df_webhook_jobs(pool: &PgPool) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM job WHERE source_type = 'webhook'")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn webhook_templated_ref_creates_a_pinned_job() -> Result<()> {
+    let fx = df_hook_fixture("").await?;
+    let (status, body) = api_req(
+        &fx.router,
+        "POST",
+        "/hooks/push-hook",
+        None,
+        Some(json!({"ref": "release/2.3"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let job_id: Uuid = body["job_id"].as_str().unwrap().parse()?;
+    let job = JobRepo::get(&fx.pool, job_id).await?.unwrap();
+    assert_eq!(job.git_ref.as_deref(), Some("release/2.3"));
+    assert_eq!(
+        job.revision.as_deref(),
+        Some(fx.commits.etl_release.as_str())
+    );
+    assert_eq!(job.task_folder.as_deref(), Some("nightlies"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn webhook_templated_ref_errors_are_value_free_400s_and_create_nothing() -> Result<()> {
+    let fx = df_hook_fixture("secrets:\n  hook_token: hk-77aa66bb99\n").await?;
+    let cases = [
+        (json!({"ref": "  "}), "the rendered ref is empty"),
+        (
+            json!({"ref": "release/9.9"}),
+            "the rendered ref was not found in workspace 'etl'",
+        ),
+        (
+            json!({"ref": "main"}),
+            "workspace 'etl' has no such action or task at the rendered ref",
+        ),
+        (
+            json!({"ref": "x-hk-77aa66bb99"}),
+            "the rendered ref contains a secret value",
+        ),
+        (json!({}), "the ref template could not be rendered"),
+    ];
+    for (body_in, want) in cases {
+        let (status, body) = api_req(
+            &fx.router,
+            "POST",
+            "/hooks/push-hook",
+            None,
+            Some(body_in.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body_in}: {body}");
+        let error = body["error"].as_str().unwrap();
+        assert!(error.starts_with(want), "{body_in}: {error}");
+    }
+    assert_eq!(df_webhook_jobs(&fx.pool).await, 0);
+    Ok(())
+}
+
+/// A temporary git failure is a 500, and neither the response nor the server
+/// log carries the rendered value.
+#[tokio::test]
+async fn webhook_unavailable_is_a_500_and_the_log_carries_no_value() -> Result<()> {
+    const BRANCH: &str = "zz-hook-4242";
+    let fx = df_hook_fixture("").await?;
+    fx.etl.commit(
+        BRANCH,
+        "release/2.3",
+        &[("workflow.yaml", &df_etl_release())],
+    );
+    let replica = fx.second_replica().await?;
+    fx.etl.break_remote();
+    let (captured, guard) = capture();
+    let (status, body) = api_req(
+        &replica.router,
+        "POST",
+        "/hooks/push-hook",
+        None,
+        Some(json!({"ref": BRANCH})),
+    )
+    .await;
+    drop(guard);
+    fx.etl.restore_remote();
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert!(!body.to_string().contains(BRANCH), "{body}");
+    let text = captured.text();
+    assert!(
+        text.contains("is not available at the rendered ref yet"),
+        "{text}"
+    );
+    assert!(!text.contains(BRANCH), "{text}");
+    assert_eq!(df_webhook_jobs(&fx.pool).await, 0);
+    Ok(())
+}
