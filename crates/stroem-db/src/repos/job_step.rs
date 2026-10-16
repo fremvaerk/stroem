@@ -315,6 +315,19 @@ pub struct ClaimIdentity {
     pub started_at: DateTime<Utc>,
 }
 
+/// Result of a guarded write to a deferred step (spec 2026-10-15 § 5.3 step 7,
+/// § 5.5): [`JobStepRepo::resolve_deferred_tx`] and [`JobStepRepo::fail_deferred_tx`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeferredWrite {
+    /// The row was written.
+    Applied,
+    /// The job is no longer `pending`/`running` (e.g. cancelled): nothing written.
+    JobTerminal,
+    /// The row is no longer this lease holder's deferred `ready` row — resolved
+    /// by another resolver, cancelled, claimed, or the lease was lost: nothing written.
+    NotApplied,
+}
+
 /// Result of [`JobStepRepo::release_claim`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReleaseOutcome {
@@ -1032,6 +1045,221 @@ impl JobStepRepo {
         Ok(outcome)
     }
 
+    /// Take the resolution lease of a deferred `ready` step (spec 2026-10-15
+    /// § 5.3 step 0, D12). `false`: another resolver holds a live lease, or the
+    /// step is no longer a deferred `ready` row. The DB clock decides expiry.
+    pub async fn take_resolve_lease(
+        pool: &PgPool,
+        job_id: Uuid,
+        step_name: &str,
+        token: Uuid,
+        lease_secs: f64,
+    ) -> Result<bool> {
+        let r = sqlx::query(
+            "UPDATE job_step \
+             SET resolve_lease_owner = $3, \
+                 resolve_lease_until = NOW() + make_interval(secs => $4::double precision) \
+             WHERE job_id = $1 AND step_name = $2 AND status = 'ready' AND action_type = 'deferred' \
+               AND (resolve_lease_until IS NULL OR resolve_lease_until < NOW())",
+        )
+        .bind(job_id)
+        .bind(step_name)
+        .bind(token)
+        .bind(lease_secs)
+        .execute(pool)
+        .await
+        .context("take resolve lease")?;
+        Ok(r.rows_affected() == 1)
+    }
+
+    /// Extend a held lease. `false`: the lease is lost (taken over after
+    /// expiry) or the step moved on — the holder must not write.
+    pub async fn renew_resolve_lease(
+        pool: &PgPool,
+        job_id: Uuid,
+        step_name: &str,
+        token: Uuid,
+        lease_secs: f64,
+    ) -> Result<bool> {
+        let r = sqlx::query(
+            "UPDATE job_step \
+             SET resolve_lease_until = NOW() + make_interval(secs => $4::double precision) \
+             WHERE job_id = $1 AND step_name = $2 AND resolve_lease_owner = $3 \
+               AND status = 'ready' AND action_type = 'deferred'",
+        )
+        .bind(job_id)
+        .bind(step_name)
+        .bind(token)
+        .bind(lease_secs)
+        .execute(pool)
+        .await
+        .context("renew resolve lease")?;
+        Ok(r.rows_affected() == 1)
+    }
+
+    /// The job's deferred `ready` steps, by name.
+    pub async fn get_ready_deferred_steps(pool: &PgPool, job_id: Uuid) -> Result<Vec<JobStepRow>> {
+        sqlx::query_as::<_, JobStepRow>(concat!(
+            "SELECT ",
+            step_columns!(),
+            " FROM job_step WHERE job_id = $1 AND status = 'ready' AND action_type = 'deferred' \
+              ORDER BY step_name"
+        ))
+        .bind(job_id)
+        .fetch_all(pool)
+        .await
+        .context("get ready deferred steps")
+    }
+
+    /// Write a deferred step's resolved columns (spec 2026-10-15 § 5.3 step 7),
+    /// in ONE transaction: the job row `FOR SHARE` first (the lock order of
+    /// [`Self::release_claim`], which serialises with `JobRepo::cancel`), nothing
+    /// unless the job is `pending`/`running`, then the step only while it is
+    /// still this lease holder's deferred `ready` row. `ready_at` restarts: the
+    /// step becomes claimable now. `status`, `input`, `timeout_secs`, `when`
+    /// and the loop columns are not touched.
+    pub async fn resolve_deferred_tx(
+        pool: &PgPool,
+        job_id: Uuid,
+        step_name: &str,
+        token: Uuid,
+        resolved: &NewJobStep,
+    ) -> Result<DeferredWrite> {
+        let mut tx = pool.begin().await.context("begin resolve_deferred_tx")?;
+        if let Some(outcome) = Self::deferred_job_gate(&mut tx, job_id).await? {
+            tx.rollback().await.ok();
+            return Ok(outcome);
+        }
+        let required_tags =
+            serde_json::to_value(&resolved.required_tags).context("serialize required_tags")?;
+        let r = sqlx::query(
+            "UPDATE job_step SET \
+                 action_name = $4, action_type = $5, action_image = $6, action_spec = $7, \
+                 required_ability = $8, required_tags = $9, runner = $10, \
+                 max_retries = $11, retry_backoff_secs = $12, retry_strategy = $13, retry_jitter = $14, \
+                 action_workspace = $15, action_revision = $16, action_ref = $17, \
+                 task_workspace = $18, task_ref = $19, task_revision = $20, \
+                 ready_at = NOW(), resolve_lease_owner = NULL, resolve_lease_until = NULL \
+             WHERE job_id = $1 AND step_name = $2 AND status = 'ready' \
+               AND action_type = 'deferred' AND resolve_lease_owner = $3",
+        )
+        .bind(job_id)
+        .bind(step_name)
+        .bind(token)
+        .bind(&resolved.action_name)
+        .bind(&resolved.action_type)
+        .bind(&resolved.action_image)
+        .bind(&resolved.action_spec)
+        .bind(&resolved.required_ability)
+        .bind(required_tags)
+        .bind(&resolved.runner)
+        .bind(resolved.max_retries)
+        .bind(resolved.retry_backoff_secs)
+        .bind(&resolved.retry_strategy)
+        .bind(resolved.retry_jitter)
+        .bind(&resolved.action_workspace)
+        .bind(&resolved.action_revision)
+        .bind(&resolved.action_ref)
+        .bind(&resolved.task_workspace)
+        .bind(&resolved.task_ref)
+        .bind(&resolved.task_revision)
+        .execute(&mut *tx)
+        .await
+        .context("write resolved deferred step")?;
+        let outcome = if r.rows_affected() == 1 {
+            DeferredWrite::Applied
+        } else {
+            DeferredWrite::NotApplied
+        };
+        tx.commit().await.context("commit resolve_deferred_tx")?;
+        Ok(outcome)
+    }
+
+    /// Fail a deferred step whose resolution failed (spec 2026-10-15 § 5.5).
+    /// Same transaction shape and token fence as [`Self::resolve_deferred_tx`];
+    /// never `mark_failed`, which matches on job and step name alone. A failure
+    /// that loses to a cancellation writes nothing. No retry attempt is
+    /// consumed: the step never ran.
+    pub async fn fail_deferred_tx(
+        pool: &PgPool,
+        job_id: Uuid,
+        step_name: &str,
+        token: Uuid,
+        error: &str,
+    ) -> Result<DeferredWrite> {
+        let mut tx = pool.begin().await.context("begin fail_deferred_tx")?;
+        if let Some(outcome) = Self::deferred_job_gate(&mut tx, job_id).await? {
+            tx.rollback().await.ok();
+            return Ok(outcome);
+        }
+        let r = sqlx::query(
+            "UPDATE job_step \
+             SET status = 'failed', error_message = $4, completed_at = NOW(), \
+                 resolve_lease_owner = NULL, resolve_lease_until = NULL \
+             WHERE job_id = $1 AND step_name = $2 AND status = 'ready' \
+               AND action_type = 'deferred' AND resolve_lease_owner = $3",
+        )
+        .bind(job_id)
+        .bind(step_name)
+        .bind(token)
+        .bind(error)
+        .execute(&mut *tx)
+        .await
+        .context("fail deferred step")?;
+        let outcome = if r.rows_affected() == 1 {
+            DeferredWrite::Applied
+        } else {
+            DeferredWrite::NotApplied
+        };
+        tx.commit().await.context("commit fail_deferred_tx")?;
+        Ok(outcome)
+    }
+
+    /// The job-row half of both deferred writes: lock the job `FOR SHARE`;
+    /// `Some(outcome)` means stop — the job is gone or terminal.
+    async fn deferred_job_gate(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        job_id: Uuid,
+    ) -> Result<Option<DeferredWrite>> {
+        let status: Option<String> =
+            sqlx::query_scalar("SELECT status FROM job WHERE job_id = $1 FOR SHARE")
+                .bind(job_id)
+                .fetch_optional(&mut **tx)
+                .await
+                .context("lock job row for a deferred-step write")?;
+        Ok(match status.as_deref() {
+            None => Some(DeferredWrite::NotApplied),
+            Some("pending") | Some("running") => None,
+            Some(_) => Some(DeferredWrite::JobTerminal),
+        })
+    }
+
+    /// Stamp the task pin of a `type: task` step whose templated `ref:` was
+    /// resolved at dispatch (spec 2026-10-15 § 5.6), only while the step is
+    /// still `ready` and unstamped. `false`: another dispatcher got there first.
+    pub async fn stamp_task_pin(
+        pool: &PgPool,
+        job_id: Uuid,
+        step_name: &str,
+        workspace: &str,
+        git_ref: &str,
+        commit: &str,
+    ) -> Result<bool> {
+        let r = sqlx::query(
+            "UPDATE job_step SET task_workspace = $3, task_ref = $4, task_revision = $5 \
+             WHERE job_id = $1 AND step_name = $2 AND status = 'ready' AND task_ref IS NULL",
+        )
+        .bind(job_id)
+        .bind(step_name)
+        .bind(workspace)
+        .bind(git_ref)
+        .bind(commit)
+        .execute(pool)
+        .await
+        .context("stamp task pin")?;
+        Ok(r.rows_affected() == 1)
+    }
+
     /// Get a single step by job_id and step_name.
     pub async fn get_step(
         pool: &PgPool,
@@ -1342,6 +1570,10 @@ impl JobStepRepo {
               -- server-dispatched consumer steps that no worker was ever
               -- supposed to claim.
               AND js.action_type NOT IN ('task', 'approval', 'event_source')
+              -- A deferred step waits for the server, never for a worker
+              -- (spec 2026-10-15 § 8). A separate conjunct keeps the list
+              -- above identical to the claim SQL's.
+              AND js.action_type <> 'deferred'
               AND js.ready_at < NOW() - make_interval(secs => $1::double precision)
               AND NOT EXISTS (
                   SELECT 1 FROM worker w

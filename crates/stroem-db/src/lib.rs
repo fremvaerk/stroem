@@ -10,8 +10,8 @@ pub use repos::job::{
 };
 pub use repos::job_ref_pin::{JobRefPinRepo, JobRefPinRow};
 pub use repos::job_step::{
-    ClaimIdentity, FailOutcome, JobStepRepo, JobStepRow, NewJobStep, ReleaseOutcome, Seed,
-    StaleStepInfo, StepDurationStatsRow, WorkerStepRow,
+    ClaimIdentity, DeferredWrite, FailOutcome, JobStepRepo, JobStepRow, NewJobStep, ReleaseOutcome,
+    Seed, StaleStepInfo, StepDurationStatsRow, WorkerStepRow,
 };
 pub use repos::oauth_authorization_code::{OAuthAuthorizationCodeRepo, OAuthAuthorizationCodeRow};
 pub use repos::oauth_client::{OAuthClientRepo, OAuthClientRow};

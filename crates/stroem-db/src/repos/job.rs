@@ -1425,6 +1425,41 @@ impl JobRepo {
         Ok(rows)
     }
 
+    /// Recovery Phase 4.6 (spec 2026-10-15 § 5.8): non-terminal jobs with a
+    /// deferred `ready` step that has waited longer than `older_than_secs`
+    /// and holds no live resolution lease — left by a crash or a dead
+    /// advance. Cursor pages like [`Self::get_stalled_pinned_jobs`].
+    pub async fn get_jobs_with_stranded_deferred_steps(
+        pool: &PgPool,
+        older_than_secs: f64,
+        after: Option<Uuid>,
+        limit: i64,
+    ) -> Result<Vec<Uuid>> {
+        sqlx::query_scalar(
+            r#"
+            SELECT j.job_id
+            FROM job j
+            WHERE j.status IN ('pending', 'running')
+              AND EXISTS (
+                  SELECT 1 FROM job_step s
+                  WHERE s.job_id = j.job_id
+                    AND s.status = 'ready'
+                    AND s.action_type = 'deferred'
+                    AND s.ready_at < NOW() - make_interval(secs => $1::double precision)
+                    AND (s.resolve_lease_until IS NULL OR s.resolve_lease_until < NOW())
+              )
+            ORDER BY ($2::uuid IS NOT NULL AND j.job_id <= $2), j.job_id
+            LIMIT $3
+            "#,
+        )
+        .bind(older_than_secs)
+        .bind(after)
+        .bind(limit)
+        .fetch_all(pool)
+        .await
+        .context("Failed to list jobs with stranded deferred steps")
+    }
+
     /// Return up to `batch_size` terminal jobs that FINISHED more than the given
     /// number of days ago (`completed_at`, falling back to `created_at` for a
     /// terminal row without one).
