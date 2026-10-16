@@ -193,6 +193,14 @@ pub enum Scope<'a> {
     /// Approval `message:` (S6). `rendered_input`, when a nonempty object,
     /// replaces `input` AFTER step entries; otherwise job input.
     ApprovalMessage { rendered_input: Option<&'a Value> },
+    /// A flow step's templated `ref:` (spec 2026-10-15 § 4.2 rule 2). Job
+    /// input and NO `secret`: a ref is an identifier and is never masked.
+    /// `each` for a loop instance.
+    StepRef,
+    /// A `type: task` action's templated `ref:` (§ 5.6): `input` is the
+    /// schema-free ref projection of the caller's step input; `job`; nothing
+    /// else (§ 4.1) — no `secret`, no state, no step entries, no `each`.
+    TaskActionRef { ref_input: &'a Value },
 }
 
 /// A flow step whose sanitized name equals a framework key.
@@ -202,7 +210,7 @@ pub struct Collision {
     pub key: &'static str,
 }
 
-/// Opaque. The only constructor is [`build`]. Holds rendered secrets, so the
+/// Opaque. The only constructors are [`build`] and [`webhook_ref`]. Holds rendered secrets, so the
 /// value is `Secret`-wrapped and `Debug` prints nothing of it.
 #[derive(Debug)]
 pub struct RenderContext {
@@ -265,24 +273,36 @@ fn build_entries(
     let mut ctx: Vec<(String, Value)> = Vec::new();
     let mut collisions = Vec::new();
 
-    // The two real axes (spec §3.2).
-    let (input, secrets): (Option<&Value>, &HashMap<String, Value>) = match scope {
-        Scope::ActionBody { prepared_input } => (prepared_input, job.owner_secrets),
+    // § 4.1: a task action's ref sees its projection and `job`, nothing else.
+    if let Scope::TaskActionRef { ref_input } = scope {
+        upsert(&mut ctx, "input", ref_input.clone());
+        upsert(&mut ctx, "job", job_context(job.job_revision, job.job_ref));
+        return (ctx, collisions);
+    }
+
+    // The two real axes (spec §3.2). The ref scopes carry no `secret`
+    // (spec 2026-10-15 D10).
+    let (input, secrets): (Option<&Value>, Option<&HashMap<String, Value>>) = match scope {
+        Scope::ActionBody { prepared_input } => (prepared_input, Some(job.owner_secrets)),
+        // TaskActionRef returned above.
+        Scope::StepRef | Scope::TaskActionRef { .. } => (job.job_input, None),
         Scope::StepInput
         | Scope::AgentPrompt
         | Scope::Condition
         | Scope::ChildTaskInput
-        | Scope::ApprovalMessage { .. } => (job.job_input, job.caller_secrets),
+        | Scope::ApprovalMessage { .. } => (job.job_input, Some(job.caller_secrets)),
     };
 
     if let Some(v) = input {
         upsert(&mut ctx, "input", v.clone());
     }
-    upsert(
-        &mut ctx,
-        "secret",
-        serde_json::to_value(secrets).unwrap_or_else(|_| json!({})),
-    );
+    if let Some(secrets) = secrets {
+        upsert(
+            &mut ctx,
+            "secret",
+            serde_json::to_value(secrets).unwrap_or_else(|_| json!({})),
+        );
+    }
     // C2 (spec 2026-10-06 § 3.6): `null`, not absent, when there is no
     // snapshot — Tera 2 errors on `state.x | default(..)` when `state` is
     // undefined but not when it is null.
@@ -401,6 +421,19 @@ pub fn build(
     }
 }
 
+/// The context of a webhook trigger's templated `ref:` (spec 2026-10-15 § 6):
+/// the webhook job input (`body`, `headers`, `method`, `query` and the
+/// trigger's `input` defaults) and nothing else — no job exists yet, so
+/// [`build`], which takes a [`JobContext`], does not fit.
+pub fn webhook_ref(input: &Value) -> RenderContext {
+    let mut ctx = Map::new();
+    ctx.insert("input".to_string(), input.clone());
+    RenderContext {
+        value: Secret::new(Value::Object(ctx)),
+        collisions: Vec::new(),
+    }
+}
+
 /// Test-only: same accumulation as [`build`], but exposes the insertion
 /// order directly — this workspace's `serde_json::Map` does not preserve
 /// insertion order (no `preserve_order` feature), so tests that assert on
@@ -475,6 +508,151 @@ mod tests {
                 rendered_input: Some(prepared),
             },
         ]
+    }
+
+    /// The ref scopes (spec 2026-10-15 § 4.2 rule 2): none carries `secret`.
+    fn ref_scopes<'a>(ref_input: &'a serde_json::Value) -> Vec<Scope<'a>> {
+        vec![Scope::StepRef, Scope::TaskActionRef { ref_input }]
+    }
+
+    /// Forces every new `Scope` variant into exactly one of the two lists
+    /// above: the match is exhaustive, so a new variant does not compile here.
+    #[allow(dead_code)]
+    fn every_scope_is_listed(scope: Scope<'_>) -> &'static str {
+        match scope {
+            Scope::StepInput
+            | Scope::ActionBody { .. }
+            | Scope::AgentPrompt
+            | Scope::Condition
+            | Scope::ChildTaskInput
+            | Scope::ApprovalMessage { .. } => "all_scopes",
+            Scope::StepRef | Scope::TaskActionRef { .. } => "ref_scopes",
+        }
+    }
+
+    #[test]
+    fn ref_scopes_never_carry_secret() {
+        let job_input = json!({"branch": "release/2.3"});
+        let caller = secrets(&[("token", "s3cr3t-value")]);
+        let sn = snaps(None, None);
+        let ref_input = json!({"branch": "main"});
+        let job = JobContext {
+            job_id: uuid::Uuid::nil(),
+            job_input: Some(&job_input),
+            caller_secrets: &caller,
+            owner_secrets: &caller,
+            snapshots: &sn,
+            job_revision: None,
+            job_ref: None,
+        };
+        for scope in ref_scopes(&ref_input) {
+            let label = format!("{scope:?}");
+            let v = build(&job, &[], None, scope);
+            assert!(
+                v.as_value().get("secret").is_none(),
+                "{label} carries secret"
+            );
+            assert!(
+                !v.as_value().to_string().contains("s3cr3t-value"),
+                "{label}"
+            );
+        }
+        let v = webhook_ref(&json!({"body": {"ref": "main"}}));
+        assert!(v.as_value().get("secret").is_none());
+    }
+
+    #[test]
+    fn step_ref_carries_job_input_state_steps_and_each_in_order() {
+        let job_input = json!({"branch": "release/2.3"});
+        let caller = secrets(&[("c", "1")]);
+        let sn = snaps(Some(json!({"s": 1})), Some(json!({"g": 1})));
+        let rows = vec![row("pick", "completed", Some(json!({"branch": "main"})))];
+        let views = views(&rows);
+        let inst = instance("run[0]", "run", 0, json!("release/2.3"));
+        let slot = LoopSlot::of(&inst);
+        let job = JobContext {
+            job_id: uuid::Uuid::nil(),
+            job_input: Some(&job_input),
+            caller_secrets: &caller,
+            owner_secrets: &caller,
+            snapshots: &sn,
+            job_revision: Some("rev"),
+            job_ref: None,
+        };
+        let ordered = build_ordered(&job, &views, slot, Scope::StepRef);
+        let keys: Vec<&str> = ordered.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(
+            keys,
+            vec!["input", "state", "global_state", "job", "pick", "each"]
+        );
+        let v = build(&job, &views, slot, Scope::StepRef);
+        assert_eq!(v.as_value()["input"]["branch"], "release/2.3");
+        assert_eq!(v.as_value()["pick"]["output"]["branch"], "main");
+        assert_eq!(v.as_value()["each"]["item"], "release/2.3");
+        // No loop slot → no `each`.
+        let v = build(&job, &views, None, Scope::StepRef);
+        assert!(v.as_value().get("each").is_none());
+    }
+
+    #[test]
+    fn task_action_ref_carries_only_the_projection_and_job() {
+        let job_input = json!({"branch": "release/2.3"});
+        let caller = secrets(&[("c", "1")]);
+        let sn = snaps(Some(json!({"s": 1})), None);
+        let rows = vec![row("pick", "completed", Some(json!({"x": 1})))];
+        let views = views(&rows);
+        let inst = instance("call[0]", "call", 0, json!("i"));
+        let ref_input = json!({"branch": "main"});
+        let job = JobContext {
+            job_id: uuid::Uuid::nil(),
+            job_input: Some(&job_input),
+            caller_secrets: &caller,
+            owner_secrets: &caller,
+            snapshots: &sn,
+            job_revision: Some("rev"),
+            job_ref: Some("release/2.3"),
+        };
+        let ordered = build_ordered(
+            &job,
+            &views,
+            LoopSlot::of(&inst),
+            Scope::TaskActionRef {
+                ref_input: &ref_input,
+            },
+        );
+        let keys: Vec<&str> = ordered.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys, vec!["input", "job"]);
+        assert_eq!(ordered[0].1, json!({"branch": "main"}));
+        assert_eq!(ordered[1].1["ref"], "release/2.3");
+    }
+
+    #[test]
+    fn webhook_ref_carries_only_the_webhook_input() {
+        let input = json!({"body": {"ref": "main"}, "method": "POST"});
+        let v = webhook_ref(&input);
+        assert_eq!(v.as_value(), &json!({"input": input}));
+        assert!(v.collisions().is_empty());
+    }
+
+    #[test]
+    fn step_ref_records_collisions_like_every_scope() {
+        let caller = secrets(&[]);
+        let sn = snaps(None, None);
+        let rows = vec![row("input", "completed", Some(json!(1)))];
+        let job = JobContext {
+            job_id: uuid::Uuid::nil(),
+            job_input: None,
+            caller_secrets: &caller,
+            owner_secrets: &caller,
+            snapshots: &sn,
+            job_revision: None,
+            job_ref: None,
+        };
+        let v = build(&job, &views(&rows), None, Scope::StepRef);
+        assert!(v
+            .collisions()
+            .iter()
+            .any(|c| c.step == "input" && c.key == "input"));
     }
 
     // ── The anti-regression test (spec §5): every rule-1 key, every scope ──
