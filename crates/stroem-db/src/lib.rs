@@ -8,6 +8,7 @@ pub use repos::job::{
     ClosureBounds, ClosurePinRow, DurationStatsRow, JobAclScope, JobPinCols, JobRepo, JobRow,
     RecentDurationRow, RedactionClosure, RetentionJobInfo, StalledPinnedJob,
 };
+pub use repos::job_ref_pin::{JobRefPinRepo, JobRefPinRow};
 pub use repos::job_step::{
     ClaimIdentity, FailOutcome, JobStepRepo, JobStepRow, NewJobStep, ReleaseOutcome, Seed,
     StaleStepInfo, StepDurationStatsRow, WorkerStepRow,

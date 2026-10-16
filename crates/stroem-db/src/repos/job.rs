@@ -844,7 +844,10 @@ impl JobRepo {
     /// 2. the action pin (`action_ref`) and the task pin (`task_ref`) of
     ///    every step in a non-terminal job;
     /// 3. failed pinned top-level jobs still owed a task-level retry
-    ///    (the same one-hour window as `tarball_keep_revisions`).
+    ///    (the same one-hour window as `tarball_keep_revisions`);
+    /// 4. every `job_ref_pin` commit of a non-terminal job (spec 2026-10-15
+    ///    § 5.2), so a resolved commit stays in the PinStore until its step
+    ///    is claimed.
     pub async fn pin_keep_set(pool: &PgPool) -> Result<Vec<(String, String)>> {
         let rows = sqlx::query_as::<_, (String, String)>(
             "SELECT workspace, revision FROM job \
@@ -860,6 +863,10 @@ impl JobRepo {
                JOIN job j ON j.job_id = s.job_id \
               WHERE j.status IN ('pending', 'running') AND s.task_ref IS NOT NULL \
                 AND s.task_workspace IS NOT NULL AND s.task_revision IS NOT NULL \
+             UNION \
+             SELECT p.workspace, p.commit FROM job_ref_pin p \
+               JOIN job j ON j.job_id = p.job_id \
+              WHERE j.status IN ('pending', 'running') \
              UNION \
              SELECT workspace, revision FROM job \
               WHERE status = 'failed' AND git_ref IS NOT NULL AND revision IS NOT NULL \

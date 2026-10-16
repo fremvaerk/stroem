@@ -1,6 +1,7 @@
 pub mod api_key;
 pub mod job;
 pub mod job_artifact;
+pub mod job_ref_pin;
 pub mod job_step;
 pub mod oauth_authorization_code;
 pub mod oauth_client;
