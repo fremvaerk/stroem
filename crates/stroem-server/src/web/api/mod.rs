@@ -496,14 +496,31 @@ mod classify_execute_error_tests {
             classify_execute_error(unavailable),
             AppError::Internal(_)
         ));
-        let not_found = anyhow::Error::new(RenderedRefError::new(
+        for kind in [
+            RenderedRefKind::Empty,
+            RenderedRefKind::Invalid,
+            RenderedRefKind::SecretValue,
             RenderedRefKind::NotFound { short_sha: false },
-            "etl",
-        ));
-        match classify_execute_error(not_found) {
-            AppError::BadRequest(msg) => {
-                assert_eq!(msg, "the rendered ref was not found in workspace 'etl'")
+            RenderedRefKind::NotFound { short_sha: true },
+            RenderedRefKind::NotGit,
+            RenderedRefKind::NoAction,
+            RenderedRefKind::AgentAction,
+            RenderedRefKind::LoadWithheld,
+            RenderedRefKind::Render,
+            RenderedRefKind::Unresolvable,
+        ] {
+            let sentence = RenderedRefError::new(kind, "etl").to_string();
+            let err = anyhow::Error::new(RenderedRefError::new(kind, "etl"));
+            match classify_execute_error(err) {
+                AppError::BadRequest(msg) => assert_eq!(msg, sentence, "{kind:?}"),
+                other => panic!("{kind:?}: expected BadRequest, got {other:?}"),
             }
+        }
+        // Wrapped in a context layer: the body is still the bare sentence.
+        let wrapped = anyhow::Error::new(RenderedRefError::new(RenderedRefKind::Empty, "etl"))
+            .context("outer layer");
+        match classify_execute_error(wrapped) {
+            AppError::BadRequest(msg) => assert_eq!(msg, "the rendered ref is empty"),
             other => panic!("expected BadRequest, got {other:?}"),
         }
     }
