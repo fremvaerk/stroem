@@ -1315,8 +1315,6 @@ impl RefMemo {
 
     /// A memo holding a job's persisted entries (`job_ref_pin`), for the
     /// deferred-step pass (spec 2026-10-15 § 5.3 step 5).
-    // The deferred-step resolution pass is its first production caller.
-    #[allow(dead_code)]
     pub(crate) fn from_rows(rows: &[stroem_db::JobRefPinRow]) -> Self {
         let memo = Self::new();
         for row in rows {

@@ -1032,6 +1032,23 @@ pub async fn init(
         .await
         .context("creation-time step cascade")?;
 
+    // Deferred root steps (spec 2026-10-15 § 5.3): a root step with a
+    // templated `ref:` is inserted `ready`, so without this call it would
+    // wait for recovery. A resolution failure fails only its step; an
+    // escaping (DB) error takes the `[creation] initialisation failed` path.
+    crate::settlement::deferred::resolve_deferred_steps(
+        workspaces,
+        pool,
+        workspace_config,
+        workspace_name,
+        job_id,
+        task,
+        defaults,
+        &snapshots,
+    )
+    .await
+    .context("resolve deferred steps")?;
+
     handle_task_steps(
         workspaces,
         pool,

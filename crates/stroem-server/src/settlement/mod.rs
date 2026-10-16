@@ -3,6 +3,7 @@
 //! `docs/superpowers/specs/2026-09-08-job-settlement-design.md` and the
 //! `### Settlement` section of CLAUDE.md.
 
+pub mod deferred;
 pub mod dispatch;
 pub mod hooks;
 mod propagate;
@@ -319,6 +320,34 @@ impl Settlement {
             // Run the cascade: promote steps, skip unreachable, expand/resolve
             // for_each placeholders (inside the cascade), check terminal.
             cascade_and_settle(&self.pool, job_id, task, workspace, &snapshots).await?;
+
+            // Deferred steps (spec 2026-10-15 § 5.3): resolve every templated
+            // `ref:` this cascade promoted, before task / approval dispatch
+            // reads the real action types. An escaping error is a DB error:
+            // logged like a task-dispatch error, never propagated.
+            if let Err(e) = deferred::resolve_deferred_steps(
+                &self.workspaces,
+                &self.pool,
+                workspace,
+                &job.workspace,
+                job_id,
+                task,
+                self.defaults,
+                &snapshots,
+            )
+            .await
+            {
+                tracing::error!(
+                    "Failed to resolve deferred steps for job {}: {:#}",
+                    job_id,
+                    e
+                );
+                self.server_log(
+                    job_id,
+                    &format!("[orchestration] Failed to resolve deferred steps: {:#}", e),
+                )
+                .await;
+            }
 
             // Handle any newly-promoted type: task steps (including loop instances)
             if let Err(e) = dispatch::handle_task_steps(

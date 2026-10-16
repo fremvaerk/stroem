@@ -1,0 +1,519 @@
+//! The deferred-step pass (spec `docs/superpowers/specs/2026-10-15-templated-refs-design.md`
+//! § 5.3). A flow step whose `ref:` is a template waits at `ready` as
+//! `action_type = 'deferred'` until this pass renders the template, resolves
+//! the commit (one per `(job, owner, ref)`, table `job_ref_pin`), checks the
+//! value against the job's ref secret set before and after the commit's
+//! config loads, and writes the step's real columns with the code job
+//! creation uses. Runs in `Settlement::advance` and `dispatch::init`, after
+//! the cascade and before task dispatch. `cascade::run` stays pure.
+//!
+//! A rendered value is private until both secret checks pass: no span, log
+//! line or error text carries it (§ 5.5). Every step failure is a
+//! `RenderedRefError`; only DB errors escape.
+
+use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::Result;
+use sqlx::PgPool;
+use stroem_common::git_ref::check_rendered_ref;
+use stroem_common::models::job::StepStatus;
+use stroem_common::models::workflow::{FlowStep, TaskDef, WorkspaceConfig};
+use stroem_common::template::render_ref_template;
+use stroem_db::{
+    DeferredWrite, JobRefPinRepo, JobRepo, JobRow, JobStepRepo, JobStepRow, NewJobStep,
+};
+use uuid::Uuid;
+
+use crate::config::JobDefaults;
+use crate::job_creator::{ref_world_sets, resolve_step_row, RefMemo, StepRowCtx};
+use crate::refs::RefWorld;
+use crate::render_context::{self, JobContext, LoopSlot, Scope, Snapshots};
+use crate::templated_ref::{RenderedRefError, RenderedRefKind};
+use crate::workspace::pins::PinRef;
+use crate::workspace::WorkspaceManager;
+use crate::workspace_set::{collect_redaction_values, WorkspaceSet};
+
+/// Lease length (D12): a resolver whose process dies loses its lease in this time.
+pub const DEFERRED_LEASE_SECS: u64 = 60;
+/// Renewal period of a held lease.
+pub const DEFERRED_LEASE_RENEW_SECS: u64 = 20;
+
+/// Lease length and renewal period. Production uses the default; tests
+/// shorten both.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy)]
+pub struct LeaseTiming {
+    pub lease: Duration,
+    pub renew: Duration,
+}
+
+impl Default for LeaseTiming {
+    fn default() -> Self {
+        Self {
+            lease: Duration::from_secs(DEFERRED_LEASE_SECS),
+            renew: Duration::from_secs(DEFERRED_LEASE_RENEW_SECS),
+        }
+    }
+}
+
+/// One step's step-failure-or-row: the inner `Err` fails the step.
+type Resolution<T> = std::result::Result<T, RenderedRefError>;
+
+/// Owns the renewal task of one resolution lease. `Drop` aborts the task, so
+/// renewal stops on EVERY exit — success, error, panic, or the resolver future
+/// being dropped (a cancelled HTTP request during `init`). A detached renewal
+/// task would keep a `ready` row leased forever, out of Phase 4.6's reach.
+struct LeaseGuard {
+    token: Uuid,
+    lost: Arc<AtomicBool>,
+    renew: tokio::task::JoinHandle<()>,
+}
+
+impl LeaseGuard {
+    /// § 5.3 step 0. `None`: another resolver holds a live lease, or the step
+    /// is no longer a deferred `ready` row.
+    async fn take(
+        pool: &PgPool,
+        job_id: Uuid,
+        step: &str,
+        timing: LeaseTiming,
+    ) -> Result<Option<Self>> {
+        let token = Uuid::new_v4();
+        let secs = timing.lease.as_secs_f64();
+        if !JobStepRepo::take_resolve_lease(pool, job_id, step, token, secs).await? {
+            return Ok(None);
+        }
+        let lost = Arc::new(AtomicBool::new(false));
+        let (pool, step, flag) = (pool.clone(), step.to_string(), Arc::clone(&lost));
+        let renew = tokio::spawn(async move {
+            let mut tick = tokio::time::interval(timing.renew);
+            tick.tick().await; // the first tick completes at once
+            loop {
+                tick.tick().await;
+                match JobStepRepo::renew_resolve_lease(&pool, job_id, &step, token, secs).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        flag.store(true, Ordering::SeqCst);
+                        return;
+                    }
+                    Err(e) => tracing::warn!(
+                        %job_id,
+                        step = %step,
+                        "renewing a resolution lease failed: {e:#}"
+                    ),
+                }
+            }
+        });
+        Ok(Some(Self { token, lost, renew }))
+    }
+
+    /// A renewal changed no row: another resolver took the lease over. The
+    /// token fence would refuse this holder's write anyway.
+    fn is_lost(&self) -> bool {
+        self.lost.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for LeaseGuard {
+    fn drop(&mut self) {
+        self.renew.abort();
+    }
+}
+
+/// Resolve every deferred `ready` step of `job_id` (spec § 5.3). Loops like
+/// `handle_task_steps`: a failure re-cascades, which can promote more
+/// deferred steps; bounded by the flow size. Only DB errors escape.
+#[allow(clippy::too_many_arguments)]
+#[tracing::instrument(skip_all, fields(job_id = %job_id, workspace = %workspace_name))]
+pub async fn resolve_deferred_steps(
+    workspaces: &WorkspaceManager,
+    pool: &PgPool,
+    workspace_config: &WorkspaceConfig,
+    workspace_name: &str,
+    job_id: Uuid,
+    task: &TaskDef,
+    defaults: JobDefaults,
+    snapshots: &Snapshots,
+) -> Result<()> {
+    resolve_deferred_steps_with(
+        workspaces,
+        pool,
+        workspace_config,
+        workspace_name,
+        job_id,
+        task,
+        defaults,
+        snapshots,
+        LeaseTiming::default(),
+    )
+    .await
+}
+
+/// [`resolve_deferred_steps`] with an explicit lease timing (tests).
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub async fn resolve_deferred_steps_with(
+    workspaces: &WorkspaceManager,
+    pool: &PgPool,
+    workspace_config: &WorkspaceConfig,
+    workspace_name: &str,
+    job_id: Uuid,
+    task: &TaskDef,
+    defaults: JobDefaults,
+    snapshots: &Snapshots,
+    timing: LeaseTiming,
+) -> Result<()> {
+    // Every failing pass retires at least one step, like `handle_task_steps`.
+    for _ in 0..(task.flow.len() + 1) {
+        let failed_any = resolve_pass(
+            workspaces,
+            pool,
+            workspace_config,
+            workspace_name,
+            job_id,
+            task,
+            defaults,
+            snapshots,
+            timing,
+        )
+        .await?;
+        if !failed_any {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// One pass over the deferred `ready` steps. `true` if a step was failed.
+#[allow(clippy::too_many_arguments)]
+async fn resolve_pass(
+    workspaces: &WorkspaceManager,
+    pool: &PgPool,
+    workspace_config: &WorkspaceConfig,
+    workspace_name: &str,
+    job_id: Uuid,
+    task: &TaskDef,
+    defaults: JobDefaults,
+    snapshots: &Snapshots,
+    timing: LeaseTiming,
+) -> Result<bool> {
+    let deferred = JobStepRepo::get_ready_deferred_steps(pool, job_id).await?;
+    if deferred.is_empty() {
+        return Ok(false);
+    }
+    let Some(job) = JobRepo::get(pool, job_id).await? else {
+        return Ok(false);
+    };
+    let steps = JobStepRepo::get_steps_for_job(pool, job_id).await?;
+    let mut failed_any = false;
+    for step in &deferred {
+        let Some(lease) = LeaseGuard::take(pool, job_id, &step.step_name, timing).await? else {
+            continue;
+        };
+        let outcome = resolve_one(
+            workspaces,
+            pool,
+            workspace_config,
+            workspace_name,
+            &job,
+            &steps,
+            step,
+            task,
+            defaults,
+            snapshots,
+        )
+        .await?;
+        if lease.is_lost() {
+            continue;
+        }
+        match outcome {
+            Ok(row) => {
+                if JobStepRepo::resolve_deferred_tx(
+                    pool,
+                    job_id,
+                    &step.step_name,
+                    lease.token,
+                    &row,
+                )
+                .await?
+                    == DeferredWrite::Applied
+                {
+                    tracing::info!(%job_id, step = %step.step_name, "[ref] deferred step resolved");
+                }
+            }
+            Err(err) => {
+                let message = format!("[ref] step '{}': {}", step.step_name, err);
+                if JobStepRepo::fail_deferred_tx(
+                    pool,
+                    job_id,
+                    &step.step_name,
+                    lease.token,
+                    &message,
+                )
+                .await?
+                    == DeferredWrite::Applied
+                {
+                    tracing::warn!(%job_id, "{message}");
+                    // The `fail_task_step` pattern: re-cascade so dependents are
+                    // skipped and the job can settle.
+                    if let Err(e) = crate::settlement::cascade_and_settle(
+                        pool,
+                        job_id,
+                        task,
+                        workspace_config,
+                        snapshots,
+                    )
+                    .await
+                    {
+                        tracing::error!(
+                            "Failed to orchestrate after deferred step '{}' failed in job {}: {:#}",
+                            step.step_name,
+                            job_id,
+                            e
+                        );
+                    }
+                    failed_any = true;
+                }
+            }
+        }
+    }
+    Ok(failed_any)
+}
+
+/// § 5.3 steps 1–6 for one step.
+#[allow(clippy::too_many_arguments)]
+async fn resolve_one(
+    workspaces: &WorkspaceManager,
+    pool: &PgPool,
+    workspace_config: &WorkspaceConfig,
+    workspace_name: &str,
+    job: &JobRow,
+    steps: &[JobStepRow],
+    step: &JobStepRow,
+    task: &TaskDef,
+    defaults: JobDefaults,
+    snapshots: &Snapshots,
+) -> Result<Resolution<NewJobStep>> {
+    // The owner was decided at creation from the action name (D11).
+    let owner = step.action_workspace.as_deref().unwrap_or(workspace_name);
+    let unresolvable = || RenderedRefError::new(RenderedRefKind::Unresolvable, owner);
+    let Some(template) = step.ref_template.as_deref() else {
+        return Ok(Err(unresolvable()));
+    };
+    let flow_key = step.loop_source.as_deref().unwrap_or(&step.step_name);
+    let Some(flow_step) = task.flow.get(flow_key) else {
+        return Ok(Err(unresolvable()));
+    };
+
+    // 1. Job input, no `secret`, `each` for an instance.
+    let job_ctx = JobContext {
+        job_id: job.job_id,
+        job_input: job.input.as_ref(),
+        caller_secrets: &workspace_config.secrets,
+        owner_secrets: &workspace_config.secrets,
+        snapshots,
+        job_revision: job.revision.as_deref(),
+        job_ref: job.git_ref.as_deref(),
+    };
+    let ctx = render_context::build(
+        &job_ctx,
+        &render_context::views(steps),
+        LoopSlot::of(step),
+        Scope::StepRef,
+    );
+
+    // 2. Render, then the post-render check against the ref secret set.
+    let rendered = match render_ref_template(template, ctx.as_value()) {
+        Ok(r) => r,
+        Err(e) => return Ok(Err(RenderedRefError::from_error(&e, owner))),
+    };
+    let secrets = match ref_secret_set(workspaces, pool, job).await? {
+        Ok(s) => s,
+        Err(e) => return Ok(Err(e)),
+    };
+    let value = match check_rendered_ref(&rendered, &secrets) {
+        Ok(v) => v,
+        Err(r) => return Ok(Err(RenderedRefError::from_rejection(r, owner))),
+    };
+
+    // 3–4. The commit: memo, else resolve; loaded privately; checked against
+    // that commit's own secrets; only then in the memo.
+    if let Err(e) = select_commit(workspaces, pool, job.job_id, owner, &value).await? {
+        return Ok(Err(e));
+    }
+
+    // 5–6. `value` passed both checks: it is an identifier from here on. The
+    // row is built by the code creation uses, from the row's own owner and
+    // action name (decided at creation) and the job config's flow step.
+    let mut written = flow_step.clone();
+    written.action = if owner == workspace_name {
+        step.action_name.clone()
+    } else {
+        format!("{owner}.{}", step.action_name)
+    };
+    build_row(
+        workspaces,
+        pool,
+        workspace_config,
+        workspace_name,
+        job,
+        &step.step_name,
+        &written,
+        &value,
+        owner,
+        &step.action_name,
+        defaults,
+    )
+    .await
+}
+
+/// The ref secret set of a step before resolution (spec § 10.3): the live set
+/// plus the pin secrets of the job's own pin and of every commit in its
+/// `job_ref_pin`. A pin that cannot be loaded fails the step (D7).
+pub(crate) async fn ref_secret_set(
+    workspaces: &WorkspaceManager,
+    pool: &PgPool,
+    job: &JobRow,
+) -> Result<Resolution<Vec<String>>> {
+    let set = WorkspaceSet::load(workspaces, &job.workspace, None).await;
+    let mut values = collect_redaction_values(&set);
+    let mut pins: BTreeSet<(String, String)> = BTreeSet::new();
+    if let Some(p) = PinRef::of_job(job) {
+        pins.insert((job.workspace.clone(), p.commit));
+    }
+    for row in JobRefPinRepo::list_for_job(pool, job.job_id).await? {
+        pins.insert((row.workspace, row.commit));
+    }
+    for (ws, commit) in pins {
+        let pinned = match workspaces.pinned_config_private(&ws, &commit).await {
+            Ok(p) => p,
+            Err(e) => return Ok(Err(RenderedRefError::from_error(&e, &ws))),
+        };
+        values.extend(workspaces.pin_redaction_values(&ws, &pinned).await);
+    }
+    Ok(Ok(values))
+}
+
+/// § 5.3 steps 3–4 / § 5.2: the commit `owner@value` runs at in `job_id`.
+/// Looked up in the memo, else resolved; loaded through the private path;
+/// the value checked against THAT commit's own secrets; only then written to
+/// the memo, first writer wins — if another resolver wrote a different
+/// commit first, that one is loaded and checked instead.
+pub(crate) async fn select_commit(
+    workspaces: &WorkspaceManager,
+    pool: &PgPool,
+    job_id: Uuid,
+    owner: &str,
+    value: &str,
+) -> Result<Resolution<PinRef>> {
+    let fail = |e: anyhow::Error| RenderedRefError::from_error(&e, owner);
+    let mut commit = match JobRefPinRepo::get(pool, job_id, owner, value).await? {
+        Some(c) => c,
+        None => match workspaces.pins().resolve(owner, value).await {
+            Ok(pin) => pin.commit,
+            Err(e) => return Ok(Err(fail(e.into()))),
+        },
+    };
+    for _ in 0..3 {
+        let pinned = match workspaces.pinned_config_private(owner, &commit).await {
+            Ok(p) => p,
+            Err(e) => return Ok(Err(fail(e))),
+        };
+        let own = workspaces.pin_redaction_values(owner, &pinned).await;
+        if let Err(r) = check_rendered_ref(value, &own) {
+            return Ok(Err(RenderedRefError::from_rejection(r, owner)));
+        }
+        let stored = JobRefPinRepo::insert_first_wins(pool, job_id, owner, value, &commit).await?;
+        if stored == commit {
+            return Ok(Ok(PinRef {
+                git_ref: value.to_string(),
+                commit,
+            }));
+        }
+        commit = stored;
+    }
+    Ok(Err(RenderedRefError::new(
+        RenderedRefKind::Unresolvable,
+        owner,
+    )))
+}
+
+/// § 5.3 steps 5–6 through `job_creator::resolve_step_row`, with nested
+/// static refs kept in the job's memo too (contract deviation 8): the memo is
+/// seeded from `job_ref_pin`, every entry the row met is written first-writer-
+/// wins, and the row is rebuilt (at most 3 times) when one disagrees.
+#[allow(clippy::too_many_arguments)]
+async fn build_row(
+    workspaces: &WorkspaceManager,
+    pool: &PgPool,
+    workspace_config: &WorkspaceConfig,
+    workspace_name: &str,
+    job: &JobRow,
+    step_name: &str,
+    written: &FlowStep,
+    value: &str,
+    owner: &str,
+    action_name: &str,
+    defaults: JobDefaults,
+) -> Result<Resolution<NewJobStep>> {
+    let (library_names, configured, git) = ref_world_sets(workspaces);
+    let world = RefWorld {
+        library_names: &library_names,
+        configured: &configured,
+        git: &git,
+    };
+    let ws_set = WorkspaceSet::load(workspaces, workspace_name, Some(workspace_config)).await;
+    let job_pin = PinRef::of_job(job);
+    for _ in 0..3 {
+        let memo = RefMemo::from_rows(&JobRefPinRepo::list_for_job(pool, job.job_id).await?);
+        let ctx = StepRowCtx {
+            workspaces,
+            job_id: job.job_id,
+            workspace_name,
+            workspace_config,
+            task_name: &job.task_name,
+            job_pin: job_pin.as_ref(),
+            world: &world,
+            memo: &memo,
+            ws_set: &ws_set,
+            defaults,
+        };
+        let row = match resolve_step_row(&ctx, step_name, written, StepStatus::Ready, Some(value))
+            .await
+        {
+            Ok(row) => row,
+            Err(e) => return Ok(Err(RenderedRefError::from_error(&e, owner))),
+        };
+        // D11: the owner and the action name were decided at creation. The
+        // live config of an unpinned job can re-point the step's `action:`
+        // before promotion; the deferred row's values must win.
+        if row.action_workspace.as_deref() != Some(owner) || row.action_name != action_name {
+            return Ok(Err(RenderedRefError::new(
+                RenderedRefKind::Unresolvable,
+                owner,
+            )));
+        }
+        let mut agreed = true;
+        for entry in memo.entries() {
+            let stored = JobRefPinRepo::insert_first_wins(
+                pool,
+                job.job_id,
+                &entry.workspace,
+                &entry.git_ref,
+                &entry.commit,
+            )
+            .await?;
+            agreed &= stored == entry.commit;
+        }
+        if agreed {
+            return Ok(Ok(row));
+        }
+    }
+    Ok(Err(RenderedRefError::new(
+        RenderedRefKind::Unresolvable,
+        owner,
+    )))
+}

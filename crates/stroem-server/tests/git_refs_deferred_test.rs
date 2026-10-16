@@ -9,9 +9,11 @@ use anyhow::Result;
 use axum::http::StatusCode;
 use serde_json::json;
 use sqlx::PgPool;
-use stroem_db::{JobRefPinRepo, JobStepRepo, JobStepRow};
+use stroem_db::{JobRefPinRepo, JobRepo, JobStepRepo, JobStepRow};
 use stroem_server::config::JobDefaults;
-use stroem_server::job_creator::create_job_for_task_detailed;
+use stroem_server::job_creator::{
+    create_child_job_for_task_detailed, create_job_for_task_detailed,
+};
 use stroem_server::workspace::pins::PinLoadWithheld;
 use uuid::Uuid;
 
@@ -420,5 +422,386 @@ async fn templated_task_action_ref_leaves_the_task_pin_empty_at_creation() -> Re
         json!("{{ input.branch }}")
     );
     assert!(call.ref_template.is_none());
+    Ok(())
+}
+
+// ─── Resolution at promotion (spec § 5.3) ─────────────────────────────────
+
+/// release/2.3 one commit later: `hello` now echoes v2.
+pub(crate) fn df_release_v2(fx: &PinnedFixture) -> String {
+    fx.etl.commit(
+        "release/2.3",
+        "release/2.3",
+        &[(
+            "workflow.yaml",
+            &df_etl_release().replace("echo v1", "echo v2"),
+        )],
+    )
+}
+
+/// The headline case: a ROOT step with `ref: "{{ input.branch }}"` is
+/// resolved by `init`, inside the creating request — no recovery wait.
+#[tokio::test]
+async fn root_templated_ref_is_resolved_at_creation() -> Result<()> {
+    let fx = df_fixture().await?;
+    // Review Focus 1: a trailing newline (a pasted form value) is trimmed.
+    for branch in ["release/2.3", "release/2.3\n"] {
+        let (status, body) = execute_task(
+            &fx.router,
+            "etl",
+            "tr-input",
+            json!({"branch": branch}),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let job_id: Uuid = body["job_id"].as_str().unwrap().parse()?;
+        let run = df_step(&fx.pool, job_id, "run").await;
+        assert_eq!(run.status, "ready", "{branch:?}");
+        assert_eq!(run.action_type, "script");
+        assert_eq!(run.required_ability, "script");
+        assert_eq!(run.runner, "local");
+        assert_eq!(run.action_ref.as_deref(), Some("release/2.3"));
+        assert_eq!(
+            run.action_revision.as_deref(),
+            Some(fx.commits.etl_release.as_str())
+        );
+        assert_eq!(
+            run.action_spec.as_ref().unwrap()["script"],
+            json!("echo v1")
+        );
+        assert_eq!(run.ref_template.as_deref(), Some("{{ input.branch }}"));
+    }
+    // The claim returns the branch's action and commit.
+    let worker = register_worker(&fx.router, &["script"]).await;
+    let claimed = claim_once(&fx.router, &worker).await;
+    assert_eq!(claimed["revision"], json!(fx.commits.etl_release));
+    assert_eq!(claimed["action_spec"]["script"], json!("echo v1"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn ref_read_from_an_earlier_steps_output() -> Result<()> {
+    let fx = df_fixture().await?;
+    let job_id = df_create(&fx, "tr-output", json!({})).await?;
+    assert_eq!(
+        df_step(&fx.pool, job_id, "run").await.action_type,
+        "deferred"
+    );
+    let worker = register_worker(&fx.router, &["script"]).await;
+    claim_and_complete(
+        &fx,
+        &worker,
+        job_id,
+        "pick",
+        json!({"output": {"branch": "release/2.3"}}),
+    )
+    .await;
+    let run = df_step(&fx.pool, job_id, "run").await;
+    assert_eq!(run.status, "ready");
+    assert_eq!(run.action_type, "script");
+    assert_eq!(run.action_ref.as_deref(), Some("release/2.3"));
+    assert_eq!(
+        run.action_revision.as_deref(),
+        Some(fx.commits.etl_release.as_str())
+    );
+    Ok(())
+}
+
+/// § 5.4: each instance renders its own `each`; equal values share a commit.
+#[tokio::test]
+async fn for_each_instances_resolve_their_own_values_and_share_equal_ones() -> Result<()> {
+    let fx = df_fixture().await?;
+    let job_id = df_create(&fx, "tr-each", json!({})).await?;
+    for (i, want) in [
+        (0, &fx.commits.etl_release),
+        (1, &fx.commits.etl_main),
+        (2, &fx.commits.etl_release),
+    ] {
+        let s = df_step(&fx.pool, job_id, &format!("run[{i}]")).await;
+        assert_eq!(s.action_type, "script", "run[{i}]");
+        assert_eq!(
+            s.action_revision.as_deref(),
+            Some(want.as_str()),
+            "run[{i}]"
+        );
+    }
+    let placeholder = df_step(&fx.pool, job_id, "run").await;
+    assert_eq!(
+        placeholder.action_type, "deferred",
+        "the placeholder never runs"
+    );
+    assert_eq!(placeholder.status, "running");
+    let memo = JobRefPinRepo::list_for_job(&fx.pool, job_id).await?;
+    let etl: Vec<&str> = memo
+        .iter()
+        .filter(|e| e.workspace == "etl")
+        .map(|e| e.git_ref.as_str())
+        .collect();
+    assert_eq!(etl, vec!["main", "release/2.3"]);
+    Ok(())
+}
+
+/// Success criterion 4: a static ref and a template rendering the same value
+/// get ONE commit, even after the branch moves between creation and
+/// promotion; so do two promotions of the same rendered value.
+#[tokio::test]
+async fn one_commit_per_ref_survives_a_branch_move() -> Result<()> {
+    let fx = df_fixture().await?;
+    let worker = register_worker(&fx.router, &["script"]).await;
+
+    let job_id = df_create(&fx, "tr-memo", json!({})).await?;
+    let v2 = df_release_v2(&fx);
+    assert_ne!(v2, fx.commits.etl_release);
+    claim_and_complete(&fx, &worker, job_id, "a", json!({"output": {}})).await;
+    let b = df_step(&fx.pool, job_id, "b").await;
+    assert_eq!(
+        b.action_revision.as_deref(),
+        Some(fx.commits.etl_release.as_str())
+    );
+    // A claim takes ANY ready step: finish job 1 so job 2's claims are exact.
+    claim_and_complete(&fx, &worker, job_id, "b", json!({"output": {}})).await;
+
+    let job2 = df_create(&fx, "tr-memo-two", json!({})).await?;
+    claim_and_complete(&fx, &worker, job2, "x", json!({"output": {}})).await;
+    let y = df_step(&fx.pool, job2, "y").await;
+    assert_eq!(
+        y.action_revision.as_deref(),
+        Some(v2.as_str()),
+        "y resolved at the tip"
+    );
+    let v3 = fx.etl.commit(
+        "release/2.3",
+        "release/2.3",
+        &[(
+            "workflow.yaml",
+            &df_etl_release().replace("echo v1", "echo v3"),
+        )],
+    );
+    claim_and_complete(&fx, &worker, job2, "y", json!({"output": {}})).await;
+    claim_and_complete(&fx, &worker, job2, "z", json!({"output": {}})).await;
+    let w = df_step(&fx.pool, job2, "w").await;
+    assert_eq!(
+        w.action_revision.as_deref(),
+        Some(v2.as_str()),
+        "w reuses y's commit, not {v3}"
+    );
+    Ok(())
+}
+
+/// Spec § 5.5: each resolution error fails ONLY that step with a fixed,
+/// value-free sentence; the job settles; the execute call still returns the
+/// job (D8: no pre-check); nothing failed reaches the memo.
+#[tokio::test]
+async fn resolution_failures_fail_the_step_with_a_value_free_message() -> Result<()> {
+    let fx = df_fixture().await?;
+    let cases: &[(&str, serde_json::Value, &str)] = &[
+        ("tr-input", json!({"branch": "  "}), "[ref] step 'run': the rendered ref is empty"),
+        (
+            "tr-input",
+            json!({"branch": "release/9.9"}),
+            "[ref] step 'run': the rendered ref was not found in workspace 'etl'",
+        ),
+        (
+            "tr-input",
+            json!({"branch": "a..b"}),
+            "[ref] step 'run': the rendered ref is not a valid branch, tag or full commit SHA",
+        ),
+        (
+            "tr-missing-action",
+            json!({}),
+            "[ref] step 'run': workspace 'etl' has no such action or task at the rendered ref",
+        ),
+        (
+            "tr-agent",
+            json!({}),
+            "[ref] step 'run': the action at the rendered ref is an agent action; agent actions cannot be referenced with `ref` yet",
+        ),
+        (
+            "tr-billing",
+            json!({"tag": "v9.9.9"}),
+            "[ref] step 'run': the rendered ref was not found in workspace 'billing'",
+        ),
+    ];
+    for (task, input, want) in cases {
+        let (status, body) = execute_task(&fx.router, "etl", task, input.clone(), None).await;
+        assert_eq!(status, StatusCode::OK, "{task} {input}: {body}");
+        let job_id: Uuid = body["job_id"].as_str().unwrap().parse()?;
+        let run = df_step(&fx.pool, job_id, "run").await;
+        assert_eq!(run.status, "failed", "{task} {input}");
+        assert_eq!(run.error_message.as_deref(), Some(*want), "{task} {input}");
+        assert_eq!(
+            run.action_type, "deferred",
+            "a failed resolution keeps the deferred row"
+        );
+        assert_eq!(
+            JobRepo::get(&fx.pool, job_id).await?.unwrap().status,
+            "failed"
+        );
+        let memo = JobRefPinRepo::list_for_job(&fx.pool, job_id).await?;
+        assert!(
+            memo.iter()
+                .all(|e| e.git_ref != "release/9.9" && e.git_ref != "v9.9.9"),
+            "{memo:?}"
+        );
+    }
+    // The owner comes from the action name: `billing.export` at a tag.
+    let job_id = df_create(&fx, "tr-billing", json!({"tag": "v4.1.0"})).await?;
+    let run = df_step(&fx.pool, job_id, "run").await;
+    assert_eq!(run.action_workspace.as_deref(), Some("billing"));
+    assert_eq!(
+        run.action_revision.as_deref(),
+        Some(fx.commits.billing_tag.as_str())
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_rendered_ref_holding_a_live_secret_is_refused() -> Result<()> {
+    let fx = pinned_workspace_fixture(PinnedFixtureOpts {
+        etl_main: Some(format!(
+            "secrets:\n  deploy_token: tok-9f8e7d6c5b\n{}",
+            df_etl_main()
+        )),
+        etl_release: Some(df_etl_release()),
+        ..Default::default()
+    })
+    .await?;
+    let job_id = df_create(&fx, "tr-input", json!({"branch": "feature-tok-9f8e7d6c5b"})).await?;
+    let run = df_step(&fx.pool, job_id, "run").await;
+    assert_eq!(run.status, "failed");
+    assert_eq!(
+        run.error_message.as_deref(),
+        Some("[ref] step 'run': the rendered ref contains a secret value")
+    );
+    let memo = JobRefPinRepo::list_for_job(&fx.pool, job_id).await?;
+    assert!(memo.iter().all(|e| !e.git_ref.contains("tok-")), "{memo:?}");
+    Ok(())
+}
+
+/// D7: a temporary git failure at promotion fails the step (no wait).
+#[tokio::test]
+async fn a_temporary_git_failure_fails_the_step() -> Result<()> {
+    let fx = df_fixture().await?;
+    let replica = fx.second_replica().await?;
+    fx.etl.break_remote();
+    let (status, body) = execute_task(
+        &replica.router,
+        "etl",
+        "tr-input",
+        json!({"branch": "release/2.3"}),
+        None,
+    )
+    .await;
+    fx.etl.restore_remote();
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let job_id: Uuid = body["job_id"].as_str().unwrap().parse()?;
+    let run = df_step(&fx.pool, job_id, "run").await;
+    assert_eq!(run.status, "failed");
+    assert_eq!(
+        run.error_message.as_deref(),
+        Some("[ref] step 'run': workspace 'etl' is not available at the rendered ref yet")
+    );
+    Ok(())
+}
+
+/// After resolution, a `type: task` step is dispatched in the same `init`,
+/// its child pinned to the commit the template selected.
+#[tokio::test]
+async fn a_resolved_task_action_dispatches_a_pinned_child() -> Result<()> {
+    let fx = df_fixture().await?;
+    let job_id = df_create(&fx, "tr-task", json!({})).await?;
+    let run = df_step(&fx.pool, job_id, "run").await;
+    assert_eq!(run.action_type, "task");
+    assert_eq!(run.status, "running", "dispatched after the pass");
+    assert_eq!(run.task_ref.as_deref(), Some("release/2.3"));
+    assert_eq!(
+        run.task_revision.as_deref(),
+        Some(fx.commits.etl_release.as_str())
+    );
+    let child: Uuid = sqlx::query_scalar("SELECT job_id FROM job WHERE parent_job_id = $1")
+        .bind(job_id)
+        .fetch_one(&fx.pool)
+        .await?;
+    let child = JobRepo::get(&fx.pool, child).await?.unwrap();
+    assert_eq!(child.git_ref.as_deref(), Some("release/2.3"));
+    assert_eq!(
+        child.revision.as_deref(),
+        Some(fx.commits.etl_release.as_str())
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_resolved_approval_step_suspends() -> Result<()> {
+    let fx = df_fixture().await?;
+    let job_id = df_create(&fx, "tr-gate", json!({})).await?;
+    let run = df_step(&fx.pool, job_id, "run").await;
+    assert_eq!(run.action_type, "approval");
+    assert_eq!(run.status, "suspended");
+    Ok(())
+}
+
+/// An agent task-tool child whose only root step fails resolution at `init`
+/// is born terminal (spec § 5.3 consequences).
+#[tokio::test]
+async fn an_agent_tool_child_whose_root_fails_resolution_is_born_terminal() -> Result<()> {
+    let fx = df_fixture().await?;
+    let parent = df_create(&fx, "tr-later", json!({})).await?;
+    let cfg = fx.mgr().get_config("etl").await.expect("etl loaded");
+    let created = create_child_job_for_task_detailed(
+        fx.mgr(),
+        &fx.pool,
+        &cfg,
+        "etl",
+        "tr-input",
+        json!({"branch": "release/9.9"}),
+        "agent_tool",
+        None,
+        parent,
+        "first",
+        Some(&fx.commits.etl_main),
+        JobDefaults::default(),
+        None,
+    )
+    .await?;
+    assert!(fx
+        .state
+        .settlement()
+        .agent_child_created(created)
+        .await
+        .is_err());
+    Ok(())
+}
+
+/// Review Focus 2: an object item renders JSON text (or a render error);
+/// either way the instance fails and its message carries none of it.
+#[tokio::test]
+async fn for_each_over_objects_fails_each_instance_without_echoing_it() -> Result<()> {
+    let fx = df_fixture().await?;
+    let job_id = df_create(&fx, "tr-each-objects", json!({})).await?;
+    let inst = df_step(&fx.pool, job_id, "run[0]").await;
+    assert_eq!(inst.status, "failed");
+    let msg = inst.error_message.unwrap();
+    assert!(
+        msg == "[ref] step 'run[0]': the rendered ref is not a valid branch, tag or full commit SHA"
+            || msg.starts_with("[ref] step 'run[0]': the ref template could not be rendered"),
+        "{msg}"
+    );
+    assert!(!msg.contains("release/2.3") && !msg.contains('{'), "{msg}");
+    Ok(())
+}
+
+/// Review Focus 3: the flow step has no `retry:`; the resolved action's own
+/// retry fills the row.
+#[tokio::test]
+async fn a_resolved_action_brings_its_own_retry() -> Result<()> {
+    let fx = df_fixture().await?;
+    let job_id = df_create(&fx, "tr-retry", json!({})).await?;
+    let run = df_step(&fx.pool, job_id, "run").await;
+    assert_eq!(run.action_type, "script");
+    assert_eq!(run.max_retries, Some(2));
+    assert_eq!(run.retry_backoff_secs, Some(1));
+    assert_eq!(run.retry_strategy.as_deref(), Some("fixed"));
     Ok(())
 }
