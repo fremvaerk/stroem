@@ -845,6 +845,20 @@ pub async fn claim_job(
         ));
     }
 
+    // The claim SQL matches the capabilities this REQUEST carries, so an
+    // unknown token could claim rows no worker should — a deferred step
+    // carries `required_ability = 'deferred'` (spec 2026-10-15 D9). Same
+    // check and message as /worker/register; a real worker always sends its
+    // registered (validated) capabilities.
+    if let Some(c) = capabilities
+        .iter()
+        .find(|c| !KNOWN_ABILITIES.contains(&c.as_str()))
+    {
+        return Err(AppError::BadRequest(format!(
+            "unknown capability '{c}'. Known: {KNOWN_ABILITIES:?}"
+        )));
+    }
+
     let step = match JobStepRepo::claim_ready_step(
         &state.pool,
         &capabilities,
@@ -2006,6 +2020,15 @@ mod tests {
             serde_json::from_value(json).expect("capabilities is enough; tags optional");
         assert_eq!(req.capabilities, vec!["script"]);
         assert!(req.tags.is_empty());
+    }
+
+    /// A deferred step carries `required_ability = 'deferred'` (spec
+    /// 2026-10-15 D9). It must never become a known ability, or a worker
+    /// could claim a step whose action is not resolved yet.
+    #[test]
+    fn known_abilities_never_contain_deferred() {
+        assert!(!KNOWN_ABILITIES.contains(&"deferred"));
+        assert!(!KNOWN_ABILITIES.contains(&stroem_common::models::job::DEFERRED_ACTION_TYPE));
     }
 
     /// Regression for review finding #3: pre-041 worker binaries send only

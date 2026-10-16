@@ -13,6 +13,7 @@ mod dependency_conditions_recalc_pipeline_test;
 mod duration_stats_test;
 mod git_refs_claim_test;
 mod git_refs_creation_test;
+mod git_refs_deferred_test;
 mod git_refs_read_paths_test;
 mod git_refs_scheduler_test;
 mod ha_test;
