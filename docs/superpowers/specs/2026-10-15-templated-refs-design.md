@@ -1,6 +1,6 @@
 # Templated refs (`ref: "{{ … }}"`)
 
-Status: revision 8 (2026-10-15) — Codex: MERGE-READY (round 6); approved by the user 2026-10-16 — plan `docs/superpowers/plans/2026-10-16-templated-refs.md`
+Status: implemented (plan docs/superpowers/plans/2026-10-16-templated-refs.md)
 Builds on: `2026-10-02-git-refs-design.md` (the git-refs spec, cited as GR),
 `2026-10-06-tera-2-upgrade-design.md` (cited as T2),
 `2026-09-11-render-context-owner-design.md`.

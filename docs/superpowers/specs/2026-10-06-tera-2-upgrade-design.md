@@ -454,6 +454,9 @@ sites interpolating a variable named `rendered` is part of review.
 | Dispatch: task-step input, approval message (`settlement/dispatch.rs`) | job log, step error | value-free; `fail_task_step` scrub + withholding kept |
 | Hooks: hook input (`settlement/hooks.rs::fire_single_hook`) | `tracing::error!` and the SOURCE job's `_server` log | value-free; **NEW scrub** with the source job's redaction values (today unscrubbed) |
 | Event source: env (`event_source.rs`) | `tracing::warn!` | value-free; **NEW scrub** with the workspace's secret values (today unscrubbed) |
+| Deferred step `ref:` (`settlement/deferred.rs`, `Scope::StepRef`, ref engine without `vals`) | `job_step.error_message`, `tracing::warn!` | value-free: one `RenderedRefError` per kind (spec 2026-10-15 § 5.5), the rendered value never quoted; a `Render` error carries only the `TemplateError` text |
+| `type: task` action `ref:` (`settlement/dispatch.rs::resolve_templated_task_ref`, `Scope::TaskActionRef`) | job log via `fail_task_step`, step error | value-free; the ref-input projection is a caller-side step-input render (scrubbed, never withheld); the ref render is owner-side (withheld when O ≠ A) |
+| Webhook trigger `ref:` (`trigger_target::resolve_templated_trigger_target`, `render_context::webhook_ref`) | HTTP 400 / 500 body, `tracing::warn!` in `web/hooks.rs`, `AppError::Internal` log | value-free: `RenderedRefError` only (a leaf with no `source`) |
 | CLI `stroem run` / `validate` | the operator's terminal | full Tera detail (§ 3.2.3) |
 
 Any new path that renders a template and reports the error must appear in

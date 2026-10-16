@@ -67,8 +67,110 @@ See [Upgrading](#upgrading).
 error. The server does not validate workspace YAML when it loads it, so
 there such a `ref:` has no effect — run `stroem validate` in CI.
 
-A ref is a fixed string. A value containing `{{` or `{%` is rejected: refs
-are never templated.
+A ref is a fixed string, or a template on a flow step, a `type: task`
+action or a webhook trigger — see [Templated refs](#templated-refs).
+
+## Templated refs
+
+A `ref:` can be a Tera template, so the person who runs a task, the system
+that calls a webhook, or an earlier step chooses the branch, tag or commit:
+
+```yaml
+tasks:
+  deploy:
+    input:
+      branch: { type: string, default: main }
+    flow:
+      build:
+        action: build
+        ref: "{{ input.branch }}"          # chosen in the Run form
+      find:
+        action: find-release
+      publish:
+        action: billing.publish
+        ref: "{{ find.output.branch }}"    # chosen by an earlier step
+        depends_on: [find]
+
+triggers:
+  on-push:
+    type: webhook
+    name: on-push
+    task: build
+    ref: "{{ input.body.ref }}"            # chosen by the caller
+```
+
+A `ref:` is a template when it contains `{{` or `{%`.
+
+| Place | Resolved | The template can read |
+|---|---|---|
+| Flow-step `ref:` | when the step becomes ready | `input` (job input), `state`, `global_state`, `job`, earlier steps' `output` / `error`, `each` (in a `for_each` instance) |
+| `type: task` action `ref:` | when the step is dispatched | `input` (the step's `input:` rendered as strings, without the task's schema and without the action's input defaults), `job` |
+| Webhook trigger `ref:` | when the webhook fires | `input` (`body`, `headers`, `method`, `query` and the trigger's `input` defaults) |
+
+No ref template can read `secret` or use `vals`. A template is a
+`stroem validate` error on scheduler triggers, hooks, event sources, agent
+task tools and actions other than `type: task`.
+
+**The owner.** The action name decides the owner workspace when the job is
+created (`billing.publish` -> `billing`); the template chooses only the
+commit. The action name itself is never a template. An owner that is not a
+git workspace, an unknown workspace or a library is a `400` at job creation.
+
+**When.** Until it is resolved, a flow step is *deferred*: job detail shows
+`action_type: deferred` and the UI shows `ref: {{ … }}` on the step. A root
+step (no `depends_on`, `when` or `for_each`) is resolved while the job is
+created. Each `for_each` instance renders its own `each.item`.
+
+**One commit per ref.** Inside one job, every step that uses the same owner
+and the same ref value runs the same commit — static and templated refs
+alike — even if the branch moves while the job runs. A task retry, a re-run
+and a restart resolve again.
+
+**Errors.** The rendered value is trimmed. These fail the step — never the
+job creation — with a message that never shows the value:
+
+| Rendered value | Step error |
+|---|---|
+| empty | `[ref] step '…': the rendered ref is empty` |
+| not a branch, tag or full SHA | `… is not a valid branch, tag or full commit SHA` |
+| contains a secret value | `… contains a secret value` |
+| no such branch or tag | `… was not found in workspace '…'` |
+| the action or task is missing at that commit | `workspace '…' has no such action or task at the rendered ref` |
+| git is unreachable | `workspace '…' is not available at the rendered ref yet` |
+| the template fails to render | `the ref template could not be rendered: …` |
+
+A failed resolution uses no retry attempt. A template syntax error or an
+unknown filter is a `400` at job creation. A webhook answers `400` for these
+errors (`500` when git is unreachable) and creates no job.
+
+**`type: task` actions.** The ref reads the step's `input:` rendered as
+strings, before the task is known. A string nested inside an object of the
+step input must render too, even if the task never uses it: escape literal
+template text there with `{% raw %}…{% endraw %}`. The step input is rendered
+twice — once for the ref, once for the child job — so a value that changes
+between renders (`now()`, a `vals` lookup) can differ. A templated ref that
+resolves to the same owner, the same task and the same commit as the running
+job fails the step, like a static self-reference.
+
+**Tools.** `stroem validate` checks a templated ref's syntax and skips the
+action or task lookup with a warning. `stroem run` ignores `ref:` and runs
+the local action.
+
+:::caution[Who can choose the commit]
+There is no allow-list. Anyone who can set a value the template reads — a
+user with `Run` on the task, any caller of the webhook (anyone at all when it
+has no `secret`), or an earlier step's output — can make the server run any
+branch, tag or commit of the owner workspace with that commit's secrets and
+connections. With push access to the owner repository, that runs any code.
+Never pass a secret into a value a ref template reads: a rendered ref is an
+identifier and is never masked. The server rejects a rendered ref that
+contains a known secret value of 4 or more characters, but not a transformed
+one (`| upper`, `| replace`).
+:::
+
+Before you merge YAML with a templated `ref:`, every server replica must run
+a release that supports it — see
+[Migrations 051 and 052](/operations/migration-051-052/).
 
 ## Ref forms
 
@@ -438,6 +540,9 @@ cross-workspace steps, and how old revisions' files are served. Read
 
 ## Not yet supported
 
+- A templated `ref` on scheduler triggers, hooks, event sources and agent
+  task tools; an empty rendered value meaning "no ref"; an allow-list of the
+  refs a template may choose.
 - A per-run ref override (testing a feature branch from the UI, API, MCP or
   CLI).
 - `ref` on hooks, event sources, agent actions and agent task tools.

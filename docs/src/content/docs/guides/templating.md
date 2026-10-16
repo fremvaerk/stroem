@@ -115,6 +115,20 @@ actions:
 A flow step literally named `job` shadows the job metadata: `{{ job.output.* }}` keeps referring to that step's output, and `{{ job.revision }}` is unavailable in that task. Avoid naming a step `job` if you want the metadata.
 :::
 
+## Templated refs
+
+A `ref:` on a flow step, a `type: task` action or a webhook trigger can be a
+template ([Git refs → Templated refs](/guides/git-refs/#templated-refs)). Its
+context is narrower than a step input's:
+
+| `ref:` on | Context |
+|---|---|
+| a flow step | `input`, `state`, `global_state`, `job`, earlier steps, `each` |
+| a `type: task` action | `input` (the step's input rendered as strings), `job` |
+| a webhook trigger | `input` (the webhook job input) |
+
+None of them has `secret`, and `vals` is an unknown filter there.
+
 ## Step name rules
 
 :::caution

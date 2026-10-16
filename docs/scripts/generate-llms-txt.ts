@@ -127,7 +127,7 @@ const sections: Section[] = [
   { file: "guides/task-state.md", title: "Task State Snapshots", slug: "task-state",
     desc: "Cross-run state persistence: STATE:, GLOBAL_STATE:, /state mount", group: "Guides" },
   { file: "guides/git-refs.md", title: "Git Refs", slug: "git-refs",
-    desc: "ref: on actions, type: task and triggers — branch/tag/SHA, pinned jobs, per-ref state", group: "Guides" },
+    desc: "ref: on actions, type: task and triggers — branch/tag/SHA, templated refs, pinned jobs, per-ref state", group: "Guides" },
   { file: "guides/artifacts.md", title: "Artifacts", slug: "artifacts",
     desc: "Per-job files via /artifacts/: limits, MIME sniffing, UI/CLI/MCP download", group: "Guides" },
   { file: "guides/mcp.md", title: "MCP Integration", slug: "mcp",

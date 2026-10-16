@@ -865,6 +865,8 @@ When a task runs in distributed mode, its steps may execute on different workers
 
 **6d. Git refs on references** — DONE (spec `docs/superpowers/specs/2026-10-02-git-refs-design.md`). `ref:` (branch | tag | SHA) on flow-step actions, `type: task` actions and scheduler/webhook triggers (which may now also name another workspace's task); jobs on a ref are pinned to one commit; replica-local PinStore; state partitioned per ref; per-job redaction closure; pinned jobs authorised by their own `task_folder`. Migrations 049 + 050; upgrade note `docs/src/content/docs/operations/migration-049-050.md`. Follow-ups in TODO.md § Git refs follow-ups.
 
+**6e. Templated refs** — DONE (spec `docs/superpowers/specs/2026-10-15-templated-refs-design.md`). `ref:` may be a Tera template on flow steps (resolved at promotion — deferred steps, resolution pass in advance/init, lease, `job_ref_pin` memo), `type: task` actions (at dispatch) and webhook triggers (at fire time); no `secret` / `vals` in ref contexts; value-free `RenderedRefError`; recovery Phase 4.6. Migrations 051 + 052; upgrade note `docs/src/content/docs/operations/migration-051-052.md`. Follow-ups in TODO.md § Templated refs follow-ups.
+
 ---
 
 ## 9. Verification

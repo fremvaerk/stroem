@@ -90,6 +90,10 @@ export default defineConfig({
               slug: "operations/migration-049-050",
             },
             {
+              label: "Migrations 051–052 — Templated Refs",
+              slug: "operations/migration-051-052",
+            },
+            {
               label: "Upgrading to 0.18.1 — JSON Inputs",
               slug: "operations/upgrade-0-18-1-json-input",
             },
