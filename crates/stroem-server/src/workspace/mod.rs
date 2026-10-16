@@ -606,6 +606,27 @@ impl WorkspaceManager {
         }
     }
 
+    /// Load `ws` at `commit` for a ref whose value is still private (spec
+    /// 2026-10-15 § 5.5 change 2): every label this path writes names the
+    /// commit only, `ws (sha7)`, never the ref. A `PinLoadFailed` is withheld
+    /// as [`pin_error_for_user`](Self::pin_error_for_user) does — scrubbed
+    /// chain to `tracing::error!`, fixed sentence returned — under that
+    /// commit-only label. Every other `PinError` passes through (its text
+    /// names the workspace and, at most, the commit).
+    #[tracing::instrument(skip_all, fields(workspace = %ws, commit = %commit))]
+    pub async fn pinned_config_private(&self, ws: &str, commit: &str) -> Result<Arc<Pinned>> {
+        match self.pins.ensure(ws, commit).await {
+            Ok(pinned) => Ok(pinned),
+            Err(err @ PinError::PinLoadFailed { .. }) => {
+                let withheld = pins::PinLoadWithheld::for_commit(ws, commit);
+                let detail = self.scrub_live(ws, &err.to_string()).await;
+                tracing::error!("{withheld}: {detail}");
+                Err(withheld.into())
+            }
+            Err(err) => Err(err.into()),
+        }
+    }
+
     /// `text` with every LIVE redaction value of `ws` and the other loaded
     /// workspaces masked (`redact_secrets_in_str`). For pin error text, which
     /// has no pinned redaction set to use: the pin is what failed to load.

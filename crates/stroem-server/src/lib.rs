@@ -29,6 +29,7 @@ pub mod settlement;
 pub mod state;
 pub mod state_storage;
 pub mod tarball_cache;
+pub mod templated_ref;
 #[cfg(test)]
 mod test_support;
 pub(crate) mod trigger_target;

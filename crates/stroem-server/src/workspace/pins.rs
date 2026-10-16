@@ -758,7 +758,10 @@ impl PinStore {
 
     /// Resolve `git_ref` (§ 4.2 forms) of `ws` to a commit that is present
     /// in the local bare repo when this returns.
-    #[tracing::instrument(skip_all, fields(workspace = %ws, git_ref = %git_ref))]
+    // `git_ref` is not a span field: a templated ref's value is private until
+    // it passes both secret checks (spec 2026-10-15 § 5.5 change 1). No
+    // caller read the field.
+    #[tracing::instrument(skip_all, fields(workspace = %ws))]
     pub async fn resolve(&self, ws: &str, git_ref: &str) -> Result<Pin, PinError> {
         let src = self.source(ws)?;
         let not_found = || PinError::RefNotFound {

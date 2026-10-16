@@ -404,6 +404,44 @@ impl std::fmt::Display for OwnerSideRender {
 // `Display + Debug` is not enough for `std::error::Error`'s blanket downcast.
 impl std::error::Error for OwnerSideRender {}
 
+/// A name missing from a pinned config. `Display` is the text `action_at` /
+/// `task_named_at` always produced, so `classify_execute_error`'s
+/// "has no action" / "has no task" phrases still answer 400; the templated-ref
+/// paths classify it by TYPE (spec 2026-10-15, `templated_ref::RenderedRefKind::NoAction`).
+#[derive(Debug)]
+pub(crate) struct MissingAtRef {
+    kind: &'static str,
+    written: String,
+    owner: String,
+    local: String,
+    git_ref: String,
+}
+
+impl std::fmt::Display for MissingAtRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} '{}': workspace '{}' has no {} '{}' at ref '{}'",
+            self.kind, self.written, self.owner, self.kind, self.local, self.git_ref
+        )
+    }
+}
+
+impl std::error::Error for MissingAtRef {}
+
+#[cfg(test)]
+impl MissingAtRef {
+    pub(crate) fn new_for_test() -> Self {
+        Self {
+            kind: "action",
+            written: "hello".into(),
+            owner: "etl".into(),
+            local: "hello".into(),
+            git_ref: "main".into(),
+        }
+    }
+}
+
 /// Create a job with parent tracking (for type: task sub-jobs).
 ///
 /// `git_ref` set ⇒ a pinned job: `workspace_config` is the pinned config at
@@ -1153,13 +1191,13 @@ fn action_at(
     git_ref: &str,
 ) -> Result<ActionDef> {
     cfg.actions.get(local).cloned().ok_or_else(|| {
-        anyhow::anyhow!(
-            "action '{}': workspace '{}' has no action '{}' at ref '{}'",
-            written,
-            owner,
-            local,
-            git_ref
-        )
+        anyhow::Error::new(MissingAtRef {
+            kind: "action",
+            written: written.to_string(),
+            owner: owner.to_string(),
+            local: local.to_string(),
+            git_ref: git_ref.to_string(),
+        })
     })
 }
 
@@ -1173,13 +1211,13 @@ fn task_named_at(
     git_ref: &str,
 ) -> Result<TaskDef> {
     cfg.tasks.get(local).cloned().ok_or_else(|| {
-        anyhow::anyhow!(
-            "task '{}': workspace '{}' has no task '{}' at ref '{}'",
-            task_ref,
-            ws,
-            local,
-            git_ref
-        )
+        anyhow::Error::new(MissingAtRef {
+            kind: "task",
+            written: task_ref.to_string(),
+            owner: ws.to_string(),
+            local: local.to_string(),
+            git_ref: git_ref.to_string(),
+        })
     })
 }
 

@@ -419,6 +419,14 @@ pub fn build_api_routes(state: Arc<AppState>) -> Router {
 /// classified first, by their own permanence (git-refs spec § 8).
 pub(crate) fn classify_execute_error(e: anyhow::Error) -> AppError {
     use crate::workspace::pins::{PinError, PinLoadWithheld};
+    // Templated refs (spec 2026-10-15 § 5.5): one value-free typed error,
+    // checked first. Its kind decides: transient → 500, else → 400.
+    if let Some(r) = e.downcast_ref::<crate::templated_ref::RenderedRefError>() {
+        return match r.kind {
+            crate::templated_ref::RenderedRefKind::Unavailable => AppError::Internal(e),
+            _ => AppError::BadRequest(r.to_string()),
+        };
+    }
     // Typed first (spec § 8): pin and ref-syntax errors carry their own
     // permanence; never infer it from message text.
     if let Some(p) = e.downcast_ref::<PinError>() {
@@ -478,6 +486,27 @@ pub(crate) fn classify_execute_error(e: anyhow::Error) -> AppError {
 #[cfg(test)]
 mod classify_execute_error_tests {
     use super::*;
+
+    #[test]
+    fn rendered_ref_errors_answer_by_kind_with_their_fixed_sentence() {
+        use crate::templated_ref::{RenderedRefError, RenderedRefKind};
+        let unavailable =
+            anyhow::Error::new(RenderedRefError::new(RenderedRefKind::Unavailable, "etl"));
+        assert!(matches!(
+            classify_execute_error(unavailable),
+            AppError::Internal(_)
+        ));
+        let not_found = anyhow::Error::new(RenderedRefError::new(
+            RenderedRefKind::NotFound { short_sha: false },
+            "etl",
+        ));
+        match classify_execute_error(not_found) {
+            AppError::BadRequest(msg) => {
+                assert_eq!(msg, "the rendered ref was not found in workspace 'etl'")
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
 
     #[test]
     fn unshared_cross_workspace_connection_is_bad_request() {
