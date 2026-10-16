@@ -941,6 +941,7 @@ pub(crate) fn build_step(
         task_workspace: task_pin.as_ref().map(|p| p.workspace.clone()),
         task_ref: task_pin.as_ref().map(|p| p.git_ref.clone()),
         task_revision: task_pin.map(|p| p.commit),
+        ref_template: None,
     }
 }
 

@@ -9,7 +9,7 @@ use uuid::Uuid;
 /// `concat!` it into a `&'static str`, which sqlx accepts as SQL directly.
 macro_rules! step_columns {
     () => {
-        "job_id, step_name, action_name, action_type, action_image, action_spec, input, output, status, worker_id, started_at, completed_at, error_message, required_ability, required_tags, runner, timeout_secs, when_condition, for_each_expr, loop_source, loop_index, loop_total, loop_item, agent_state, suspended_at, retry_attempt, max_retries, retry_backoff_secs, retry_strategy, retry_jitter, retry_history, retry_at, action_workspace, action_revision, carried_over, skip_reason, action_ref, task_workspace, task_ref, task_revision, pin_releases"
+        "job_id, step_name, action_name, action_type, action_image, action_spec, input, output, status, worker_id, started_at, completed_at, error_message, required_ability, required_tags, runner, timeout_secs, when_condition, for_each_expr, loop_source, loop_index, loop_total, loop_item, agent_state, suspended_at, retry_attempt, max_retries, retry_backoff_secs, retry_strategy, retry_jitter, retry_history, retry_at, action_workspace, action_revision, carried_over, skip_reason, action_ref, task_workspace, task_ref, task_revision, pin_releases, ref_template"
     };
 }
 
@@ -79,6 +79,9 @@ pub struct JobStepRow {
     pub task_revision: Option<String>,
     /// Claims released because the pin was unavailable (§ 7.2).
     pub pin_releases: i32,
+    /// The `ref:` template of a flow step created deferred (spec
+    /// 2026-10-15 § 5.1). Kept after resolution, for display.
+    pub ref_template: Option<String>,
 }
 
 impl JobStepRow {
@@ -128,6 +131,7 @@ impl JobStepRow {
             task_ref: None,
             task_revision: None,
             pin_releases: 0,
+            ref_template: None,
         }
     }
 }
@@ -171,6 +175,8 @@ pub struct NewJobStep {
     pub task_ref: Option<String>,
     /// See [`JobStepRow::task_revision`].
     pub task_revision: Option<String>,
+    /// See [`JobStepRow::ref_template`].
+    pub ref_template: Option<String>,
 }
 
 /// Bind parameters for a single row in the batch INSERT inside [`JobStepRepo::create_steps_tx`].
@@ -207,6 +213,7 @@ struct StepInsertRow {
     task_workspace: Option<String>,
     task_ref: Option<String>,
     task_revision: Option<String>,
+    ref_template: Option<String>,
 }
 
 /// A stale running step with its job info for recovery.
@@ -344,13 +351,13 @@ impl JobStepRepo {
         // Build a batch insert query
         let mut query = String::from(
             r#"
-            INSERT INTO job_step (job_id, step_name, action_name, action_type, action_image, action_spec, input, status, required_ability, required_tags, runner, timeout_secs, ready_at, when_condition, for_each_expr, loop_source, loop_index, loop_total, loop_item, max_retries, retry_backoff_secs, retry_strategy, retry_jitter, action_workspace, action_revision, action_ref, task_workspace, task_ref, task_revision)
+            INSERT INTO job_step (job_id, step_name, action_name, action_type, action_image, action_spec, input, status, required_ability, required_tags, runner, timeout_secs, ready_at, when_condition, for_each_expr, loop_source, loop_index, loop_total, loop_item, max_retries, retry_backoff_secs, retry_strategy, retry_jitter, action_workspace, action_revision, action_ref, task_workspace, task_ref, task_revision, ref_template)
             VALUES
             "#,
         );
 
         let mut rows: Vec<StepInsertRow> = Vec::new();
-        let cols_per_row = 29;
+        let cols_per_row = 30;
         for (i, step) in steps.iter().enumerate() {
             if i > 0 {
                 query.push_str(", ");
@@ -400,6 +407,7 @@ impl JobStepRepo {
                 task_workspace: step.task_workspace.clone(),
                 task_ref: step.task_ref.clone(),
                 task_revision: step.task_revision.clone(),
+                ref_template: step.ref_template.clone(),
             });
         }
 
@@ -435,7 +443,8 @@ impl JobStepRepo {
                 .bind(row.action_ref)
                 .bind(row.task_workspace)
                 .bind(row.task_ref)
-                .bind(row.task_revision);
+                .bind(row.task_revision)
+                .bind(row.ref_template);
         }
 
         q.execute(executor)

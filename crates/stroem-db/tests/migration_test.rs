@@ -59,6 +59,7 @@ async fn test_schema_completeness() -> Result<()> {
         "refresh_token",
         "user_auth_link",
         "api_key",
+        "job_ref_pin",
     ];
 
     for table in &expected {
@@ -210,5 +211,85 @@ async fn test_049_050_git_ref_columns_and_indexes() -> Result<()> {
     sqlx::raw_sql(include_str!("../migrations/050_git_refs_indexes.sql"))
         .execute(&pool)
         .await?;
+    Ok(())
+}
+
+/// Migrations 051 + 052 (spec 2026-10-15 § 8): the new columns and the memo
+/// table exist, the action-type check accepts `deferred` and is VALID after
+/// 052, and both files are re-runnable.
+#[tokio::test]
+async fn test_051_052_templated_refs_schema() -> Result<()> {
+    let pool = setup_db().await?;
+
+    for (table, column) in [
+        ("job_step", "ref_template"),
+        ("job_step", "resolve_lease_owner"),
+        ("job_step", "resolve_lease_until"),
+        ("job_ref_pin", "job_id"),
+        ("job_ref_pin", "workspace"),
+        ("job_ref_pin", "git_ref"),
+        ("job_ref_pin", "commit"),
+    ] {
+        let found: Option<(String,)> = sqlx::query_as(
+            "SELECT column_name::text FROM information_schema.columns \
+             WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2",
+        )
+        .bind(table)
+        .bind(column)
+        .fetch_optional(&pool)
+        .await?;
+        assert!(found.is_some(), "{table}.{column} missing");
+    }
+
+    let job_id = uuid::Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO job (job_id, workspace, task_name, mode, status, source_type) \
+         VALUES ($1, 'etl', 't', 'distributed', 'running', 'api')",
+    )
+    .bind(job_id)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO job_step (job_id, step_name, action_name, action_type, status, \
+                               required_ability, runner, ref_template) \
+         VALUES ($1, 'run', 'hello', 'deferred', 'ready', 'deferred', 'none', '{{ input.b }}')",
+    )
+    .bind(job_id)
+    .execute(&pool)
+    .await
+    .expect("a deferred row inserts after 051");
+    let bogus = sqlx::query(
+        "INSERT INTO job_step (job_id, step_name, action_name, action_type, status, runner) \
+         VALUES ($1, 'x', 'a', 'bogus', 'ready', 'none')",
+    )
+    .bind(job_id)
+    .execute(&pool)
+    .await;
+    assert!(bogus.is_err(), "an unknown action type is still rejected");
+
+    let valid = |pool: PgPool| async move {
+        let (v,): (bool,) = sqlx::query_as(
+            "SELECT convalidated FROM pg_constraint WHERE conname = 'job_step_action_type_check'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        v
+    };
+    assert!(valid(pool.clone()).await, "052 validated the widened check");
+
+    sqlx::raw_sql(include_str!("../migrations/051_templated_refs.sql"))
+        .execute(&pool)
+        .await?;
+    assert!(
+        !valid(pool.clone()).await,
+        "051 re-adds the check NOT VALID"
+    );
+    sqlx::raw_sql(include_str!(
+        "../migrations/052_templated_refs_validate.sql"
+    ))
+    .execute(&pool)
+    .await?;
+    assert!(valid(pool.clone()).await);
     Ok(())
 }

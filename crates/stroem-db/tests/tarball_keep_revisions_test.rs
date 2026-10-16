@@ -37,6 +37,7 @@ async fn cross_ws_step(pool: &PgPool, job_id: Uuid, owner: &str, owner_rev: &str
         task_workspace: None,
         task_ref: None,
         task_revision: None,
+        ref_template: None,
         job_id,
         step_name: "s".to_string(),
         action_name: format!("{owner}.act"),
@@ -219,6 +220,7 @@ async fn pinned_step(
         task_workspace: task.map(|t| t.0.to_string()),
         task_ref: task.map(|t| t.1.to_string()),
         task_revision: task.map(|t| t.2.to_string()),
+        ref_template: None,
     };
     JobStepRepo::create_steps(pool, &[step]).await
 }

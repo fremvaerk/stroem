@@ -33,6 +33,7 @@ fn make_step(job_id: Uuid, step_name: &str, status: &str) -> NewJobStep {
         task_workspace: None,
         task_ref: None,
         task_revision: None,
+        ref_template: None,
         job_id,
         step_name: step_name.to_string(),
         action_name: "test-action".to_string(),

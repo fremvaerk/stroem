@@ -560,6 +560,9 @@ fn phase_placeholders(
                     task_workspace: r.task_workspace.clone(),
                     task_ref: r.task_ref.clone(),
                     task_revision: r.task_revision.clone(),
+                    // A deferred placeholder's instances are deferred too; each
+                    // is resolved with its own `each` (spec 2026-10-15 § 5.4).
+                    ref_template: r.ref_template.clone(),
                 }
             })
             .collect();
@@ -1722,6 +1725,41 @@ mod tests {
             assert_eq!(i.task_ref.as_deref(), Some("v4"));
             assert_eq!(i.task_revision.as_deref(), Some("c2"));
         }
+    }
+
+    /// A deferred placeholder's instances keep the template and the deferred
+    /// kind, so the resolution pass can render each with its own `each`
+    /// (spec 2026-10-15 § 5.4).
+    #[test]
+    fn expand_instances_copy_the_ref_template() {
+        let t = task(vec![("p", fs(&[]))]);
+        let mut p = placeholder("p", "pending", "[\"a\", \"b\"]");
+        p.action_type = "deferred".into();
+        p.required_ability = "deferred".into();
+        p.ref_template = Some("{{ each.item }}".into());
+        let plan = run(
+            &t,
+            &job(None),
+            &[p],
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
+        let instances = plan
+            .changes
+            .iter()
+            .find_map(|c| match c {
+                Change::Expand { instances, .. } => Some(instances),
+                _ => None,
+            })
+            .expect("p expands");
+        assert_eq!(instances.len(), 2);
+        for i in instances {
+            assert_eq!(i.action_type, "deferred", "{}", i.step_name);
+            assert_eq!(i.required_ability, "deferred");
+            assert_eq!(i.ref_template.as_deref(), Some("{{ each.item }}"));
+        }
+        assert_eq!(instances[0].status, "ready");
     }
 
     #[test]

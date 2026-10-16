@@ -62,6 +62,7 @@ fn step(job_id: Uuid, name: &str, status: &str) -> NewJobStep {
         task_workspace: None,
         task_ref: None,
         task_revision: None,
+        ref_template: None,
         job_id,
         step_name: name.to_string(),
         action_name: "noop".to_string(),
