@@ -1977,7 +1977,7 @@ async fn a_templated_task_ref_to_the_jobs_own_task_and_pin_is_a_self_reference()
     Ok(())
 }
 
-/// Spec § 12: a task retry is a new job with a new memo; its templates resolve
+/// Spec § 5.7: a task retry is a new job with a new memo; its templates resolve
 /// again, at the branch's CURRENT tip.
 #[tokio::test]
 async fn a_task_retry_resolves_its_templated_ref_again_with_its_own_pins() -> Result<()> {
