@@ -2,16 +2,18 @@ use anyhow::{bail, Context, Result};
 use sqlx::{self, PgPool};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use stroem_common::models::job::StepStatus;
+use stroem_common::git_ref::{classify_ref, RefKind};
+use stroem_common::models::job::{StepStatus, DEFERRED_ACTION_TYPE};
 use stroem_common::models::workflow::resolve_step_retry_config;
 use stroem_common::models::workflow::{
-    ActionDef, BackoffStrategy, FlowStep, InputFieldDef, TaskDef, WorkspaceConfig,
+    ActionDef, BackoffStrategy, FlowStep, InputFieldDef, RetryConfig, TaskDef, WorkspaceConfig,
 };
 use stroem_common::template::{
-    merge_defaults, parse_qualified_ref, resolve_connection_inputs, RoleConfig, RoleScope,
+    check_ref_template_syntax, merge_defaults, parse_qualified_ref, resolve_connection_inputs,
+    RoleConfig, RoleScope,
 };
 use stroem_common::validation::{compute_required_ability, compute_required_tags, derive_runner};
-use stroem_db::{JobPinCols, JobRepo, JobRow, JobStepRepo, NewJobStep};
+use stroem_db::{JobPinCols, JobRefPinRepo, JobRepo, JobRow, JobStepRepo, NewJobStep};
 use uuid::Uuid;
 
 use crate::config::{AgentsConfig, JobDefaults};
@@ -629,130 +631,26 @@ pub(crate) fn create_job_for_task_inner<'a>(
         // Generate job_id upfront so steps can reference it
         let job_id = Uuid::new_v4();
 
+        let ctx = StepRowCtx {
+            workspaces,
+            job_id,
+            workspace_name,
+            workspace_config,
+            task_name,
+            job_pin: job_pin.as_ref(),
+            world: &world,
+            memo: &memo,
+            ws_set: &ws_set,
+            defaults,
+        };
         for (step_name, flow_step) in &task.flow {
-            let StepAction {
-                action,
-                workspace: action_workspace,
-                revision: action_revision,
-                name: action_name,
-                owner_cfg,
-                pin: action_pin,
-            } = resolve_step_action(
-                workspaces,
-                workspace_name,
-                workspace_config,
-                job_pin.as_ref(),
-                step_name,
-                flow_step,
-                &world,
-                &memo,
-            )
-            .await?;
-
-            // Fail fast (400) on literal connection references the worker would
-            // otherwise reject at claim time. Templated values cannot be checked here.
-            let mut task_pin: Option<TaskPinStamp> = None;
-            if action.action_type == "task" {
-                let task_ref = action
-                    .task
-                    .as_deref()
-                    .context("type: task action missing task field")?;
-                let base_ws: &str = action_workspace.as_deref().unwrap_or(workspace_name);
-                let base_cfg: &WorkspaceConfig = owner_cfg.as_deref().unwrap_or(workspace_config);
-                // The pin of the config this action is written in (§ 4.3 base
-                // pin): the step's action pin, else — for an action of the
-                // job's own config — the job's. A live foreign action has none.
-                let base_pin: Option<PinRef> = match (&action_pin, &action_workspace) {
-                    (Some(p), _) => Some(p.clone()),
-                    (None, None) => job_pin.clone(),
-                    (None, Some(_)) => None,
-                };
-                let (resolved, pin) = resolve_task_for_step(
-                    workspaces,
-                    base_ws,
-                    base_cfg,
-                    base_pin.as_ref(),
-                    task_ref,
-                    action.git_ref.as_deref(),
-                    &world,
-                    &memo,
-                )
-                .await?;
-                // A self-reference is the same task at the same pin; the same
-                // task at another commit is a different version (bounded by
-                // MAX_TASK_DEPTH like any nesting).
-                if resolved.workspace == workspace_name
-                    && resolved.task_name == task_name
-                    && pin.as_ref() == job_pin.as_ref()
-                {
-                    bail!(
-                        "task '{}' is a self-reference to '{}/{}' (invalid)",
-                        task_ref,
-                        workspace_name,
-                        task_name
-                    );
-                }
-                precheck_task_step_literals(
-                    step_name,
-                    flow_step,
-                    &resolved,
-                    workspaces,
-                    RoleConfig {
-                        workspace: workspace_name,
-                        config: workspace_config,
-                    },
-                    base_cfg,
-                )
-                .await?;
-                task_pin = pin.map(|p| TaskPinStamp {
-                    workspace: resolved.workspace.clone(),
-                    git_ref: p.git_ref,
-                    commit: p.commit,
-                });
-            } else {
-                // Role-scoped (spec § 7.4): the job's own config is the
-                // caller, the action's owner config (pinned or live) its owner
-                // — the same roles the claim path resolves with.
-                let roles = RoleScope {
-                    caller: RoleConfig {
-                        workspace: workspace_name,
-                        config: workspace_config,
-                    },
-                    action_owner: action_workspace.as_deref().map(|ws| RoleConfig {
-                        workspace: ws,
-                        config: owner_cfg.as_deref().unwrap_or(workspace_config),
-                    }),
-                    task_owner: None,
-                    others: &ws_set,
-                };
-                precheck_literal_connection_inputs(step_name, flow_step, &action, &roles)?;
-            }
-
-            let status = if flow_step.for_each.is_some() {
-                // For-each steps always start pending — expanded at promotion time
-                StepStatus::Pending
-            } else if flow_step.depends_on.is_empty() && flow_step.when.is_none() {
-                StepStatus::Ready
-            } else {
-                // Steps with `when` conditions start as pending even if they
-                // have no deps — the post-creation promote loop evaluates them.
-                StepStatus::Pending
+            let status = initial_status(flow_step);
+            let step = match flow_step.git_ref.as_deref().map(classify_ref) {
+                // Spec 2026-10-15 § 5.1: resolved when the step becomes ready.
+                Some(RefKind::Template) => deferred_row(&ctx, step_name, flow_step, status)?,
+                _ => resolve_step_row(&ctx, step_name, flow_step, status, None).await?,
             };
-
-            new_steps.push(build_step(
-                job_id,
-                step_name,
-                action_name,
-                flow_step,
-                &action,
-                Some(serde_json::to_value(&flow_step.input).unwrap_or_default()),
-                status,
-                defaults,
-                action_workspace,
-                action_revision,
-                action_pin.map(|p| p.git_ref),
-                task_pin,
-            ));
+            new_steps.push(step);
         }
 
         // Create job and steps atomically in a transaction
@@ -798,6 +696,12 @@ pub(crate) fn create_job_for_task_inner<'a>(
         JobStepRepo::create_steps_tx(&mut *tx, &new_steps)
             .await
             .context("Failed to create job steps")?;
+
+        // The job's ref memo (spec 2026-10-15 § 5.2): its own pin and every
+        // static ref this creation resolved. Deferred steps resolve against it.
+        JobRefPinRepo::insert_many_tx(&mut *tx, job_id, &memo.entries())
+            .await
+            .context("persist the job's ref memo")?;
 
         // Restart: overwrite the freshly created rows outside the restart set
         // with the source job's terminal state, inside the SAME transaction —
@@ -925,7 +829,7 @@ pub(crate) fn build_step(
     let required_ability = compute_required_ability(action);
     let required_tags = compute_required_tags(action);
     let runner = derive_runner(action);
-    let retry = resolve_step_retry_config(flow_step, action);
+    let retry = retry_cols(resolve_step_retry_config(flow_step, action).as_ref());
 
     NewJobStep {
         job_id,
@@ -939,40 +843,17 @@ pub(crate) fn build_step(
         required_ability,
         required_tags,
         runner,
-        timeout_secs: flow_step
-            .timeout
-            .map(|d| i32::try_from(d.as_secs()).expect("timeout validated to fit i32"))
-            .or(defaults.step_timeout_secs),
+        timeout_secs: step_timeout(flow_step, defaults),
         when_condition: flow_step.when.clone(),
-        for_each_expr: flow_step.for_each.as_ref().map(|v| {
-            // Store human-readable form: raw string for templates, compact JSON for arrays
-            match v {
-                serde_json::Value::String(s) => s.clone(),
-                other => other.to_string(),
-            }
-        }),
+        for_each_expr: for_each_text(flow_step),
         loop_source: None,
         loop_index: None,
         loop_total: None,
         loop_item: None,
-        // `max_attempts` counts total executions; the DB column counts
-        // retries only, so it's stored as `max_attempts - 1`. Validation
-        // guarantees `max_attempts >= 1`, so this subtraction never
-        // underflows.
-        max_retries: retry
-            .as_ref()
-            .map(|r| i32::try_from(r.max_attempts - 1).expect("max_attempts fits i32")),
-        retry_backoff_secs: retry
-            .as_ref()
-            .map(|r| i32::try_from(r.delay.as_secs()).expect("retry delay fits i32")),
-        retry_strategy: retry.as_ref().map(|r| {
-            if r.backoff == BackoffStrategy::Exponential {
-                "exponential".to_string()
-            } else {
-                "fixed".to_string()
-            }
-        }),
-        retry_jitter: retry.as_ref().is_some_and(|r| r.jitter),
+        max_retries: retry.max_retries,
+        retry_backoff_secs: retry.backoff_secs,
+        retry_strategy: retry.strategy,
+        retry_jitter: retry.jitter,
         action_workspace,
         action_revision,
         action_ref,
@@ -981,6 +862,285 @@ pub(crate) fn build_step(
         task_revision: task_pin.map(|p| p.commit),
         ref_template: None,
     }
+}
+
+/// `timeout_secs` of a step: its own timeout, else the server default.
+fn step_timeout(flow_step: &FlowStep, defaults: JobDefaults) -> Option<i32> {
+    flow_step
+        .timeout
+        .map(|d| i32::try_from(d.as_secs()).expect("timeout validated to fit i32"))
+        .or(defaults.step_timeout_secs)
+}
+
+/// `for_each_expr`: the raw string of a template, compact JSON of a literal array.
+fn for_each_text(flow_step: &FlowStep) -> Option<String> {
+    flow_step.for_each.as_ref().map(|v| match v {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    })
+}
+
+/// The four retry columns. `max_attempts` counts executions; the column counts
+/// retries, so it stores `max_attempts - 1` (validation: `max_attempts >= 1`).
+struct RetryCols {
+    max_retries: Option<i32>,
+    backoff_secs: Option<i32>,
+    strategy: Option<String>,
+    jitter: bool,
+}
+
+fn retry_cols(retry: Option<&RetryConfig>) -> RetryCols {
+    RetryCols {
+        max_retries: retry
+            .map(|r| i32::try_from(r.max_attempts - 1).expect("max_attempts fits i32")),
+        backoff_secs: retry
+            .map(|r| i32::try_from(r.delay.as_secs()).expect("retry delay fits i32")),
+        strategy: retry.map(|r| {
+            if r.backoff == BackoffStrategy::Exponential {
+                "exponential".to_string()
+            } else {
+                "fixed".to_string()
+            }
+        }),
+        jitter: retry.is_some_and(|r| r.jitter),
+    }
+}
+
+/// What every flow step of one job resolves against (spec 2026-10-15 § 5.3
+/// step 5): the job's own config and pin, the ref world, the memo and the
+/// job's connection set. Built once per creation and once per deferred-step
+/// resolution.
+pub(crate) struct StepRowCtx<'a> {
+    pub workspaces: &'a WorkspaceManager,
+    pub job_id: Uuid,
+    pub workspace_name: &'a str,
+    pub workspace_config: &'a WorkspaceConfig,
+    pub task_name: &'a str,
+    pub job_pin: Option<&'a PinRef>,
+    pub world: &'a RefWorld<'a>,
+    pub memo: &'a RefMemo,
+    pub ws_set: &'a WorkspaceSet<'a>,
+    pub defaults: JobDefaults,
+}
+
+/// The status a flow step is created with: a root step with no `when` and no
+/// `for_each` is `ready`; every other step waits for the cascade.
+fn initial_status(flow_step: &FlowStep) -> StepStatus {
+    if flow_step.for_each.is_some() {
+        // For-each steps always start pending — expanded at promotion time
+        StepStatus::Pending
+    } else if flow_step.depends_on.is_empty() && flow_step.when.is_none() {
+        StepStatus::Ready
+    } else {
+        // Steps with `when` conditions start as pending even if they
+        // have no deps — the post-creation promote loop evaluates them.
+        StepStatus::Pending
+    }
+}
+
+/// One flow step's row (spec 2026-10-15 § 5.3 step 5): its action resolved
+/// (git-refs § 4.3), the creation checks run, the columns built — the SAME
+/// code for job creation (static refs) and for the deferred-step pass
+/// (`git_ref_override` = the rendered, checked value).
+pub(crate) async fn resolve_step_row(
+    ctx: &StepRowCtx<'_>,
+    step_name: &str,
+    flow_step: &FlowStep,
+    status: StepStatus,
+    git_ref_override: Option<&str>,
+) -> Result<NewJobStep> {
+    let StepAction {
+        action,
+        workspace: action_workspace,
+        revision: action_revision,
+        name: action_name,
+        owner_cfg,
+        pin: action_pin,
+    } = resolve_step_action(
+        ctx.workspaces,
+        ctx.workspace_name,
+        ctx.workspace_config,
+        ctx.job_pin,
+        step_name,
+        flow_step,
+        git_ref_override.or(flow_step.git_ref.as_deref()),
+        ctx.world,
+        ctx.memo,
+    )
+    .await?;
+
+    // Fail fast (400) on literal connection references the worker would
+    // otherwise reject at claim time. Templated values cannot be checked here.
+    let mut task_pin: Option<TaskPinStamp> = None;
+    if action.action_type == "task" {
+        let task_ref = action
+            .task
+            .as_deref()
+            .context("type: task action missing task field")?;
+        match action.git_ref.as_deref() {
+            // Spec 2026-10-15 § 5.6: a templated task ref resolves at
+            // dispatch. Only its syntax is checked now; no task pin.
+            Some(r) if classify_ref(r) == RefKind::Template => {
+                check_ref_template_syntax(r)
+                    .map_err(anyhow::Error::new)
+                    .with_context(|| {
+                        format!(
+                            "step '{step_name}': action '{action_name}' has an invalid `ref` template"
+                        )
+                    })?;
+            }
+            task_git_ref => {
+                let base_ws: &str = action_workspace.as_deref().unwrap_or(ctx.workspace_name);
+                let base_cfg: &WorkspaceConfig =
+                    owner_cfg.as_deref().unwrap_or(ctx.workspace_config);
+                // The pin of the config this action is written in (§ 4.3 base
+                // pin): the step's action pin, else — for an action of the
+                // job's own config — the job's. A live foreign action has none.
+                let base_pin: Option<PinRef> = match (&action_pin, &action_workspace) {
+                    (Some(p), _) => Some(p.clone()),
+                    (None, None) => ctx.job_pin.cloned(),
+                    (None, Some(_)) => None,
+                };
+                let (resolved, pin) = resolve_task_for_step(
+                    ctx.workspaces,
+                    base_ws,
+                    base_cfg,
+                    base_pin.as_ref(),
+                    task_ref,
+                    task_git_ref,
+                    ctx.world,
+                    ctx.memo,
+                )
+                .await?;
+                // A self-reference is the same task at the same pin; the same
+                // task at another commit is a different version (bounded by
+                // MAX_TASK_DEPTH like any nesting).
+                if resolved.workspace == ctx.workspace_name
+                    && resolved.task_name == ctx.task_name
+                    && pin.as_ref() == ctx.job_pin
+                {
+                    bail!(
+                        "task '{}' is a self-reference to '{}/{}' (invalid)",
+                        task_ref,
+                        ctx.workspace_name,
+                        ctx.task_name
+                    );
+                }
+                precheck_task_step_literals(
+                    step_name,
+                    flow_step,
+                    &resolved,
+                    ctx.workspaces,
+                    RoleConfig {
+                        workspace: ctx.workspace_name,
+                        config: ctx.workspace_config,
+                    },
+                    base_cfg,
+                )
+                .await?;
+                task_pin = pin.map(|p| TaskPinStamp {
+                    workspace: resolved.workspace.clone(),
+                    git_ref: p.git_ref,
+                    commit: p.commit,
+                });
+            }
+        }
+    } else {
+        // Role-scoped (spec § 7.4): the job's own config is the caller, the
+        // action's owner config (pinned or live) its owner — the same roles
+        // the claim path resolves with.
+        let roles = RoleScope {
+            caller: RoleConfig {
+                workspace: ctx.workspace_name,
+                config: ctx.workspace_config,
+            },
+            action_owner: action_workspace.as_deref().map(|ws| RoleConfig {
+                workspace: ws,
+                config: owner_cfg.as_deref().unwrap_or(ctx.workspace_config),
+            }),
+            task_owner: None,
+            others: ctx.ws_set,
+        };
+        precheck_literal_connection_inputs(step_name, flow_step, &action, &roles)?;
+    }
+
+    Ok(build_step(
+        ctx.job_id,
+        step_name,
+        action_name,
+        flow_step,
+        &action,
+        Some(serde_json::to_value(&flow_step.input).unwrap_or_default()),
+        status,
+        ctx.defaults,
+        action_workspace,
+        action_revision,
+        action_pin.map(|p| p.git_ref),
+        task_pin,
+    ))
+}
+
+/// A flow step whose `ref:` is a template (spec 2026-10-15 § 5.1): the owner
+/// is decided now from the action name (D11, § 4.2 rule 4 — an unknown, a
+/// library or a non-git owner is a 400 here), the template is checked for
+/// syntax (§ 7), and everything derived from the action is left for the
+/// resolution pass. Retry columns come from the flow step's own `retry:`
+/// when present; the action's are filled at resolution.
+fn deferred_row(
+    ctx: &StepRowCtx<'_>,
+    step_name: &str,
+    flow_step: &FlowStep,
+    status: StepStatus,
+) -> Result<NewJobStep> {
+    let template = flow_step
+        .git_ref
+        .as_deref()
+        .expect("deferred_row is called only for a templated ref");
+    check_ref_template_syntax(template)
+        .map_err(anyhow::Error::new)
+        .with_context(|| format!("step '{step_name}': invalid `ref` template"))?;
+    let RefPlan::AtRef { target, .. } = plan_reference(
+        ctx.workspace_name,
+        None,
+        &flow_step.action,
+        Some(template),
+        ctx.world,
+    )?
+    else {
+        unreachable!("plan_reference returns AtRef whenever a ref is given")
+    };
+    let retry = retry_cols(flow_step.retry.as_ref());
+    Ok(NewJobStep {
+        job_id: ctx.job_id,
+        step_name: step_name.to_string(),
+        action_name: target.local_name,
+        action_type: DEFERRED_ACTION_TYPE.to_string(),
+        action_image: None,
+        action_spec: None,
+        input: Some(serde_json::to_value(&flow_step.input).unwrap_or_default()),
+        status: status.to_string(),
+        required_ability: DEFERRED_ACTION_TYPE.to_string(),
+        required_tags: Vec::new(),
+        runner: "none".to_string(),
+        timeout_secs: step_timeout(flow_step, ctx.defaults),
+        when_condition: flow_step.when.clone(),
+        for_each_expr: for_each_text(flow_step),
+        loop_source: None,
+        loop_index: None,
+        loop_total: None,
+        loop_item: None,
+        max_retries: retry.max_retries,
+        retry_backoff_secs: retry.backoff_secs,
+        retry_strategy: retry.strategy,
+        retry_jitter: retry.jitter,
+        action_workspace: Some(target.owner),
+        action_revision: None,
+        action_ref: None,
+        task_workspace: None,
+        task_ref: None,
+        task_revision: None,
+        ref_template: Some(template.to_string()),
+    })
 }
 
 /// Compute the nesting depth of a job by walking the parent chain.
@@ -1142,15 +1302,46 @@ impl RefMemo {
         memo
     }
 
-    fn get(&self, owner: &str, git_ref: &str) -> Option<PinRef> {
+    pub(crate) fn get(&self, owner: &str, git_ref: &str) -> Option<PinRef> {
         let map = self.0.lock().unwrap_or_else(|e| e.into_inner());
         map.get(&(owner.to_string(), git_ref.to_string())).cloned()
     }
 
-    fn insert(&self, owner: &str, git_ref: &str, pin: PinRef) {
+    pub(crate) fn insert(&self, owner: &str, git_ref: &str, pin: PinRef) {
         let mut map = self.0.lock().unwrap_or_else(|e| e.into_inner());
         map.entry((owner.to_string(), git_ref.to_string()))
             .or_insert(pin);
+    }
+
+    /// A memo holding a job's persisted entries (`job_ref_pin`), for the
+    /// deferred-step pass (spec 2026-10-15 § 5.3 step 5).
+    // The deferred-step resolution pass is its first production caller.
+    #[allow(dead_code)]
+    pub(crate) fn from_rows(rows: &[stroem_db::JobRefPinRow]) -> Self {
+        let memo = Self::new();
+        for row in rows {
+            memo.insert(
+                &row.workspace,
+                &row.git_ref,
+                PinRef {
+                    git_ref: row.git_ref.clone(),
+                    commit: row.commit.clone(),
+                },
+            );
+        }
+        memo
+    }
+
+    /// Every entry, to persist (`job_ref_pin`, spec 2026-10-15 § 5.2).
+    pub(crate) fn entries(&self) -> Vec<stroem_db::JobRefPinRow> {
+        let map = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        map.iter()
+            .map(|((workspace, git_ref), pin)| stroem_db::JobRefPinRow {
+                workspace: workspace.clone(),
+                git_ref: git_ref.clone(),
+                commit: pin.commit.clone(),
+            })
+            .collect()
     }
 }
 
@@ -1325,7 +1516,9 @@ struct StepAction {
 }
 
 /// § 4.3 for a flow step's `action` (+ `ref`), written in `workspace_config`
-/// (`workspace_name`, pinned at `job_pin` or live).
+/// (`workspace_name`, pinned at `job_pin` or live). `step_ref` is the step's
+/// own `ref:`, or — for a deferred step — the rendered value (spec 2026-10-15
+/// § 5.3 step 5).
 #[allow(clippy::too_many_arguments)]
 async fn resolve_step_action(
     workspaces: &WorkspaceManager,
@@ -1334,10 +1527,11 @@ async fn resolve_step_action(
     job_pin: Option<&PinRef>,
     step_name: &str,
     flow_step: &FlowStep,
+    step_ref: Option<&str>,
     world: &RefWorld<'_>,
     memo: &RefMemo,
 ) -> Result<StepAction> {
-    if let Some(step_ref) = flow_step.git_ref.as_deref() {
+    if let Some(step_ref) = step_ref {
         // With `ref:` the owner is decided syntactically, then the name is
         // looked up in owner@ref (§ 7.1).
         parse_ref(step_ref, &format!("step '{step_name}'"))?;
@@ -2332,5 +2526,146 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("nope"), "{text}");
+    }
+
+    /// Spec 2026-10-15 § 5.2: the memo persists as rows and is rebuilt from
+    /// them unchanged; the first writer of a key keeps it.
+    #[test]
+    fn ref_memo_entries_round_trip_through_from_rows() {
+        let pin = |c: &str| PinRef {
+            git_ref: "release/2.3".into(),
+            commit: c.into(),
+        };
+        let memo = RefMemo::new();
+        memo.insert("etl", "release/2.3", pin("c1"));
+        memo.insert("etl", "release/2.3", pin("c2"));
+        memo.insert(
+            "billing",
+            "v4.1.0",
+            PinRef {
+                git_ref: "v4.1.0".into(),
+                commit: "c3".into(),
+            },
+        );
+        let mut rows = memo.entries();
+        rows.sort_by(|a, b| a.workspace.cmp(&b.workspace));
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            (rows[1].workspace.as_str(), rows[1].git_ref.as_str()),
+            ("etl", "release/2.3")
+        );
+        assert_eq!(rows[1].commit, "c1");
+
+        let back = RefMemo::from_rows(&rows);
+        assert_eq!(back.get("etl", "release/2.3"), Some(pin("c1")));
+        assert_eq!(
+            back.get("billing", "v4.1.0").map(|p| p.commit),
+            Some("c3".to_string())
+        );
+        assert_eq!(back.get("etl", "refs/heads/release/2.3"), None);
+        assert!(RefMemo::new().entries().is_empty());
+    }
+
+    /// Spec 2026-10-15 § 5.1: a deferred row takes its owner from the action
+    /// name, its retry columns from the flow step's own `retry:` only, and
+    /// leaves every action-derived column empty.
+    #[tokio::test]
+    async fn deferred_row_columns_and_owner() {
+        let mgr = WorkspaceManager::from_configs(vec![
+            ("A".into(), WorkspaceConfig::default(), None),
+            ("B".into(), WorkspaceConfig::default(), None),
+        ]);
+        let a_cfg = WorkspaceConfig::default();
+        let libs: HashSet<String> = ["lib".to_string()].into();
+        let configured: HashSet<String> = ["A".to_string(), "B".to_string()].into();
+        let git = configured.clone();
+        let world = RefWorld {
+            library_names: &libs,
+            configured: &configured,
+            git: &git,
+        };
+        let memo = RefMemo::new();
+        let ws_set = WorkspaceSet::load(&mgr, "A", Some(&a_cfg)).await;
+        let ctx = StepRowCtx {
+            workspaces: &mgr,
+            job_id: Uuid::new_v4(),
+            workspace_name: "A",
+            workspace_config: &a_cfg,
+            task_name: "t",
+            job_pin: None,
+            world: &world,
+            memo: &memo,
+            ws_set: &ws_set,
+            defaults: JobDefaults {
+                step_timeout_secs: Some(600),
+                job_timeout_secs: None,
+            },
+        };
+        let step = |yaml: &str| -> FlowStep { serde_yaml::from_str(yaml).unwrap() };
+
+        let row = deferred_row(
+            &ctx,
+            "s",
+            &step(
+                "action: B.deploy\nref: \"{{ input.b }}\"\ntimeout: 30s\n\
+                 retry: { max_attempts: 3, delay: 2s, backoff: exponential, jitter: true }\n\
+                 input: { x: 1 }",
+            ),
+            StepStatus::Ready,
+        )
+        .unwrap();
+        assert_eq!(row.action_type, DEFERRED_ACTION_TYPE);
+        assert_eq!(row.required_ability, DEFERRED_ACTION_TYPE);
+        assert_eq!(row.runner, "none");
+        assert!(row.required_tags.is_empty());
+        assert_eq!(row.action_workspace.as_deref(), Some("B"));
+        assert_eq!(row.action_name, "deploy");
+        assert_eq!(row.ref_template.as_deref(), Some("{{ input.b }}"));
+        assert_eq!(row.status, "ready");
+        assert_eq!(row.input, Some(json!({"x": 1})));
+        assert_eq!(row.timeout_secs, Some(30));
+        assert_eq!(row.max_retries, Some(2));
+        assert_eq!(row.retry_backoff_secs, Some(2));
+        assert_eq!(row.retry_strategy.as_deref(), Some("exponential"));
+        assert!(row.retry_jitter);
+        assert!(row.action_spec.is_none() && row.action_image.is_none());
+        assert!(row.action_revision.is_none() && row.action_ref.is_none());
+        assert!(row.task_workspace.is_none() && row.task_ref.is_none());
+        assert!(row.task_revision.is_none());
+
+        // Undotted → the job's own workspace; no step `retry:` → no retry
+        // columns yet (the action's are filled at resolution); the server
+        // default timeout applies.
+        let row = deferred_row(
+            &ctx,
+            "s",
+            &step("action: hello\nref: \"{{ input.b }}\""),
+            StepStatus::Pending,
+        )
+        .unwrap();
+        assert_eq!(row.action_workspace.as_deref(), Some("A"));
+        assert_eq!(row.action_name, "hello");
+        assert_eq!(row.timeout_secs, Some(600));
+        assert!(row.max_retries.is_none() && row.retry_strategy.is_none());
+        assert!(!row.retry_jitter);
+
+        // § 4.2 rule 4: a library item or an unknown workspace is refused now.
+        for (action, want) in [
+            ("lib.x", RefResolveError::LibraryItem("lib.x".into())),
+            ("nope.x", RefResolveError::UnknownWorkspace("nope".into())),
+        ] {
+            let err = deferred_row(
+                &ctx,
+                "s",
+                &step(&format!("action: {action}\nref: \"{{{{ input.b }}}}\"")),
+                StepStatus::Ready,
+            )
+            .unwrap_err();
+            assert_eq!(
+                err.downcast_ref::<RefResolveError>(),
+                Some(&want),
+                "{err:#}"
+            );
+        }
     }
 }
