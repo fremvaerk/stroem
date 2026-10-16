@@ -435,10 +435,12 @@ async fn stamp_task_pin_only_stamps_a_ready_unstamped_step() -> Result<()> {
 /// using a partial `status = 'ready'` index after the sweep gains its
 /// `<> 'deferred'` conjunct. The WHERE clauses are copies of the two
 /// queries (`claim_ready_step`, `get_unmatched_ready_steps`) with literal
-/// values — keep them in sync. `enable_seqscan = off` because a test table is
+/// values — keep them in sync. The sweep copy omits the `NOT EXISTS` worker
+/// anti-join, which does not change the `job_step` access path.
+/// `enable_seqscan = off` because a test table is
 /// small enough that the planner would scan it whatever the indexes are.
 #[tokio::test]
-async fn claim_and_unmatched_sweep_still_use_an_index() -> Result<()> {
+async fn claim_and_unmatched_sweep_still_use_a_ready_partial_index() -> Result<()> {
     let pool = setup_db().await;
     let job_id = create_job(&pool, "etl", "t").await;
     sqlx::query(
@@ -482,8 +484,8 @@ async fn claim_and_unmatched_sweep_still_use_an_index() -> Result<()> {
         let text: String = plan.into_iter().map(|r| r.0).collect::<Vec<_>>().join("\n");
         assert!(!text.contains("Seq Scan on job_step"), "{name}: {text}");
         assert!(
-            text.contains("idx_job_step_"),
-            "{name} must use a job_step index, not a Seq Scan: {text}"
+            text.contains("idx_job_step_ready_"),
+            "{name} must use a partial `status = 'ready'` index: {text}"
         );
     }
     tx.rollback().await?;
