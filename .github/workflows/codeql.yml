@@ -1,0 +1,48 @@
+name: CodeQL
+
+# Advanced setup, replacing GitHub's default setup so that test code can be
+# excluded (.github/codeql/codeql-config.yml). Default setup must be disabled
+# in the repository settings: GitHub rejects this workflow's upload while it
+# is on.
+#
+# The categories must stay `/language:<language>`, the ones default setup
+# used. Another category orphans every existing alert and opens duplicates.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 4 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      packages: read
+      actions: read
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [actions, javascript-typescript, rust]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          config-file: ./.github/codeql/codeql-config.yml
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:${{ matrix.language }}"

@@ -1,0 +1,26 @@
+# CodeQL configuration for .github/workflows/codeql.yml (advanced setup).
+#
+# Test code is not analysed: its fixture secrets and its assertion messages
+# are flagged as hard-coded credentials and cleartext logging, and every edit
+# re-flags them at new line numbers. Production code is analysed in full.
+#
+# A Rust unit-test module is excluded only when it lives in a sibling
+# `tests.rs` (`#[cfg(test)] mod tests;`), not inline in the source file.
+name: stroem CodeQL config
+
+paths-ignore:
+  # Integration tests: one test binary per crate, plus shared fixtures.
+  - crates/*/tests
+  # Example programs. Nothing ships from them.
+  - crates/*/examples
+  # Test infrastructure crate. Every crate uses it as a dev-dependency only.
+  - crates/stroem-test-support
+  # Rust unit-test modules in their own file.
+  - '**/tests.rs'
+  # `#[cfg(test)] mod test_support` of stroem-server.
+  - crates/stroem-server/src/test_support.rs
+  # UI tests: Playwright e2e and Vitest unit tests.
+  - ui/e2e
+  - ui/**/__tests__
+  - ui/**/*.test.ts
+  - ui/**/*.test.tsx
