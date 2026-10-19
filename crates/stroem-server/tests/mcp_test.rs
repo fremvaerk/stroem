@@ -18,7 +18,7 @@ use stroem_server::config::{
 use stroem_server::log_storage::LogStorage;
 use stroem_server::state::AppState;
 use stroem_server::web::build_router;
-use stroem_server::workspace::WorkspaceManager;
+use stroem_server::workspace::{WorkspaceManager, WorkspaceMetadata};
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
@@ -316,6 +316,14 @@ fn mcp_test_workspace() -> WorkspaceConfig {
 // ─── Setup helpers ───────────────────────────────────────────────────────────
 
 async fn setup_with_mcp() -> Result<(Router, PgPool, TempDir)> {
+    setup_with_mcp_using(WorkspaceManager::from_config(
+        "default",
+        mcp_test_workspace(),
+    ))
+    .await
+}
+
+async fn setup_with_mcp_using(mgr: WorkspaceManager) -> Result<(Router, PgPool, TempDir)> {
     let test_db = stroem_test_support::test_db().await;
     let pool = test_db.pool.clone();
     let url = test_db.url;
@@ -337,6 +345,8 @@ async fn setup_with_mcp() -> Result<(Router, PgPool, TempDir)> {
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -361,8 +371,6 @@ async fn setup_with_mcp() -> Result<(Router, PgPool, TempDir)> {
         pin_store: None,
     };
 
-    let workspace = mcp_test_workspace();
-    let mgr = WorkspaceManager::from_config("default", workspace);
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
     let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None);
     let router = build_router(state, CancellationToken::new());
@@ -392,6 +400,8 @@ async fn setup_mcp_disabled() -> Result<(Router, PgPool, TempDir)> {
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -454,6 +464,8 @@ async fn setup_with_auth_and_mcp_cfg(
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -874,6 +886,58 @@ async fn test_mcp_execute_with_non_object_input_errors() -> Result<()> {
         resp.get("error").is_some(),
         "non-object input must produce a JSON-RPC error, got: {resp}"
     );
+
+    Ok(())
+}
+
+/// list_workspaces carries the server-config display_name / description,
+/// and omits both keys for a workspace that sets neither.
+#[tokio::test]
+async fn test_mcp_list_workspaces_reports_display_name_and_description() -> Result<()> {
+    let mgr = WorkspaceManager::from_configs(vec![
+        ("default".to_string(), mcp_test_workspace(), None),
+        ("plain".to_string(), mcp_test_workspace(), None),
+    ])
+    .with_metadata(
+        "default",
+        WorkspaceMetadata {
+            display_name: Some("Default jobs".to_string()),
+            description: Some("Everything that runs by default".to_string()),
+        },
+    );
+    let (router, _pool, _tmp) = setup_with_mcp_using(mgr).await?;
+    let (router, session_id) = mcp_initialize(router).await;
+
+    let body = json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "id": 2,
+        "params": {
+            "name": "list_workspaces",
+            "arguments": {}
+        }
+    });
+    let response = router
+        .clone()
+        .oneshot(mcp_request(session_id.as_deref(), body))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let resp = body_json(response).await;
+    let text = resp["result"]["content"][0]["text"]
+        .as_str()
+        .expect("content[0].text should be a string");
+    let workspaces: Value = serde_json::from_str(text)?;
+    let arr = workspaces.as_array().expect("should be array");
+    assert_eq!(arr.len(), 2);
+
+    assert_eq!(arr[0]["name"], "default");
+    assert_eq!(arr[0]["display_name"], "Default jobs");
+    assert_eq!(arr[0]["description"], "Everything that runs by default");
+    assert_eq!(arr[0]["task_count"], 2);
+
+    assert_eq!(arr[1]["name"], "plain");
+    assert!(arr[1].get("display_name").is_none(), "got: {}", arr[1]);
+    assert!(arr[1].get("description").is_none(), "got: {}", arr[1]);
 
     Ok(())
 }

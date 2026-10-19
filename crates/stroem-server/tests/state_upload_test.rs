@@ -142,6 +142,8 @@ async fn build_test_app_inner(
             workspace_name.to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: tmp.path().to_string_lossy().to_string(),
             },
         )]),
@@ -705,6 +707,8 @@ async fn build_test_app_with_auth(
             workspace_name.to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: tmp.path().to_string_lossy().to_string(),
             },
         )]),

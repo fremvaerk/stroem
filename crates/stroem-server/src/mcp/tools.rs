@@ -120,6 +120,10 @@ pub struct GetArtifactParams {
 #[derive(Serialize)]
 struct WorkspaceInfo {
     name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
     task_count: usize,
 }
 
@@ -341,8 +345,16 @@ impl StromMcpHandler {
             };
             // Skip workspaces with zero accessible tasks
             if task_count > 0 {
+                let meta = self
+                    .state
+                    .workspaces
+                    .metadata(&ws_name)
+                    .cloned()
+                    .unwrap_or_default();
                 workspaces.push(WorkspaceInfo {
                     name: ws_name,
+                    display_name: meta.display_name,
+                    description: meta.description,
                     task_count,
                 });
             }

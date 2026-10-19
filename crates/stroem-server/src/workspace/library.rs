@@ -1246,6 +1246,8 @@ tasks:
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: workspace_dir.path().to_string_lossy().to_string(),
             },
         );
@@ -1398,6 +1400,8 @@ tasks:
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: workspace_dir.path().to_string_lossy().to_string(),
             },
         );

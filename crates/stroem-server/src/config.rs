@@ -264,6 +264,14 @@ pub enum WorkspaceSourceDef {
         /// production repo without duplicating its scheduled work.
         #[serde(default = "default_true", deserialize_with = "lenient_bool")]
         triggers: bool,
+        /// Human-readable name the UI shows instead of the workspace key.
+        /// Lives in the server config (not the workspace YAML), so it is
+        /// known even when the workspace fails to load.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display_name: Option<String>,
+        /// Free-text description shown with the workspace in the UI.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
     },
     #[serde(rename = "git")]
     Git {
@@ -276,6 +284,12 @@ pub enum WorkspaceSourceDef {
         /// See `Folder::triggers`.
         #[serde(default = "default_true", deserialize_with = "lenient_bool")]
         triggers: bool,
+        /// See `Folder::display_name`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display_name: Option<String>,
+        /// See `Folder::description`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
     },
 }
 
@@ -286,6 +300,30 @@ impl WorkspaceSourceDef {
             Self::Folder { triggers, .. } | Self::Git { triggers, .. } => *triggers,
         }
     }
+
+    /// The configured `display_name`, trimmed; `None` when absent or blank.
+    pub fn display_name(&self) -> Option<&str> {
+        match self {
+            Self::Folder { display_name, .. } | Self::Git { display_name, .. } => {
+                non_blank(display_name)
+            }
+        }
+    }
+
+    /// The configured `description`, trimmed; `None` when absent or blank.
+    pub fn description(&self) -> Option<&str> {
+        match self {
+            Self::Folder { description, .. } | Self::Git { description, .. } => {
+                non_blank(description)
+            }
+        }
+    }
+}
+
+/// An empty or whitespace-only string (e.g. an env override set to `""`)
+/// counts as unset, so the UI falls back to the workspace key.
+fn non_blank(value: &Option<String>) -> Option<&str> {
+    value.as_deref().map(str::trim).filter(|s| !s.is_empty())
 }
 
 fn default_true() -> bool {
@@ -1034,6 +1072,120 @@ workspaces:
 worker_token: "secret-token-123"
 "#;
         assert!(serde_yaml::from_str::<ServerConfig>(yaml).is_err());
+    }
+
+    #[test]
+    fn test_workspace_display_name_and_description_absent_by_default() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+workspaces:
+  local:
+    type: folder
+    path: "./workspace"
+  remote:
+    type: git
+    url: "https://github.com/org/repo.git"
+worker_token: "secret-token-123"
+"#;
+        let config: ServerConfig = serde_yaml::from_str(yaml).unwrap();
+        for name in ["local", "remote"] {
+            assert_eq!(config.workspaces[name].display_name(), None);
+            assert_eq!(config.workspaces[name].description(), None);
+        }
+    }
+
+    #[test]
+    fn test_workspace_display_name_and_description_parse_for_both_source_types() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+workspaces:
+  local:
+    type: folder
+    path: "./workspace"
+    display_name: "Local jobs"
+    description: "Jobs from the local folder"
+  remote:
+    type: git
+    url: "https://github.com/org/repo.git"
+    display_name: "Data platform"
+    description: "Nightly ETL jobs and reports"
+worker_token: "secret-token-123"
+"#;
+        let config: ServerConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            config.workspaces["local"].display_name(),
+            Some("Local jobs")
+        );
+        assert_eq!(
+            config.workspaces["local"].description(),
+            Some("Jobs from the local folder")
+        );
+        assert_eq!(
+            config.workspaces["remote"].display_name(),
+            Some("Data platform")
+        );
+        assert_eq!(
+            config.workspaces["remote"].description(),
+            Some("Nightly ETL jobs and reports")
+        );
+        // The source fields are untouched.
+        match &config.workspaces["remote"] {
+            WorkspaceSourceDef::Git { url, .. } => {
+                assert_eq!(url, "https://github.com/org/repo.git")
+            }
+            _ => panic!("Expected git workspace"),
+        }
+    }
+
+    #[test]
+    fn test_workspace_display_name_blank_counts_as_unset() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+workspaces:
+  local:
+    type: folder
+    path: "./workspace"
+    display_name: "   "
+    description: ""
+worker_token: "secret-token-123"
+"#;
+        let config: ServerConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.workspaces["local"].display_name(), None);
+        assert_eq!(config.workspaces["local"].description(), None);
+    }
+
+    #[test]
+    fn test_workspace_display_name_is_trimmed() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+workspaces:
+  local:
+    type: folder
+    path: "./workspace"
+    display_name: "  Local jobs  "
+worker_token: "secret-token-123"
+"#;
+        let config: ServerConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            config.workspaces["local"].display_name(),
+            Some("Local jobs")
+        );
     }
 
     #[test]
@@ -1833,6 +1985,70 @@ worker_token: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         let config = config.unwrap();
         assert!(!config.workspaces["default"].triggers_enabled());
         // The source itself is untouched by the override.
+        match &config.workspaces["default"] {
+            WorkspaceSourceDef::Folder { path, .. } => assert_eq!(path, "./workspace"),
+            _ => panic!("Expected folder workspace"),
+        }
+    }
+
+    #[test]
+    fn test_env_override_workspace_display_name_and_description() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        // `default` sets display_name in YAML (env overrides it) and has no
+        // description (env adds it); `remote` is a git source set via YAML only.
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://placeholder:5432/stroem"
+log_storage:
+  local_dir: "./logs"
+workspaces:
+  default:
+    type: folder
+    path: "./workspace"
+    display_name: "From YAML"
+  remote:
+    type: git
+    url: "https://github.com/org/repo.git"
+    display_name: "Data platform"
+    description: "Nightly ETL jobs and reports"
+worker_token: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+"#;
+
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut file, yaml.as_bytes()).unwrap();
+        std::io::Write::flush(&mut file).unwrap();
+
+        // SAFETY: test-only, serialized by ENV_MUTEX
+        unsafe {
+            std::env::set_var("STROEM__WORKSPACES__DEFAULT__DISPLAY_NAME", "From env");
+            std::env::set_var("STROEM__WORKSPACES__DEFAULT__DESCRIPTION", "2024 jobs");
+        }
+
+        let config = load_config(file.path().to_str().unwrap());
+
+        unsafe {
+            std::env::remove_var("STROEM__WORKSPACES__DEFAULT__DISPLAY_NAME");
+            std::env::remove_var("STROEM__WORKSPACES__DEFAULT__DESCRIPTION");
+        }
+
+        let config = config.unwrap();
+        assert_eq!(
+            config.workspaces["default"].display_name(),
+            Some("From env")
+        );
+        assert_eq!(
+            config.workspaces["default"].description(),
+            Some("2024 jobs")
+        );
+        assert_eq!(
+            config.workspaces["remote"].display_name(),
+            Some("Data platform")
+        );
+        assert_eq!(
+            config.workspaces["remote"].description(),
+            Some("Nightly ETL jobs and reports")
+        );
         match &config.workspaces["default"] {
             WorkspaceSourceDef::Folder { path, .. } => assert_eq!(path, "./workspace"),
             _ => panic!("Expected folder workspace"),

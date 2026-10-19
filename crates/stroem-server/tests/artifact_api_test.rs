@@ -69,6 +69,8 @@ async fn build_test_app() -> Result<TestApp> {
             "ws1".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: tmp.path().to_string_lossy().to_string(),
             },
         )]),
