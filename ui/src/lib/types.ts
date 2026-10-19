@@ -1,5 +1,10 @@
 export interface WorkspaceInfo {
+  /** Workspace key from the server config; used in every URL and API path */
   name: string;
+  /** Human-readable label from the server config, absent if unset */
+  display_name?: string;
+  /** Free-text description from the server config, absent if unset */
+  description?: string;
   tasks_count: number;
   actions_count: number;
   triggers_count: number;

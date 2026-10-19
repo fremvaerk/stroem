@@ -57,9 +57,9 @@ async function loadWorkspace(name: string): Promise<WorkspacePageData> {
 
 export function WorkspaceDetailPage() {
   const { workspace = "" } = useParams<{ workspace: string }>();
-  useTitle(workspace || "Workspace");
   const fetcher = useCallback(() => loadWorkspace(workspace), [workspace]);
   const { data, loading, error, refresh } = useAsyncData(fetcher);
+  useTitle(data?.info?.display_name || workspace || "Workspace");
   const [search, setSearch] = useState("");
   const [refreshing, setRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState<string | null>(null);
@@ -107,10 +107,27 @@ export function WorkspaceDetailPage() {
           </Link>
         </Button>
         <div className="flex-1 min-w-0">
-          <h1 className="font-mono text-2xl font-semibold tracking-tight">
-            {info.name}
+          <h1
+            className={`text-2xl font-semibold tracking-tight ${
+              info.display_name ? "" : "font-mono"
+            }`}
+          >
+            {info.display_name ?? info.name}
           </h1>
+          {info.description && (
+            <p className="mt-1 text-sm text-muted-foreground">
+              {info.description}
+            </p>
+          )}
           <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-muted-foreground">
+            {info.display_name && (
+              <>
+                <code className="text-xs" title="Workspace key">
+                  {info.name}
+                </code>
+                <span>·</span>
+              </>
+            )}
             <span>
               revision{" "}
               {info.revision ? (

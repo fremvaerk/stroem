@@ -85,6 +85,34 @@ describe("WorkspaceDetailPage", () => {
     expect(screen.getByText("0 6 * * *")).toBeInTheDocument();
   });
 
+  it("uses the key as heading and title when no display name is set", async () => {
+    renderAt("/workspaces/iso");
+    const heading = await screen.findByRole("heading", { name: "iso" });
+    expect(heading).toHaveClass("font-mono");
+    expect(screen.queryByTitle("Workspace key")).toBeNull();
+    await waitFor(() => expect(document.title).toBe("iso - Strøm"));
+  });
+
+  it("shows display name, key and description in the header", async () => {
+    mockWs.mockResolvedValue([
+      ws({
+        display_name: "Isolated jobs",
+        description: "Jobs that run in isolation",
+      }),
+    ]);
+    renderAt("/workspaces/iso");
+    const heading = await screen.findByRole("heading", { name: "Isolated jobs" });
+    expect(heading).not.toHaveClass("font-mono");
+    expect(screen.getByTitle("Workspace key")).toHaveTextContent("iso");
+    expect(screen.getByText("Jobs that run in isolation")).toBeInTheDocument();
+    await waitFor(() => expect(document.title).toBe("Isolated jobs - Strøm"));
+    // Data is still fetched and refreshed by key.
+    expect(mockTasks).toHaveBeenCalledWith("iso");
+    expect(
+      screen.getByRole("button", { name: /refresh workspace iso/i }),
+    ).toBeInTheDocument();
+  });
+
   it("decodes the workspace name from the URL", async () => {
     mockWs.mockResolvedValue([ws({ name: "my ws" })]);
     renderAt("/workspaces/my%20ws");
