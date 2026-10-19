@@ -195,7 +195,7 @@ stroem-api cancel <job-id>
 
 ### `workspaces`
 
-List all configured workspaces on the server.
+List all configured workspaces on the server: name, task / action / trigger counts (`(off)` when the server config disables the workspace's triggers), and the [display name and description](/guides/multi-workspace/#display-name-and-description) from the server config (`-` when unset).
 
 ```bash
 stroem-api workspaces

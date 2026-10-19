@@ -13,7 +13,7 @@ Task, job, and log endpoints do not require authentication unless the server is 
 GET /api/workspaces
 ```
 
-Returns all configured workspaces with task, action, and trigger counts. `triggers_enabled` is `false` when the server config sets `triggers: false` for the workspace (its triggers are listed but never fired by this server).
+Returns all configured workspaces with task, action, and trigger counts. `triggers_enabled` is `false` when the server config sets `triggers: false` for the workspace (its triggers are listed but never fired by this server). `display_name` and `description` come from the same server-config entry (see [Display name and description](/guides/multi-workspace/#display-name-and-description)); each is omitted when unset. `name` is always the workspace key used in every other path.
 
 **Response:**
 
@@ -21,6 +21,8 @@ Returns all configured workspaces with task, action, and trigger counts. `trigge
 [
   {
     "name": "default",
+    "display_name": "Default jobs",
+    "description": "Jobs for the platform team",
     "tasks_count": 3,
     "actions_count": 5,
     "triggers_count": 1,

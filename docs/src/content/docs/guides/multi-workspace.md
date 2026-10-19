@@ -97,11 +97,41 @@ This is a server-side setting, so it does not travel with the repository. To tur
 
 The workspace list (`GET /api/workspaces`, the UI Workspaces page, and `stroem-api workspaces`) reports `triggers_enabled: false` for such workspaces; the triggers themselves remain listed so you can see what would fire elsewhere.
 
+## Display name and description
+
+The workspace key (`analytics` below) is what URLs, API paths, CLI arguments, ACL rules and cross-workspace references use. To show people something friendlier, give the entry a `display_name` and a `description`:
+
+```yaml
+workspaces:
+  analytics:
+    type: git
+    url: https://github.com/org/data-workflows.git
+    display_name: "Data platform"
+    description: "Nightly ETL jobs and reports"
+```
+
+Both fields are optional and work for `folder` and `git` sources. Without them, the UI shows the key, as before. An empty or whitespace-only value counts as unset.
+
+They are server-config settings, not workspace YAML: they do not change with the repository, a [git ref](/guides/git-refs/) or a library, and they are shown even while the workspace fails to load. Env overrides use the same form as `triggers` (same naming rules for the workspace segment):
+
+```bash
+STROEM__WORKSPACES__ANALYTICS__DISPLAY_NAME="Data platform"
+STROEM__WORKSPACES__ANALYTICS__DESCRIPTION="Nightly ETL jobs and reports"
+```
+
+Where they appear:
+
+- `GET /api/workspaces` and the MCP `list_workspaces` tool return `display_name` and `description` (each omitted when unset).
+- The UI **Workspaces** page shows the display name as the link, the key beside it, and the description below. The **workspace page** uses the display name as its heading and browser-tab title, with the key in the line under it.
+- `stroem-api workspaces` prints them in its `DISPLAY NAME` and `DESCRIPTION` columns (`-` when unset).
+
+Breadcrumbs, the workspace badges on the Tasks page and the workspace link on a job page still show the key.
+
 ## Browsing workspaces in the UI
 
 The web UI treats a workspace as a navigation level of its own:
 
-- **Workspaces** (`/workspaces`) lists every configured workspace with its task, action and trigger counts, revision, and any load error or warning. Each name links to the workspace page.
+- **Workspaces** (`/workspaces`) lists every configured workspace with its task, action and trigger counts, revision, and any load error or warning. Each name (the [display name](#display-name-and-description) when one is set) links to the workspace page.
 - **Workspace page** (`/workspaces/<name>`) shows that workspace only: header with revision and counts, a **Refresh** button, the task tree (folders collapsible), and the workspace's triggers with their schedule and next run. A workspace that failed to load still gets a page with its error, so a shared link never lands on an empty screen.
 - **Tasks** (`/tasks`) is the cross-workspace list. When more than one workspace is loaded, a **Merged / By workspace** switch appears next to the search box. *Merged* shows one folder tree with a Workspace column; *By workspace* nests each workspace's folders under a collapsible workspace row. The choice, collapsed workspaces and open folders are remembered in the browser.
 - Breadcrumbs on a task page read `Workspaces / <workspace> / <task>`, and the workspace name shown on a job page links to its workspace.

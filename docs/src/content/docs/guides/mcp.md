@@ -62,7 +62,7 @@ The MCP server provides ten tools for interacting with Strøm:
 
 | Tool | Description | Parameters |
 |------|-------------|------------|
-| `list_workspaces` | List all workspaces and their task counts | none |
+| `list_workspaces` | List all workspaces and their task counts, with the server-config `display_name` / `description` when set | none |
 | `list_tasks` | List tasks in a workspace | `workspace?` (optional; lists all if omitted) |
 | `get_task` | Get detailed task definition | `workspace`, `task_name` |
 | `execute_task` | Execute a task and return job ID | `workspace`, `task_name`, `input?` |
@@ -224,6 +224,8 @@ Returns:
 [
   {
     "name": "production",
+    "display_name": "Production",
+    "description": "Customer-facing deploys and jobs",
     "task_count": 12
   },
   {
