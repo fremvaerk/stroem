@@ -27,7 +27,7 @@ use stroem_server::log_storage::{archive_key, JobLogMeta, LogStorage};
 use stroem_server::state::AppState;
 use stroem_server::state_storage::StateStorage;
 use stroem_server::web::build_router;
-use stroem_server::workspace::WorkspaceManager;
+use stroem_server::workspace::{WorkspaceManager, WorkspaceMetadata};
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
@@ -1306,6 +1306,8 @@ async fn setup() -> Result<(Router, PgPool, TempDir)> {
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -1509,6 +1511,8 @@ async fn setup_two_workspaces() -> Result<(Router, PgPool, TempDir)> {
                 "A".to_string(),
                 WorkspaceSourceDef::Folder {
                     triggers: true,
+                    display_name: None,
+                    description: None,
                     path: temp_dir.path().to_string_lossy().to_string(),
                 },
             ),
@@ -1516,6 +1520,8 @@ async fn setup_two_workspaces() -> Result<(Router, PgPool, TempDir)> {
                 "B".to_string(),
                 WorkspaceSourceDef::Folder {
                     triggers: true,
+                    display_name: None,
+                    description: None,
                     path: temp_dir.path().to_string_lossy().to_string(),
                 },
             ),
@@ -1853,6 +1859,8 @@ async fn setup_shared_connections() -> Result<(Router, PgPool, TempDir)> {
                 "caller".to_string(),
                 WorkspaceSourceDef::Folder {
                     triggers: true,
+                    display_name: None,
+                    description: None,
                     path: temp_dir.path().to_string_lossy().to_string(),
                 },
             ),
@@ -1860,6 +1868,8 @@ async fn setup_shared_connections() -> Result<(Router, PgPool, TempDir)> {
                 "owner".to_string(),
                 WorkspaceSourceDef::Folder {
                     triggers: true,
+                    display_name: None,
+                    description: None,
                     path: temp_dir.path().to_string_lossy().to_string(),
                 },
             ),
@@ -1867,6 +1877,8 @@ async fn setup_shared_connections() -> Result<(Router, PgPool, TempDir)> {
                 "infra".to_string(),
                 WorkspaceSourceDef::Folder {
                     triggers: true,
+                    display_name: None,
+                    description: None,
                     path: temp_dir.path().to_string_lossy().to_string(),
                 },
             ),
@@ -2539,6 +2551,8 @@ async fn setup_with_task_needing_missing_connection() -> Result<(Router, PgPool,
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -2943,6 +2957,8 @@ async fn setup_with_library_dotted_action() -> Result<(Router, PgPool, TempDir)>
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -3791,6 +3807,8 @@ async fn setup_cross_task_workspaces(
                 "A".to_string(),
                 WorkspaceSourceDef::Folder {
                     triggers: true,
+                    display_name: None,
+                    description: None,
                     path: temp_dir.path().to_string_lossy().to_string(),
                 },
             ),
@@ -3798,6 +3816,8 @@ async fn setup_cross_task_workspaces(
                 "B".to_string(),
                 WorkspaceSourceDef::Folder {
                     triggers: true,
+                    display_name: None,
+                    description: None,
                     path: temp_dir.path().to_string_lossy().to_string(),
                 },
             ),
@@ -3805,6 +3825,8 @@ async fn setup_cross_task_workspaces(
                 "C".to_string(),
                 WorkspaceSourceDef::Folder {
                     triggers: true,
+                    display_name: None,
+                    description: None,
                     path: temp_dir.path().to_string_lossy().to_string(),
                 },
             ),
@@ -6451,6 +6473,8 @@ async fn test_task_detail_connections() -> Result<()> {
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -8712,6 +8736,8 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
             "default".to_string(),
             stroem_server::config::WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -8991,6 +9017,8 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
             "default".to_string(),
             stroem_server::config::WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -9228,6 +9256,8 @@ async fn setup_with_auth_rate_limit(
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -11677,6 +11707,20 @@ async fn setup_multi_workspace() -> Result<(Router, PgPool, TempDir)> {
 async fn setup_multi_workspace_with(
     triggers_disabled: &[&str],
 ) -> Result<(Router, PgPool, TempDir)> {
+    setup_multi_workspace_mapped(|mut mgr| {
+        for name in triggers_disabled {
+            mgr = mgr.with_triggers_disabled(name);
+        }
+        mgr
+    })
+    .await
+}
+
+/// Like `setup_multi_workspace`, with `configure` applied to the workspace
+/// manager (the builders stand in for server-config settings).
+async fn setup_multi_workspace_mapped(
+    configure: impl FnOnce(WorkspaceManager) -> WorkspaceManager,
+) -> Result<(Router, PgPool, TempDir)> {
     let test_db = stroem_test_support::test_db().await;
     let pool = test_db.pool.clone();
     let url = test_db.url;
@@ -11699,6 +11743,8 @@ async fn setup_multi_workspace_with(
                 "default".to_string(),
                 WorkspaceSourceDef::Folder {
                     triggers: true,
+                    display_name: None,
+                    description: None,
                     path: temp_dir.path().to_string_lossy().to_string(),
                 },
             ),
@@ -11706,6 +11752,8 @@ async fn setup_multi_workspace_with(
                 "ops".to_string(),
                 WorkspaceSourceDef::Folder {
                     triggers: true,
+                    display_name: None,
+                    description: None,
                     path: temp_dir.path().to_string_lossy().to_string(),
                 },
             ),
@@ -11773,10 +11821,7 @@ async fn setup_multi_workspace_with(
         WorkspaceEntry::new("ops", src_ops, ws_ops, Some("test-rev".to_string())),
     );
 
-    let mut mgr = WorkspaceManager::from_entries(entries);
-    for name in triggers_disabled {
-        mgr = mgr.with_triggers_disabled(name);
-    }
+    let mgr = configure(WorkspaceManager::from_entries(entries));
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
     let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None);
     let router = build_router(state, CancellationToken::new());
@@ -11830,6 +11875,38 @@ async fn test_workspace_triggers_disabled_reported_and_webhook_hidden() -> Resul
     assert_eq!(response.status(), 200);
     let body = body_json(response).await;
     assert!(body["job_id"].as_str().is_some());
+
+    Ok(())
+}
+
+/// `workspaces.<name>.display_name` / `.description` reach the workspace
+/// list; a workspace that sets neither omits both keys.
+#[tokio::test]
+async fn test_list_workspaces_reports_display_name_and_description() -> Result<()> {
+    let (router, _pool, _tmp) = setup_multi_workspace_mapped(|mgr| {
+        mgr.with_metadata(
+            "ops",
+            WorkspaceMetadata {
+                display_name: Some("Operations".to_string()),
+                description: Some("Deploys and maintenance".to_string()),
+            },
+        )
+    })
+    .await?;
+
+    let response = router.oneshot(api_get("/api/workspaces")).await?;
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+    let workspaces = body.as_array().unwrap();
+    let ops_ws = workspaces.iter().find(|w| w["name"] == "ops").unwrap();
+    assert_eq!(ops_ws["display_name"], json!("Operations"));
+    assert_eq!(ops_ws["description"], json!("Deploys and maintenance"));
+    let default_ws = workspaces.iter().find(|w| w["name"] == "default").unwrap();
+    assert!(
+        default_ws.get("display_name").is_none(),
+        "got: {default_ws}"
+    );
+    assert!(default_ws.get("description").is_none(), "got: {default_ws}");
 
     Ok(())
 }
@@ -11971,6 +12048,8 @@ async fn setup_with_auth_and_acl() -> Result<(Router, PgPool, TempDir)> {
                 "default".to_string(),
                 WorkspaceSourceDef::Folder {
                     triggers: true,
+                    display_name: None,
+                    description: None,
                     path: temp_dir.path().to_string_lossy().to_string(),
                 },
             ),
@@ -11978,6 +12057,8 @@ async fn setup_with_auth_and_acl() -> Result<(Router, PgPool, TempDir)> {
                 "ops".to_string(),
                 WorkspaceSourceDef::Folder {
                     triggers: true,
+                    display_name: None,
+                    description: None,
                     path: temp_dir.path().to_string_lossy().to_string(),
                 },
             ),
@@ -12635,6 +12716,8 @@ async fn test_workspace_tarball_download() -> Result<()> {
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: ws_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -12661,6 +12744,8 @@ async fn test_workspace_tarball_download() -> Result<()> {
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: ws_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -12832,6 +12917,8 @@ async fn test_tarball_mismatched_etag_returns_200() -> Result<()> {
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: ws_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -12858,6 +12945,8 @@ async fn test_tarball_mismatched_etag_returns_200() -> Result<()> {
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: ws_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -12926,6 +13015,8 @@ async fn test_tarball_bare_etag_matches() -> Result<()> {
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: ws_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -12952,6 +13043,8 @@ async fn test_tarball_bare_etag_matches() -> Result<()> {
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: ws_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -13036,6 +13129,8 @@ async fn test_tarball_stale_etag_after_workspace_change() -> Result<()> {
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: ws_path_str.clone(),
             },
         )]),
@@ -13062,6 +13157,8 @@ async fn test_tarball_stale_etag_after_workspace_change() -> Result<()> {
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: ws_path_str.clone(),
             },
         )]),
@@ -13181,6 +13278,8 @@ async fn test_tarball_etag_header_format() -> Result<()> {
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: ws_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -13207,6 +13306,8 @@ async fn test_tarball_etag_header_format() -> Result<()> {
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: ws_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -14096,6 +14197,8 @@ async fn test_config_returns_oidc_providers_with_auth() -> Result<()> {
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -14180,6 +14283,8 @@ async fn test_config_returns_has_internal_auth_true() -> Result<()> {
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -14258,6 +14363,8 @@ async fn test_config_returns_has_internal_auth_false_oidc_only() -> Result<()> {
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -16668,6 +16775,8 @@ async fn setup_recovery() -> Result<(AppState, PgPool, TempDir)> {
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -17177,6 +17286,8 @@ async fn test_recovery_propagates_to_parent() -> Result<()> {
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -18961,6 +19072,8 @@ async fn test_connection_input_passthrough_at_claim() -> Result<()> {
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -19328,6 +19441,8 @@ async fn setup_sync_webhook() -> Result<(Router, PgPool, TempDir)> {
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -20545,6 +20660,8 @@ async fn test_multi_workspace_tarball_download() -> Result<()> {
                 "default".to_string(),
                 WorkspaceSourceDef::Folder {
                     triggers: true,
+                    display_name: None,
+                    description: None,
                     path: ws_default_dir.path().to_string_lossy().to_string(),
                 },
             ),
@@ -20552,6 +20669,8 @@ async fn test_multi_workspace_tarball_download() -> Result<()> {
                 "ops".to_string(),
                 WorkspaceSourceDef::Folder {
                     triggers: true,
+                    display_name: None,
+                    description: None,
                     path: ws_ops_dir.path().to_string_lossy().to_string(),
                 },
             ),
@@ -20794,6 +20913,8 @@ async fn setup_recovery_with_unmatched_timeout(
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -23038,6 +23159,8 @@ async fn setup_with_workspace(workspace: WorkspaceConfig) -> Result<(Router, PgP
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -23095,6 +23218,8 @@ async fn setup_state_with_workspace(
             WorkspaceSourceDef::Folder {
                 path: temp_dir.path().to_string_lossy().to_string(),
                 triggers: true,
+                display_name: None,
+                description: None,
             },
         )]),
         libraries: HashMap::new(),
@@ -24031,6 +24156,8 @@ async fn setup_event_source() -> Result<(Router, AppState, PgPool, TempDir)> {
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -24549,6 +24676,8 @@ async fn test_emit_endpoint_disabled_trigger() -> Result<()> {
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -24676,6 +24805,8 @@ async fn setup_event_source_with_workspace(
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -30914,6 +31045,8 @@ async fn setup_with_state_storage() -> Result<(Router, PgPool, TempDir)> {
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -32124,6 +32257,8 @@ async fn setup_with_log_archive() -> Result<(Router, PgPool, TempDir, Arc<dyn Bl
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),

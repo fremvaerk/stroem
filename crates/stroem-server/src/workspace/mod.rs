@@ -168,6 +168,10 @@ pub struct WorkspaceManager {
     /// separate from `entries` so it also covers workspaces whose source
     /// failed to construct, and so test constructors need not thread it.
     triggers_disabled: HashSet<String>,
+    /// Operator labels (`workspaces.<name>.display_name` / `.description`).
+    /// Captured from the defs like `triggers_disabled`, so errored entries
+    /// and source-construction failures report them too.
+    metadata: HashMap<String, WorkspaceMetadata>,
     settings: ReloadSettings,
     /// Shared across startup loads and every watcher load (spec § 4.5).
     load_permits: Arc<Semaphore>,
@@ -216,7 +220,12 @@ impl WorkspaceManager {
         // before — they never reach the concurrent load step below.
         let mut sources: Vec<(String, Arc<dyn WorkspaceSource>)> = Vec::with_capacity(defs.len());
         let mut triggers_disabled = HashSet::new();
+        let mut metadata = HashMap::new();
         for (name, def) in defs {
+            let meta = WorkspaceMetadata::from_def(&def);
+            if meta != WorkspaceMetadata::default() {
+                metadata.insert(name.clone(), meta);
+            }
             if !def.triggers_enabled() {
                 tracing::info!(
                     "Workspace '{}': triggers disabled by server config — \
@@ -337,6 +346,7 @@ impl WorkspaceManager {
             load_errors,
             resolved_libraries: Arc::new(resolved_libraries),
             triggers_disabled,
+            metadata,
             settings,
             load_permits,
             pins: Arc::new(PinStore::disabled()),
@@ -359,6 +369,7 @@ impl WorkspaceManager {
             load_errors: HashMap::new(),
             resolved_libraries: Arc::new(HashMap::new()),
             triggers_disabled: HashSet::new(),
+            metadata: HashMap::new(),
             settings: ReloadSettings::default(),
             load_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_WORKSPACE_LOADS)),
             pins: Arc::new(PinStore::disabled()),
@@ -500,6 +511,18 @@ impl WorkspaceManager {
     /// `workspaces.<name>.triggers: false`.
     pub fn with_triggers_disabled(mut self, name: &str) -> Self {
         self.triggers_disabled.insert(name.to_string());
+        self
+    }
+
+    /// The server-config labels of `name`; `None` when neither is set.
+    pub fn metadata(&self, name: &str) -> Option<&WorkspaceMetadata> {
+        self.metadata.get(name)
+    }
+
+    /// Builder (tests, like [`Self::with_triggers_disabled`]): set `name`'s
+    /// labels as if the server config had `display_name` / `description`.
+    pub fn with_metadata(mut self, name: &str, metadata: WorkspaceMetadata) -> Self {
+        self.metadata.insert(name.to_string(), metadata);
         self
     }
 
@@ -688,8 +711,11 @@ impl WorkspaceManager {
             } else {
                 Vec::new()
             };
+            let meta = self.metadata(name).cloned().unwrap_or_default();
             infos.push(WorkspaceInfo {
                 name: name.clone(),
+                display_name: meta.display_name,
+                description: meta.description,
                 tasks_count: p.config.tasks.len(),
                 actions_count: p.config.actions.len(),
                 triggers_count: p.config.triggers.len(),
@@ -708,8 +734,11 @@ impl WorkspaceManager {
         }
         // Source construction failures (e.g. GitSource::new() failed — no source object)
         for (name, error) in &self.load_errors {
+            let meta = self.metadata(name).cloned().unwrap_or_default();
             infos.push(WorkspaceInfo {
                 name: name.clone(),
+                display_name: meta.display_name,
+                description: meta.description,
                 tasks_count: 0,
                 actions_count: 0,
                 triggers_count: 0,
@@ -886,10 +915,34 @@ pub struct WatchStatus {
     pub last_successful_load_age: Option<Duration>,
 }
 
+/// Operator-facing labels of a workspace, from the server config
+/// (`workspaces.<name>.display_name` / `.description`). Never from the
+/// workspace YAML: these must be known even when the workspace fails to load.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkspaceMetadata {
+    pub display_name: Option<String>,
+    pub description: Option<String>,
+}
+
+impl WorkspaceMetadata {
+    fn from_def(def: &WorkspaceSourceDef) -> Self {
+        Self {
+            display_name: def.display_name().map(str::to_owned),
+            description: def.description().map(str::to_owned),
+        }
+    }
+}
+
 /// Info about a workspace for the API
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct WorkspaceInfo {
+    /// The workspace key (`workspaces.<name>`), used in every API path.
     pub name: String,
+    /// Server-config label shown instead of `name`; absent if unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     pub tasks_count: usize,
     pub actions_count: usize,
     pub triggers_count: usize,
@@ -1074,6 +1127,8 @@ tasks:
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp.path().to_str().unwrap().to_string(),
             },
         );
@@ -1111,6 +1166,8 @@ tasks:
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp1.path().to_str().unwrap().to_string(),
             },
         );
@@ -1118,6 +1175,8 @@ tasks:
             "ops".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp2.path().to_str().unwrap().to_string(),
             },
         );
@@ -1140,6 +1199,8 @@ tasks:
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp.path().to_str().unwrap().to_string(),
             },
         );
@@ -1157,6 +1218,8 @@ tasks:
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp.path().to_str().unwrap().to_string(),
             },
         );
@@ -1179,6 +1242,8 @@ tasks:
             WorkspaceSourceDef::Folder {
                 path: temp.path().to_str().unwrap().to_string(),
                 triggers: true,
+                display_name: None,
+                description: None,
             },
         );
 
@@ -1199,6 +1264,8 @@ tasks:
             WorkspaceSourceDef::Folder {
                 path: temp.path().to_str().unwrap().to_string(),
                 triggers: false,
+                display_name: None,
+                description: None,
             },
         );
 
@@ -1223,6 +1290,8 @@ tasks:
             WorkspaceSourceDef::Folder {
                 path: "/nonexistent/stroem-workspace-triggers-test".to_string(),
                 triggers: false,
+                display_name: None,
+                description: None,
             },
         );
 
@@ -1247,6 +1316,153 @@ tasks:
         assert!(!infos[0].triggers_enabled);
     }
 
+    fn labels(display_name: &str, description: &str) -> WorkspaceMetadata {
+        WorkspaceMetadata {
+            display_name: Some(display_name.to_string()),
+            description: Some(description.to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_metadata_reported_for_healthy_workspace() {
+        let temp = create_test_workspace_dir();
+        let mut defs = HashMap::new();
+        defs.insert(
+            "data".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: temp.path().to_str().unwrap().to_string(),
+                triggers: true,
+                display_name: Some("Data platform".to_string()),
+                description: Some("Nightly ETL jobs".to_string()),
+            },
+        );
+        defs.insert(
+            "plain".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: temp.path().to_str().unwrap().to_string(),
+                triggers: true,
+                display_name: None,
+                description: None,
+            },
+        );
+
+        let mgr = WorkspaceManager::new(defs, HashMap::new(), HashMap::new()).await;
+        assert_eq!(
+            mgr.metadata("data"),
+            Some(&labels("Data platform", "Nightly ETL jobs"))
+        );
+        assert_eq!(mgr.metadata("plain"), None);
+
+        let infos = mgr.list_workspace_info().await;
+        let data = infos.iter().find(|i| i.name == "data").unwrap();
+        assert!(data.error.is_none());
+        assert_eq!(data.display_name.as_deref(), Some("Data platform"));
+        assert_eq!(data.description.as_deref(), Some("Nightly ETL jobs"));
+        let plain = infos.iter().find(|i| i.name == "plain").unwrap();
+        assert_eq!(plain.display_name, None);
+        assert_eq!(plain.description, None);
+    }
+
+    #[tokio::test]
+    async fn test_metadata_blank_values_are_not_reported() {
+        let temp = create_test_workspace_dir();
+        let mut defs = HashMap::new();
+        defs.insert(
+            "blank".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: temp.path().to_str().unwrap().to_string(),
+                triggers: true,
+                display_name: Some("  ".to_string()),
+                description: Some(String::new()),
+            },
+        );
+
+        let mgr = WorkspaceManager::new(defs, HashMap::new(), HashMap::new()).await;
+        assert_eq!(mgr.metadata("blank"), None);
+        let infos = mgr.list_workspace_info().await;
+        assert_eq!(infos[0].display_name, None);
+        assert_eq!(infos[0].description, None);
+    }
+
+    #[tokio::test]
+    async fn test_metadata_reported_for_workspace_that_failed_to_load() {
+        // Captured from the def before any load, like `triggers_disabled`.
+        let mut defs = HashMap::new();
+        defs.insert(
+            "broken".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: "/nonexistent/stroem-workspace-metadata-test".to_string(),
+                triggers: true,
+                display_name: Some("Broken one".to_string()),
+                description: Some("Fails to load".to_string()),
+            },
+        );
+
+        let mgr = WorkspaceManager::new(defs, HashMap::new(), HashMap::new()).await;
+        let infos = mgr.list_workspace_info().await;
+        assert_eq!(infos.len(), 1);
+        assert!(infos[0].error.is_some(), "load must have failed");
+        assert_eq!(infos[0].display_name.as_deref(), Some("Broken one"));
+        assert_eq!(infos[0].description.as_deref(), Some("Fails to load"));
+    }
+
+    #[tokio::test]
+    async fn test_metadata_reported_for_source_construction_failure() {
+        let mut mgr = WorkspaceManager::from_configs(vec![])
+            .with_metadata("broken", labels("Broken one", "No source"));
+        mgr.insert_load_error_for_test("broken", "boom");
+        let infos = mgr.list_workspace_info().await;
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].error.as_deref(), Some("boom"));
+        assert_eq!(infos[0].display_name.as_deref(), Some("Broken one"));
+        assert_eq!(infos[0].description.as_deref(), Some("No source"));
+    }
+
+    #[tokio::test]
+    async fn test_with_metadata_builder() {
+        let mgr = WorkspaceManager::from_configs(vec![
+            ("a".to_string(), WorkspaceConfig::new(), None),
+            ("b".to_string(), WorkspaceConfig::new(), None),
+        ])
+        .with_metadata("a", labels("Alpha", "First"));
+        assert_eq!(mgr.metadata("a"), Some(&labels("Alpha", "First")));
+        assert_eq!(mgr.metadata("b"), None);
+        let infos = mgr.list_workspace_info().await;
+        let a = infos.iter().find(|i| i.name == "a").unwrap();
+        assert_eq!(a.display_name.as_deref(), Some("Alpha"));
+        let b = infos.iter().find(|i| i.name == "b").unwrap();
+        assert_eq!(b.display_name, None);
+    }
+
+    #[test]
+    fn test_workspace_info_serializes_metadata_only_when_set() {
+        let mut info = WorkspaceInfo {
+            name: "x".to_string(),
+            display_name: None,
+            description: None,
+            tasks_count: 0,
+            actions_count: 0,
+            triggers_count: 0,
+            connections_count: 0,
+            revision: None,
+            error: None,
+            warnings: Vec::new(),
+            triggers_enabled: true,
+            last_successful_load: None,
+            availability: "fresh".to_string(),
+        };
+        let json = serde_json::to_value(&info).unwrap();
+        assert!(json.get("display_name").is_none());
+        assert!(json.get("description").is_none());
+
+        info.display_name = Some("X ray".to_string());
+        info.description = Some("About x".to_string());
+        let json = serde_json::to_value(&info).unwrap();
+        assert_eq!(json["name"], "x");
+        assert_eq!(json["display_name"], "X ray");
+        assert_eq!(json["description"], "About x");
+    }
+
     #[tokio::test]
     async fn test_with_triggers_disabled_builder() {
         let mgr = WorkspaceManager::from_configs(vec![
@@ -1262,6 +1478,8 @@ tasks:
     fn test_workspace_info_serializes_triggers_enabled() {
         let info = WorkspaceInfo {
             name: "x".to_string(),
+            display_name: None,
+            description: None,
             tasks_count: 0,
             actions_count: 0,
             triggers_count: 2,
@@ -1572,6 +1790,8 @@ tasks:
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp_path.clone(),
             },
         );
@@ -1589,6 +1809,8 @@ tasks:
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp.path().to_str().unwrap().to_string(),
             },
         );
@@ -1612,6 +1834,8 @@ tasks:
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp_path.clone(),
             },
         );
@@ -1643,6 +1867,8 @@ tasks:
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp_path,
             },
         );
@@ -1660,6 +1886,8 @@ tasks:
             "nonexistent".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: "/nonexistent/path/12345/xyz".to_string(),
             },
         );
@@ -1713,6 +1941,8 @@ tasks:
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp1.path().to_str().unwrap().to_string(),
             },
         );
@@ -1720,6 +1950,8 @@ tasks:
             "ops".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp2.path().to_str().unwrap().to_string(),
             },
         );
@@ -1751,6 +1983,8 @@ tasks:
             "alpha".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp1.path().to_str().unwrap().to_string(),
             },
         );
@@ -1758,6 +1992,8 @@ tasks:
             "beta".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp2.path().to_str().unwrap().to_string(),
             },
         );
@@ -1765,6 +2001,8 @@ tasks:
             "gamma".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp3.path().to_str().unwrap().to_string(),
             },
         );
@@ -1800,6 +2038,8 @@ actions:
             "bad".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp.path().to_str().unwrap().to_string(),
             },
         );
@@ -1875,6 +2115,8 @@ tasks:
             "mixed".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp.path().to_str().unwrap().to_string(),
             },
         );
@@ -1925,6 +2167,8 @@ tasks:
             "all-bad".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp.path().to_str().unwrap().to_string(),
             },
         );
@@ -1973,6 +2217,8 @@ actions:
             "ws".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp.path().to_str().unwrap().to_string(),
             },
         );
@@ -2037,6 +2283,8 @@ actions:
             "ws".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp.path().to_str().unwrap().to_string(),
             },
         );
@@ -2089,6 +2337,8 @@ tasks:
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp.path().to_str().unwrap().to_string(),
             },
         );
@@ -2144,6 +2394,8 @@ tasks:
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp.path().to_str().unwrap().to_string(),
             },
         );
@@ -2171,6 +2423,8 @@ tasks:
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp.path().to_str().unwrap().to_string(),
             },
         );
@@ -2241,6 +2495,8 @@ tasks:
             "good".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: good_temp.path().to_str().unwrap().to_string(),
             },
         );
@@ -2248,6 +2504,8 @@ tasks:
             "bad".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: "/nonexistent/path/12345".to_string(),
             },
         );
@@ -2279,6 +2537,8 @@ tasks:
             "ws1".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: "/nonexistent/a".to_string(),
             },
         );
@@ -2286,6 +2546,8 @@ tasks:
             "ws2".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: "/nonexistent/b".to_string(),
             },
         );
@@ -2309,6 +2571,8 @@ tasks:
             "missing".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: "/nonexistent/path/12345/xyz".to_string(),
             },
         );
@@ -2362,6 +2626,8 @@ tasks:
             "leaky".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp.path().to_str().unwrap().to_string(),
             },
         );
@@ -2403,6 +2669,8 @@ tasks:
             "ok".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp.path().to_str().unwrap().to_string(),
             },
         );
@@ -2426,6 +2694,8 @@ tasks:
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: temp.path().to_str().unwrap().to_string(),
             },
         );
@@ -2455,6 +2725,8 @@ tasks:
             "good".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: good_temp.path().to_str().unwrap().to_string(),
             },
         );
@@ -2462,6 +2734,8 @@ tasks:
             "bad".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: "/nonexistent/path/xyz".to_string(),
             },
         );
@@ -2485,6 +2759,8 @@ tasks:
             "ws".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: ws_path_str,
             },
         );
@@ -2521,6 +2797,8 @@ tasks:
             "ws".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: ws_path.clone(),
             },
         );
@@ -2555,6 +2833,8 @@ tasks:
             "retry".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: ws_path_str,
             },
         );
@@ -2606,6 +2886,8 @@ tasks:
             "cycle".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: ws_path.to_str().unwrap().to_string(),
             },
         );
@@ -2675,6 +2957,8 @@ tasks:
             "broken".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: ws_path_str,
             },
         );
@@ -2713,6 +2997,8 @@ tasks:
             "ws".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: ws_path.clone(),
             },
         );
@@ -2762,6 +3048,8 @@ tasks:
             "ws".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path,
             },
         );
@@ -2876,6 +3164,8 @@ tasks:
             git_one.clone(),
             WorkspaceSourceDef::Git {
                 triggers: true,
+                display_name: None,
+                description: None,
                 url: url1,
                 git_ref: "main".to_string(),
                 poll_interval_secs: 60,
@@ -2886,6 +3176,8 @@ tasks:
             git_two.clone(),
             WorkspaceSourceDef::Git {
                 triggers: true,
+                display_name: None,
+                description: None,
                 url: url2,
                 git_ref: "main".to_string(),
                 poll_interval_secs: 60,
@@ -2896,6 +3188,8 @@ tasks:
             "missing-folder".to_string(),
             WorkspaceSourceDef::Folder {
                 triggers: true,
+                display_name: None,
+                description: None,
                 path: "/nonexistent/path/for/concurrent/test".to_string(),
             },
         );

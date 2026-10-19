@@ -72,6 +72,8 @@ async fn app_ws(
                     name.to_string(),
                     WorkspaceSourceDef::Folder {
                         triggers: true,
+                        display_name: None,
+                        description: None,
                         path: tmp.path().to_string_lossy().to_string(),
                     },
                 )

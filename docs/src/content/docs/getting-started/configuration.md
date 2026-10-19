@@ -31,6 +31,8 @@ workspaces:
   default:
     type: folder
     path: ./workspace
+    # display_name: "Default jobs"           # UI label instead of the key `default`
+    # description: "Jobs for the platform team"
   # Git workspace example:
   # data-team:
   #   type: git
@@ -104,6 +106,8 @@ worker_token: "change-in-production"
 | `log_storage.s3` | No | S3 archival config (see [Log Storage](/operations/log-storage/)) |
 | `workspaces` | Yes | Map of workspace definitions (see [Multi-Workspace](/guides/multi-workspace/)) |
 | `workspaces.<name>.triggers` | No | `false` loads the workspace but never fires its triggers on this server (default: `true`; see [Disabling triggers per server](/guides/multi-workspace/#disabling-triggers-per-server)) |
+| `workspaces.<name>.display_name` | No | Human-readable label the UI shows instead of the workspace key (see [Display name and description](/guides/multi-workspace/#display-name-and-description)) |
+| `workspaces.<name>.description` | No | Free-text description shown with the workspace in the UI |
 | `workspace_reload` | No | Tunes workspace refresh timing and backoff (see [`workspace_reload`](#workspace_reload) below) |
 | `pin_store` | No | Where and how many pinned commits this replica keeps for [git refs](/guides/git-refs/) (see [`pin_store`](#pin_store) below) |
 | `worker_token` | Yes | Shared secret for worker authentication |

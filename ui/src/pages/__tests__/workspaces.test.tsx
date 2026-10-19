@@ -34,6 +34,47 @@ function renderPage() {
   );
 }
 
+describe("WorkspacesPage name column", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("links the key when no display name or description is set", async () => {
+    mockList.mockResolvedValue([ws()]);
+    renderPage();
+    const link = await screen.findByRole("link", { name: "default" });
+    expect(link).toHaveAttribute("href", "/workspaces/default");
+    expect(screen.getAllByText("default")).toHaveLength(1);
+  });
+
+  it("shows the display name as the link, the key beside it and the description", async () => {
+    mockList.mockResolvedValue([
+      ws({
+        name: "data-platform",
+        display_name: "Data platform",
+        description: "Nightly ETL jobs and reports",
+      }),
+    ]);
+    renderPage();
+    const link = await screen.findByRole("link", { name: "Data platform" });
+    expect(link).toHaveAttribute("href", "/workspaces/data-platform");
+    expect(screen.getByText("data-platform", { selector: "code" })).toBeInTheDocument();
+    expect(screen.getByText("Nightly ETL jobs and reports")).toBeInTheDocument();
+    // Actions keep addressing the workspace by its key.
+    expect(
+      screen.getByRole("button", { name: /refresh workspace data-platform/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("shows a description without a display name", async () => {
+    mockList.mockResolvedValue([ws({ description: "Main jobs" })]);
+    renderPage();
+    expect(await screen.findByRole("link", { name: "default" })).toBeInTheDocument();
+    expect(screen.getByText("Main jobs")).toBeInTheDocument();
+    expect(screen.queryByText("default", { selector: "code" })).toBeNull();
+  });
+});
+
 describe("WorkspacesPage triggers column", () => {
   beforeEach(() => {
     vi.clearAllMocks();

@@ -90,12 +90,24 @@ export function WorkspacesPage() {
                   <TableRow key={ws.name}>
                     <TableCell>
                       <div className="flex flex-col gap-1">
-                        <Link
-                          to={`/workspaces/${encodeURIComponent(ws.name)}`}
-                          className="font-medium hover:underline"
-                        >
-                          {ws.name}
-                        </Link>
+                        <div className="flex flex-wrap items-baseline gap-x-2">
+                          <Link
+                            to={`/workspaces/${encodeURIComponent(ws.name)}`}
+                            className="font-medium hover:underline"
+                          >
+                            {ws.display_name ?? ws.name}
+                          </Link>
+                          {ws.display_name && (
+                            <code className="text-xs text-muted-foreground">
+                              {ws.name}
+                            </code>
+                          )}
+                        </div>
+                        {ws.description && (
+                          <p className="text-xs text-muted-foreground">
+                            {ws.description}
+                          </p>
+                        )}
                         {ws.error && (
                           <div className="flex items-start gap-1.5 text-destructive">
                             <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />

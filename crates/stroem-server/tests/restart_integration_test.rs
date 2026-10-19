@@ -216,6 +216,8 @@ async fn build_test_app_with_pool(
             WorkspaceSourceDef::Folder {
                 path: tmp.path().to_string_lossy().to_string(),
                 triggers: true,
+                display_name: None,
+                description: None,
             },
         )]),
         libraries: HashMap::new(),
