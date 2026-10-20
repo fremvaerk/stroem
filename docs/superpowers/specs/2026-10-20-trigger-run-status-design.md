@@ -140,7 +140,7 @@ For an **enabled** scheduler trigger in a workspace whose triggers are enabled o
 (`WorkspaceManager::triggers_enabled`), with a last fire `L` (§5.2):
 
 ```
-missed = { t ∈ occurrences(cron, timezone) : L + tolerance < t ≤ now − grace }
+missed = { t ∈ occurrences(cron, timezone) : L < t ≤ now − grace }, minus the first occurrence after L when it is ≤ 5 s after L
 ```
 
 - Show `count` and `first = min(missed)`; no mark when `missed` is empty.
@@ -157,7 +157,7 @@ missed = { t ∈ occurrences(cron, timezone) : L + tolerance < t ≤ now − gra
   `force_refresh` trigger reloads its workspace first and can be later. 5 minutes keeps the
   mark quiet for slow fires and still shows a missed daily run within minutes. A constant; no
   config.
-- **Clock tolerance: 60 s** (`MISSED_SKEW_TOLERANCE_SECS`): the scheduler fires by the replica clock, `created_at` is the DB `NOW()`. A DB clock a few ms behind would stamp a fire just before its own occurrence and count it as missed for a whole period. Counting starts at `L + 60 s`.
+- **Clock tolerance: 5 s** (`MISSED_SKEW_TOLERANCE_SECS`): the scheduler fires by the replica clock, `created_at` is the DB `NOW()`. A DB clock a few ms behind stamps a fire just before its own occurrence. If the FIRST occurrence after `L` is at most 5 s after `L`, it is that fire's own occurrence and is skipped; at most this one occurrence is ever skipped. Trade-off: for a cron that fires every 5 s or more often, one genuine missed fire right after `L` may not be counted.
 - **No last fire → no mark** — we cannot know when a new trigger was added.
 - **Reset**: by construction, the trigger's next own run moves `L` past the gap **(user)**. A
   manual run, Re-run or Restart of the task does not reset it (§5.1).
@@ -369,4 +369,5 @@ index shape, within §7.2's requirement; test split.
 - **Rev 5** (Codex round 2): the consumer marker is `input ? '_fingerprint'`, not
   `_event_source` — consumers written by v0.14.0/v0.14.1 carry only `_fingerprint` (and the
   synthetic task name `_event_source:{trigger}`); every later consumer carries both.
-- **Rev 6** (final review): clock tolerance of 60 s in the missed rule (§5.3).
+- **Rev 6** (final review): clock tolerance in the missed rule (§5.3).
+- **Rev 7** (Codex implementation round 1): the 60 s window hid a distinct occurrence close after the last fire (`0,1 1 * * *`); the tolerance now absorbs at most one occurrence ≤ 5 s after the last fire.

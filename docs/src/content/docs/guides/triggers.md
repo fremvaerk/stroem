@@ -73,11 +73,11 @@ Every trigger shows its **last run**. A scheduler trigger can also show **missed
 
 **Missed runs.** For an enabled scheduler trigger, a run is missed when a scheduled fire time:
 
-- is more than 60 seconds later than the trigger's newest job of any status (a `skipped` row counts, because it proves the scheduler fired; the 60 seconds absorb a small clock difference between the server and the database), and
+- is later than the trigger's newest job of any status (a `skipped` row counts, because it proves the scheduler fired), and
 - is at least 5 minutes in the past, and
 - has no job.
 
-The UI shows the number of missed runs and the first missed time. The count stops at 1000 and shows `1000+`. The 5 minute grace period lets a fire that is late by seconds pass. A trigger with no job at all never shows a mark, because the server cannot know when the trigger was added. A disabled trigger and a trigger in a workspace with `triggers: false` never show a mark. Webhook and event source triggers have no schedule, so they show a last run but never a missed mark.
+The UI shows the number of missed runs and the first missed time. The count stops at 1000 and shows `1000+`. The 5 minute grace period lets a fire that is late by seconds pass. A small clock difference between the server and the database can record a fire a few milliseconds before its scheduled time, so the first scheduled time that is at most 5 seconds after the newest job is not counted (at most one time is skipped this way). For a schedule that fires every 5 seconds or more often, one missed fire right after the newest job may therefore not be counted. A trigger with no job at all never shows a mark, because the server cannot know when the trigger was added. A disabled trigger and a trigger in a workspace with `triggers: false` never show a mark. Webhook and event source triggers have no schedule, so they show a last run but never a missed mark.
 
 The mark clears only when the trigger itself runs again. A manual run, a Re-run or a Restart of the task does not clear it, and does not change the last result.
 
