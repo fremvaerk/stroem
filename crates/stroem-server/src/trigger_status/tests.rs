@@ -66,7 +66,7 @@ fn count_stops_at_the_cap() {
     let r = missed_runs("* * * * * *", None, last, last + Duration::hours(2)).unwrap();
     assert_eq!(r.count, 1000);
     assert!(r.capped);
-    assert_eq!(r.first, last + Duration::seconds(2));
+    assert_eq!(r.first, last + Duration::seconds(1));
 }
 
 #[test]
@@ -282,7 +282,7 @@ fn occurrence_beyond_the_tolerance_is_still_missed() {
     let r = missed_runs(
         "0 1 * * *",
         None,
-        t("2026-10-19T00:59:54Z"),
+        t("2026-10-19T00:59:58.500Z"),
         t("2026-10-19T09:00:00Z"),
     )
     .unwrap();
@@ -315,4 +315,29 @@ fn only_one_occurrence_is_absorbed() {
     .unwrap();
     assert_eq!(r.first, tt + Duration::seconds(1));
     assert_eq!(r.count, 300);
+}
+
+#[test]
+fn late_fire_close_to_the_next_occurrence_is_still_missed() {
+    let r = missed_runs(
+        "0,1 1 * * *",
+        None,
+        t("2026-10-19T01:00:56Z"),
+        t("2026-10-19T09:00:00Z"),
+    )
+    .unwrap();
+    assert_eq!(r.count, 1);
+    assert_eq!(r.first, t("2026-10-19T01:01:00Z"));
+}
+
+#[test]
+fn exactly_one_second_before_is_not_absorbed() {
+    let r = missed_runs(
+        "0 1 * * *",
+        None,
+        t("2026-10-19T00:59:59Z"),
+        t("2026-10-19T09:00:00Z"),
+    )
+    .unwrap();
+    assert_eq!(r.count, 1);
 }

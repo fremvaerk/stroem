@@ -19,8 +19,8 @@ use uuid::Uuid;
 pub const MISSED_GRACE_SECS: i64 = 300;
 /// The DB stamps `created_at` and the scheduler fires by its own clock, so a
 /// fire may be recorded slightly before its occurrence. At most ONE occurrence
-/// within this many seconds after the last fire is absorbed.
-pub const MISSED_SKEW_TOLERANCE_SECS: i64 = 5;
+/// strictly less than this many milliseconds after the last fire is absorbed.
+pub const MISSED_SKEW_TOLERANCE_MS: i64 = 1000;
 /// Counting stops here; the UI shows `1000+`.
 pub const MISSED_CAP: u32 = 1000;
 
@@ -247,7 +247,7 @@ pub fn source_type_of(def: &TriggerDef) -> &'static str {
 }
 
 /// Scheduled occurrences `t` with `last_fire < t <= now - grace`, except that
-/// the first one is skipped when it is at most the skew tolerance after
+/// the first one is skipped when it is less than the skew tolerance after
 /// `last_fire` (the last fire's own occurrence, recorded slightly early).
 /// `None` for an unparsable cron or when there is none.
 pub fn missed_runs(
@@ -262,7 +262,7 @@ pub fn missed_runs(
         .unwrap_or(chrono_tz::UTC);
     let limit = now - Duration::seconds(MISSED_GRACE_SECS);
 
-    let tolerance = Duration::seconds(MISSED_SKEW_TOLERANCE_SECS);
+    let tolerance = Duration::milliseconds(MISSED_SKEW_TOLERANCE_MS);
     let mut prev = last_fire;
     let mut absorb_early = true;
     let mut first = None;
@@ -275,7 +275,7 @@ pub fn missed_runs(
         }
         if absorb_early {
             absorb_early = false;
-            if utc - last_fire <= tolerance {
+            if utc - last_fire < tolerance {
                 prev = utc;
                 continue;
             }

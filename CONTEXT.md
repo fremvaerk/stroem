@@ -39,7 +39,7 @@ holds what the words mean. Keep both in sync when a term is added or sharpened.
 - **Log source** — which source answered a read: `local`, `archive`, `merged` or `none` (`X-Stroem-Log-Source`).
 - **Native value** — the value a `json` input field takes from a string that is exactly one `{{ expression }}`: the expression's JSON value (object, array, number, …), not its rendered text.
 - **Last fire** — the newest job of a trigger, of any status including `skipped`. A `skipped` row proves the scheduler fired, so the Last fire is the base of the Missed run mark. The "last run" the UI shows ignores `skipped` rows.
-- **Missed run** — a scheduled fire time that is later than the trigger's Last fire (the first such time is skipped when it is at most 5 seconds after the Last fire: the clock tolerance), at least the grace period (5 minutes) in the past, and has no job. Counted only for enabled scheduler triggers that fire on this server; only the trigger's own next run clears it.
+- **Missed run** — a scheduled fire time that is later than the trigger's Last fire (the first such time is skipped when it is less than 1 second after the Last fire: the clock tolerance), at least the grace period (5 minutes) in the past, and has no job. Counted only for enabled scheduler triggers that fire on this server; only the trigger's own next run clears it.
 
 See `CLAUDE.md` for how these pieces fit together (architecture, conventions, key patterns).
 

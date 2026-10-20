@@ -140,7 +140,7 @@ For an **enabled** scheduler trigger in a workspace whose triggers are enabled o
 (`WorkspaceManager::triggers_enabled`), with a last fire `L` (§5.2):
 
 ```
-missed = { t ∈ occurrences(cron, timezone) : L < t ≤ now − grace }, minus the first occurrence after L when it is ≤ 5 s after L
+missed = { t ∈ occurrences(cron, timezone) : L < t ≤ now − grace }, minus the first occurrence after L when it is < 1 s after L
 ```
 
 - Show `count` and `first = min(missed)`; no mark when `missed` is empty.
@@ -157,7 +157,7 @@ missed = { t ∈ occurrences(cron, timezone) : L < t ≤ now − grace }, minus 
   `force_refresh` trigger reloads its workspace first and can be later. 5 minutes keeps the
   mark quiet for slow fires and still shows a missed daily run within minutes. A constant; no
   config.
-- **Clock tolerance: 5 s** (`MISSED_SKEW_TOLERANCE_SECS`): the scheduler fires by the replica clock, `created_at` is the DB `NOW()`. A DB clock a few ms behind stamps a fire just before its own occurrence. If the FIRST occurrence after `L` is at most 5 s after `L`, it is that fire's own occurrence and is skipped; at most this one occurrence is ever skipped. Trade-off: for a cron that fires every 5 s or more often, one genuine missed fire right after `L` may not be counted.
+- **Clock tolerance: < 1 s** (`MISSED_SKEW_TOLERANCE_MS` = 1000): the scheduler fires by the replica clock, `created_at` is the DB `NOW()`. A fire has one time stamp, so an early own fire and a late fire of the previous time cannot be told apart. If the FIRST occurrence after `L` is strictly less than 1 s after `L`, it is skipped, at most this one. Trade-off: a fire recorded less than 1 second before the next scheduled time is taken as that time's own fire, because the database clock can run slightly behind the scheduler's clock. If it was instead a very late fire of the previous scheduled time, that next time is not counted. At most one scheduled time is skipped this way.
 - **No last fire → no mark** — we cannot know when a new trigger was added.
 - **Reset**: by construction, the trigger's next own run moves `L` past the gap **(user)**. A
   manual run, Re-run or Restart of the task does not reset it (§5.1).
@@ -371,3 +371,4 @@ index shape, within §7.2's requirement; test split.
   synthetic task name `_event_source:{trigger}`); every later consumer carries both.
 - **Rev 6** (final review): clock tolerance in the missed rule (§5.3).
 - **Rev 7** (Codex implementation round 1): the 60 s window hid a distinct occurrence close after the last fire (`0,1 1 * * *`); the tolerance now absorbs at most one occurrence ≤ 5 s after the last fire.
+- **Rev 8** (Codex implementation round 2): a 5 s window still absorbed a distinct time after a 56-s-late fire; one time stamp cannot separate an early own fire from a late previous fire, so the window is cut to real clock skew (< 1 s) and the residual case is a stated trade-off.
