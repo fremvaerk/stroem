@@ -1494,7 +1494,7 @@ mod lease {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
     use tokio::net::{TcpListener, TcpStream};
-    use tokio::sync::watch;
+    use tokio::sync::{watch, Notify};
     use tokio::time::sleep;
     use tokio_util::sync::CancellationToken;
 
@@ -1511,6 +1511,17 @@ mod lease {
         }
     }
 
+    /// For the early-session-end tests: validity far longer than the
+    /// detection bound, so a passing test proves the failed ping cleared it,
+    /// not the deadline.
+    fn long_validity() -> LeaderTiming {
+        LeaderTiming {
+            validity: Duration::from_secs(4),
+            lease: Duration::from_secs(5),
+            ..fast()
+        }
+    }
+
     /// Takeover bound after the old session's last idle start (spec § 5.1),
     /// plus 1 s of slack.
     fn takeover_bound(t: &LeaderTiming) -> Duration {
@@ -1518,14 +1529,20 @@ mod lease {
     }
 
     fn start(url: &str) -> (Arc<LeaderElection>, CancellationToken) {
+        start_timed(url, fast())
+    }
+
+    fn start_timed(url: &str, timing: LeaderTiming) -> (Arc<LeaderElection>, CancellationToken) {
         let cancel = CancellationToken::new();
-        let (leader, _handle) = LeaderElection::start_with(url.to_string(), fast(), cancel.clone());
+        let (leader, _handle) = LeaderElection::start_with(url.to_string(), timing, cancel.clone());
         (leader, cancel)
     }
 
-    /// A leads on `url_a`, then B starts on `url_b` and stays follower.
+    /// A (with `timing_a`) leads on `url_a`, then B starts on `url_b` and
+    /// stays follower.
     async fn leader_and_follower(
         url_a: &str,
+        timing_a: LeaderTiming,
         url_b: &str,
     ) -> (
         Arc<LeaderElection>,
@@ -1533,7 +1550,7 @@ mod lease {
         Arc<LeaderElection>,
         CancellationToken,
     ) {
-        let (a, ca) = start(url_a);
+        let (a, ca) = start_timed(url_a, timing_a);
         assert!(
             wait_for(Duration::from_secs(5), || a.is_leader()).await,
             "A must acquire the lock"
@@ -1593,8 +1610,10 @@ mod lease {
         /// Stop forwarding in both directions; keep every socket open, also
         /// when the client closes — what the incident's node did.
         frozen: AtomicBool,
-        /// Hold each client `Q` message this long before forwarding it.
-        request_delay_ms: AtomicU64,
+        /// Hold the next client `Q` message until `release_query` is
+        /// notified.
+        hold_queries: AtomicBool,
+        release_query: Notify,
         /// Hold the server's messages until this long after the `Z` (or end
         /// of stream) that ends them.
         answer_delay_ms: AtomicU64,
@@ -1602,10 +1621,13 @@ mod lease {
         /// message, then freeze.
         cut_next_query_after: AtomicUsize,
         /// Barriers: counters bumped when a `Q` is held, an answer is held,
-        /// and when a `Q` was cut (`(cut after, message length)`).
+        /// and when a `Q` was cut (`(cut after, message length)`); when a
+        /// held `Q` and a held answer were forwarded.
         query_held: watch::Sender<u64>,
         answer_held: watch::Sender<u64>,
         query_cut: watch::Sender<(usize, usize)>,
+        query_forwarded: watch::Sender<Option<Instant>>,
+        answer_released: watch::Sender<Option<Instant>>,
     }
 
     struct PgProxy {
@@ -1626,12 +1648,15 @@ mod lease {
             let port = listener.local_addr().expect("proxy addr").port();
             let ctl = Arc::new(ProxyCtl {
                 frozen: AtomicBool::new(false),
-                request_delay_ms: AtomicU64::new(0),
+                hold_queries: AtomicBool::new(false),
+                release_query: Notify::new(),
                 answer_delay_ms: AtomicU64::new(0),
                 cut_next_query_after: AtomicUsize::new(0),
                 query_held: watch::channel(0).0,
                 answer_held: watch::channel(0).0,
                 query_cut: watch::channel((0, 0)).0,
+                query_forwarded: watch::channel(None).0,
+                answer_released: watch::channel(None).0,
             });
             let accept_ctl = ctl.clone();
             let accept = tokio::spawn(async move {
@@ -1719,10 +1744,14 @@ mod lease {
                     // Keep both sockets open forever.
                     std::future::pending::<()>().await;
                 }
-                let delay = ctl.request_delay_ms.load(Ordering::SeqCst);
-                if delay > 0 {
+                if ctl.hold_queries.load(Ordering::SeqCst) {
                     ctl.query_held.send_modify(|n| *n += 1);
-                    sleep(Duration::from_millis(delay)).await;
+                    ctl.release_query.notified().await;
+                    if w.write_all(&msg).await.is_err() {
+                        return;
+                    }
+                    ctl.query_forwarded.send_replace(Some(Instant::now()));
+                    continue;
                 }
             }
             if w.write_all(&msg).await.is_err() {
@@ -1759,6 +1788,9 @@ mod lease {
             if w.write_all(&held).await.is_err() {
                 return;
             }
+            if delay > 0 {
+                ctl.answer_released.send_replace(Some(Instant::now()));
+            }
             held.clear();
         }
     }
@@ -1774,7 +1806,7 @@ mod lease {
     async fn frozen_leader_loses_lock_to_follower_after_lease() -> Result<()> {
         let h = boot().await?;
         let t = fast();
-        let (a, ca, b, cb) = leader_and_follower(&h.url, &h.url).await;
+        let (a, ca, b, cb) = leader_and_follower(&h.url, fast(), &h.url).await;
 
         a.pause_for_test(true);
         let paused_at = Instant::now();
@@ -1816,7 +1848,7 @@ mod lease {
         let h = boot().await?;
         let t = fast();
         let proxy = PgProxy::start(upstream_of(&h.url)).await;
-        let (a, ca, b, cb) = leader_and_follower(&proxy.url_for(&h.url), &h.url).await;
+        let (a, ca, b, cb) = leader_and_follower(&proxy.url_for(&h.url), fast(), &h.url).await;
         let pid_a = holder_pid(&h.pool).await.expect("A holds the lock");
 
         proxy.ctl.frozen.store(true, Ordering::SeqCst);
@@ -1857,7 +1889,7 @@ mod lease {
         let h = boot().await?;
         let t = fast();
         let proxy = PgProxy::start(upstream_of(&h.url)).await;
-        let (a, ca, b, cb) = leader_and_follower(&proxy.url_for(&h.url), &h.url).await;
+        let (a, ca, b, cb) = leader_and_follower(&proxy.url_for(&h.url), fast(), &h.url).await;
 
         let mut cut = proxy.ctl.query_cut.subscribe();
         proxy.ctl.cut_next_query_after.store(5, Ordering::SeqCst);
@@ -1885,7 +1917,7 @@ mod lease {
     async fn healthy_leader_keeps_lock_past_lease() -> Result<()> {
         let h = boot().await?;
         let t = fast();
-        let (a, ca, b, cb) = leader_and_follower(&h.url, &h.url).await;
+        let (a, ca, b, cb) = leader_and_follower(&h.url, fast(), &h.url).await;
         let pid = holder_pid(&h.pool).await.expect("A holds the lock");
 
         let until = Instant::now() + 3 * t.lease;
@@ -1904,14 +1936,24 @@ mod lease {
         Ok(())
     }
 
+    /// After A has noticed its lost session, exactly one of A and B leads:
+    /// A is healthy and may win the next election as fairly as B.
+    async fn one_leader_again(a: &LeaderElection, b: &LeaderElection) -> bool {
+        wait_exclusive(a, b, takeover_bound(&fast()), || {
+            a.is_leader() || b.is_leader()
+        })
+        .await
+    }
+
     /// Test 5: a session ended early (administrator, connection reset) lets B
-    /// take over at once; A notices on its next ping.
+    /// take over at once; A notices on its next ping — well before its
+    /// validity (4 s here) could lapse on its own.
     #[tokio::test]
     #[serial]
     async fn early_session_end_overlap_is_bounded() -> Result<()> {
         let h = boot().await?;
-        let t = fast();
-        let (a, ca, b, cb) = leader_and_follower(&h.url, &h.url).await;
+        let t = long_validity();
+        let (a, ca, b, cb) = leader_and_follower(&h.url, t, &h.url).await;
         let pid = holder_pid(&h.pool).await.expect("A holds the lock");
 
         sqlx::query("SELECT pg_terminate_backend($1)")
@@ -1919,17 +1961,15 @@ mod lease {
             .execute(&h.pool)
             .await?;
         let ended_at = Instant::now();
+        let bound = t.retry_interval + t.ping_timeout + Duration::from_millis(500);
+        assert!(bound < t.validity - t.retry_interval - t.ping_timeout);
         assert!(
-            wait_for(
-                t.retry_interval + t.ping_timeout + Duration::from_millis(500),
-                || { !a.is_leader() }
-            )
-            .await,
+            wait_for(bound, || !a.is_leader()).await,
             "A must notice the ended session on its next ping"
         );
         assert!(
-            wait_for(takeover_bound(&t), || b.is_leader()).await,
-            "B takes over ({:?} after the termination)",
+            one_leader_again(&a, &b).await,
+            "a replica takes over ({:?} after the termination)",
             ended_at.elapsed()
         );
         ca.cancel();
@@ -1938,18 +1978,21 @@ mod lease {
     }
 
     /// Test 6: as test 5, but a successful answer sent before the
-    /// termination reaches A only afterwards. The overlap stays within
-    /// `2 × ping_timeout + retry_interval`, never past `validity`.
+    /// termination reaches A only afterwards. A still notices within
+    /// `2 × ping_timeout + retry_interval` — on its next ping, not by its
+    /// (4 s) validity running out.
     #[tokio::test]
     #[serial]
     async fn early_session_end_with_late_answers_is_bounded() -> Result<()> {
         let h = boot().await?;
-        let t = fast();
+        let t = long_validity();
         let proxy = PgProxy::start(upstream_of(&h.url)).await;
-        let (a, ca, b, cb) = leader_and_follower(&proxy.url_for(&h.url), &h.url).await;
+        let (a, ca, b, cb) = leader_and_follower(&proxy.url_for(&h.url), t, &h.url).await;
         let pid = holder_pid(&h.pool).await.expect("A holds the lock");
 
         let mut held = proxy.ctl.answer_held.subscribe();
+        let mut released = proxy.ctl.answer_released.subscribe();
+        // Below `ping_timeout`, so A takes the late answer as a success.
         proxy.ctl.answer_delay_ms.store(350, Ordering::SeqCst);
         tokio::time::timeout(Duration::from_secs(3), held.changed())
             .await
@@ -1959,16 +2002,24 @@ mod lease {
             .execute(&h.pool)
             .await?;
         let ended_at = Instant::now();
-
-        let bound =
-            (2 * t.ping_timeout + t.retry_interval).min(t.validity) + Duration::from_millis(500);
+        tokio::time::timeout(Duration::from_secs(1), released.changed())
+            .await
+            .expect("the held answer is delivered")?;
+        let released_at = released.borrow().expect("release time");
         assert!(
-            wait_for(bound, || !a.is_leader()).await,
+            released_at > ended_at,
+            "the successful answer must reach A after the termination"
+        );
+
+        let bound = 2 * t.ping_timeout + t.retry_interval + Duration::from_millis(500);
+        assert!(bound < t.validity - t.retry_interval - t.ping_timeout);
+        assert!(
+            wait_for(bound.saturating_sub(ended_at.elapsed()), || !a.is_leader()).await,
             "A must stop reporting leader within {bound:?} of the termination"
         );
         assert!(
-            wait_for(takeover_bound(&t), || b.is_leader()).await,
-            "B takes over ({:?} after the termination)",
+            one_leader_again(&a, &b).await,
+            "a replica takes over ({:?} after the termination)",
             ended_at.elapsed()
         );
         ca.cancel();
@@ -1983,35 +2034,44 @@ mod lease {
     async fn delayed_ping_extends_the_session_by_one_lease_only() -> Result<()> {
         let h = boot().await?;
         let t = fast();
-        let delay = Duration::from_millis(300);
         let proxy = PgProxy::start(upstream_of(&h.url)).await;
-        let (a, ca, b, cb) = leader_and_follower(&proxy.url_for(&h.url), &h.url).await;
+        let (a, ca, b, cb) = leader_and_follower(&proxy.url_for(&h.url), fast(), &h.url).await;
 
         let mut held = proxy.ctl.query_held.subscribe();
-        proxy
-            .ctl
-            .request_delay_ms
-            .store(delay.as_millis() as u64, Ordering::SeqCst);
+        let mut forwarded = proxy.ctl.query_forwarded.subscribe();
+        proxy.ctl.hold_queries.store(true, Ordering::SeqCst);
         tokio::time::timeout(Duration::from_secs(3), held.changed())
             .await
             .expect("a ping of A is held")?;
         a.pause_for_test(true);
         let paused_at = Instant::now();
+        // Hold it a while longer (still below `ping_timeout`, so A takes the
+        // answer as a success), then let it reach PostgreSQL.
+        sleep(Duration::from_millis(300)).await;
+        proxy.ctl.hold_queries.store(false, Ordering::SeqCst);
+        proxy.ctl.release_query.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), forwarded.changed())
+            .await
+            .expect("the held ping is forwarded")?;
+        let forwarded_at = forwarded.borrow().expect("forward time");
+        assert!(
+            forwarded_at > paused_at,
+            "the held ping arrives after the freeze"
+        );
 
-        // The held ping reaches PostgreSQL `delay` after the pause and
-        // restarts the idle interval there.
-        let earliest = delay + t.lease - Duration::from_millis(150);
+        // PostgreSQL restarted the idle interval when the ping arrived: no
+        // takeover before `forwarded_at + lease`.
+        let earliest = (forwarded_at + t.lease - Duration::from_millis(150))
+            .saturating_duration_since(Instant::now());
         assert!(
             !wait_exclusive(&a, &b, earliest, || b.is_leader()).await,
-            "B took over {:?} after the pause, before the delayed ping's lease could end",
-            paused_at.elapsed()
+            "B took over {:?} after the forward, before the delayed ping's lease could end",
+            forwarded_at.elapsed()
         );
         assert!(
-            wait_exclusive(&a, &b, delay + takeover_bound(&t) - earliest, || b
-                .is_leader())
-            .await,
-            "B must take over within the bound from the freeze ({:?})",
-            paused_at.elapsed()
+            wait_exclusive(&a, &b, takeover_bound(&t), || b.is_leader()).await,
+            "B must take over within the bound from the delayed ping ({:?})",
+            forwarded_at.elapsed()
         );
         ca.cancel();
         cb.cancel();

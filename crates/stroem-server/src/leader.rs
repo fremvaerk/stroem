@@ -730,11 +730,12 @@ mod tests {
         assert!(short_lease.check().is_err());
     }
 
-    /// The integration tests' timing (ha_test.rs) must pass the same check
-    /// as production, or `start_with`'s debug assertion fires.
+    /// The integration tests' timings (ha_test.rs `fast` and
+    /// `long_validity`) must pass the same check as production, or
+    /// `start_with`'s debug assertion fires.
     #[test]
     fn integration_test_timing_satisfies_the_invariants() {
-        let t = LeaderTiming {
+        let fast = LeaderTiming {
             retry_interval: Duration::from_millis(200),
             ping_timeout: Duration::from_millis(500),
             acquire_timeout: Duration::from_millis(1500),
@@ -742,7 +743,13 @@ mod tests {
             lease: Duration::from_millis(2500),
             release_after: Duration::from_millis(600),
         };
-        assert_eq!(t.check(), Ok(()));
+        assert_eq!(fast.check(), Ok(()));
+        let long_validity = LeaderTiming {
+            validity: Duration::from_secs(4),
+            lease: Duration::from_secs(5),
+            ..fast
+        };
+        assert_eq!(long_validity.check(), Ok(()));
     }
 
     #[test]

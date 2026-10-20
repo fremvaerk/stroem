@@ -1,12 +1,21 @@
 # A frozen leader must not keep the leader lock
 
-Status: revision 4, draft for review (2026-10-20)
+Status: revision 5, approved by Codex (round 4); implemented on branch `fix/leader-stale-lock` (2026-10-20)
 
 Code: `crates/stroem-server/src/leader.rs`, `web/health.rs`, `scheduler.rs`,
 `main.rs`; tests `crates/stroem-server/tests/ha_test.rs`; test image
 `crates/stroem-test-support/src/lib.rs`.
 
 ## Revision history
+
+**Revision 5 (2026-10-20, Codex implementation review round 1 — tests and
+docs only, no production-code finding).** Test 7 holds the ping until the
+test releases it and anchors its lower bound on the proxy's forward time;
+tests 5 and 6 run A with `long_validity` (validity 4 s, lease 5 s) so the
+detection deadline lies before any passive validity lapse, test 6 checks
+that the held successful answer reached A after the termination, and both
+accept either replica as the next leader (A is healthy and may win). The
+operations guide keeps the 55 s bound's anchor and network assumption.
 
 **Revision 4 (2026-10-20, Codex review round 3, 1 finding, verified).**
 The test proxy (§ 6.3) frames PostgreSQL protocol messages instead of
@@ -716,8 +725,8 @@ tools:
   boundaries) and acts per message:
   - **freeze** (both directions): stop forwarding and keep both sockets
     open, also when the client side closes — what the incident's node did;
-  - **delay requests by `d`**: hold each client `Q` message for `d` before
-    forwarding it;
+  - **hold requests**: hold the next client `Q` message until the test
+    releases it, and record when it was forwarded;
   - **delay answers by `d`**: hold the server's messages and release them
     together `d` after the `Z` (ReadyForQuery) that ends an answer arrives;
     an `E` + end of stream (a FATAL) is released `d` after it arrives;
@@ -726,8 +735,9 @@ tools:
     `0 < k < 1 + length`), then freeze the client→server direction.
 
   Barriers (`tokio::sync::Notify` / watch counters the test awaits):
-  "a `Q` is held in the request delay", "an answer ending in `Z` is held in
-  the answer delay", "a `Q` was cut after `k` of its `n` bytes". Tests act
+  "a `Q` is held", "a held `Q` was forwarded (at time t)", "an answer
+  ending in `Z` is held in the answer delay", "a held answer was released
+  (at time t)", "a `Q` was cut after `k` of its `n` bytes". Tests act
   only after the barrier, so the case is exercised, not just likely.
 
 Tests:
@@ -754,24 +764,25 @@ Tests:
    PostgreSQL's behaviour, which § 4.2 cites.
 4. `healthy_leader_keeps_lock_past_lease`: A leads for 3 × N; the holder
    pid (from `lock_holder`) never changes; B never reads `true`.
-5. `early_session_end_overlap_is_bounded`: A leads, B follows;
-   `pg_terminate_backend` A's backend (pid from `lock_holder`); B
-   acquires; A reads `false` no later than `retry_interval + ping_timeout`
-   + 0.5 s after the termination.
+5. `early_session_end_overlap_is_bounded`: A (validity 4 s, lease 5 s, so
+   a lapse cannot pass the test) leads, B follows; `pg_terminate_backend`
+   A's backend (pid from `lock_holder`); A reads `false` no later than
+   `retry_interval + ping_timeout` + 0.5 s after the termination; then
+   exactly one of A and B leads (A is healthy and may win the election).
 6. `early_session_end_with_late_answers_is_bounded` (answer delay `d` =
-   350 ms < `ping_timeout`): A leads through the proxy, its pings still
-   succeed; wait for the barrier "an answer ending in `Z` is held", then
-   terminate A's backend — the held successful answer reaches A after the
-   termination. A reads `false` no later than `2 × ping_timeout +
-   retry_interval` + 0.5 s after the termination, and never later than
-   V + 0.5 s.
-7. `delayed_ping_extends_the_session_by_one_lease_only` (request delay
-   `d` = 300 ms < `ping_timeout`, so A's pings still succeed): wait for the
-   barrier "a `Q` is held in the request delay", then pause A — the held
-   ping reaches PostgreSQL after the pause and restarts the idle interval.
-   B acquires within `d` + N + 2 × `acquire_timeout` + `retry_interval` +
-   1 s of the pause — the § 5.1 bound from the freeze with a delivery delay
-   of `d`.
+   350 ms < `ping_timeout`; A with validity 4 s): A leads through the
+   proxy, its pings still succeed; wait for the barrier "an answer ending
+   in `Z` is held", then terminate A's backend; the barrier "a held answer
+   was released" must come after the termination. A reads `false` no later
+   than `2 × ping_timeout + retry_interval` + 0.5 s after the termination
+   (before its validity could lapse); then exactly one of A and B leads.
+7. `delayed_ping_extends_the_session_by_one_lease_only` (hold requests):
+   wait for the barrier "a `Q` is held", pause A, keep the ping held
+   300 ms more (below `ping_timeout`, so A's ping still succeeds), release
+   it and read its forward time `f` (after the pause). B does not lead
+   before `f + N − 0.15 s` — the late ping restarted the idle interval —
+   and leads within N + 2 × `acquire_timeout` + `retry_interval` + 1 s of
+   `f`: the § 5.1 bound from the freeze with a delivery delay.
 8. `lease_setup_maps_unrecognized_parameter_to_unsupported`: `apply_lease`
    with a non-existent parameter name on PostgreSQL 15 returns
    `Unsupported` — the real server error code; with `idle_session_timeout`
