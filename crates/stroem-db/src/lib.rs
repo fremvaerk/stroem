@@ -18,6 +18,7 @@ pub use repos::oauth_client::{OAuthClientRepo, OAuthClientRow};
 pub use repos::oauth_refresh_token::{OAuthRefreshTokenRepo, OAuthRefreshTokenRow};
 pub use repos::refresh_token::{RefreshTokenRepo, RefreshTokenRow};
 pub use repos::task_state::{TaskStateRepo, TaskStateRow};
+pub use repos::trigger_run::{TriggerRunKey, TriggerRunRepo, TriggerRunRow};
 pub use repos::user::{UserRepo, UserRow};
 pub use repos::user_auth_link::{UserAuthLinkRepo, UserAuthLinkRow};
 pub use repos::user_group::{UserGroupRepo, UserGroupRow};

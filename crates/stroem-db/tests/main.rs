@@ -9,3 +9,4 @@ mod job_step_status_tests;
 mod migration_test;
 mod tarball_keep_revisions_test;
 mod templated_refs_test;
+mod trigger_runs_test;
