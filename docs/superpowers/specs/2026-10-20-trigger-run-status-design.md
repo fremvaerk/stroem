@@ -1,6 +1,6 @@
 # Trigger run status: last run, result and missed runs
 
-Status: approved by the user 2026-10-20, in Codex review (revision 5 — Codex rounds 1–2 fixed;
+Status: approved by the user 2026-10-20; Codex APPROVE in round 3 (revision 5;
 history in §11).
 
 Markers used below: **(user)** = decided by the user in the brainstorm; **(my call)** = proposed
