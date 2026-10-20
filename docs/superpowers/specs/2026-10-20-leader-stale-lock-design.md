@@ -1,9 +1,8 @@
 # A frozen leader must not keep the leader lock
 
-Status: revision 7 (the user removed the caps of § 4.1), under Codex
-review. Revision 6 was approved by Codex in round 2 and implemented on
-branch `fix/leader-stale-lock` (2026-10-20); revision 5 was approved in
-round 4.
+Status: revision 7 (the user removed the caps of § 4.1), approved by Codex
+(round 2 of revision 7); implemented on branch `fix/leader-stale-lock`
+(2026-10-20). Revisions 6 and 5 were approved in rounds 2 and 4.
 
 Code: `crates/stroem-server/src/leader.rs`, `config.rs`, `web/health.rs`,
 `scheduler.rs`, `main.rs`; tests `crates/stroem-server/tests/ha_test.rs`;
