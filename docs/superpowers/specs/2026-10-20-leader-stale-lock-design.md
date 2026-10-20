@@ -208,8 +208,9 @@ Five changes in the leader-election path, one in the scheduler, one in the
 health endpoints:
 
 1. **Server-enforced lease** — the leader session carries
-   `idle_session_timeout` = N (default 30 s). The leader pings every 5 s, so
-   a healthy leader is never idle that long; PostgreSQL ends a silent
+   `idle_session_timeout` = N (default 30 s). The leader pings every
+   `retry_interval` (N/6, default 5 s), so a healthy leader is never idle
+   that long; PostgreSQL ends a silent
    leader's session and with it the lock.
 2. **Leader validity** — `is_leader()` is `true` only while the last
    successful ping was SENT less than V (default 20 s) ago; every leader
@@ -295,17 +296,23 @@ timeout at 10 s; the user preferred the plain formulas.
 What the lease trades:
 
 - **Smaller lease:** faster takeover of a frozen leader (≈ N + one
-  attempt); faster detection of a broken connection (ping timeout N/6);
-  a leader runtime starved longer than 2N/3 loses validity, and longer
-  than N loses the lock; a slow database answer longer than N/6 drops the
-  connection; more attempt connections per follower (one every N/6).
+  attempt); faster detection of a broken connection; a leader runtime
+  starved longer than 2N/3 loses validity, and longer than N loses the
+  lock; a database answer slower than N/6 drops the connection; more
+  attempt connections per follower (one every N/6).
 - **Larger lease:** slower takeover of a frozen leader; more tolerance for
   a starved leader runtime and for slow database answers. Also slower in
   three other ways, because the retry and the timeouts scale too:
-  - a follower tries every N/6, so after an immediate release (shutdown,
-    self-release, early session end) the takeover takes up to N/6 plus
-    one attempt — 10 min with `lease_secs: 3600`;
-  - a hung ping or a broken connection is detected only after N/6;
+  - a follower tries every N/6. After an immediate release (shutdown,
+    self-release, early session end) the takeover typically takes up to
+    N/6 (attempts of milliseconds); the worst case is `2 ×
+    acquire_timeout + retry_interval` = 5N/6, when an attempt that is
+    refused just before the release runs to its timeout before the
+    pause — 10 min typical and 50 min worst with `lease_secs: 3600`;
+  - a ping that hangs is abandoned `ping_timeout` (N/6) after it was
+    sent; counted from the moment the connection breaks, detection takes
+    up to `retry_interval + ping_timeout` = N/3 (the fault can start
+    just after a successful ping) — 20 min with `lease_secs: 3600`;
   - the early-end overlap of § 5.2.1 is up to `2 × ping_timeout +
     retry_interval` = N/2 (15 s with the default, 30 min with
     `lease_secs: 3600`).
@@ -314,10 +321,14 @@ Each replica uses its own values. The no-overlap argument (§ 5.2.1) needs
 `validity < lease` within ONE replica — the leader's validity against its
 own session's lease — so replicas with different values (a configuration
 rollout) are safe. A follower's holder report (§ 4.6) compares the holder's
-idle time with its own lease. A healthy leader is idle up to its own retry
-interval (its lease / 6), so a follower whose lease is shorter than that
-logs a false "looks stale" WARN — only when the two leases differ more
-than six times, only in the log, and only until the rollout ends.
+idle time with its own lease. A healthy leader's backend is idle about
+its retry interval (its lease / 6) on a prompt network, and up to `2 ×
+ping_timeout + retry_interval` (its lease / 2) when the answer and the
+next ping are each delayed just below the ping timeout. A follower whose
+lease is shorter than that idle time logs a false "looks stale" WARN.
+This needs different leases on the two replicas (with equal leases the
+idle time stays below the lease); it is a log line only, and it ends with
+the rollout.
 
 ### 4.2 Lease: `idle_session_timeout` on the leader session
 
