@@ -155,4 +155,23 @@ describe("WorkspaceDetailPage", () => {
     fireEvent.click(await screen.findByRole("button", { name: /refresh workspace iso/i }));
     expect(await screen.findByText(/Refresh failed: rate-limited/)).toBeInTheDocument();
   });
+
+  it("shows Last run column, never for old fixtures, and missed pill with warning", async () => {
+    mockTriggers.mockResolvedValue([
+      trigger,
+      {
+        ...trigger,
+        name: "hourly",
+        missed: { count: 3, capped: false, first: "2026-10-20T06:00:00Z" },
+      },
+    ]);
+    renderAt("/workspaces/iso");
+    const headers = await screen.findAllByRole("columnheader");
+    const names = headers.map((h) => h.textContent);
+    expect(names.indexOf("Last run")).toBe(names.indexOf("Schedule") + 1);
+    expect(names.indexOf("Next run")).toBe(names.indexOf("Last run") + 1);
+    expect(screen.getAllByText("never").length).toBe(2);
+    expect(screen.getByText(/3 missed · /)).toBeInTheDocument();
+    expect(screen.getByText(/1 trigger missed scheduled runs — hourly\./)).toBeInTheDocument();
+  });
 });

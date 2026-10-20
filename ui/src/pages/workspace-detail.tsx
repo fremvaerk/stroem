@@ -1,6 +1,11 @@
 import { useCallback, useMemo, useState } from "react";
 import { Link, useParams } from "react-router";
 import { AlertTriangle, ArrowLeft, RefreshCw, Search, X } from "lucide-react";
+import {
+  LastRunCell,
+  MissedRunsPill,
+  MissedRunsWarning,
+} from "@/components/trigger-run-status";
 import { LoadingSpinner } from "@/components/loading-spinner";
 import { TaskTree } from "@/components/task-tree";
 import { taskHref } from "@/lib/task-tree";
@@ -239,6 +244,8 @@ export function WorkspaceDetailPage() {
               No triggers defined.
             </p>
           ) : (
+            <>
+            <MissedRunsWarning triggers={triggers} />
             <Table>
               <TableHeader>
                 <TableRow>
@@ -246,6 +253,7 @@ export function WorkspaceDetailPage() {
                   <TableHead>Type</TableHead>
                   <TableHead>Task</TableHead>
                   <TableHead>Schedule</TableHead>
+                  <TableHead>Last run</TableHead>
                   <TableHead>Next run</TableHead>
                 </TableRow>
               </TableHeader>
@@ -282,6 +290,12 @@ export function WorkspaceDetailPage() {
                         <span className="text-xs text-muted-foreground">—</span>
                       )}
                     </TableCell>
+                    <TableCell>
+                      <div className="space-y-1">
+                        <LastRunCell trigger={t} />
+                        {t.missed && <MissedRunsPill missed={t.missed} />}
+                      </div>
+                    </TableCell>
                     <TableCell className="text-xs text-muted-foreground">
                       {t.next_runs[0] ? formatTime(t.next_runs[0]) : "—"}
                     </TableCell>
@@ -289,6 +303,7 @@ export function WorkspaceDetailPage() {
                 ))}
               </TableBody>
             </Table>
+            </>
           )}
         </CardContent>
       </Card>

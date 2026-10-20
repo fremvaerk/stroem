@@ -18,6 +18,7 @@ import {
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { LastRunCell, MissedRunsPill } from "@/components/trigger-run-status";
 import { StatusBadge } from "@/components/status-badge";
 import { PaginationControls } from "@/components/pagination-controls";
 import { LoadingSpinner } from "@/components/loading-spinner";
@@ -368,6 +369,13 @@ export function TaskDetailPage() {
                     >
                       {trigger.enabled ? "enabled" : "disabled"}
                     </Badge>
+                  </div>
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    <span className="text-xs font-medium text-muted-foreground">
+                      Last run
+                    </span>
+                    <LastRunCell trigger={trigger} />
+                    {trigger.missed && <MissedRunsPill missed={trigger.missed} />}
                   </div>
                   {trigger.next_runs.length > 0 && (
                     <div className="mt-2 space-y-1">
