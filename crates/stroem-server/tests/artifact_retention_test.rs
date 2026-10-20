@@ -100,6 +100,7 @@ async fn build_test_app_inner(job_days: u64, with_blob: bool) -> Result<TestApp>
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        leader: Default::default(),
         pin_store: None,
     };
 

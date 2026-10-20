@@ -368,6 +368,7 @@ async fn setup_with_mcp_using(mgr: WorkspaceManager) -> Result<(Router, PgPool, 
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        leader: Default::default(),
         pin_store: None,
     };
 
@@ -420,6 +421,7 @@ async fn setup_mcp_disabled() -> Result<(Router, PgPool, TempDir)> {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        leader: Default::default(),
         pin_store: None,
     };
 
@@ -497,6 +499,7 @@ async fn setup_with_auth_and_mcp_cfg(
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        leader: Default::default(),
         pin_store: None,
     };
 
@@ -1808,6 +1811,7 @@ async fn test_mcp_created_jobs_fire_hooks() -> Result<()> {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        leader: Default::default(),
         pin_store: None,
     };
     let mgr = WorkspaceManager::from_config("default", workspace.clone());

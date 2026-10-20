@@ -95,6 +95,7 @@ fn empty_config(url: &str, log_dir: &std::path::Path) -> ServerConfig {
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        leader: Default::default(),
         pin_store: None,
     }
 }
@@ -1130,6 +1131,41 @@ async fn livez_fails_when_started_task_exited_on_leader() -> Result<()> {
     Ok(())
 }
 
+/// A loop that ran and then EXITED fails liveness on a follower too (spec
+/// 2026-10-20 § 4.4.1): the follower can never do that loop's work, and with
+/// self-release it never becomes leader again — only a restart repairs it.
+/// Turning self-release off does not change the health rules.
+#[tokio::test(flavor = "multi_thread")]
+async fn livez_fails_when_started_task_exited_on_follower() -> Result<()> {
+    let h = boot().await?;
+    for self_release_after_secs in [30, 0] {
+        let mut state = build_state(&h, Uuid::new_v4()).with_leader(LeaderElection::never());
+        let mut config = (*state.config).clone();
+        config.leader.self_release_after_secs = self_release_after_secs;
+        state.config = std::sync::Arc::new(config);
+        mark_all_tasks_alive(&state);
+        state
+            .background_tasks
+            .recovery_alive
+            .store(false, Ordering::Relaxed);
+        let router = build_router(state, CancellationToken::new());
+
+        let (status, json) = get_json(&router, "/livez", false).await?;
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "self_release_after_secs = {self_release_after_secs}"
+        );
+        assert_eq!(json, serde_json::json!({ "status": "stopped" }));
+        let (status, json) = get_json(&router, "/healthz/detail", true).await?;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(json["checks"]["leader"], false);
+        assert_eq!(json["checks"]["recovery"], "stopped");
+        assert_eq!(json["checks"]["scheduler"], "ok");
+    }
+    Ok(())
+}
+
 // ─── Must: /healthz/detail — follower with stopped scheduler ─────────────────
 
 /// When this replica is a follower and the scheduler guard is not held,
@@ -1489,8 +1525,10 @@ mod lease {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
     use stroem_server::leader::{
-        apply_lease, lock_holder, LeaderElection, LeaderTiming, LeaseStatus, APPLICATION_NAME,
+        apply_lease, lock_holder, LeaderElection, LeaderTiming, LeaseStatus, LoopFault, UnfitLoop,
+        APPLICATION_NAME,
     };
+    use stroem_server::web::health::leader_fitness_probe;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
     use tokio::net::{TcpListener, TcpStream};
@@ -1507,7 +1545,7 @@ mod lease {
             acquire_timeout: Duration::from_millis(1500),
             validity: Duration::from_millis(1500),
             lease: Duration::from_millis(2500),
-            release_after: Duration::from_millis(600),
+            release_after: Some(Duration::from_millis(600)),
         }
     }
 
@@ -2126,7 +2164,10 @@ mod lease {
         let (a, ca) = start(&h.url);
         let flag = stalled.clone();
         a.set_fitness_probe(Arc::new(move || {
-            flag.load(Ordering::SeqCst).then_some("scheduler")
+            flag.load(Ordering::SeqCst).then_some(UnfitLoop {
+                name: "scheduler",
+                fault: LoopFault::Stalled,
+            })
         }));
         assert!(wait_for(Duration::from_secs(5), || a.is_leader()).await);
         let (b, cb) = start(&h.url);
@@ -2149,7 +2190,8 @@ mod lease {
         // A persistent stall: A keeps the lock for release_after, then lets go.
         stalled.store(true, Ordering::SeqCst);
         let stalled_at = Instant::now();
-        let hold = t.release_after - Duration::from_millis(100);
+        let release_after = t.release_after.expect("fast() has self-release on");
+        let hold = release_after - Duration::from_millis(100);
         while stalled_at.elapsed() < hold {
             assert!(a.is_leader(), "A keeps the lock until the stall persisted");
             sleep(Duration::from_millis(20)).await;
@@ -2158,7 +2200,7 @@ mod lease {
             wait_exclusive(
                 &a,
                 &b,
-                t.release_after + 2 * (t.retry_interval + t.ping_timeout),
+                release_after + 2 * (t.retry_interval + t.ping_timeout),
                 || !a.is_leader()
             )
             .await,
@@ -2181,6 +2223,103 @@ mod lease {
             wait_for(Duration::from_secs(5), || a.is_leader()).await,
             "A acquires once its loops make progress again"
         );
+        ca.cancel();
+        Ok(())
+    }
+
+    /// Test 12: a gated loop that ran and then exited makes the leader
+    /// release through the real health probe (spec § 4.4, § 4.4.1); the
+    /// ex-leader never takes the lock back, and its `/livez` fails so the
+    /// kubelet restarts it.
+    #[tokio::test]
+    #[serial]
+    async fn stopped_loop_releases_lock_through_the_health_probe() -> Result<()> {
+        let h = boot().await?;
+        let t = fast();
+        let release_after = t.release_after.expect("fast() has self-release on");
+        let (a, ca) = start(&h.url);
+        let state = super::build_state(&h, uuid::Uuid::new_v4()).with_leader(a.clone());
+        super::mark_all_tasks_alive(&state);
+        a.set_fitness_probe(leader_fitness_probe(&state));
+        assert!(
+            wait_for(Duration::from_secs(5), || a.is_leader()).await,
+            "A must acquire the lock"
+        );
+        let (b, cb) = start(&h.url);
+        sleep(Duration::from_millis(800)).await;
+        assert!(a.is_leader() && !b.is_leader(), "A leads, B follows");
+
+        // The scheduler task exits (a panic); it had beaten, so it is `Stopped`.
+        state
+            .background_tasks
+            .scheduler_alive
+            .store(false, Ordering::SeqCst);
+        assert!(
+            wait_exclusive(
+                &a,
+                &b,
+                release_after + 2 * (t.retry_interval + t.ping_timeout) + Duration::from_secs(1),
+                || !a.is_leader()
+            )
+            .await,
+            "A must release once the stopped loop persisted"
+        );
+        assert!(
+            wait_exclusive(&a, &b, Duration::from_secs(5), || b.is_leader()).await,
+            "B takes over after the release"
+        );
+
+        // Nothing respawns the loop: A stays follower with the lock free.
+        cb.cancel();
+        let until = Instant::now() + Duration::from_millis(1500);
+        while Instant::now() < until {
+            assert!(
+                !a.is_leader(),
+                "a replica with a stopped loop must not acquire"
+            );
+            sleep(Duration::from_millis(20)).await;
+        }
+        let router = stroem_server::web::build_router(state, CancellationToken::new());
+        let (status, json) = super::get_json(&router, "/livez", false).await?;
+        assert_eq!(status, http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(json, serde_json::json!({ "status": "stopped" }));
+        ca.cancel();
+        Ok(())
+    }
+
+    /// Test 13: with self-release off the probe is not consulted: an unfit
+    /// loop neither stops the acquire nor releases the lock.
+    #[tokio::test]
+    #[serial]
+    async fn self_release_off_ignores_an_unfit_loop() -> Result<()> {
+        let h = boot().await?;
+        let off = LeaderTiming {
+            release_after: None,
+            ..fast()
+        };
+        // Installed before the loop's first iteration: the spawned task runs
+        // only once this test task yields (current-thread runtime).
+        let (a, ca) = start_timed(&h.url, off);
+        a.set_fitness_probe(Arc::new(|| {
+            Some(UnfitLoop {
+                name: "scheduler",
+                fault: LoopFault::Stopped,
+            })
+        }));
+        assert!(
+            wait_for(Duration::from_secs(5), || a.is_leader()).await,
+            "A acquires although the probe reports an unfit loop"
+        );
+        let (b, cb) = start(&h.url);
+        let until = Instant::now() + 3 * fast().release_after.expect("fast() has self-release on");
+        while Instant::now() < until {
+            assert!(
+                a.is_leader() && !b.is_leader(),
+                "A keeps the lock, B follows"
+            );
+            sleep(Duration::from_millis(20)).await;
+        }
+        cb.cancel();
         ca.cancel();
         Ok(())
     }

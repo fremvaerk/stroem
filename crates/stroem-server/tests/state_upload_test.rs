@@ -162,6 +162,7 @@ async fn build_test_app_inner(
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        leader: Default::default(),
         pin_store: None,
     };
 
@@ -727,6 +728,7 @@ async fn build_test_app_with_auth(
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        leader: Default::default(),
         pin_store: None,
     };
 

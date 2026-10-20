@@ -1,5 +1,5 @@
 use crate::config::ServerConfig;
-use crate::leader::FitnessProbe;
+use crate::leader::{FitnessProbe, LoopFault, UnfitLoop};
 use crate::state::{AppState, BackgroundTasks};
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use serde_json::json;
@@ -81,22 +81,32 @@ fn background_report_of(bg: &BackgroundTasks, recovery_stall: u64) -> [TaskRepor
     })
 }
 
-/// The first leader-gated loop that is `Stalled` — the rule `/livez` fails on.
-/// `Stopped` loops are left out on purpose (spec 2026-10-20 § 4.4).
-fn stalled_loop(bg: &BackgroundTasks, recovery_stall: u64) -> Option<&'static str> {
+/// The first leader-gated loop that `/livez` fails on: `Stalled`, or
+/// `Stopped` after it started (spec 2026-10-20 § 4.4). A loop that never
+/// beat is not unfit.
+pub(crate) fn unfit_loop(bg: &BackgroundTasks, recovery_stall: u64) -> Option<UnfitLoop> {
     background_report_of(bg, recovery_stall)
         .into_iter()
-        .find(|t| t.health == TaskHealth::Stalled)
-        .map(|t| t.name)
+        .find_map(|t| {
+            let fault = match t.health {
+                TaskHealth::Stalled => LoopFault::Stalled,
+                TaskHealth::Stopped if t.started => LoopFault::Stopped,
+                _ => return None,
+            };
+            Some(UnfitLoop {
+                name: t.name,
+                fault,
+            })
+        })
 }
 
-/// The leader's fitness probe: names a stalled leader-gated loop, so the
+/// The leader's fitness probe: names an unfit leader-gated loop, so the
 /// leader releases the lock instead of holding it for a process that does no
 /// leader work (`LeaderElection::set_fitness_probe`).
 pub fn leader_fitness_probe(state: &AppState) -> FitnessProbe {
     let bg = state.background_tasks.clone();
     let recovery_stall = recovery_stall_secs(&state.config);
-    Arc::new(move || stalled_loop(&bg, recovery_stall))
+    Arc::new(move || unfit_loop(&bg, recovery_stall))
 }
 
 async fn db_ok(state: &AppState) -> bool {
@@ -112,19 +122,20 @@ async fn db_ok(state: &AppState) -> bool {
 
 /// GET /livez — unauthenticated LIVENESS probe: should this process be restarted?
 ///
-/// 503 when a background loop is STALLED (alive but not making progress — on
-/// any replica, a hung standby is no standby) or, on the leader, when a loop
-/// ran and then exited. The database is deliberately NOT checked: restarting
-/// the server does not fix a database outage. Body is `{"status": "ok" |
-/// "stalled" | "stopped"}` — no task name, no leader identity.
+/// 503 when a background loop is STALLED (alive but not making progress) or
+/// ran and then EXITED — on any replica: a hung standby is no standby, and a
+/// replica whose loop exited cannot do that loop's work as leader and, with
+/// self-release, never becomes leader again (spec 2026-10-20 § 4.4.1). The
+/// database is deliberately NOT checked: restarting the server does not fix a
+/// database outage. Body is `{"status": "ok" | "stalled" | "stopped"}` — no
+/// task name, no leader identity.
 pub async fn livez(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let is_leader = state.leader.is_leader();
     let report = background_report(&state);
     let status = if report.iter().any(|t| t.health == TaskHealth::Stalled) {
         "stalled"
     } else if report
         .iter()
-        .any(|t| t.health == TaskHealth::Stopped && is_leader && t.started)
+        .any(|t| t.health == TaskHealth::Stopped && t.started)
     {
         "stopped"
     } else {
@@ -174,7 +185,8 @@ pub async fn healthz(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 /// Requires a valid `Authorization: Bearer <worker_token>` header. Returns
 /// `status` and `checks` (db, leader, scheduler, recovery, event_source). Each
 /// task is `ok`, `stalled`, or — when its guard is not held — `stopped` on the
-/// leader and `follower` elsewhere. The leader flag and per-task strings are
+/// leader or when it ran before, and `follower` for a never-started task on a
+/// follower. The leader flag and per-task strings are
 /// only exposed on this authenticated endpoint to avoid leaking cluster
 /// topology to unauthenticated clients.
 pub async fn healthz_detail(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -194,9 +206,9 @@ pub async fn healthz_detail(State(state): State<Arc<AppState>>) -> impl IntoResp
         let label = match task.health {
             TaskHealth::Ok => "ok",
             TaskHealth::Stalled => "stalled",
-            TaskHealth::Stopped if is_leader => "stopped",
-            // Followers report task state for visibility but don't fail health
-            // on it — only the leader is supposed to be doing this work.
+            TaskHealth::Stopped if is_leader || task.started => "stopped",
+            // A follower whose task never started (not spawned yet) does not
+            // fail health on it.
             TaskHealth::Stopped => "follower",
         };
         if matches!(label, "stalled" | "stopped") {
@@ -224,7 +236,8 @@ pub async fn healthz_detail(State(state): State<Arc<AppState>>) -> impl IntoResp
 
 #[cfg(test)]
 mod tests {
-    use super::{stalled_loop, task_health, TaskHealth, SCHEDULER_STALL_SECS};
+    use super::{task_health, unfit_loop, TaskHealth, SCHEDULER_STALL_SECS};
+    use crate::leader::{LoopFault, UnfitLoop};
     use crate::state::{BackgroundTasks, Heartbeat};
     use std::time::Duration;
 
@@ -257,33 +270,57 @@ mod tests {
     }
 
     #[test]
-    fn test_stalled_loop_names_the_stalled_gated_loop() {
+    fn test_unfit_loop_names_the_stalled_gated_loop() {
         let tasks = BackgroundTasks::new();
         tasks.scheduler_alive.store(true, Ordering::Relaxed);
         tasks.recovery_alive.store(true, Ordering::Relaxed);
         tasks.event_source_alive.store(true, Ordering::Relaxed);
         // Not started yet: healthy.
-        assert_eq!(stalled_loop(&tasks, 1800), None);
+        assert_eq!(unfit_loop(&tasks, 1800), None);
         tasks.scheduler_beat.beat();
         tasks.recovery_beat.beat();
         tasks.event_source_beat.beat();
-        assert_eq!(stalled_loop(&tasks, 1800), None);
+        assert_eq!(unfit_loop(&tasks, 1800), None);
         tasks
             .scheduler_beat
             .backdate(Duration::from_secs(SCHEDULER_STALL_SECS + 1));
-        assert_eq!(stalled_loop(&tasks, 1800), Some("scheduler"));
+        assert_eq!(
+            unfit_loop(&tasks, 1800),
+            Some(UnfitLoop {
+                name: "scheduler",
+                fault: LoopFault::Stalled
+            })
+        );
     }
 
-    /// A loop that exited is not a reason to release the lock (spec § 4.4):
-    /// a released leader with a `Stopped` loop would pass `/livez` forever.
+    /// A loop that ran and then exited is unfit (spec § 4.4); `/livez` fails
+    /// on it on every replica, so a leader that released stays visible.
     #[test]
-    fn test_stalled_loop_ignores_stopped_loops() {
+    fn test_unfit_loop_names_a_started_loop_that_stopped() {
         let tasks = BackgroundTasks::new();
-        tasks
-            .recovery_beat
-            .backdate(Duration::from_secs(SCHEDULER_STALL_SECS * 100));
+        tasks.scheduler_alive.store(true, Ordering::Relaxed);
+        tasks.recovery_alive.store(true, Ordering::Relaxed);
+        tasks.event_source_alive.store(true, Ordering::Relaxed);
+        tasks.scheduler_beat.beat();
+        tasks.recovery_beat.beat();
+        tasks.event_source_beat.beat();
+        tasks.recovery_alive.store(false, Ordering::Relaxed);
+        assert_eq!(
+            unfit_loop(&tasks, 1800),
+            Some(UnfitLoop {
+                name: "recovery",
+                fault: LoopFault::Stopped
+            })
+        );
+    }
+
+    /// A loop that never beat is not unfit, alive or not: it may not be
+    /// spawned yet (router-only tests, the window before `main` starts it).
+    #[test]
+    fn test_unfit_loop_ignores_loops_that_never_started() {
+        let tasks = BackgroundTasks::new();
         assert!(!tasks.recovery_alive.load(Ordering::Relaxed));
-        assert_eq!(stalled_loop(&tasks, 1800), None);
+        assert_eq!(unfit_loop(&tasks, 1800), None);
     }
 
     #[test]

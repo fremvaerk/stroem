@@ -19,9 +19,12 @@
 //! - **Validity**: [`LeaderElection::is_leader`] is true only while the last
 //!   successful ping was sent less than [`LeaderTiming::validity`] ago, so a
 //!   process that thaws after losing its session does not act on a stale flag.
-//! - **Self-release**: when a leader-gated loop has been `Stalled` (the
-//!   `/livez` rule) for [`LeaderTiming::release_after`], the leader drops the
-//!   lock and does not try again while the stall lasts.
+//! - **Self-release**: when a leader-gated loop has been `Stalled`, or ran
+//!   and then exited (the `/livez` rules), for [`LeaderTiming::release_after`],
+//!   the leader drops the lock and does not try again while that lasts.
+//!
+//! The timing comes from the `leader:` server config
+//! ([`LeaderTiming::from_lease`]).
 //!
 //! For tests and single-replica deployments, [`LeaderElection::always`] returns
 //! a leader that always reports `true` without contacting the database.
@@ -78,8 +81,9 @@ const HOLDER_REPORT_INTERVAL: Duration = Duration::from_secs(60);
 /// How often an unchanged, healthy holder is logged again at INFO.
 const HOLDER_REPEAT_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
-/// Timing of the election loop. Production uses [`LeaderTiming::default`];
-/// tests pass shorter values to [`LeaderElection::start_with`].
+/// Timing of the election loop. Production derives it from the `leader:`
+/// config with [`LeaderTiming::from_lease`]; tests pass shorter values to
+/// [`LeaderElection::start_with`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LeaderTiming {
     /// Pause between loop iterations: a ping when leader, an acquire attempt
@@ -94,25 +98,40 @@ pub struct LeaderTiming {
     pub validity: Duration,
     /// `idle_session_timeout` of the leader session.
     pub lease: Duration,
-    /// How long a leader-gated loop must stay stalled before the leader
-    /// releases the lock.
-    pub release_after: Duration,
+    /// How long a leader-gated loop must stay unfit before the leader
+    /// releases the lock. `None`: self-release off — the fitness probe is
+    /// not called.
+    pub release_after: Option<Duration>,
 }
 
 impl Default for LeaderTiming {
     fn default() -> Self {
-        Self {
-            retry_interval: Duration::from_secs(5),
-            ping_timeout: Duration::from_secs(5),
-            acquire_timeout: Duration::from_secs(10),
-            validity: Duration::from_secs(20),
-            lease: Duration::from_secs(30),
-            release_after: Duration::from_secs(30),
-        }
+        Self::from_lease(Duration::from_secs(30), Some(Duration::from_secs(30)))
     }
 }
 
+/// Caps of the values derived from the lease (spec § 4.1): they detect a
+/// broken connection and pace the follower, independent of the lease.
+const MAX_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+const MAX_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(10);
+
 impl LeaderTiming {
+    /// Derive the timing from the lease (spec § 4.1), in whole milliseconds:
+    /// retry and ping timeout `min(lease/6, 5 s)`, acquire timeout
+    /// `min(lease/3, 10 s)`, validity `2 × lease/3`.
+    pub fn from_lease(lease: Duration, release_after: Option<Duration>) -> Self {
+        let ms = u64::try_from(lease.as_millis()).unwrap_or(u64::MAX);
+        let sixth = Duration::from_millis(ms / 6).min(MAX_RETRY_INTERVAL);
+        Self {
+            retry_interval: sixth,
+            ping_timeout: sixth,
+            acquire_timeout: Duration::from_millis(ms / 3).min(MAX_ACQUIRE_TIMEOUT),
+            validity: Duration::from_millis(ms / 3 * 2),
+            lease,
+            release_after,
+        }
+    }
+
     /// The invariants of spec § 4.1.
     pub fn check(&self) -> Result<(), String> {
         if 2 * self.ping_timeout + self.retry_interval >= self.validity {
@@ -140,9 +159,36 @@ impl LeaderTiming {
     }
 }
 
-/// Returns the name of a leader-gated loop that is stalled, if any. Installed
-/// by `main` with [`LeaderElection::set_fitness_probe`].
-pub type FitnessProbe = Arc<dyn Fn() -> Option<&'static str> + Send + Sync>;
+/// Why a leader-gated loop does no leader work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoopFault {
+    /// Alive, but it has not come round for longer than its threshold.
+    Stalled,
+    /// It ran and then exited (a panic: nothing respawns it).
+    Stopped,
+}
+
+/// A leader-gated loop that cannot do leader work, as the fitness probe
+/// reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnfitLoop {
+    pub name: &'static str,
+    pub fault: LoopFault,
+}
+
+impl std::fmt::Display for UnfitLoop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let state = match self.fault {
+            LoopFault::Stalled => "is stalled",
+            LoopFault::Stopped => "has stopped",
+        };
+        write!(f, "the {} loop {}", self.name, state)
+    }
+}
+
+/// Returns a leader-gated loop that is unfit, if any. Installed by `main`
+/// with [`LeaderElection::set_fitness_probe`].
+pub type FitnessProbe = Arc<dyn Fn() -> Option<UnfitLoop> + Send + Sync>;
 
 /// Leader election handle shared across background tasks.
 ///
@@ -181,7 +227,7 @@ impl LeaderElection {
         Self::with_valid_until(i64::MIN)
     }
 
-    /// Spawn the leader-election loop with the production timing. Returns a
+    /// Spawn the leader-election loop with the default timing. Returns a
     /// shared handle plus the task `JoinHandle` so the caller can await
     /// shutdown.
     #[tracing::instrument(skip(db_url, cancel))]
@@ -189,7 +235,7 @@ impl LeaderElection {
         Self::start_with(db_url, LeaderTiming::default(), cancel)
     }
 
-    /// [`Self::start`] with explicit timing (tests).
+    /// [`Self::start`] with explicit timing (the `leader:` config, or tests).
     #[tracing::instrument(skip(db_url, cancel))]
     pub fn start_with(
         db_url: String,
@@ -209,8 +255,9 @@ impl LeaderElection {
         monotonic_ms() < self.valid_until_ms.load(Ordering::Relaxed)
     }
 
-    /// Install the probe that tells the loop a leader-gated loop is stalled.
-    /// Only the first call takes effect.
+    /// Install the probe that tells the loop a leader-gated loop is unfit.
+    /// Only the first call takes effect. Not called when
+    /// [`LeaderTiming::release_after`] is `None`.
     pub fn set_fitness_probe(&self, probe: FitnessProbe) {
         if self.fitness.set(probe).is_err() {
             tracing::warn!("Leader fitness probe already installed; ignoring the new one");
@@ -239,10 +286,10 @@ impl LeaderElection {
 /// What one loop iteration does (spec § 4.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Action {
-    /// Drop the lock: a gated loop has been stalled for `release_after`.
+    /// Drop the lock: a gated loop has been unfit for `release_after`.
     Release,
     Ping,
-    /// Follower with a stalled gated loop: do not try to become leader.
+    /// Follower with an unfit gated loop: do not try to become leader.
     StayFollower,
     Acquire,
 }
@@ -466,8 +513,8 @@ struct LoopState {
     conn: Option<PgConnection>,
     /// The PostgreSQL < 14 warning was logged.
     lease_warned: bool,
-    /// The stalled loop and when it was first seen stalled.
-    unfit: Option<(&'static str, Instant)>,
+    /// The unfit loop and when this unfit stretch was first seen.
+    unfit: Option<(UnfitLoop, Instant)>,
     /// When a follower last asked who holds the lock.
     holder_asked_at: Option<Instant>,
     /// The holder last logged at INFO: `(pid, backend_start)` and when.
@@ -480,11 +527,25 @@ async fn run_loop(
     timing: LeaderTiming,
     cancel: CancellationToken,
 ) {
-    tracing::info!("LeaderElection started");
+    tracing::info!(
+        "LeaderElection started (lease={:?}, validity={:?}, retry={:?}, ping_timeout={:?}, \
+         acquire_timeout={:?}, {})",
+        timing.lease,
+        timing.validity,
+        timing.retry_interval,
+        timing.ping_timeout,
+        timing.acquire_timeout,
+        timing.release_after.map_or_else(
+            || "self-release off".to_string(),
+            |d| format!("self-release after {d:?}")
+        )
+    );
     let mut st = LoopState::default();
 
     loop {
-        if !leader.paused.load(Ordering::Relaxed) {
+        // At shutdown the gated loops exit, which reads as `Stopped`: no new
+        // iteration once `cancel` has fired (spec § 4.4, "Shutdown").
+        if !leader.paused.load(Ordering::Relaxed) && !cancel.is_cancelled() {
             iterate(&db_url, &leader, &timing, &mut st).await;
         }
 
@@ -501,20 +562,33 @@ async fn run_loop(
     }
 }
 
-async fn iterate(db_url: &str, leader: &LeaderElection, timing: &LeaderTiming, st: &mut LoopState) {
-    let stalled = leader.fitness.get().and_then(|probe| probe());
-    track_fitness(stalled, st);
-    let unfit_for = st.unfit.map(|(_, since)| since.elapsed());
+/// The probe's answer, or `None` without calling it when self-release is
+/// off (`release_after = None`).
+fn observe_fitness(
+    probe: Option<&FitnessProbe>,
+    release_after: Option<Duration>,
+) -> Option<UnfitLoop> {
+    release_after?;
+    probe.and_then(|probe| probe())
+}
 
-    match next_action(st.conn.is_some(), unfit_for, timing.release_after) {
+async fn iterate(db_url: &str, leader: &LeaderElection, timing: &LeaderTiming, st: &mut LoopState) {
+    track_fitness(
+        observe_fitness(leader.fitness.get(), timing.release_after),
+        st,
+    );
+    let unfit_for = st.unfit.map(|(_, since)| since.elapsed());
+    // With self-release off nothing is unfit, so the value is never compared.
+    let release_after = timing.release_after.unwrap_or(Duration::MAX);
+
+    match next_action(st.conn.is_some(), unfit_for, release_after) {
         Action::Release => {
-            let (name, since) = st.unfit.expect("Release implies a stalled loop");
+            let (unfit, since) = st.unfit.expect("Release implies an unfit loop");
             leader.clear();
             st.conn = None;
             tracing::warn!(
-                "Releasing leader lock: the {} loop has been stalled for {}s; \
-                 not taking the lock again until it makes progress",
-                name,
+                "Releasing leader lock: {} ({}s); not taking the lock again while that lasts",
+                unfit,
                 since.elapsed().as_secs()
             );
         }
@@ -524,25 +598,30 @@ async fn iterate(db_url: &str, leader: &LeaderElection, timing: &LeaderTiming, s
     }
 }
 
-/// Log the transitions of the fitness probe and remember since when a loop
-/// has been stalled.
-fn track_fitness(stalled: Option<&'static str>, st: &mut LoopState) {
-    match (stalled, st.unfit) {
-        (Some(name), None) => {
+/// Log the transitions of the fitness probe and remember since when the
+/// replica has been unfit. A new loop or fault within one unfit stretch keeps
+/// the stretch's start: the replica stayed unfit.
+fn track_fitness(unfit: Option<UnfitLoop>, st: &mut LoopState) {
+    match (unfit, st.unfit) {
+        (Some(now), None) => {
             if st.conn.is_some() {
                 tracing::warn!(
-                    "The {} loop is stalled; this leader will release the lock if it stays stalled",
-                    name
+                    "Leader fitness: {}; this leader will release the lock if that lasts",
+                    now
                 );
             } else {
-                tracing::warn!("Not trying to become leader: the {} loop is stalled", name);
+                tracing::warn!("Not trying to become leader: {}", now);
             }
-            st.unfit = Some((name, Instant::now()));
+            st.unfit = Some((now, Instant::now()));
         }
-        (None, Some((name, _))) => {
+        (Some(now), Some((before, since))) if now != before => {
+            tracing::warn!("Leader fitness: {} (before: {})", now, before);
+            st.unfit = Some((now, since));
+        }
+        (None, Some((before, _))) => {
             tracing::info!(
                 "The {} loop makes progress again; eligible for leadership",
-                name
+                before.name
             );
             st.unfit = None;
         }
@@ -707,6 +786,55 @@ mod tests {
         assert_eq!(t.lease - t.validity, Duration::from_secs(10));
     }
 
+    /// The defaults are the fixed values of spec revision 5.
+    #[test]
+    fn default_timing_is_the_lease_of_30s() {
+        assert_eq!(
+            LeaderTiming::default(),
+            LeaderTiming {
+                retry_interval: Duration::from_secs(5),
+                ping_timeout: Duration::from_secs(5),
+                acquire_timeout: Duration::from_secs(10),
+                validity: Duration::from_secs(20),
+                lease: Duration::from_secs(30),
+                release_after: Some(Duration::from_secs(30)),
+            }
+        );
+        assert_eq!(
+            LeaderTiming::from_lease(Duration::from_secs(30), Some(Duration::from_secs(30))),
+            LeaderTiming::default()
+        );
+    }
+
+    /// Every lease `leader.lease_secs` accepts (spec § 4.1).
+    #[test]
+    fn from_lease_satisfies_the_invariants_over_the_allowed_range() {
+        for secs in 10..=3600 {
+            let t = LeaderTiming::from_lease(Duration::from_secs(secs), None);
+            assert_eq!(t.check(), Ok(()), "lease {secs}s: {t:?}");
+        }
+    }
+
+    #[test]
+    fn from_lease_scales_below_30s_and_caps_above() {
+        let ms = Duration::from_millis;
+        let short = LeaderTiming::from_lease(Duration::from_secs(10), None);
+        assert_eq!(short.retry_interval, ms(1666));
+        assert_eq!(short.ping_timeout, ms(1666));
+        assert_eq!(short.acquire_timeout, ms(3333));
+        assert_eq!(short.validity, ms(6666));
+        assert_eq!(short.lease, Duration::from_secs(10));
+        assert_eq!(short.release_after, None);
+
+        let long = LeaderTiming::from_lease(Duration::from_secs(3600), Some(ms(60_000)));
+        assert_eq!(long.retry_interval, Duration::from_secs(5));
+        assert_eq!(long.ping_timeout, Duration::from_secs(5));
+        assert_eq!(long.acquire_timeout, Duration::from_secs(10));
+        assert_eq!(long.validity, Duration::from_secs(2400));
+        assert_eq!(long.lease, Duration::from_secs(3600));
+        assert_eq!(long.release_after, Some(ms(60_000)));
+    }
+
     #[test]
     fn timing_check_rejects_each_broken_invariant() {
         let ok = LeaderTiming::default();
@@ -741,7 +869,7 @@ mod tests {
             acquire_timeout: Duration::from_millis(1500),
             validity: Duration::from_millis(1500),
             lease: Duration::from_millis(2500),
-            release_after: Duration::from_millis(600),
+            release_after: Some(Duration::from_millis(600)),
         };
         assert_eq!(fast.check(), Ok(()));
         let long_validity = LeaderTiming {
@@ -858,13 +986,63 @@ mod tests {
     }
 
     #[test]
-    fn fitness_transitions_record_the_first_stalled_sighting() {
+    fn fitness_transitions_record_the_first_unfit_sighting() {
+        let stalled = UnfitLoop {
+            name: "scheduler",
+            fault: LoopFault::Stalled,
+        };
+        let stopped = UnfitLoop {
+            name: "scheduler",
+            fault: LoopFault::Stopped,
+        };
         let mut st = LoopState::default();
-        track_fitness(Some("scheduler"), &mut st);
-        let first = st.unfit.expect("stalled loop recorded").1;
-        track_fitness(Some("scheduler"), &mut st);
-        assert_eq!(st.unfit, Some(("scheduler", first)));
+        track_fitness(Some(stalled), &mut st);
+        let first = st.unfit.expect("unfit loop recorded").1;
+        track_fitness(Some(stalled), &mut st);
+        assert_eq!(st.unfit, Some((stalled, first)));
+        // A new fault within one unfit stretch keeps the stretch's start.
+        track_fitness(Some(stopped), &mut st);
+        assert_eq!(st.unfit, Some((stopped, first)));
         track_fitness(None, &mut st);
         assert!(st.unfit.is_none());
+    }
+
+    /// Self-release off (`release_after = None`): the probe is not called,
+    /// so nothing is unfit and the loop pings or acquires as without a probe.
+    #[test]
+    fn self_release_off_does_not_call_the_probe() {
+        use std::sync::atomic::AtomicUsize;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = calls.clone();
+        let unfit = UnfitLoop {
+            name: "recovery",
+            fault: LoopFault::Stopped,
+        };
+        let probe: FitnessProbe = Arc::new(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Some(unfit)
+        });
+        assert_eq!(observe_fitness(Some(&probe), None), None);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            observe_fitness(Some(&probe), Some(Duration::from_secs(30))),
+            Some(unfit)
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(observe_fitness(None, Some(Duration::from_secs(30))), None);
+    }
+
+    #[test]
+    fn unfit_loop_wording() {
+        let stalled = UnfitLoop {
+            name: "scheduler",
+            fault: LoopFault::Stalled,
+        };
+        let stopped = UnfitLoop {
+            name: "recovery",
+            fault: LoopFault::Stopped,
+        };
+        assert_eq!(stalled.to_string(), "the scheduler loop is stalled");
+        assert_eq!(stopped.to_string(), "the recovery loop has stopped");
     }
 }

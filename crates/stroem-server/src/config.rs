@@ -601,6 +601,81 @@ impl Default for WorkspaceReloadConfig {
     }
 }
 
+/// Leader election (spec `docs/superpowers/specs/2026-10-20-leader-stale-lock-design.md`
+/// § 4.1). Every other timing value is derived from the lease
+/// ([`crate::leader::LeaderTiming::from_lease`]). A plain struct, so env
+/// overrides (`STROEM__LEADER__LEASE_SECS=…`) coerce normally.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LeaderConfig {
+    /// `idle_session_timeout` of the leader session, seconds (default 30).
+    #[serde(default = "default_leader_lease_secs")]
+    pub lease_secs: u64,
+    /// How long a leader-gated loop must stay stalled or stopped before the
+    /// leader releases the lock, seconds (default 30). `0` turns
+    /// self-release off.
+    #[serde(default = "default_self_release_after_secs")]
+    pub self_release_after_secs: u64,
+}
+
+/// Bounds of `leader.lease_secs`, enforced by [`ServerConfig::validate`].
+pub const MIN_LEADER_LEASE_SECS: u64 = 10;
+pub const MAX_LEADER_LEASE_SECS: u64 = 3600;
+/// Upper bound of `leader.self_release_after_secs`.
+pub const MAX_SELF_RELEASE_AFTER_SECS: u64 = 3600;
+
+fn default_leader_lease_secs() -> u64 {
+    30
+}
+fn default_self_release_after_secs() -> u64 {
+    30
+}
+
+impl Default for LeaderConfig {
+    fn default() -> Self {
+        Self {
+            lease_secs: default_leader_lease_secs(),
+            self_release_after_secs: default_self_release_after_secs(),
+        }
+    }
+}
+
+impl LeaderConfig {
+    /// The election loop's timing for these settings.
+    pub fn timing(&self) -> crate::leader::LeaderTiming {
+        let after = self.self_release_after_secs;
+        crate::leader::LeaderTiming::from_lease(
+            std::time::Duration::from_secs(self.lease_secs),
+            (after > 0).then(|| std::time::Duration::from_secs(after)),
+        )
+    }
+
+    fn validate(&self) -> anyhow::Result<()> {
+        if !(MIN_LEADER_LEASE_SECS..=MAX_LEADER_LEASE_SECS).contains(&self.lease_secs) {
+            anyhow::bail!(
+                "leader.lease_secs must be between {MIN_LEADER_LEASE_SECS} and \
+                 {MAX_LEADER_LEASE_SECS}, got {}",
+                self.lease_secs
+            );
+        }
+        if self.self_release_after_secs > MAX_SELF_RELEASE_AFTER_SECS {
+            anyhow::bail!(
+                "leader.self_release_after_secs must be 0 (off) or at most \
+                 {MAX_SELF_RELEASE_AFTER_SECS}, got {}",
+                self.self_release_after_secs
+            );
+        }
+        // A release build has no debug assertions: check the derived values here.
+        let timing = self.timing();
+        timing.check().map_err(|e| {
+            anyhow::anyhow!(
+                "leader.lease_secs = {} gives an invalid timing {timing:?}: {e}",
+                self.lease_secs
+            )
+        })
+    }
+}
+
 /// Pin store (spec § 5.1, § 10). Every field optional.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -734,6 +809,9 @@ pub struct ServerConfig {
     /// Workspace watcher reload tuning (spec § 4). Defaults apply when absent.
     #[serde(default)]
     pub workspace_reload: WorkspaceReloadConfig,
+    /// Leader election timing (`leader:`).
+    #[serde(default)]
+    pub leader: LeaderConfig,
     /// Pinned ref store (git refs on actions/tasks/triggers). Defaults apply when absent.
     #[serde(default)]
     pub pin_store: Option<PinStoreSection>,
@@ -891,6 +969,7 @@ impl ServerConfig {
         {
             anyhow::bail!("workspace_reload git timeouts must be between 1 and {c_int_max} ms");
         }
+        self.leader.validate()?;
         if let Some(p) = &self.pin_store {
             if p.dir.as_deref().is_some_and(str::is_empty) {
                 anyhow::bail!("pin_store.dir must not be empty");
@@ -3123,6 +3202,7 @@ worker_token: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             default_step_timeout: None,
             default_job_timeout: None,
             workspace_reload: Default::default(),
+            leader: Default::default(),
             pin_store: None,
         }
     }
@@ -3378,6 +3458,93 @@ worker_token: "0123456789abcdef0123456789abcdef"
         c.workspace_reload.load_timeout_secs = 86_400;
         c.workspace_reload.max_backoff_secs = 86_400;
         assert!(c.validate().is_ok(), "{:?}", c.validate());
+    }
+
+    const LEADER_BASE_YAML: &str = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://x"
+log_storage:
+  local_dir: /tmp/logs
+worker_token: "0123456789abcdef0123456789abcdef"
+"#;
+
+    #[test]
+    fn leader_defaults_when_absent() {
+        let cfg: ServerConfig = serde_yaml::from_str(LEADER_BASE_YAML).unwrap();
+        assert_eq!(cfg.leader.lease_secs, 30);
+        assert_eq!(cfg.leader.self_release_after_secs, 30);
+        assert_eq!(cfg.leader.timing(), crate::leader::LeaderTiming::default());
+        assert!(cfg.validate().is_ok(), "{:?}", cfg.validate());
+    }
+
+    #[test]
+    fn leader_overrides_parse_and_derive_the_timing() {
+        let yaml =
+            format!("{LEADER_BASE_YAML}leader:\n  lease_secs: 60\n  self_release_after_secs: 0\n");
+        let cfg: ServerConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(cfg.leader.lease_secs, 60);
+        assert_eq!(cfg.leader.self_release_after_secs, 0);
+        let t = cfg.leader.timing();
+        assert_eq!(t.lease, std::time::Duration::from_secs(60));
+        assert_eq!(t.validity, std::time::Duration::from_secs(40));
+        assert_eq!(t.release_after, None, "0 turns self-release off");
+    }
+
+    #[test]
+    fn leader_rejects_unknown_fields() {
+        let yaml = format!("{LEADER_BASE_YAML}leader:\n  lease: 30\n");
+        assert!(serde_yaml::from_str::<ServerConfig>(&yaml).is_err());
+    }
+
+    #[test]
+    fn leader_validate_enforces_the_ranges() {
+        let base: ServerConfig = serde_yaml::from_str(LEADER_BASE_YAML).unwrap();
+        for (lease_secs, self_release_after_secs, ok) in [
+            (9, 30, false),
+            (10, 30, true),
+            (3600, 30, true),
+            (3601, 30, false),
+            (30, 0, true),
+            (30, 1, true),
+            (30, 3600, true),
+            (30, 3601, false),
+        ] {
+            let mut c = base.clone();
+            c.leader = LeaderConfig {
+                lease_secs,
+                self_release_after_secs,
+            };
+            assert_eq!(
+                c.validate().is_ok(),
+                ok,
+                "lease_secs {lease_secs}, self_release_after_secs {self_release_after_secs}: {:?}",
+                c.validate()
+            );
+        }
+    }
+
+    #[test]
+    fn test_env_override_leader_settings() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut file, LEADER_BASE_YAML.as_bytes()).unwrap();
+        std::io::Write::flush(&mut file).unwrap();
+
+        // SAFETY: test-only, serialized by ENV_MUTEX
+        unsafe {
+            std::env::set_var("STROEM__LEADER__LEASE_SECS", "45");
+            std::env::set_var("STROEM__LEADER__SELF_RELEASE_AFTER_SECS", "0");
+        }
+        let config = load_config(file.path().to_str().unwrap());
+        unsafe {
+            std::env::remove_var("STROEM__LEADER__LEASE_SECS");
+            std::env::remove_var("STROEM__LEADER__SELF_RELEASE_AFTER_SECS");
+        }
+
+        let config = config.unwrap();
+        assert_eq!(config.leader.lease_secs, 45);
+        assert_eq!(config.leader.self_release_after_secs, 0);
     }
 
     #[test]
