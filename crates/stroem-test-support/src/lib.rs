@@ -9,8 +9,10 @@ use testcontainers::{ContainerAsync, ContainerRequest, GenericImage};
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 
-/// The test Postgres container: `postgres:11-alpine`, user, password and
-/// database all `postgres`, started with `-c fsync=off`. A plain
+/// The test Postgres container: `postgres:15-alpine` (prod runs PostgreSQL
+/// 15, and the leader lease needs `idle_session_timeout`, PostgreSQL ≥ 14);
+/// user, password and database all `postgres`, started with
+/// `-c fsync=off`. A plain
 /// `GenericImage` equivalent of the `testcontainers-modules` 0.15 `Postgres`
 /// module's defaults (that crate does not support `testcontainers` 0.28).
 ///
@@ -26,7 +28,7 @@ use uuid::Uuid;
 /// [`container_name`].
 fn postgres_image() -> ContainerRequest<GenericImage> {
     const READY: &str = "database system is ready to accept connections";
-    GenericImage::new("postgres", "11-alpine")
+    GenericImage::new("postgres", "15-alpine")
         .with_exposed_port(5432.tcp())
         .with_wait_for(WaitFor::message_on_stderr(READY))
         .with_wait_for(WaitFor::message_on_stdout(READY))
