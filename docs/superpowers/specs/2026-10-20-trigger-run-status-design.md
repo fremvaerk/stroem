@@ -1,6 +1,6 @@
 # Trigger run status: last run, result and missed runs
 
-Status: implemented on branch feat/trigger-run-status (revision 5; Codex APPROVE in round 3; history in §11).
+Status: implemented on branch feat/trigger-run-status (revision 8; spec: Codex APPROVE in round 3; implementation: Codex APPROVE in round 3; history in §11).
 
 Markers used below: **(user)** = decided by the user in the brainstorm; **(my call)** = proposed
 by the designer, open to the user's correction; **(builder's call)** = left to the implementer.
