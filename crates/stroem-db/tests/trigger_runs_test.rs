@@ -111,6 +111,44 @@ async fn last_run_skips_skipped_rows_but_last_fire_sees_them() -> Result<()> {
 }
 
 #[tokio::test]
+async fn skipped_only_trigger_returns_the_skipped_row() -> Result<()> {
+    let pool = setup_db().await;
+    let t = Utc::now();
+    insert_job(
+        &pool,
+        "trigger",
+        "etl/so",
+        "t",
+        "skipped",
+        t - Duration::hours(2),
+        None,
+    )
+    .await;
+    let newest = insert_job(
+        &pool,
+        "trigger",
+        "etl/so",
+        "t",
+        "skipped",
+        t - Duration::hours(1),
+        None,
+    )
+    .await;
+    let (_, rows) = TriggerRunRepo::last_runs(&pool, &[key("trigger", "etl/so")]).await?;
+    let r = &rows[0];
+    assert!(r.run_job_id.is_none());
+    assert_eq!(r.skipped_job_id, Some(newest));
+    assert_eq!(r.skipped_workspace.as_deref(), Some("etl"));
+    assert_eq!(r.skipped_task_name.as_deref(), Some("t"));
+    assert!(r.skipped_task_folder.is_none() && r.skipped_git_ref.is_none());
+    assert_eq!(
+        r.skipped_at.unwrap().timestamp_micros(),
+        (t - Duration::hours(1)).timestamp_micros()
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn event_source_last_run_is_the_newest_consumer_not_an_emitted_job() -> Result<()> {
     let pool = setup_db().await;
     let t = Utc::now();

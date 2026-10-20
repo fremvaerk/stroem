@@ -26,6 +26,13 @@ pub struct TriggerRunRow {
     pub run_created_at: Option<DateTime<Utc>>,
     /// Newest `skipped` fire (scheduler only).
     pub skipped_at: Option<DateTime<Utc>>,
+    /// That skipped fire's job and coordinates, shown only for a trigger that
+    /// has no other run.
+    pub skipped_job_id: Option<Uuid>,
+    pub skipped_workspace: Option<String>,
+    pub skipped_task_name: Option<String>,
+    pub skipped_task_folder: Option<String>,
+    pub skipped_git_ref: Option<String>,
     pub retry_job_id: Option<Uuid>,
     pub retry_status: Option<String>,
 }
@@ -41,7 +48,9 @@ SELECT NOW() AS db_now, k.source_type, k.source_id, \
        r.job_id AS run_job_id, r.workspace AS run_workspace, r.task_name AS run_task_name, \
        r.task_folder AS run_task_folder, r.git_ref AS run_git_ref, r.status AS run_status, \
        r.created_at AS run_created_at, \
-       s.created_at AS skipped_at, t.job_id AS retry_job_id, t.status AS retry_status \
+       s.created_at AS skipped_at, s.job_id AS skipped_job_id, s.workspace AS skipped_workspace, \
+       s.task_name AS skipped_task_name, s.task_folder AS skipped_task_folder, \
+       s.git_ref AS skipped_git_ref, t.job_id AS retry_job_id, t.status AS retry_status \
 FROM unnest($1::text[], $2::text[]) WITH ORDINALITY AS k(source_type, source_id, ord) \
 LEFT JOIN LATERAL ( \
     SELECT j.job_id, j.workspace, j.task_name, j.task_folder, j.git_ref, j.status, j.created_at \
@@ -51,7 +60,7 @@ LEFT JOIN LATERAL ( \
            OR (j.source_type = 'event_source' AND j.input ? '_fingerprint')) \
     ORDER BY j.created_at DESC LIMIT 1) r ON true \
 LEFT JOIN LATERAL ( \
-    SELECT j.created_at FROM job j \
+    SELECT j.job_id, j.workspace, j.task_name, j.task_folder, j.git_ref, j.created_at FROM job j \
     WHERE k.source_type = 'trigger' \
       AND j.source_type = 'trigger' AND j.source_id = k.source_id AND j.status = 'skipped' \
     ORDER BY j.created_at DESC LIMIT 1) s ON true \
