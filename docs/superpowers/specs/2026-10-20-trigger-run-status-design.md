@@ -1,6 +1,6 @@
 # Trigger run status: last run, result and missed runs
 
-Status: approved by the user 2026-10-20, in Codex review (revision 4 — Codex round 1 fixed;
+Status: approved by the user 2026-10-20, in Codex review (revision 5 — Codex rounds 1–2 fixed;
 history in §11).
 
 Markers used below: **(user)** = decided by the user in the brainstorm; **(my call)** = proposed
@@ -72,7 +72,7 @@ workspace, so match on `source_id`, never on `job.workspace`).
 |---|---|---|---|
 | scheduler | `trigger` | `scheduler.rs::fire_trigger` → `trigger_target::create_target_job`; `concurrency: skip` writes a `status = 'skipped'` row via `JobRepo::create_skipped` | — (a `skipped` row is a run) |
 | webhook | `webhook` | `web/hooks.rs` (`source_id = "{ws}/{trigger_key}"` — the map key, **not** the webhook's `name:` URL segment) | — |
-| event source | `event_source` | consumer: `event_source.rs::create_event_source_job` | the job input has the `_event_source` key (the consumer marker, below) |
+| event source | `event_source` | consumer: `event_source.rs::create_event_source_job` | the job input has the `_fingerprint` key (the consumer marker, below) |
 
 Event-source **emitted** jobs (`web/worker_api/event_source.rs::emit_event`) use the same
 `source_type = 'event_source'` and the same `source_id` (the worker sends it; the endpoint
@@ -80,18 +80,25 @@ checks it is `"{req.workspace}/{trigger}"` and that `req.task` is the trigger's 
 Both kinds live in the defining workspace. Emitted jobs are not runs of the trigger.
 
 **Consumer marker.** A consumer job is told apart from an emitted job by a fact persisted on the
-job row, not by the trigger's current configuration: `create_event_source_job` writes the
-`_event_source` object into the consumer's input (since the feature shipped, 084a454f), and the
-claim already uses exactly `source_type = 'event_source'` + `input ? '_event_source'` to decide
-that a job is a consumer (`web/worker_api/jobs.rs`, `event_source_config`). The trigger's
-current `task` / `target_task` must **not** be used: validation only checks the current
+job row, not by the trigger's current configuration: `source_type = 'event_source' AND input ?
+'_fingerprint'`. Every consumer job ever written carries `_fingerprint` in its input — the first
+release (v0.14.0/v0.14.1, 084a454f) wrote `{"_fingerprint": …}` with the synthetic task name
+`_event_source:{trigger}`; since the refactor 820839b8 (v0.14.2) the input also holds the
+`_event_source` object and `task_name` is the trigger's `task` — and the event-source manager
+reads exactly this key to recognise its consumers' configuration
+(`event_source.rs::load_active_event_source_jobs`). `_event_source` alone (what the claim uses
+today, `web/worker_api/jobs.rs` `event_source_config`) would miss the v0.14.0/v0.14.1 rows, and
+retention is off by default (`config.rs`, `RetentionConfig`), so those rows can still be a
+trigger's newest consumer. The trigger's current `task` / `target_task` must **not** be used: validation only checks the current
 configuration (`stroem-common/src/validation.rs`, consumer ≠ target), so after the consumer
 `task` changes (A → C) or consumer and target swap (A/B → B/A), a `task_name` filter would hide
 real consumer history or count old emitted jobs as runs. With the marker, all of the trigger's
-consumer jobs count, whatever their `task_name`. Accepted residual, same as the claim today: an
-emitted payload that itself carries an `_event_source` key (emitted input = trigger `input`
-defaults merged with the payload object, `stroem-worker/src/executor.rs`) is treated as a
-consumer by the claim and therefore here too (TODO.md).
+consumer jobs count, whatever their `task_name`. A v0.14.0/v0.14.1 consumer's task name is not
+a live task, so for a non-admin under ACL its job path (`acl::job_task_path`) normally denies it
+and the UI shows "no access" (§7.3). Accepted residual: an emitted payload that itself carries
+a `_fingerprint` key (emitted input = trigger `input` defaults merged with the payload object,
+`stroem-worker/src/executor.rs`) is counted as a consumer — the claim has the same weakness for
+`_event_source` (TODO.md).
 
 Not runs of the trigger **(user)**: any other job of the same task — a manual run
 (`source_type = user/api/mcp`), a Re-run (`rerun`) or Restart (`restart`) of the trigger's run,
@@ -240,7 +247,8 @@ Workspace shown by key, like the rest of the job/task UI.
   new migration,
   - *runs*: `job (source_type, source_id, created_at DESC) WHERE (source_type IN ('trigger',
     'webhook') AND status <> 'skipped') OR (source_type = 'event_source' AND input ?
-    '_event_source')` — the newest row is the last run;
+    '_fingerprint')` — the newest row is the last run (`?` on the `jsonb` `input` column is
+    immutable, so it is allowed in a partial-index predicate);
   - *skipped fires*: `job (source_id, created_at DESC) WHERE source_type = 'trigger' AND status
     = 'skipped'` — the last fire `L` is the later of the newest run and the newest skipped row;
 
@@ -330,7 +338,8 @@ index shape, within §7.2's requirement; test split.
   triggers and omits last-run fields of a job the user may not view; the Dashboard call
   returns only "needs attention" triggers; an event source whose consumer `task` changed
   (A → C) or whose consumer and target swapped still counts its consumer jobs, never its
-  emitted ones; a run blocked behind many `skipped` rows is still found; the indexes are
+  emitted ones; a v0.14.1-style consumer row (`_event_source:{trigger}` task, input with only
+  `_fingerprint`) is found; a run blocked behind many `skipped` rows is still found; the indexes are
   used (`EXPLAIN`, §7.2).
 - Migration test in stroem-db (`migration_test.rs`).
 - UI: vitest for the three parts (column, warning box, Dashboard card hidden/shown/failed
@@ -357,3 +366,6 @@ index shape, within §7.2's requirement; test split.
   `skipped` rows, emitted jobs and history, with a two-partial-index shape; event-source
   consumers are identified by the persisted `_event_source` input marker the claim already
   uses, not by the trigger's current `task` (§5.1).
+- **Rev 5** (Codex round 2): the consumer marker is `input ? '_fingerprint'`, not
+  `_event_source` — consumers written by v0.14.0/v0.14.1 carry only `_fingerprint` (and the
+  synthetic task name `_event_source:{trigger}`); every later consumer carries both.
