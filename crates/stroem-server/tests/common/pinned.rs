@@ -600,6 +600,7 @@ pub async fn pinned_workspace_fixture(opts: PinnedFixtureOpts) -> Result<PinnedF
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        leader: Default::default(),
         // The store itself is injected below with `with_pin_store`; the
         // section only carries the claim budget.
         pin_store: opts.claim_load_budget_secs.map(|secs| PinStoreSection {

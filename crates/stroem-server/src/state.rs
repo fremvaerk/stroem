@@ -46,7 +46,7 @@ pub struct Heartbeat(AtomicI64);
 
 const NEVER: i64 = i64::MIN;
 
-fn monotonic_ms() -> i64 {
+pub(crate) fn monotonic_ms() -> i64 {
     static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
     let epoch = *EPOCH.get_or_init(std::time::Instant::now);
     i64::try_from(epoch.elapsed().as_millis()).unwrap_or(i64::MAX)
@@ -344,6 +344,7 @@ pub(crate) fn test_app_state_with_pool(
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
+        leader: Default::default(),
         pin_store: None,
     };
     let log_storage = LogStorage::new(log_dir);
@@ -407,6 +408,7 @@ mod tests {
             default_step_timeout: None,
             default_job_timeout: None,
             workspace_reload: Default::default(),
+            leader: Default::default(),
             pin_store: None,
         };
         let mgr = WorkspaceManager::from_config("default", WorkspaceConfig::new());

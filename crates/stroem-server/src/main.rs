@@ -301,8 +301,11 @@ async fn async_main(worker_threads: usize) -> Result<()> {
     let metrics_handle = stroem_server::metrics::install_recorder(replica_id)
         .context("installing prometheus metrics recorder")?;
 
-    let (leader, _leader_handle) =
-        stroem_server::leader::LeaderElection::start(config.db.url.clone(), cancel_token.clone());
+    let (leader, _leader_handle) = stroem_server::leader::LeaderElection::start_with(
+        config.db.url.clone(),
+        config.leader.timing(),
+        cancel_token.clone(),
+    );
     let event_bus = stroem_server::events::EventBus::new(pool.clone(), replica_id);
 
     let state = AppState::new(
@@ -317,6 +320,13 @@ async fn async_main(worker_threads: usize) -> Result<()> {
     .with_artifact_blob(artifact_blob)
     .with_leader(leader)
     .with_event_bus(event_bus);
+
+    // A leader whose scheduler, recovery or event-source loop is stalled or
+    // stopped releases the lock (spec 2026-10-20 § 4.4); with
+    // `leader.self_release_after_secs: 0` the election never calls the probe.
+    state
+        .leader
+        .set_fitness_probe(stroem_server::web::health::leader_fitness_probe(&state));
 
     // Spawn the cross-replica NOTIFY listener now that AppState carries the
     // EventBus (the listener filters its own messages by replica_id).

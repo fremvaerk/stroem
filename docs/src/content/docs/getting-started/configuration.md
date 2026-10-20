@@ -51,6 +51,10 @@ worker_token: "change-in-production"
 #   heartbeat_timeout_secs: 120
 #   sweep_interval_secs: 60
 #   unmatched_step_timeout_secs: 30
+# Optional: leader election (multi-replica servers)
+# leader:
+#   lease_secs: 30
+#   self_release_after_secs: 30   # 0 = off
 # Optional: data retention settings
 # retention:
 #   worker_hours: 2                 # Delete inactive workers older than 2h
@@ -112,6 +116,7 @@ worker_token: "change-in-production"
 | `pin_store` | No | Where and how many pinned commits this replica keeps for [git refs](/guides/git-refs/) (see [`pin_store`](#pin_store) below) |
 | `worker_token` | Yes | Shared secret for worker authentication |
 | `recovery` | No | Recovery sweeper settings (see [Recovery](/operations/recovery/)) |
+| `leader` | No | Leader lease and self-release (see [`leader`](#leader) below) |
 | `retention` | No | Data retention settings (see [Retention](/operations/retention/)) |
 | `auth` | No | Authentication config (see [Authentication](/operations/authentication/)) |
 | `acl` | No | Access control list configuration (see [Authorization](/operations/authorization/)) |
@@ -206,6 +211,23 @@ configurable.
 
 Environment overrides use the usual form, e.g.
 `STROEM__PIN_STORE__DIR=/var/lib/stroem/pins`.
+
+### `leader`
+
+Leader election for a server with more than one replica (see [High Availability](/operations/high-availability/#when-the-leader-stops-working)). Both fields are optional.
+
+```yaml
+leader:
+  lease_secs: 30               # default 30
+  self_release_after_secs: 30  # default 30; 0 = off
+```
+
+| Field | Default | Meaning |
+|---|---|---|
+| `lease_secs` | `30` | How long the leader's database session may stay silent before PostgreSQL ends it and frees the leader lock (`idle_session_timeout`). A frozen leader is replaced about one lease later. The ping interval, the ping and acquire timeouts and the leader validity are derived from it (see [Leader settings](/operations/high-availability/#leader-settings)). Between `10` and `3600`. |
+| `self_release_after_secs` | `30` | How long the scheduler, recovery or event-source loop on the leader must stay stalled, or stay exited, before the leader releases the lock to another replica. `0` turns self-release off. At most `3600`. |
+
+Environment overrides use the usual form, e.g. `STROEM__LEADER__LEASE_SECS=60`.
 
 ## Agent providers
 

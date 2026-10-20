@@ -1070,6 +1070,7 @@ mod tests {
             default_step_timeout: None,
             default_job_timeout: None,
             workspace_reload: Default::default(),
+            leader: Default::default(),
             pin_store: None,
         };
 
