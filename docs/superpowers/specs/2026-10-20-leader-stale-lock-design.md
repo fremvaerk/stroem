@@ -1,12 +1,19 @@
 # A frozen leader must not keep the leader lock
 
-Status: revision 3, draft for review (2026-10-20)
+Status: revision 4, draft for review (2026-10-20)
 
 Code: `crates/stroem-server/src/leader.rs`, `web/health.rs`, `scheduler.rs`,
 `main.rs`; tests `crates/stroem-server/tests/ha_test.rs`; test image
 `crates/stroem-test-support/src/lib.rs`.
 
 ## Revision history
+
+**Revision 4 (2026-10-20, Codex review round 3, 1 finding, verified).**
+The test proxy (§ 6.3) frames PostgreSQL protocol messages instead of
+acting on TCP read chunks (TCP keeps no write boundaries): it cuts at a
+chosen offset inside a selected `Q` message, delays whole messages, and
+exposes barriers that tests 3, 6 and 7 wait on before they pause A or end
+its backend, so each test exercises the case it names.
 
 **Revision 3 (2026-10-20, Codex review round 2, 3 findings, all verified).**
 - § 4.2: protocol rule — from the lock query on, the leader session sends
@@ -700,13 +707,28 @@ tools:
   (`#[doc(hidden)] pub`): the leader loop skips its iterations — no ping, no
   acquire — which is what PostgreSQL sees from a frozen process with a
   working network.
-- A TCP proxy in the test file (tokio, one task per direction) between one
-  replica and PostgreSQL, controlled per direction: forward; **freeze**
-  (stop forwarding, keep both sockets open — what the incident's node did);
-  **delay** each chunk by `d`; **cut** the next client→server chunk after
-  `k` bytes and then freeze that direction (a message delivered in part).
-  The leader sends one message per write, so "the next chunk" is the next
-  ping.
+- A **message-framing TCP proxy** in the test file (tokio, one task per
+  direction) between one replica and PostgreSQL. The proxied replica
+  connects with `sslmode=disable`, so the stream is plain protocol: the
+  client's first message is the untyped StartupMessage (int32 length), every
+  later message in both directions is typed (1-byte type + int32 length).
+  The proxy reads whole messages (TCP read chunks carry no write
+  boundaries) and acts per message:
+  - **freeze** (both directions): stop forwarding and keep both sockets
+    open, also when the client side closes — what the incident's node did;
+  - **delay requests by `d`**: hold each client `Q` message for `d` before
+    forwarding it;
+  - **delay answers by `d`**: hold the server's messages and release them
+    together `d` after the `Z` (ReadyForQuery) that ends an answer arrives;
+    an `E` + end of stream (a FATAL) is released `d` after it arrives;
+  - **cut the next `Q` after `k` bytes**: forward the first `k` bytes of
+    the next client `Q` message (`k` is asserted to be inside it:
+    `0 < k < 1 + length`), then freeze the client→server direction.
+
+  Barriers (`tokio::sync::Notify` / watch counters the test awaits):
+  "a `Q` is held in the request delay", "an answer ending in `Z` is held in
+  the answer delay", "a `Q` was cut after `k` of its `n` bytes". Tests act
+  only after the barrier, so the case is exercised, not just likely.
 
 Tests:
 
@@ -722,9 +744,10 @@ Tests:
    until the lease ends it; B acquires within the test-1 bound; never both
    `true`.
 3. `partial_ping_message_does_not_stop_the_lease` (proxy cut): A through
-   the proxy, B direct; cut A's next ping after 5 of its bytes (inside the
-   `Query` message). The backend waits mid-message with the idle timer
-   armed: B acquires within the test-1 bound. This is the message-aware
+   the proxy, B direct; arm "cut the next `Q` after 5 bytes" and wait for
+   the cut barrier (A's ping `Q` of 14 bytes was cut after 5). The backend
+   waits mid-message with the idle timer armed: B acquires within N + 2 ×
+   `acquire_timeout` + `retry_interval` + 1 s of the cut. This is the message-aware
    check of § 4.2's protocol rule; a variant with the extended protocol
    (Bind/Execute delivered, Sync withheld) is not part of the suite —
    `raw_sql` is the guard, and the variant would only demonstrate
@@ -735,17 +758,20 @@ Tests:
    `pg_terminate_backend` A's backend (pid from `lock_holder`); B
    acquires; A reads `false` no later than `retry_interval + ping_timeout`
    + 0.5 s after the termination.
-6. `early_session_end_with_late_answers_is_bounded` (proxy delay on the
-   server→client direction, `d` = 350 ms < `ping_timeout`): A leads through
-   the proxy, pings still succeed; terminate A's backend; A reads `false`
-   no later than `2 × ping_timeout + retry_interval` + 0.5 s after the
-   termination, and never later than V + 0.5 s.
-7. `delayed_ping_extends_the_session_by_one_lease_only` (proxy delay on the
-   client→server direction, `d` = 300 ms < `ping_timeout`, so A's pings
-   still succeed and one is usually queued in the proxy when A is paused):
-   pause A; B acquires within `d` + N + 2 × `acquire_timeout` +
-   `retry_interval` + 1 s of the pause — the § 5.1 bound from the freeze
-   with a delivery delay of `d`.
+6. `early_session_end_with_late_answers_is_bounded` (answer delay `d` =
+   350 ms < `ping_timeout`): A leads through the proxy, its pings still
+   succeed; wait for the barrier "an answer ending in `Z` is held", then
+   terminate A's backend — the held successful answer reaches A after the
+   termination. A reads `false` no later than `2 × ping_timeout +
+   retry_interval` + 0.5 s after the termination, and never later than
+   V + 0.5 s.
+7. `delayed_ping_extends_the_session_by_one_lease_only` (request delay
+   `d` = 300 ms < `ping_timeout`, so A's pings still succeed): wait for the
+   barrier "a `Q` is held in the request delay", then pause A — the held
+   ping reaches PostgreSQL after the pause and restarts the idle interval.
+   B acquires within `d` + N + 2 × `acquire_timeout` + `retry_interval` +
+   1 s of the pause — the § 5.1 bound from the freeze with a delivery delay
+   of `d`.
 8. `lease_setup_maps_unrecognized_parameter_to_unsupported`: `apply_lease`
    with a non-existent parameter name on PostgreSQL 15 returns
    `Unsupported` — the real server error code; with `idle_session_timeout`
