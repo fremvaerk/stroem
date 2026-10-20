@@ -21,7 +21,7 @@ At startup each replica opens a dedicated Postgres connection and runs:
 SELECT pg_try_advisory_lock(0x5354524D4C445201);  -- "STRMLDR" + version 0x01
 ```
 
-The replica that acquires the lock becomes the **leader** and runs all three tasks. Followers run the loops but skip the work each tick (so they're warm and can take over instantly). If the leader's connection drops (pod restart, network blip, DB restart) Postgres releases the lock automatically, and a follower acquires it on its next attempt — within about 5 s with the default lease (followers try every `leader.lease_secs / 6`; see [Leader settings](#leader-settings) for longer leases). No external coordinator (etcd, ZooKeeper, Raft) is required.
+The replica that acquires the lock becomes the **leader** and runs all three tasks. Followers run the loops but skip the work each tick (so they're warm and can take over instantly). If the leader's connection drops (pod restart, network blip, DB restart) Postgres releases the lock automatically, and a follower acquires it on its next attempt — within about 5 s (followers try every `leader.lease_secs / 6`, at most 5 s apart; see [Leader settings](#leader-settings)). No external coordinator (etcd, ZooKeeper, Raft) is required.
 
 ### When the leader stops working
 
@@ -47,19 +47,21 @@ Every other value comes from the lease, so the values cannot contradict each oth
 
 | Value | From the lease `L` | Default |
 |---|---|---|
-| Ping interval and follower retry | `L / 6` | 5 s |
-| Ping timeout | `L / 6` | 5 s |
-| Acquire attempt timeout | `L / 3` | 10 s |
+| Ping interval and follower retry | `L / 6`, at most 5 s | 5 s |
+| Ping timeout | `L / 6`, at most 5 s | 5 s |
+| Acquire attempt timeout | `L / 3`, at most 10 s | 10 s |
 | Validity | `2 × L / 3` | 20 s |
 
 What the lease trades:
 
-- **A smaller lease** gives a faster takeover of a frozen leader (about the lease plus one attempt) and a faster reaction to a broken connection. A leader whose process is starved for longer than two thirds of the lease stops acting as leader until its next ping, and one starved for longer than the lease loses the lock. A database answer slower than `L / 6` drops the leader connection. Each follower opens an attempt connection every `L / 6`.
-- **A larger lease** gives more room for a starved leader process and for slow database answers. Because every value scales with the lease, it is also slower everywhere else. With `lease_secs: 3600`:
-  - a frozen leader is replaced after about an hour;
-  - after a normal handover (a rolling deploy, a self-release), a follower takes the lock on its next attempt: up to 10 minutes, in the worst case 50 minutes;
-  - a broken leader connection is noticed after up to 20 minutes;
-  - after the leader session ends early, the old leader can still believe it leads for up to 30 minutes.
+- **A smaller lease** gives a faster takeover of a frozen leader (about the lease plus one attempt). A leader whose process is starved for longer than two thirds of the lease stops acting as leader until its next ping, and one starved for longer than the lease loses the lock. Below 30 s, the capped values scale down too: a database answer slower than `L / 6` drops the leader connection, and each follower opens an attempt connection every `L / 6`.
+- **A larger lease** gives a slower takeover of a frozen leader and more room for a starved leader process. It does not make the leader more tolerant of a slow database: a ping slower than 5 s still drops the connection.
+
+Because of the caps, three values stay the same for every lease of 30 s or more:
+
+- after a normal handover (a rolling deploy, a self-release), a follower takes the lock on its next attempt — within about 5 s, at most 25 s;
+- a broken leader connection is noticed within 10 s;
+- after the leader session ends early, the old leader can still believe it leads for up to 15 s.
 
 Each replica uses its own values, so replicas with different settings (during a configuration rollout) are safe.
 
@@ -192,10 +194,8 @@ done
 # Kill the leader
 kubectl delete pod <leader-pod> --grace-period=60
 
-# Verify the other pod takes over. With the default lease and a prompt
-# network this takes a few seconds (a follower tries every lease_secs / 6);
-# with a longer leader.lease_secs, wait at least lease_secs / 6 + a few
-# seconds (see "Leader settings").
+# Verify the other pod takes over. On a prompt network this takes a few
+# seconds: a follower tries every lease_secs / 6, at most 5 s apart (see "Leader settings").
 sleep 15
 kubectl exec <surviving-pod> -- wget -qO- \
   --header="Authorization: Bearer $TOKEN" \
@@ -213,7 +213,7 @@ kubectl exec <surviving-pod> -- wget -qO- \
   - `stroem_job_log_chunk`: A missed segment is absent from the replica's mirror, so REST reads served from that pod will be short until backfill (manual `getJobLogs` refetch after the live tail catches up, or archive read after job completion). The publishing replica's local file is always complete.
 - **Pinned commits for [git refs](/guides/git-refs/) are per replica.** Each replica keeps its own [pin store](/getting-started/configuration/#pin_store) (never share `pin_store.dir` between replicas — the second one refuses to start) and its own branch/tag listing, so two jobs created on different replicas within one `poll_interval_secs` window can resolve a branch to different commits. A step claimed on a replica that has not loaded its commit yet is released and retried while that replica loads it — up to 30 times, each cycle taking up to `pin_store.claim_load_budget_secs` + 10 s + the worker's next poll (a little over 5 minutes in all when the git server fails fast, about 15 minutes or more when it hangs; see [Git Refs → Claim](/guides/git-refs/#claim)); during a git outage, job detail of a job connected to such a commit can answer `503` on that replica only.
 - **Missed and duplicate cron fires during a handover.** Followers advance cron triggers without firing them, so a trigger that comes due between the moment the old leader stops firing and the moment the new leader takes over is never fired (after a frozen leader: up to `lease + 2 × acquire timeout + retry`, about 55 s with the default lease on a working network, see [When the leader stops working](#when-the-leader-stops-working); after a stalled or exited scheduler: the stall, or the exit, plus `self_release_after_secs`, plus one attempt). There is no replay of missed fires yet. In rare cases (the new leader takes over within milliseconds of a due time while the old leader is still firing it) one occurrence can fire twice.
-- **Overlap after an early session end.** When the leader session ends early — an administrator terminates it, the connection is reset — a follower can take over at once while the old leader still believes it leads for up to half the lease, and never longer than the validity (two thirds of the lease) — 15 s and 20 s with the default lease. Work it starts in that window runs alongside the new leader's.
+- **Overlap after an early session end.** When the leader session ends early — an administrator terminates it, the connection is reset — a follower can take over at once while the old leader still believes it leads for up to half the lease, at most 15 s (never longer than the validity, two thirds of the lease). Work it starts in that window runs alongside the new leader's.
 - **Rate limiter (Tower Governor) is per-replica.** Login / refresh / signup limits are enforced per pod, so effective cluster-wide limits are roughly `replicas × per-pod-limit`. Acceptable for current security posture; if you need exact global limits, terminate at the Ingress layer or front the cluster with a CDN-level rate limiter.
 
 ## Monitoring leader flips
