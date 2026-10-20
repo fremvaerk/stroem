@@ -1,14 +1,22 @@
 # A frozen leader must not keep the leader lock
 
-Status: revision 6 (the user's decisions on Q1–Q3), approved by Codex
-(round 2 of revision 6); implemented on branch `fix/leader-stale-lock`
-(2026-10-20). Revision 5 was approved by Codex in round 4.
+Status: revision 7 (the user removed the caps of § 4.1), under Codex
+review. Revision 6 was approved by Codex in round 2 and implemented on
+branch `fix/leader-stale-lock` (2026-10-20); revision 5 was approved in
+round 4.
 
 Code: `crates/stroem-server/src/leader.rs`, `config.rs`, `web/health.rs`,
 `scheduler.rs`, `main.rs`; tests `crates/stroem-server/tests/ha_test.rs`;
 test image `crates/stroem-test-support/src/lib.rs`.
 
 ## Revision history
+
+**Revision 7 (2026-10-20, the user's decision).** The derived values have
+no caps: retry and ping timeout L/6, acquire timeout L/3, validity
+floor(2L/3) (§ 4.1). Everything scales with the lease, which adds the
+trade-offs listed in § 4.1 for a long lease (slower detection of a broken
+connection, slower follower attempts, a wider early-end overlap,
+§ 5.2.1). The defaults (L = 30 s) do not change.
 
 **Revision 6 (2026-10-20, the user's decisions on § 9).**
 - Q1: self-release stays (§ 4.4).
@@ -241,17 +249,18 @@ release_after)`, in integer milliseconds:
 
 | Name | Formula | Default (L = 30 s) | Meaning |
 |---|---|---|---|
-| `retry_interval` | min(L/6, 5 s) | 5 s | unchanged: pause between loop iterations (ping when leader, acquire attempt when follower) |
-| `ping_timeout` | min(L/6, 5 s) | 5 s | new: client-side bound on one leader ping |
-| `acquire_timeout` | min(L/3, 10 s) | 10 s | new: bound on one whole acquire attempt (connect + lease setup + lock query + holder report) |
-| `validity` (V) | 2L/3 | 20 s | new: `is_leader()` is `true` only while the last successful ping was sent less than V ago |
+| `retry_interval` | L/6 | 5 s | unchanged: pause between loop iterations (ping when leader, acquire attempt when follower) |
+| `ping_timeout` | L/6 | 5 s | new: client-side bound on one leader ping |
+| `acquire_timeout` | L/3 | 10 s | new: bound on one whole acquire attempt (connect + lease setup + lock query + holder report) |
+| `validity` (V) | floor(2L/3) | 20 s | new: `is_leader()` is `true` only while the last successful ping was sent less than V ago |
 | `lease` (N) | L | 30 s | new: `idle_session_timeout` of the leader session |
 | `release_after` | `self_release_after_secs`; `None` when 0 | 30 s | new: how long a gated loop must stay unfit before the leader releases (§ 4.4) |
 
 `LeaderTiming::default()` is `from_lease(30 s, Some(30 s))`: the values of
-revision 5. `CONNECT_TIMEOUT` (5 s) stays a constant inside the acquire
-attempt; for a lease below 30 s the outer `acquire_timeout` (down to 3.3 s)
-is the effective bound.
+revision 5. Each value is the floor of its formula in whole milliseconds
+(validity is floor(2L/3), not 2 × floor(L/3)). `CONNECT_TIMEOUT` (5 s)
+stays a constant inside the acquire attempt; for a lease below 15 s the
+outer `acquire_timeout` (down to 3.3 s) is the effective bound.
 
 Invariants (`LeaderTiming::check`):
 
@@ -265,10 +274,9 @@ Invariants (`LeaderTiming::check`):
 - `lease ≥ 3 × retry_interval` — at least two scheduled pings must be
   missed before the server ends a healthy session.
 
-They hold for every allowed lease. For L < 30 s nothing is capped: L/2 <
-2L/3 < L, and L ≥ L/2. For L ≥ 30 s: 15 s < 2L/3 (≥ 20 s) < L, and L ≥
-15 s. Integer division moves each value by under 1 ms, while every gap is
-at least L/6 ≥ 1.6 s. A unit test runs `check` for every whole second from
+They hold for every allowed lease: L/2 < 2L/3 < L, and L ≥ L/2. Integer
+division moves each value by under 1 ms, while every gap is at least L/6
+≥ 1.6 s. A unit test runs `check` for every whole second from
 10 s to 3600 s. `ServerConfig::validate` rejects a range violation and also
 runs `check` on the derived timing (a release build has no debug
 assertions); `start_with` keeps its debug assertion for test timings.
@@ -280,29 +288,36 @@ Ranges, enforced by `ServerConfig::validate`:
   the takeover for over an hour, which defeats G1.
 - `self_release_after_secs`: 0 (off) or 1 to 3600.
 
-Why caps on the ping, the attempt and the retry: they detect a broken
-connection and pace the follower, which has nothing to do with how long a
-leader may be silent. Uncapped, `lease_secs: 3600` would leave a hung ping
-undetected for 10 min, keep a follower 10 min between attempts, and widen
-§ 5.2.1's early-end overlap to 30 min. With the caps, that overlap is
-≤ 15 s for every allowed lease (L/2 below 30 s).
+No caps (user decision, revision 7): every value scales with the lease.
+Revision 6 capped the retry and the ping timeout at 5 s and the acquire
+timeout at 10 s; the user preferred the plain formulas.
 
 What the lease trades:
 
 - **Smaller lease:** faster takeover of a frozen leader (≈ N + one
-  attempt); a leader runtime starved longer than 2N/3 loses validity, and
-  longer than N loses the lock; below 30 s, more attempt connections per
-  follower.
-- **Larger lease:** slower takeover; more tolerance for a starved leader
-  runtime. Not more tolerance for a slow database: a ping slower than
-  5 s still drops the connection.
+  attempt); faster detection of a broken connection (ping timeout N/6);
+  a leader runtime starved longer than 2N/3 loses validity, and longer
+  than N loses the lock; a slow database answer longer than N/6 drops the
+  connection; more attempt connections per follower (one every N/6).
+- **Larger lease:** slower takeover of a frozen leader; more tolerance for
+  a starved leader runtime and for slow database answers. Also slower in
+  three other ways, because the retry and the timeouts scale too:
+  - a follower tries every N/6, so after an immediate release (shutdown,
+    self-release, early session end) the takeover takes up to N/6 plus
+    one attempt — 10 min with `lease_secs: 3600`;
+  - a hung ping or a broken connection is detected only after N/6;
+  - the early-end overlap of § 5.2.1 is up to `2 × ping_timeout +
+    retry_interval` = N/2 (15 s with the default, 30 min with
+    `lease_secs: 3600`).
 
 Each replica uses its own values. The no-overlap argument (§ 5.2.1) needs
 `validity < lease` within ONE replica — the leader's validity against its
 own session's lease — so replicas with different values (a configuration
 rollout) are safe. A follower's holder report (§ 4.6) compares the holder's
-idle time with its own lease; a healthy leader is idle ≤ 5 s, below every
-allowed lease, so different values cause no false WARN.
+idle time with its own lease. A healthy leader is idle up to its own retry
+interval (its lease / 6), so a follower whose lease is shorter than that
+logs a false "looks stale" WARN — only when the two leases differ more
+than six times, only in the log, and only until the rollout ends.
 
 ### 4.2 Lease: `idle_session_timeout` on the leader session
 
@@ -745,8 +760,8 @@ moment the session ended. Overlap:
   succeed, so the newest validity deadline comes from a query sent before
   `E`: `valid_until ≤ E + V`. This covers a late successful acquire answer
   too (its deadline is the lock query's send time + V).
-- **leader task running: ≤ `2 × ping_timeout + retry_interval` (15 s for
-  every lease ≥ 30 s, because of the § 4.1 caps; L/2 below).** The
+- **leader task running: ≤ `2 × ping_timeout + retry_interval` = N/2
+  (15 s with the default lease).** The
   answer to a ping sent before `E` can still arrive, successful, up to
   `ping_timeout` after `E`; the next ping is sent `retry_interval` later and
   fails or times out within `ping_timeout`, clearing validity. With a prompt
@@ -849,7 +864,8 @@ the user before changing that test. `docker-compose.yml` (e2e) already uses
   the test timings below do too; `from_lease`: `check` passes for every
   whole second from 10 s to 3600 s, `from_lease(30 s, Some(30 s))` equals
   revision 5's values, the values at 10 s (1666 / 1666 / 3333 / 6666 ms)
-  and at 3600 s (5 s / 5 s / 10 s / 2400 s); validity arithmetic
+  and at 3600 s (600 s / 600 s / 1200 s / 2400 s), and validity 7333 ms at
+  11 s (the floor of 2L/3); validity arithmetic
   (`is_leader` false at/after `valid_until`, `always()`, `never()`);
   `next_action` table of § 4.4 incl. the `release_after` boundary; the
   "off" rule: with `release_after = None` the probe is not called (a probe
@@ -1034,6 +1050,6 @@ that test 9's probe returns an `UnfitLoop`.
 - Q1. Self-release (§ 4.4): keep it.
 - Q2. Timing: configurable, with two settings, `leader.lease_secs` and
   `leader.self_release_after_secs` (`0` = off); the other values are
-  derived (§ 4.1).
+  derived from the lease with no caps (§ 4.1, revision 7).
 - Q3. A loop that ran and then exited (`Stopped`): covered in this change,
   with the `/livez` change on every replica (§ 4.4, § 4.4.1).
