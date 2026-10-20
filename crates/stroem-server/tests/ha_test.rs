@@ -1528,6 +1528,12 @@ mod lease {
         t.lease + 2 * t.acquire_timeout + t.retry_interval + Duration::from_secs(1)
     }
 
+    /// What is left of `bound` measured from `from` — one absolute deadline
+    /// across several waits.
+    fn remaining(from: Instant, bound: Duration) -> Duration {
+        (from + bound).saturating_duration_since(Instant::now())
+    }
+
     fn start(url: &str) -> (Arc<LeaderElection>, CancellationToken) {
         start_timed(url, fast())
     }
@@ -1817,7 +1823,9 @@ mod lease {
             "a frozen leader must stop reporting leader within validity"
         );
         assert!(
-            wait_exclusive(&a, &b, takeover_bound(&t), || b.is_leader()).await,
+            wait_exclusive(&a, &b, remaining(paused_at, takeover_bound(&t)), || b
+                .is_leader())
+            .await,
             "B must take over within the lease bound ({:?} since the pause)",
             paused_at.elapsed()
         );
@@ -1868,7 +1876,9 @@ mod lease {
             "A dropped its socket, but the frozen proxy keeps A's session open"
         );
         assert!(
-            wait_exclusive(&a, &b, takeover_bound(&t), || b.is_leader()).await,
+            wait_exclusive(&a, &b, remaining(frozen_at, takeover_bound(&t)), || b
+                .is_leader())
+            .await,
             "B must take over once the lease ends A's session ({:?} since the freeze)",
             frozen_at.elapsed()
         );
@@ -1901,7 +1911,9 @@ mod lease {
         assert_eq!(*cut.borrow(), (5, 14), "cut inside A's ping message");
 
         assert!(
-            wait_exclusive(&a, &b, takeover_bound(&t), || b.is_leader()).await,
+            wait_exclusive(&a, &b, remaining(cut_at, takeover_bound(&t)), || b
+                .is_leader())
+            .await,
             "B must take over although A's backend waits mid-message ({:?} since the cut)",
             cut_at.elapsed()
         );
@@ -2061,15 +2073,16 @@ mod lease {
 
         // PostgreSQL restarted the idle interval when the ping arrived: no
         // takeover before `forwarded_at + lease`.
-        let earliest = (forwarded_at + t.lease - Duration::from_millis(150))
-            .saturating_duration_since(Instant::now());
+        let earliest = remaining(forwarded_at, t.lease - Duration::from_millis(150));
         assert!(
             !wait_exclusive(&a, &b, earliest, || b.is_leader()).await,
             "B took over {:?} after the forward, before the delayed ping's lease could end",
             forwarded_at.elapsed()
         );
         assert!(
-            wait_exclusive(&a, &b, takeover_bound(&t), || b.is_leader()).await,
+            wait_exclusive(&a, &b, remaining(forwarded_at, takeover_bound(&t)), || b
+                .is_leader())
+            .await,
             "B must take over within the bound from the delayed ping ({:?})",
             forwarded_at.elapsed()
         );
