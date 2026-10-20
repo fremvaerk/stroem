@@ -8,6 +8,7 @@ pub mod oauth_client;
 pub mod oauth_refresh_token;
 pub mod refresh_token;
 pub mod task_state;
+pub mod trigger_run;
 pub mod user;
 pub mod user_auth_link;
 pub mod user_group;

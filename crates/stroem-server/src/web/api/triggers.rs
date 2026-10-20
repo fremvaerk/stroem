@@ -1,5 +1,8 @@
-use crate::acl::{load_user_acl_context, make_task_path, TaskPermission};
 use crate::state::AppState;
+use crate::trigger_status::{
+    attach_run_status, last_run_failed, needs_attention, sort_attention, trigger_visible,
+    viewer_for, LastRun, MissedRuns, TriggerStatusItem,
+};
 use crate::web::api::get_workspace_or_error;
 use crate::web::api::middleware::AuthUser;
 use crate::web::error::AppError;
@@ -30,6 +33,10 @@ pub struct TriggerInfo {
     pub enabled: bool,
     pub input: HashMap<String, serde_json::Value>,
     pub next_runs: Vec<String>,
+    pub last_run: Option<LastRun>,
+    /// The last run exists but its job is outside the viewer's ACL.
+    pub last_run_hidden: bool,
+    pub missed: Option<MissedRuns>,
 }
 
 impl TriggerInfo {
@@ -54,6 +61,9 @@ impl TriggerInfo {
             enabled: trigger.enabled(),
             input: trigger.input().clone(),
             next_runs: next_runs.iter().map(|dt| dt.to_rfc3339()).collect(),
+            last_run: None,
+            last_run_hidden: false,
+            missed: None,
         }
     }
 }
@@ -90,7 +100,7 @@ pub fn compute_next_runs(trigger: &TriggerDef, count: usize) -> Vec<DateTime<Utc
 }
 
 /// GET /api/workspaces/:ws/triggers — List all triggers in a workspace
-#[tracing::instrument(skip(state))]
+#[tracing::instrument(skip(state, auth_user))]
 pub async fn list_triggers(
     State(state): State<Arc<AppState>>,
     auth_user: Option<AuthUser>,
@@ -98,40 +108,72 @@ pub async fn list_triggers(
 ) -> Result<impl IntoResponse, AppError> {
     let workspace = get_workspace_or_error(&state, &ws).await?;
 
-    let mut triggers: Vec<TriggerInfo> = workspace
+    let viewer = viewer_for(&state, &auth_user).await?;
+    let triggers_enabled = state.workspaces.triggers_enabled(&ws);
+    let mut items: Vec<TriggerStatusItem> = workspace
         .triggers
         .iter()
-        .map(|(name, trigger)| TriggerInfo::from_def(name, trigger, 5))
+        .filter(|(_, trigger)| {
+            trigger_visible(&state, viewer.as_ref(), &ws, &workspace, trigger.task())
+        })
+        .map(|(name, trigger)| TriggerStatusItem {
+            workspace: ws.clone(),
+            fires_here: trigger.enabled() && triggers_enabled,
+            def: trigger.clone(),
+            info: TriggerInfo::from_def(name, trigger, 5),
+        })
         .collect();
-
-    // ACL filter: only show triggers for tasks the user can access
-    if let Some(ref auth) = auth_user {
-        if state.acl.is_configured() {
-            if let Ok(user_id) = auth.user_id() {
-                if let Ok((is_admin, groups)) =
-                    load_user_acl_context(&state.pool, user_id, auth.is_admin()).await
-                {
-                    if !is_admin {
-                        triggers.retain(|t| {
-                            let task_def = workspace.tasks.get(&t.task);
-                            let folder = task_def.and_then(|td| td.folder.as_deref());
-                            let task_path = make_task_path(folder, &t.task);
-                            let perm = state.acl.evaluate(
-                                &ws,
-                                &task_path,
-                                &auth.claims.email,
-                                &groups,
-                                false,
-                            );
-                            !matches!(perm, TaskPermission::Deny)
-                        });
-                    }
-                }
-            }
-        }
-    }
+    attach_run_status(&state, viewer.as_ref(), &mut items).await?;
+    let triggers: Vec<TriggerInfo> = items.into_iter().map(|i| i.info).collect();
 
     Ok(Json(triggers))
+}
+
+/// A trigger from any workspace that needs attention.
+#[derive(Debug, Serialize)]
+pub struct AttentionTrigger {
+    pub workspace: String,
+    #[serde(flatten)]
+    pub trigger: TriggerInfo,
+    pub last_run_failed: bool,
+}
+
+/// GET /api/triggers/attention — Triggers across all workspaces that missed
+/// scheduled runs or whose last run failed
+#[tracing::instrument(skip(state, auth_user))]
+pub async fn list_attention_triggers(
+    State(state): State<Arc<AppState>>,
+    auth_user: Option<AuthUser>,
+) -> Result<impl IntoResponse, AppError> {
+    let viewer = viewer_for(&state, &auth_user).await?;
+    let mut items: Vec<TriggerStatusItem> = Vec::new();
+    for (ws, config) in state.workspaces.get_all_configs().await {
+        let triggers_enabled = state.workspaces.triggers_enabled(&ws);
+        for (name, trigger) in &config.triggers {
+            if !trigger_visible(&state, viewer.as_ref(), &ws, &config, trigger.task()) {
+                continue;
+            }
+            items.push(TriggerStatusItem {
+                workspace: ws.clone(),
+                fires_here: trigger.enabled() && triggers_enabled,
+                def: trigger.clone(),
+                info: TriggerInfo::from_def(name, trigger, 0),
+            });
+        }
+    }
+    attach_run_status(&state, viewer.as_ref(), &mut items).await?;
+    let mut rows: Vec<AttentionTrigger> = items
+        .into_iter()
+        .filter(needs_attention)
+        .map(|item| AttentionTrigger {
+            last_run_failed: last_run_failed(&item),
+            workspace: item.workspace,
+            trigger: item.info,
+        })
+        .collect();
+    sort_attention(&mut rows);
+
+    Ok(Json(rows))
 }
 
 #[cfg(test)]

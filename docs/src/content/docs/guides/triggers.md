@@ -59,6 +59,47 @@ no other effect (no `cancel_previous`, no skipped row). The concurrency
 policy and `source_id` stay keyed on the **defining** workspace's trigger,
 and `triggers: false` on the defining workspace still suppresses it.
 
+### Last run and missed runs
+
+Every trigger shows its **last run**. A scheduler trigger can also show **missed runs**. Both appear on the workspace page, on the task page and on the Dashboard.
+
+**Last run.** A trigger's runs are the jobs it created: `source_type: "trigger"` for a scheduler, `"webhook"` for a webhook. Jobs that someone started by hand are not runs of the trigger. This includes a manual run of the same task, a Re-run and a Restart.
+
+- The time links to the job. The result is the job's status: `pending`, `running`, `completed`, `failed`, `cancelled` or `skipped`.
+- If the run has [task retry](/guides/retry/) jobs, the result is the status of the newest retry job. A nightly run that failed once and passed on retry shows `completed`. The time still links to the trigger's own run.
+- With `concurrency: skip`, every fire that finds the previous job still running writes a `skipped` row. The last run ignores those rows. Only a trigger with no other run shows a `skipped` last run.
+- `never` means the trigger has no run in the database.
+- `no access` means the run exists, but you may not view that job. The job is checked on its own task and folder, so a cross-workspace `ws.task` target or a pinned `ref:` job can be hidden even when the trigger is visible.
+
+**Missed runs.** For an enabled scheduler trigger, a run is missed when a scheduled fire time:
+
+- is later than the trigger's newest job of any status (a `skipped` row counts, because it proves the scheduler fired), and
+- is at least 5 minutes in the past, and
+- has no job.
+
+The UI shows the number of missed runs and the first missed time. The count stops at 1000 and shows `1000+`. The 5 minute grace period lets a fire that is late by seconds pass. A fire recorded less than 1 second before the next scheduled time is taken as that time's own fire, because the database clock can run slightly behind the scheduler's clock. If it was instead a very late fire of the previous scheduled time, that next time is not counted. At most one scheduled time is skipped this way. A trigger with no job at all never shows a mark, because the server cannot know when the trigger was added. A disabled trigger and a trigger in a workspace with `triggers: false` never show a mark. Webhook and event source triggers have no schedule, so they show a last run but never a missed mark.
+
+The mark clears only when the trigger itself runs again. A manual run, a Re-run or a Restart of the task does not clear it, and does not change the last result.
+
+**Where it shows.**
+
+- Workspace page: a "Last run" column in the Triggers table. A warning box above the table lists the triggers with missed runs.
+- Task page: the same last run and missed mark on each trigger of the task.
+- Dashboard: a card "Triggers that need attention". It lists triggers that have missed runs or whose last result is `failed`, missed first. It hides when no trigger needs attention, and when the request fails. `cancelled` and `skipped` results do not count. Disabled triggers never appear. API: `GET /api/triggers/attention`.
+
+A trigger appears only if its task is not denied for you by [ACL](/operations/authorization/). If the server cannot load your ACL data, `GET /api/workspaces/{ws}/triggers` now returns an error. Before, it listed every trigger.
+
+**Limitations.**
+
+- The missed rule uses the trigger's current cron and timezone. After you change either, the mark can be wrong until the trigger fires once on the new schedule.
+- A trigger that you re-enable after `enabled: false` (or a workspace that you switch back from `triggers: false`) shows the fire times it skipped as missed, until it fires again. The database does not record when it was enabled.
+- Job retention (`retention.job_days`) can delete the last run of a rarely firing trigger. The trigger then shows `never` and no mark.
+- A trigger that you rename in YAML is a new trigger. It shows `never` until it fires.
+- The Dashboard does not list triggers of a workspace that is in load error. They appear again after the workspace loads, with the runs that were missed during the outage.
+- A failed run that you already handled by hand still shows as failed until the trigger runs again.
+
+Run status needs two indexes on `job`. See [Migration 053](/operations/migration-053/) for the manual pre-run on a large database.
+
 ### Concurrency policy
 
 Control what happens when a trigger fires while a previous run is still active:
@@ -279,6 +320,10 @@ See [Webhook API](/reference/webhook-api/) for the full endpoint reference.
 
 Webhook names should be unique across all workspaces. If the same name appears in multiple workspaces, the first match wins at dispatch time.
 
+### Last run
+
+A webhook trigger shows its last run (the newest job it created, with the result) on the workspace page, the task page and the Dashboard. It never shows a missed mark, because a webhook has no schedule. See [Last run and missed runs](#last-run-and-missed-runs).
+
 ## Event source triggers
 
 For long-running queue consumers that create jobs from external events, see the dedicated [Event Sources](/stroem/guides/event-sources/) guide.
@@ -296,3 +341,5 @@ triggers:
 ```
 
 The consumer task runs as a regular job. Each `OUTPUT: ` line emitted by the consumer is parsed as JSON and creates a new job for the target task. This pattern is ideal for queue-driven architectures where you need continuous consumption with backpressure support.
+
+An event source trigger shows a last run too, but never a missed mark. Its last run is the newest **consumer** job, not a job that the consumer emitted. The server finds consumer jobs by the `_fingerprint` marker in the job input. A running consumer shows "running since" its start time. See [Last run and missed runs](#last-run-and-missed-runs).

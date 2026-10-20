@@ -32,6 +32,7 @@ pub mod tarball_cache;
 pub mod templated_ref;
 #[cfg(test)]
 mod test_support;
+pub mod trigger_status;
 pub(crate) mod trigger_target;
 pub mod web;
 pub mod workspace;
