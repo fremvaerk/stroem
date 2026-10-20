@@ -184,22 +184,49 @@ pub fn acl_folder(
     }
 }
 
-/// [`acl_folder`] for a job row; reads the live config only for an unpinned job.
-#[tracing::instrument(skip_all, fields(job_id = %job.job_id))]
-pub async fn job_folder(state: &AppState, job: &JobRow) -> Option<String> {
-    let live = if job.git_ref.is_some() {
+async fn coords_folder(
+    state: &AppState,
+    workspace: &str,
+    task_name: &str,
+    git_ref: Option<&str>,
+    task_folder: Option<&str>,
+) -> Option<String> {
+    let live = if git_ref.is_some() {
         None
     } else {
         state
-            .get_workspace(&job.workspace)
+            .get_workspace(workspace)
             .await
-            .and_then(|ws| ws.tasks.get(&job.task_name).and_then(|t| t.folder.clone()))
+            .and_then(|ws| ws.tasks.get(task_name).and_then(|t| t.folder.clone()))
     };
-    acl_folder(
+    acl_folder(git_ref, task_folder, live.as_deref())
+}
+
+/// THE job-row ACL path, from the row's coordinates (spec 2026-10-02 § 7.8).
+/// Reads the live config only for an unpinned job (`git_ref` is `None`).
+#[tracing::instrument(skip(state))]
+pub async fn job_coords_task_path(
+    state: &AppState,
+    workspace: &str,
+    task_name: &str,
+    git_ref: Option<&str>,
+    task_folder: Option<&str>,
+) -> String {
+    let folder = coords_folder(state, workspace, task_name, git_ref, task_folder).await;
+    make_task_path(folder.as_deref(), task_name)
+}
+
+/// [`acl_folder`] for a job row; reads the live config only for an unpinned job.
+#[tracing::instrument(skip_all, fields(job_id = %job.job_id))]
+pub async fn job_folder(state: &AppState, job: &JobRow) -> Option<String> {
+    coords_folder(
+        state,
+        &job.workspace,
+        &job.task_name,
         job.git_ref.as_deref(),
         job.task_folder.as_deref(),
-        live.as_deref(),
     )
+    .await
 }
 
 /// `{folder}/{task}` for a job — THE task path every job-scoped read path
@@ -207,7 +234,14 @@ pub async fn job_folder(state: &AppState, job: &JobRow) -> Option<String> {
 /// `web::api::jobs::check_job_acl`), never a live folder lookup.
 #[tracing::instrument(skip_all, fields(job_id = %job.job_id))]
 pub async fn job_task_path(state: &AppState, job: &JobRow) -> String {
-    make_task_path(job_folder(state, job).await.as_deref(), &job.task_name)
+    job_coords_task_path(
+        state,
+        &job.workspace,
+        &job.task_name,
+        job.git_ref.as_deref(),
+        job.task_folder.as_deref(),
+    )
+    .await
 }
 
 /// Every live task as `(workspace, task_name, folder)`, the input of
@@ -721,5 +755,36 @@ mod tests {
         let all = narrow_job_scope(&scope, None, None);
         assert_eq!(all.live_pairs.len(), 2);
         assert_eq!(all.pinned_triples.len(), 2);
+    }
+
+    async fn state_with_task(
+        task: &str,
+        folder: &str,
+        dir: &std::path::Path,
+    ) -> crate::state::AppState {
+        let yaml = format!("tasks:\n  {task}:\n    folder: {folder}\n    flow: {{}}\n");
+        let config: stroem_common::models::workflow::WorkspaceConfig =
+            serde_yaml::from_str(&yaml).unwrap();
+        let mgr = crate::workspace::WorkspaceManager::from_config("etl", config);
+        crate::state::test_app_state_with_workspaces(mgr, dir)
+    }
+
+    #[tokio::test]
+    async fn job_coords_task_path_uses_pinned_folder() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let state = state_with_task("nightly", "other", dir.path()).await;
+        let path =
+            job_coords_task_path(&state, "etl", "nightly", Some("main"), Some("nightlies")).await;
+        assert_eq!(path, "nightlies/nightly");
+    }
+
+    #[tokio::test]
+    async fn job_coords_task_path_uses_live_folder_when_unpinned() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let state = state_with_task("manifest", "public", dir.path()).await;
+        let path = job_coords_task_path(&state, "etl", "manifest", None, Some("stale")).await;
+        assert_eq!(path, "public/manifest");
+        let missing = job_coords_task_path(&state, "etl", "gone", None, None).await;
+        assert_eq!(missing, "gone");
     }
 }
