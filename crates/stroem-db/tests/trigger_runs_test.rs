@@ -323,6 +323,7 @@ async fn last_run_probes_use_the_partial_indexes() -> Result<()> {
     sqlx::query("SET LOCAL enable_seqscan = off")
         .execute(&mut *tx)
         .await?;
+    // AssertSqlSafe: EXPLAIN prefix on the repo's own constant query text; no user input.
     let plan: Vec<(String,)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "EXPLAIN {}",
         TriggerRunRepo::LAST_RUNS_SQL

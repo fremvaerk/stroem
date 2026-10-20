@@ -156,7 +156,7 @@ describe("WorkspaceDetailPage", () => {
     expect(await screen.findByText(/Refresh failed: rate-limited/)).toBeInTheDocument();
   });
 
-  it("shows Last run column, never for old fixtures, and missed pill with warning", async () => {
+  it("shows Last run column, a dash for old fixtures, and missed pill with warning", async () => {
     mockTriggers.mockResolvedValue([
       trigger,
       {
@@ -170,7 +170,7 @@ describe("WorkspaceDetailPage", () => {
     const names = headers.map((h) => h.textContent);
     expect(names.indexOf("Last run")).toBe(names.indexOf("Schedule") + 1);
     expect(names.indexOf("Next run")).toBe(names.indexOf("Last run") + 1);
-    expect(screen.getAllByText("never").length).toBe(2);
+    expect(screen.getAllByText("—").length).toBe(2);
     expect(screen.getByText(/3 missed · /)).toBeInTheDocument();
     expect(screen.getByText(/1 trigger missed scheduled runs — hourly\./)).toBeInTheDocument();
   });

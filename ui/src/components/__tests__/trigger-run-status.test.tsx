@@ -39,9 +39,10 @@ describe("LastRunCell", () => {
     wrap(<LastRunCell trigger={trig({ last_run: null })} />);
     expect(screen.getByText("never")).toBeInTheDocument();
   });
-  it("renders never when fields are absent", () => {
+  it("renders a dash when the API sends no status fields", () => {
     wrap(<LastRunCell trigger={trig()} />);
-    expect(screen.getByText("never")).toBeInTheDocument();
+    expect(screen.getByText("—")).toBeInTheDocument();
+    expect(screen.queryByText("never")).not.toBeInTheDocument();
   });
   it("renders no access", () => {
     wrap(<LastRunCell trigger={trig({ last_run: null, last_run_hidden: true })} />);

@@ -8,6 +8,10 @@ import type { MissedRuns, TriggerInfo } from "@/lib/types";
 
 export function LastRunCell({ trigger }: { trigger: TriggerInfo }) {
   const run = trigger.last_run;
+  if (run === undefined && trigger.last_run_hidden === undefined) {
+    // An older API (rolling deploy) sends no status data.
+    return <span className="text-xs text-muted-foreground">—</span>;
+  }
   if (!run) {
     return (
       <span className="text-xs text-muted-foreground">
