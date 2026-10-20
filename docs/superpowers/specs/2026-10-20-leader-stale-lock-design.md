@@ -20,8 +20,10 @@ test image `crates/stroem-test-support/src/lib.rs`.
   release too, and `/livez` fails on such a loop on every replica, not only
   on the leader (§ 4.4, § 4.4.1). `/healthz/detail` follows.
 - At shutdown the gated loops exit (`Stopped`). The leader loop does not
-  start an iteration once `cancel` has fired, and an iteration that starts
-  just before is a first sighting, which cannot release (§ 4.4).
+  start an iteration once `cancel` has fired; an iteration already running
+  can still release, which is harmless (§ 4.4).
+- "Off" disables only the fitness-based release and acquire suppression;
+  the § 4.4.1 health rules apply either way (Codex round 1 on revision 6).
 
 **Revision 5 (2026-10-20, Codex implementation review round 1 — tests and
 docs only, no production-code finding).** Test 7 holds the ping until the
@@ -512,11 +514,17 @@ Reasoning:
 - **Shutdown.** On `cancel` the three gated loops exit, which reads as
   `Stopped` after start. `run_loop` does not start an iteration once
   `cancel` has fired (`!cancel.is_cancelled()` next to the `paused`
-  check); its `select!` then returns on `cancel`. An iteration that starts
-  just before `cancel` reads the probe before the loops have exited, or —
-  in a window of nanoseconds — sees them for the first time, with an
-  unfit time of about 0, below every allowed `release_after` (≥ 1 s): no
-  release, at most one WARN.
+  check), and its `select!` then returns on `cancel`; so no iteration
+  that begins after `cancel` reads the probe. An iteration that began
+  before `cancel` can still read it after the loops exited. If that is the
+  start of an unfit stretch, its unfit time is about 0, below every
+  allowed `release_after` (≥ 1 s), and it pings or acquires as usual. If
+  an unfit stretch was already running (a loop stalled before the
+  shutdown), the stretch keeps its first sighting's time, and the
+  iteration can release. Both are harmless: the shutdown drops the
+  connection and clears the validity right after, and a release only does
+  the same a moment earlier. The cost is at most one WARN line, which
+  names a real stall when it is the release message.
 - **Never-beaten loops.** `task_health(alive, None, _)` is `Ok`, and a
   `Stopped` loop that never beat is not unfit: a loop that hangs or panics
   before its first beat is invisible to the probe. The recovery and
@@ -526,7 +534,10 @@ Reasoning:
 
 The fitness probe is optional: `LeaderElection::start` without a probe
 behaves exactly like § 4.2–4.3 (every existing test), and so does a timing
-with `release_after = None` with a probe installed.
+with `release_after = None` with a probe installed. "Off" is a property of
+the leader loop only: it disables the fitness-based release and the
+acquire suppression, not the health rules of § 4.4.1, which read the loop
+flags directly and do not depend on `leader:` settings.
 
 #### 4.4.1 Health contract: a loop that ran and then exited
 
@@ -705,7 +716,7 @@ backend last became idle (just after answering its last ping).
 | PostgreSQL < 14 | as row 1 "before" | no lease: a frozen leader keeps the lock (WARN at startup); validity, ping timeout and self-release still apply |
 | Gated loop panicked (`Stopped`) on the leader | lock kept, `/livez` fails, kubelet restarts if it can reach the node | release `release_after` after the probe sees it (§ 4.4 timing) → follower acquires one attempt later; the ex-leader stays follower and its `/livez` fails, so the kubelet restarts it |
 | Gated loop panicked on a follower | `/livez` green; the replica stays up but cannot do that loop's work as leader | the replica does not acquire; `/livez` fails → kubelet restart (§ 4.4.1) |
-| Self-release off (`self_release_after_secs: 0`) | n/a | the two rows above and the crawling row behave as "before"; lease and validity unchanged |
+| Self-release off (`self_release_after_secs: 0`) | n/a | no fitness-based release and no acquire suppression: in the two rows above and in the crawling row, the lock stays as "before". The health rules of § 4.4.1 still apply: a stopped loop fails `/livez` on every replica. Lease and validity unchanged |
 | Stalled scheduler on a single replica | `/livez` restart | release after `release_after` (recovery and event source pause too), then the `/livez` restart |
 
 ### 5.2 Split brain
@@ -972,7 +983,9 @@ Tests:
     `livez_fails_for_stalled_loop_on_follower`): a follower whose loops are
     alive and beaten, then the recovery flag dropped: `/livez` 503
     `{"status": "stopped"}`; `/healthz/detail` `recovery` = `stopped`,
-    `scheduler` = `ok`.
+    `scheduler` = `ok`. The same assertions hold for a state whose config
+    has `leader.self_release_after_secs: 0` ("off" does not change the
+    health rules).
 
 Existing tests keep the default timing and must pass unchanged, except
 that test 9's probe returns an `UnfitLoop`.
