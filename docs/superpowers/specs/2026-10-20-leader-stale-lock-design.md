@@ -1,12 +1,27 @@
 # A frozen leader must not keep the leader lock
 
-Status: revision 2, draft for review (2026-10-20)
+Status: revision 3, draft for review (2026-10-20)
 
 Code: `crates/stroem-server/src/leader.rs`, `web/health.rs`, `scheduler.rs`,
 `main.rs`; tests `crates/stroem-server/tests/ha_test.rs`; test image
 `crates/stroem-test-support/src/lib.rs`.
 
 ## Revision history
+
+**Revision 3 (2026-10-20, Codex review round 2, 3 findings, all verified).**
+- § 4.2: protocol rule — from the lock query on, the leader session sends
+  only simple-protocol `Query` messages (`sqlx::raw_sql`). PostgreSQL arms
+  the idle timer only at ReadyForQuery; with the extended protocol a session
+  that received Bind/Execute but never Sync would hold the lock with no
+  timer. A simple `Query` is one message, and a message delivered in part
+  leaves the timer armed. New proxy test (§ 6.3, test 3).
+- § 5.2.1: the early-session-end overlap is ≤ `2 × ping_timeout +
+  retry_interval` (15 s) with the leader task running — a successful answer
+  can arrive late — and never more than V (20 s); test 6 delays answers.
+- § 5.1 / G1: the takeover bound is from the backend's last idle start; from
+  the freeze, add the delivery delay of the one leader message that can be
+  in flight (bounded by the client kernel's TCP retransmission limit). Test 7
+  delays requests.
 
 **Revision 2 (2026-10-20, Codex review round 1, 10 findings, all verified
 against the code).**
@@ -115,7 +130,10 @@ Goals:
   the kubelet cannot restart the pod: PostgreSQL ends its session at most
   N = 30 s after the session last became idle, and a follower completes the
   takeover one attempt later (§ 5.1 gives the bound with attempt durations:
-  ~35 s typical, ≤ 55 s worst case).
+  ~35 s typical, ≤ 55 s worst case, from the session's last idle start; from
+  the freeze, add the delivery delay of a leader message already in flight
+  — milliseconds on a working network, bounded by the client kernel's TCP
+  retransmission limit on a degraded one).
 - G2. A replica never acts on a leadership belief older than V = 20 s. Two
   replicas never both read `is_leader() == true` when the takeover follows a
   lease expiry; when the old session ends early, the overlap is bounded
@@ -212,26 +230,45 @@ contract change.
 2. `SELECT set_config('idle_session_timeout', $1, false)` with
    `$1 = '30000ms'` — session scope (`is_local = false`), outside any
    transaction, a bound parameter (no dynamic SQL);
-3. `SELECT pg_try_advisory_lock($1), pg_backend_pid()`.
+3. `SELECT pg_try_advisory_lock(x'5354524D4C445201'::bigint),
+   pg_backend_pid()` — sent with the **simple query protocol**
+   (`sqlx::raw_sql`, a constant `&'static str`; a unit test checks that the
+   literal is `LEADER_LOCK_KEY`).
 
 The lease is set BEFORE the lock is taken, so there is no moment in which
 the session holds the lock without the lease, and a failure of step 2 never
 leaves a lock behind. A follower's short-lived attempt connection carries
 the lease too; it is closed right after the attempt either way.
 
-PostgreSQL semantics relied on (`idle_session_timeout`, PostgreSQL ≥ 14):
-the backend is terminated when it has waited for a client query, outside a
-transaction, for longer than the setting. The timer runs only while the
-backend is idle; an executing statement is outside it. Every statement the
-leader session runs (`set_config`, `pg_try_advisory_lock`, `SELECT 1`)
-completes in milliseconds and none waits on a lock, so the session is idle
-except for those milliseconds; the leader never opens a transaction on this
-connection. Termination is a `FATAL` (SQLSTATE `57P05`, "terminating
-connection due to idle-session timeout"); the backend exits and releases its
-session-level advisory locks whether or not the client reads the message
-(the message is ~100 bytes; the client's socket buffer cannot be full,
-because the client only ever sends tiny queries). A frozen leader's session
-therefore ends at most N after its last answered query.
+PostgreSQL semantics relied on (`idle_session_timeout`, PostgreSQL ≥ 14;
+`PostgresMain` in `src/backend/tcop/postgres.c`): the backend arms the idle
+timer when it is about to send ReadyForQuery outside a transaction block,
+keeps it armed while it reads the next message (`ReadCommand`, including a
+message that has arrived only in part), and disarms it once a whole message
+has been read. When the timer fires during that read, the backend ends the
+session with a `FATAL` (SQLSTATE `57P05`, "terminating connection due to
+idle-session timeout"), exits and releases its session-level advisory
+locks, whether or not the client reads the message (~100 bytes; the
+client's socket buffer cannot be full, because the client only ever sends
+tiny queries). An executing statement is outside the timer; every statement
+of the leader session completes in milliseconds and none waits on a lock.
+
+**Protocol rule: from the lock query on, the leader session sends only
+simple-protocol `Query` messages** (`sqlx::raw_sql`): the lock query and
+every ping (`SELECT 1`). The extended protocol (`sqlx::query`) sends one
+statement as several messages (Bind, Execute, Sync); between Execute and
+Sync the backend has sent no ReadyForQuery, so no idle timer is armed while
+it waits — a session whose Sync never arrives (a stalled intermediary
+keeping the connection open, a write cut short) would hold the lock with
+no lease. A simple `Query` is one message: before it is complete the timer
+is armed, after it the backend answers with ReadyForQuery and re-arms it.
+So at every moment after the lock is granted, the backend is executing a
+millisecond statement or waiting for a message with the idle timer armed.
+`set_config` (step 2) and the follower's holder report (§ 4.6) keep the
+extended protocol with bound parameters: neither runs while the session
+holds the lock. The leader never opens a transaction block on this
+connection. A frozen leader's session therefore ends at most N after the
+backend last became idle (the bound from the freeze is § 5.1).
 
 **PostgreSQL < 14.** `set_config` raises `undefined_object` (SQLSTATE
 `42704`, "unrecognized configuration parameter"). `apply_lease` maps exactly
@@ -275,7 +312,8 @@ and `is_leader()` becomes `true` again. Only a ping error, a ping timeout, a
 release or shutdown drops the connection.
 
 Every query on the leader connection gets a client-side bound: the ping
-`ping_timeout` (5 s), the whole acquire attempt `acquire_timeout` (10 s). A
+(`raw_sql("SELECT 1")`, § 4.2's protocol rule) `ping_timeout` (5 s), the
+whole acquire attempt `acquire_timeout` (10 s). A
 timed-out query leaves the sqlx connection in an unknown protocol state, so
 it is dropped; dropping it closes the socket. If the lock had been granted,
 PostgreSQL releases it when the backend sees the close, or at the latest
@@ -487,17 +525,28 @@ backend last became idle (just after answering its last ping).
   `i + N + acquire_timeout (an attempt that started just before and was
   refused) + retry_interval + acquire_timeout` — **≤ 55 s** worst case,
   **~35 s** typical (attempts of milliseconds).
-- Measured from the freeze, the bound is the same: `i` is at or before the
-  freeze, or milliseconds after it when a ping was in flight. The scheduler
-  stops firing from the freeze.
+- Measured from the freeze, add the delivery delay of the leader's message
+  in flight at the freeze, if any. The leader task has at most one message
+  outstanding (it waits for each answer before the next ping), and a frozen
+  process writes nothing new. A message that arrives only in part does not
+  re-arm the timer (§ 4.2). A whole message that arrives late does: it
+  restarts the idle interval at its arrival, so the session ends N after
+  that. The delay is milliseconds on a working network; on a degraded one
+  it is at most the client kernel's retransmission limit for unacknowledged
+  data (Linux `tcp_retries2 = 15`, about 15.5 min), after which the client
+  kernel abandons the connection and the message never arrives. So: ≤ 55 s
+  after the freeze on a working network, ≤ ~16.5 min in the worst case of a
+  degraded one (today: unbounded — 16.5 h in the incident). A per-socket
+  `TCP_USER_TIMEOUT` would shorten the worst case; sqlx's `PgConnectOptions`
+  does not expose it — accepted. The scheduler stops firing from the freeze.
 
 | Scenario | Before | After |
 |---|---|---|
-| Leader process frozen (SIGSTOP, cgroup freeze, CPU starvation, node hang), kernel answers TCP (this incident) | lock held until the node dies (16.5 h) | session ended ≤ 30 s after its last idle start; takeover ≤ 55 s (§ above). On thaw the ex-leader reads `is_leader() == false` (validity lapsed ≤ 20 s after its last ping was sent); its next ping fails; it stays follower |
+| Leader process frozen (SIGSTOP, cgroup freeze, CPU starvation, node hang), kernel answers TCP (this incident) | lock held until the node dies (16.5 h) | session ended ≤ 30 s after its last idle start; takeover ≤ 55 s after it (from the freeze: § above). On thaw the ex-leader reads `is_leader() == false` (validity lapsed ≤ 20 s after its last ping was sent); its next ping fails; it stays follower |
 | Network to the DB silently dropped (half-open: the DB host or an intermediary keeps the session) | DB closes by keepalive after ~6 min (if probes are not ACKed); ex-leader's ping hangs ~15 min with `is_leader()` true → minutes of overlap | ex-leader: ping times out at 5 s, validity cleared; session: ended by the lease 30 s after its last idle start; no overlap |
 | Leader crawling: leader task pings < 30 s apart but a gated loop does not come round | lock held while the process lives | loop `Stalled` (scheduler: 300 s), then held for `release_after` → release (§ 4.4 timing) → follower acquires one attempt later |
 | Leader crawling: pings < 30 s apart, loops beat within their thresholds | lock held, work slow | unchanged: slow but making progress is not a failure this design detects |
-| Session ended early (administrator `pg_terminate_backend`, connection reset) | ex-leader detects on its next ping (≤ 5 s + an unbounded ping) | detected on the next ping (≤ `retry_interval + ping_timeout`); overlap bounded, § 5.2.1 |
+| Session ended early (administrator `pg_terminate_backend`, connection reset) | ex-leader detects on its next ping (≤ 5 s + an unbounded ping) | detected on the next failing ping; overlap ≤ 15 s, never more than V = 20 s (§ 5.2.1) |
 | DB restart / failover | sessions die, ping errors, followers race to reacquire | unchanged (with the § 5.2.1 bound) |
 | Healthy leader, its runtime starved 20–30 s | n/a | `is_leader()` false for the starved stretch, lock kept; next successful ping restores it. Scheduler triggers that came due in the stretch are advanced as by a follower (missed) |
 | Healthy leader, runtime starved > 30 s | n/a | session ended; failover (the frozen-leader outcome) |
@@ -524,16 +573,24 @@ lifetime from above; nothing stops it ending sooner — `pg_terminate_backend`
 by an administrator, a connection reset, a database restart. A follower can
 then acquire within one attempt while the old leader still holds a validity
 deadline up to V in the future. The old leader learns of the loss only on
-its next ping (sqlx delivers nothing between queries). Overlap:
+its next ping (sqlx delivers nothing between queries). Let `E` be the
+moment the session ended. Overlap:
 
-- leader task running: ≤ `retry_interval + ping_timeout` (10 s) — the next
-  ping fails or times out and clears validity;
-- leader task also stalled: ≤ V (20 s), the validity deadline.
+- **hard cap V (20 s), in every case.** A query sent after `E` cannot
+  succeed, so the newest validity deadline comes from a query sent before
+  `E`: `valid_until ≤ E + V`. This covers a late successful acquire answer
+  too (its deadline is the lock query's send time + V).
+- **leader task running: ≤ `2 × ping_timeout + retry_interval` (15 s).** The
+  answer to a ping sent before `E` can still arrive, successful, up to
+  `ping_timeout` after `E`; the next ping is sent `retry_interval` later and
+  fails or times out within `ping_timeout`, clearing validity. With a prompt
+  network it is ≈ `retry_interval` (5 s).
 
 Today the same overlap exists, ≤ `retry_interval` plus an unbounded ping.
 Closing it would need the leader to learn of the session's end without
 sending a query (a pending read on the socket), which sqlx's `PgConnection`
-does not offer; accepted. A test pins the 10 s bound (§ 6.3, test 4).
+does not offer; accepted. Tests pin both the prompt and the delayed-answer
+bound (§ 6.3, tests 5 and 6).
 
 Requirement on the clock: it must advance while the process is frozen.
 Linux `CLOCK_MONOTONIC` (Rust's `Instant`) advances during SIGSTOP, cgroup
@@ -603,7 +660,7 @@ small per handover.
 Followers advance triggers without firing. A trigger that comes due between
 the moment the old leader stops firing and the moment the new leader
 acquires is never fired by anyone: after a frozen leader, from the freeze to
-the takeover (§ 5.1, ≤ 55 s); after a stalled scheduler, the stall plus
+the takeover (§ 5.1: ≤ 55 s on a working network); after a stalled scheduler, the stall plus
 `release_after` plus one attempt. Today: the whole outage (16.5 h). Replay
 stays an open TODO item.
 
@@ -634,18 +691,22 @@ the user before changing that test. `docker-compose.yml` (e2e) already uses
 ### 6.3 Integration tests (`crates/stroem-server/tests/ha_test.rs`)
 
 All `#[serial]` with the existing leader tests. Test timing through
-`start_with`: `retry_interval` 200 ms, `ping_timeout` 300 ms,
-`acquire_timeout` 1 s, `validity` 1.5 s, `lease` 2.5 s, `release_after`
-600 ms (invariants: 2 × 0.3 + 0.2 = 0.8 < 1.5 < 2.5; 2.5 ≥ 0.6). Two
-test-only hooks (`#[doc(hidden)] pub`):
+`start_with`: `retry_interval` 200 ms, `ping_timeout` 500 ms,
+`acquire_timeout` 1.5 s, `validity` 1.5 s, `lease` 2.5 s, `release_after`
+600 ms (invariants: 2 × 0.5 + 0.2 = 1.2 < 1.5 < 2.5; 2.5 ≥ 0.6). Test-only
+tools:
 
-- `pause_for_test(&self, paused: bool)`: the leader loop skips its
-  iterations — no ping, no acquire — which is what PostgreSQL sees from a
-  frozen process with a working network.
-- the test-side frozen TCP proxy: a small tokio proxy in the test file
-  between one replica and PostgreSQL that can stop forwarding while keeping
-  both sockets open — what the incident's node did (kernel keeps the
-  session; nothing moves).
+- `LeaderElection::pause_for_test(&self, paused: bool)`
+  (`#[doc(hidden)] pub`): the leader loop skips its iterations — no ping, no
+  acquire — which is what PostgreSQL sees from a frozen process with a
+  working network.
+- A TCP proxy in the test file (tokio, one task per direction) between one
+  replica and PostgreSQL, controlled per direction: forward; **freeze**
+  (stop forwarding, keep both sockets open — what the incident's node did);
+  **delay** each chunk by `d`; **cut** the next client→server chunk after
+  `k` bytes and then freeze that direction (a message delivered in part).
+  The leader sends one message per write, so "the next chunk" is the next
+  ping.
 
 Tests:
 
@@ -654,34 +715,54 @@ Tests:
    N + 2 × `acquire_timeout` + `retry_interval` + 1 s; sampled every 20 ms,
    A and B are never both `true`. Then resume A: for 2 s A reads `false` at
    every sample and B `true` (thawed ex-leader).
-2. `partitioned_leader_loses_lock_to_follower_after_lease` (proxy): A
-   through the proxy, B direct. Freeze the proxy: A's ping times out and A
-   reads `false` within `ping_timeout` + `retry_interval` + 0.5 s; A's
-   backend stays alive until the lease ends it; B acquires; never both
+2. `partitioned_leader_loses_lock_to_follower_after_lease` (proxy freeze,
+   both directions): A through the proxy, B direct. A's ping times out and
+   A reads `false` within `ping_timeout` + `retry_interval` + 0.5 s; A's
+   backend stays alive (A's dropped socket does not pass the frozen proxy)
+   until the lease ends it; B acquires within the test-1 bound; never both
    `true`.
-3. `healthy_leader_keeps_lock_past_lease`: A leads for 3 × N; the holder
+3. `partial_ping_message_does_not_stop_the_lease` (proxy cut): A through
+   the proxy, B direct; cut A's next ping after 5 of its bytes (inside the
+   `Query` message). The backend waits mid-message with the idle timer
+   armed: B acquires within the test-1 bound. This is the message-aware
+   check of § 4.2's protocol rule; a variant with the extended protocol
+   (Bind/Execute delivered, Sync withheld) is not part of the suite —
+   `raw_sql` is the guard, and the variant would only demonstrate
+   PostgreSQL's behaviour, which § 4.2 cites.
+4. `healthy_leader_keeps_lock_past_lease`: A leads for 3 × N; the holder
    pid (from `lock_holder`) never changes; B never reads `true`.
-4. `early_session_end_overlap_is_bounded`: A leads, B follows;
-   `pg_terminate_backend` A's backend (by pid from `lock_holder`); B
+5. `early_session_end_overlap_is_bounded`: A leads, B follows;
+   `pg_terminate_backend` A's backend (pid from `lock_holder`); B
    acquires; A reads `false` no later than `retry_interval + ping_timeout`
    + 0.5 s after the termination.
-5. `lease_setup_maps_unrecognized_parameter_to_unsupported`: `apply_lease`
+6. `early_session_end_with_late_answers_is_bounded` (proxy delay on the
+   server→client direction, `d` = 350 ms < `ping_timeout`): A leads through
+   the proxy, pings still succeed; terminate A's backend; A reads `false`
+   no later than `2 × ping_timeout + retry_interval` + 0.5 s after the
+   termination, and never later than V + 0.5 s.
+7. `delayed_ping_extends_the_session_by_one_lease_only` (proxy delay on the
+   client→server direction, `d` = 300 ms < `ping_timeout`, so A's pings
+   still succeed and one is usually queued in the proxy when A is paused):
+   pause A; B acquires within `d` + N + 2 × `acquire_timeout` +
+   `retry_interval` + 1 s of the pause — the § 5.1 bound from the freeze
+   with a delivery delay of `d`.
+8. `lease_setup_maps_unrecognized_parameter_to_unsupported`: `apply_lease`
    with a non-existent parameter name on PostgreSQL 15 returns
    `Unsupported` — the real server error code; with `idle_session_timeout`
    it returns `Enforced` and `SHOW idle_session_timeout` on that connection
    reads the value set.
-6. `stalled_loop_releases_lock_after_persistence_and_blocks_reacquire`: A
+9. `stalled_loop_releases_lock_after_persistence_and_blocks_reacquire`: A
    with a probe backed by an `AtomicBool`; set it → A keeps the lock for at
    least `release_after`, then releases; B acquires; while the flag is set A
    never reads `true`, even after B is cancelled; clear it → A acquires.
    A flag set for less than `release_after` and then cleared → no release.
-7. `follower_reports_lock_holder`: `lock_holder` on another connection
-   returns A's backend pid with `application_name = stroem-leader`.
-8. Scheduler startup beat: not covered by a test. `load_triggers` reads
-   the published in-memory snapshots (`WorkspaceManager::get_config`) and
-   cannot be made to block without a test-only hook in the workspace
-   manager; the change is one statement before that call, checked in
-   review.
+10. `follower_reports_lock_holder`: `lock_holder` on another connection
+    returns A's backend pid with `application_name = stroem-leader`.
+11. Scheduler startup beat: not covered by a test. `load_triggers` reads
+    the published in-memory snapshots (`WorkspaceManager::get_config`) and
+    cannot be made to block without a test-only hook in the workspace
+    manager; the change is one statement before that call, checked in
+    review.
 
 Existing tests keep the default timing and must pass unchanged.
 
