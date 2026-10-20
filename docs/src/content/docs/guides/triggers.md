@@ -73,7 +73,7 @@ Every trigger shows its **last run**. A scheduler trigger can also show **missed
 
 **Missed runs.** For an enabled scheduler trigger, a run is missed when a scheduled fire time:
 
-- is later than the trigger's newest job of any status (a `skipped` row counts, because it proves the scheduler fired), and
+- is more than 60 seconds later than the trigger's newest job of any status (a `skipped` row counts, because it proves the scheduler fired; the 60 seconds absorb a small clock difference between the server and the database), and
 - is at least 5 minutes in the past, and
 - has no job.
 

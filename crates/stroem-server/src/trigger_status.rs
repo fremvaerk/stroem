@@ -17,6 +17,9 @@ use uuid::Uuid;
 
 /// A fire later than this after its scheduled time still counts as on time.
 pub const MISSED_GRACE_SECS: i64 = 300;
+/// The DB stamps `created_at` and the scheduler fires by its own clock, so a
+/// fire may be recorded slightly before its occurrence.
+pub const MISSED_SKEW_TOLERANCE_SECS: i64 = 60;
 /// Counting stops here; the UI shows `1000+`.
 pub const MISSED_CAP: u32 = 1000;
 
@@ -167,11 +170,13 @@ pub async fn attach_run_status(
         )) = shown
         {
             let hidden = match (viewer, ws, task) {
+                (None, _, _) => false,
                 (Some(viewer), Some(ws), Some(task)) => {
                     let path = job_coords_task_path(state, ws, task, git_ref, folder).await;
                     denied(state, viewer, ws, &path)
                 }
-                _ => false,
+                // Missing coordinates: the ACL path is unknown, so hide.
+                (Some(_), _, _) => true,
             };
             if hidden {
                 item.info.last_run_hidden = true;
@@ -240,7 +245,7 @@ pub fn source_type_of(def: &TriggerDef) -> &'static str {
     }
 }
 
-/// Scheduled occurrences `t` with `last_fire < t <= now - grace`.
+/// Scheduled occurrences `t` with `last_fire + tolerance < t <= now - grace`.
 /// `None` for an unparsable cron or when there is none.
 pub fn missed_runs(
     cron: &str,
@@ -254,10 +259,11 @@ pub fn missed_runs(
         .unwrap_or(chrono_tz::UTC);
     let limit = now - Duration::seconds(MISSED_GRACE_SECS);
 
-    let mut prev = last_fire;
+    let from = last_fire + Duration::seconds(MISSED_SKEW_TOLERANCE_SECS);
+    let mut prev = from;
     let mut first = None;
     let mut count: u32 = 0;
-    for dt in cron.iter_after(last_fire.with_timezone(&tz)) {
+    for dt in cron.iter_after(from.with_timezone(&tz)) {
         let utc = dt.with_timezone(&Utc);
         // A DST gap or overlap can repeat or reorder local times.
         if utc <= prev {

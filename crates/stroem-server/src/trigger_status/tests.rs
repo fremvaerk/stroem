@@ -66,13 +66,13 @@ fn count_stops_at_the_cap() {
     let r = missed_runs("* * * * * *", None, last, last + Duration::hours(2)).unwrap();
     assert_eq!(r.count, 1000);
     assert!(r.capped);
-    assert_eq!(r.first, last + Duration::seconds(1));
+    assert_eq!(r.first, last + Duration::seconds(61));
 }
 
 #[test]
 fn six_field_cron_is_accepted() {
     let last = t("2026-10-20T00:00:00Z");
-    let r = missed_runs("*/10 * * * * *", None, last, last + Duration::minutes(6)).unwrap();
+    let r = missed_runs("*/10 * * * * *", None, last, last + Duration::minutes(7)).unwrap();
     assert_eq!(r.count, 6);
 }
 
@@ -264,4 +264,28 @@ fn attention_order() {
 fn hidden_failed_run_is_not_last_run_failed() {
     let item = attention_item("a", true, None, true, Some(1));
     assert!(!last_run_failed(&item));
+}
+
+#[test]
+fn fire_recorded_just_before_its_occurrence_is_not_missed() {
+    let r = missed_runs(
+        "0 1 * * *",
+        None,
+        t("2026-10-19T00:59:59.990Z"),
+        t("2026-10-19T09:00:00Z"),
+    );
+    assert_eq!(r, None);
+}
+
+#[test]
+fn occurrence_beyond_the_tolerance_is_still_missed() {
+    let r = missed_runs(
+        "0 1 * * *",
+        None,
+        t("2026-10-19T00:58:59Z"),
+        t("2026-10-19T09:00:00Z"),
+    )
+    .unwrap();
+    assert_eq!(r.count, 1);
+    assert_eq!(r.first, t("2026-10-19T01:00:00Z"));
 }

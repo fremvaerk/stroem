@@ -100,7 +100,7 @@ pub fn compute_next_runs(trigger: &TriggerDef, count: usize) -> Vec<DateTime<Utc
 }
 
 /// GET /api/workspaces/:ws/triggers — List all triggers in a workspace
-#[tracing::instrument(skip(state))]
+#[tracing::instrument(skip(state, auth_user))]
 pub async fn list_triggers(
     State(state): State<Arc<AppState>>,
     auth_user: Option<AuthUser>,
