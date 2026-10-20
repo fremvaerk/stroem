@@ -110,17 +110,22 @@ impl Default for LeaderTiming {
     }
 }
 
+/// Caps of the values derived from the lease (spec § 4.1): they detect a
+/// broken connection and pace the follower, independent of the lease.
+const MAX_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+const MAX_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(10);
+
 impl LeaderTiming {
-    /// Derive the timing from the lease (spec § 4.1), in whole milliseconds,
-    /// with no caps: retry and ping timeout `lease/6`, acquire timeout
-    /// `lease/3`, validity `2 × lease/3`.
+    /// Derive the timing from the lease (spec § 4.1), in whole milliseconds:
+    /// retry and ping timeout `min(lease/6, 5 s)`, acquire timeout
+    /// `min(lease/3, 10 s)`, validity `2 × lease/3`.
     pub fn from_lease(lease: Duration, release_after: Option<Duration>) -> Self {
         let ms = u64::try_from(lease.as_millis()).unwrap_or(u64::MAX);
-        let sixth = Duration::from_millis(ms / 6);
+        let sixth = Duration::from_millis(ms / 6).min(MAX_RETRY_INTERVAL);
         Self {
             retry_interval: sixth,
             ping_timeout: sixth,
-            acquire_timeout: Duration::from_millis(ms / 3),
+            acquire_timeout: Duration::from_millis(ms / 3).min(MAX_ACQUIRE_TIMEOUT),
             validity: Duration::from_millis(ms.saturating_mul(2) / 3),
             lease,
             release_after,
@@ -811,7 +816,7 @@ mod tests {
     }
 
     #[test]
-    fn from_lease_scales_every_value_with_the_lease() {
+    fn from_lease_scales_below_30s_and_caps_above() {
         let ms = Duration::from_millis;
         let short = LeaderTiming::from_lease(Duration::from_secs(10), None);
         assert_eq!(short.retry_interval, ms(1666));
@@ -827,10 +832,10 @@ mod tests {
         );
 
         let long = LeaderTiming::from_lease(Duration::from_secs(3600), Some(ms(60_000)));
-        // No caps (spec revision 7): everything scales with the lease.
-        assert_eq!(long.retry_interval, Duration::from_secs(600));
-        assert_eq!(long.ping_timeout, Duration::from_secs(600));
-        assert_eq!(long.acquire_timeout, Duration::from_secs(1200));
+        // The caps (spec § 4.1): only the validity scales past 30 s.
+        assert_eq!(long.retry_interval, Duration::from_secs(5));
+        assert_eq!(long.ping_timeout, Duration::from_secs(5));
+        assert_eq!(long.acquire_timeout, Duration::from_secs(10));
         assert_eq!(long.validity, Duration::from_secs(2400));
         assert_eq!(long.lease, Duration::from_secs(3600));
         assert_eq!(long.release_after, Some(ms(60_000)));
