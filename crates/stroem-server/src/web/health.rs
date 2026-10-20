@@ -1,4 +1,6 @@
-use crate::state::AppState;
+use crate::config::ServerConfig;
+use crate::leader::FitnessProbe;
+use crate::state::{AppState, BackgroundTasks};
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use serde_json::json;
 use std::sync::{atomic::Ordering, Arc};
@@ -40,10 +42,15 @@ struct TaskReport {
     started: bool,
 }
 
+fn recovery_stall_secs(config: &ServerConfig) -> u64 {
+    RECOVERY_STALL_FLOOR_SECS.max(config.recovery.sweep_interval_secs.saturating_mul(5))
+}
+
 fn background_report(state: &AppState) -> [TaskReport; 3] {
-    let bg = &state.background_tasks;
-    let recovery_stall =
-        RECOVERY_STALL_FLOOR_SECS.max(state.config.recovery.sweep_interval_secs.saturating_mul(5));
+    background_report_of(&state.background_tasks, recovery_stall_secs(&state.config))
+}
+
+fn background_report_of(bg: &BackgroundTasks, recovery_stall: u64) -> [TaskReport; 3] {
     [
         (
             "scheduler",
@@ -72,6 +79,24 @@ fn background_report(state: &AppState) -> [TaskReport; 3] {
             started: age.is_some(),
         }
     })
+}
+
+/// The first leader-gated loop that is `Stalled` — the rule `/livez` fails on.
+/// `Stopped` loops are left out on purpose (spec 2026-10-20 § 4.4).
+fn stalled_loop(bg: &BackgroundTasks, recovery_stall: u64) -> Option<&'static str> {
+    background_report_of(bg, recovery_stall)
+        .into_iter()
+        .find(|t| t.health == TaskHealth::Stalled)
+        .map(|t| t.name)
+}
+
+/// The leader's fitness probe: names a stalled leader-gated loop, so the
+/// leader releases the lock instead of holding it for a process that does no
+/// leader work (`LeaderElection::set_fitness_probe`).
+pub fn leader_fitness_probe(state: &AppState) -> FitnessProbe {
+    let bg = state.background_tasks.clone();
+    let recovery_stall = recovery_stall_secs(&state.config);
+    Arc::new(move || stalled_loop(&bg, recovery_stall))
 }
 
 async fn db_ok(state: &AppState) -> bool {
@@ -199,7 +224,7 @@ pub async fn healthz_detail(State(state): State<Arc<AppState>>) -> impl IntoResp
 
 #[cfg(test)]
 mod tests {
-    use super::{task_health, TaskHealth};
+    use super::{stalled_loop, task_health, TaskHealth, SCHEDULER_STALL_SECS};
     use crate::state::{BackgroundTasks, Heartbeat};
     use std::time::Duration;
 
@@ -229,6 +254,36 @@ mod tests {
         assert_eq!(task_health(true, Some(301), 300), TaskHealth::Stalled);
         assert_eq!(task_health(true, Some(300), 300), TaskHealth::Ok);
         assert_eq!(task_health(true, Some(0), 300), TaskHealth::Ok);
+    }
+
+    #[test]
+    fn test_stalled_loop_names_the_stalled_gated_loop() {
+        let tasks = BackgroundTasks::new();
+        tasks.scheduler_alive.store(true, Ordering::Relaxed);
+        tasks.recovery_alive.store(true, Ordering::Relaxed);
+        tasks.event_source_alive.store(true, Ordering::Relaxed);
+        // Not started yet: healthy.
+        assert_eq!(stalled_loop(&tasks, 1800), None);
+        tasks.scheduler_beat.beat();
+        tasks.recovery_beat.beat();
+        tasks.event_source_beat.beat();
+        assert_eq!(stalled_loop(&tasks, 1800), None);
+        tasks
+            .scheduler_beat
+            .backdate(Duration::from_secs(SCHEDULER_STALL_SECS + 1));
+        assert_eq!(stalled_loop(&tasks, 1800), Some("scheduler"));
+    }
+
+    /// A loop that exited is not a reason to release the lock (spec § 4.4):
+    /// a released leader with a `Stopped` loop would pass `/livez` forever.
+    #[test]
+    fn test_stalled_loop_ignores_stopped_loops() {
+        let tasks = BackgroundTasks::new();
+        tasks
+            .recovery_beat
+            .backdate(Duration::from_secs(SCHEDULER_STALL_SECS * 100));
+        assert!(!tasks.recovery_alive.load(Ordering::Relaxed));
+        assert_eq!(stalled_loop(&tasks, 1800), None);
     }
 
     #[test]

@@ -85,6 +85,9 @@ async fn run_loop(state: AppState, cancel: CancellationToken) {
     let workspaces = &state.workspaces;
     tracing::info!("Scheduler started");
 
+    // Beat before the first load: a loop that hangs before its first beat
+    // would read as healthy forever (`task_health(true, None, _)`).
+    state.background_tasks.scheduler_beat.beat();
     let mut triggers = load_triggers(workspaces, None).await;
     tracing::info!("Scheduler loaded {} trigger(s)", triggers.len());
 

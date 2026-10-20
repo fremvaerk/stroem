@@ -318,6 +318,12 @@ async fn async_main(worker_threads: usize) -> Result<()> {
     .with_leader(leader)
     .with_event_bus(event_bus);
 
+    // A leader whose scheduler, recovery or event-source loop is stalled
+    // releases the lock (spec 2026-10-20 § 4.4).
+    state
+        .leader
+        .set_fitness_probe(stroem_server::web::health::leader_fitness_probe(&state));
+
     // Spawn the cross-replica NOTIFY listener now that AppState carries the
     // EventBus (the listener filters its own messages by replica_id).
     let _event_listener = stroem_server::events::start_listener(

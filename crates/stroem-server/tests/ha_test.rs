@@ -5,11 +5,12 @@
 //!
 //! - Leader election: only one `LeaderElection` instance holds the advisory
 //!   lock at a time; failover happens within seconds when the holder drops.
-//!   Postgres advisory locks are server-wide, not per-database — so every
-//!   test here that touches the real `LEADER_LOCK_KEY` is `#[serial]`,
-//!   serializing them against each other (and the metrics tests' `#[serial]`
-//!   ones, the same default key; not against the other tests of this
-//!   binary) within this one shared container.
+//!   Postgres advisory locks are per database, and every test has its own;
+//!   the tests that touch `LEADER_LOCK_KEY` are still `#[serial]` (against
+//!   each other and the metrics tests' `#[serial]` ones, the same default
+//!   key) because they measure timing that a parallel load would skew.
+//! - Leader lease, validity and self-release (`mod lease`): a leader that
+//!   stops working loses the lock in bounded time.
 //! - NOTIFY/LISTEN event bus: cancellation, log chunks, and workspace reloads
 //!   propagate from one replica to another via Postgres pub/sub.
 
@@ -1471,4 +1472,669 @@ async fn worker_log_post_reaches_ws_viewer_on_peer_replica() -> Result<()> {
 
     cancel.cancel();
     Ok(())
+}
+
+// ─── Leader lease, validity and self-release (spec 2026-10-20) ──────────────
+
+/// A leader that stops working must lose the lock in bounded time — prod
+/// 2026-10-19: a frozen node's kernel kept the leader session to RDS alive and
+/// no replica was leader for 16.5 h. Spec
+/// `docs/superpowers/specs/2026-10-20-leader-stale-lock-design.md` § 6.3.
+mod lease {
+    use super::{boot, wait_for};
+    use anyhow::Result;
+    use serial_test::serial;
+    use sqlx::{Connection, PgConnection, PgPool};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    use stroem_server::leader::{
+        apply_lease, lock_holder, LeaderElection, LeaderTiming, LeaseStatus, APPLICATION_NAME,
+    };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::watch;
+    use tokio::time::sleep;
+    use tokio_util::sync::CancellationToken;
+
+    /// Sub-second timing; `leader::tests::integration_test_timing_satisfies_the_invariants`
+    /// checks it against `LeaderTiming::check`.
+    fn fast() -> LeaderTiming {
+        LeaderTiming {
+            retry_interval: Duration::from_millis(200),
+            ping_timeout: Duration::from_millis(500),
+            acquire_timeout: Duration::from_millis(1500),
+            validity: Duration::from_millis(1500),
+            lease: Duration::from_millis(2500),
+            release_after: Duration::from_millis(600),
+        }
+    }
+
+    /// Takeover bound after the old session's last idle start (spec § 5.1),
+    /// plus 1 s of slack.
+    fn takeover_bound(t: &LeaderTiming) -> Duration {
+        t.lease + 2 * t.acquire_timeout + t.retry_interval + Duration::from_secs(1)
+    }
+
+    fn start(url: &str) -> (Arc<LeaderElection>, CancellationToken) {
+        let cancel = CancellationToken::new();
+        let (leader, _handle) = LeaderElection::start_with(url.to_string(), fast(), cancel.clone());
+        (leader, cancel)
+    }
+
+    /// A leads on `url_a`, then B starts on `url_b` and stays follower.
+    async fn leader_and_follower(
+        url_a: &str,
+        url_b: &str,
+    ) -> (
+        Arc<LeaderElection>,
+        CancellationToken,
+        Arc<LeaderElection>,
+        CancellationToken,
+    ) {
+        let (a, ca) = start(url_a);
+        assert!(
+            wait_for(Duration::from_secs(5), || a.is_leader()).await,
+            "A must acquire the lock"
+        );
+        let (b, cb) = start(url_b);
+        sleep(Duration::from_millis(800)).await;
+        assert!(a.is_leader() && !b.is_leader(), "A leads, B follows");
+        (a, ca, b, cb)
+    }
+
+    /// Poll every 20 ms until `done()` or `within` has passed; fail the test
+    /// if A and B are ever leader at the same time.
+    async fn wait_exclusive(
+        a: &LeaderElection,
+        b: &LeaderElection,
+        within: Duration,
+        mut done: impl FnMut() -> bool,
+    ) -> bool {
+        let deadline = Instant::now() + within;
+        loop {
+            assert!(
+                !(a.is_leader() && b.is_leader()),
+                "two replicas reported is_leader() at the same time"
+            );
+            if done() {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    async fn holder_pid(pool: &PgPool) -> Option<i32> {
+        let mut conn = pool.acquire().await.expect("pool connection");
+        lock_holder(&mut conn)
+            .await
+            .expect("read lock holder")
+            .map(|h| h.pid)
+    }
+
+    async fn backend_alive(pool: &PgPool, pid: i32) -> bool {
+        let (n,): (i64,) = sqlx::query_as("SELECT count(*) FROM pg_stat_activity WHERE pid = $1")
+            .bind(pid)
+            .fetch_one(pool)
+            .await
+            .expect("count backend");
+        n == 1
+    }
+
+    // ── A PostgreSQL-protocol-aware TCP proxy ──────────────────────────────
+
+    /// Controls of [`PgProxy`]. Acts on whole protocol messages, never on TCP
+    /// read chunks (TCP keeps no write boundaries).
+    struct ProxyCtl {
+        /// Stop forwarding in both directions; keep every socket open, also
+        /// when the client closes — what the incident's node did.
+        frozen: AtomicBool,
+        /// Hold each client `Q` message this long before forwarding it.
+        request_delay_ms: AtomicU64,
+        /// Hold the server's messages until this long after the `Z` (or end
+        /// of stream) that ends them.
+        answer_delay_ms: AtomicU64,
+        /// When > 0: forward only this many bytes of the next client `Q`
+        /// message, then freeze.
+        cut_next_query_after: AtomicUsize,
+        /// Barriers: counters bumped when a `Q` is held, an answer is held,
+        /// and when a `Q` was cut (`(cut after, message length)`).
+        query_held: watch::Sender<u64>,
+        answer_held: watch::Sender<u64>,
+        query_cut: watch::Sender<(usize, usize)>,
+    }
+
+    struct PgProxy {
+        port: u16,
+        ctl: Arc<ProxyCtl>,
+        accept: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for PgProxy {
+        fn drop(&mut self) {
+            self.accept.abort();
+        }
+    }
+
+    impl PgProxy {
+        async fn start(upstream: String) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind proxy");
+            let port = listener.local_addr().expect("proxy addr").port();
+            let ctl = Arc::new(ProxyCtl {
+                frozen: AtomicBool::new(false),
+                request_delay_ms: AtomicU64::new(0),
+                answer_delay_ms: AtomicU64::new(0),
+                cut_next_query_after: AtomicUsize::new(0),
+                query_held: watch::channel(0).0,
+                answer_held: watch::channel(0).0,
+                query_cut: watch::channel((0, 0)).0,
+            });
+            let accept_ctl = ctl.clone();
+            let accept = tokio::spawn(async move {
+                while let Ok((client, _)) = listener.accept().await {
+                    let ctl = accept_ctl.clone();
+                    let upstream = upstream.clone();
+                    tokio::spawn(async move {
+                        let Ok(server) = TcpStream::connect(&upstream).await else {
+                            return;
+                        };
+                        let (cr, cw) = client.into_split();
+                        let (sr, sw) = server.into_split();
+                        tokio::spawn(client_to_server(cr, sw, ctl.clone()));
+                        tokio::spawn(server_to_client(sr, cw, ctl));
+                    });
+                }
+            });
+            Self { port, ctl, accept }
+        }
+
+        /// `url` with its host and port replaced by the proxy, TLS off so
+        /// the proxy sees plain protocol messages.
+        fn url_for(&self, url: &str) -> String {
+            let (head, rest) = url.split_once('@').expect("URL has credentials");
+            let (_, path) = rest.split_once('/').expect("URL has a database");
+            let sep = if path.contains('?') { '&' } else { '?' };
+            format!("{head}@127.0.0.1:{}/{path}{sep}sslmode=disable", self.port)
+        }
+    }
+
+    /// `host:port` of the test database.
+    fn upstream_of(url: &str) -> String {
+        let (_, rest) = url.split_once('@').expect("URL has credentials");
+        rest.split_once('/')
+            .expect("URL has a database")
+            .0
+            .to_string()
+    }
+
+    /// One protocol message: `typed` = it starts with a type byte (every
+    /// message except the client's StartupMessage). `None` at end of stream.
+    async fn read_message(r: &mut OwnedReadHalf, typed: bool) -> Option<Vec<u8>> {
+        let header = if typed { 5 } else { 4 };
+        let mut msg = vec![0u8; header];
+        r.read_exact(&mut msg).await.ok()?;
+        let len = u32::from_be_bytes(msg[header - 4..].try_into().ok()?) as usize;
+        let mut body = vec![0u8; len.checked_sub(4)?];
+        r.read_exact(&mut body).await.ok()?;
+        msg.extend_from_slice(&body);
+        Some(msg)
+    }
+
+    async fn unfrozen(ctl: &ProxyCtl) {
+        while ctl.frozen.load(Ordering::SeqCst) {
+            sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    async fn client_to_server(mut r: OwnedReadHalf, mut w: OwnedWriteHalf, ctl: Arc<ProxyCtl>) {
+        let mut typed = false;
+        loop {
+            let Some(msg) = read_message(&mut r, typed).await else {
+                // Client closed: while frozen the server side stays open.
+                unfrozen(&ctl).await;
+                let _ = w.shutdown().await;
+                return;
+            };
+            let is_query = typed && msg[0] == b'Q';
+            typed = true;
+            unfrozen(&ctl).await;
+            if is_query {
+                let k = ctl.cut_next_query_after.swap(0, Ordering::SeqCst);
+                if k > 0 {
+                    assert!(
+                        k < msg.len(),
+                        "cut offset {k} not inside a {}-byte Q",
+                        msg.len()
+                    );
+                    let _ = w.write_all(&msg[..k]).await;
+                    let _ = w.flush().await;
+                    // Hold new connections too, so the cut replica cannot
+                    // simply reconnect.
+                    ctl.frozen.store(true, Ordering::SeqCst);
+                    ctl.query_cut.send_replace((k, msg.len()));
+                    // Keep both sockets open forever.
+                    std::future::pending::<()>().await;
+                }
+                let delay = ctl.request_delay_ms.load(Ordering::SeqCst);
+                if delay > 0 {
+                    ctl.query_held.send_modify(|n| *n += 1);
+                    sleep(Duration::from_millis(delay)).await;
+                }
+            }
+            if w.write_all(&msg).await.is_err() {
+                return;
+            }
+        }
+    }
+
+    async fn server_to_client(mut r: OwnedReadHalf, mut w: OwnedWriteHalf, ctl: Arc<ProxyCtl>) {
+        let mut held = Vec::new();
+        loop {
+            let msg = read_message(&mut r, true).await;
+            let delay = ctl.answer_delay_ms.load(Ordering::SeqCst);
+            let Some(msg) = msg else {
+                // End of stream (e.g. after a FATAL): released `delay` later.
+                if delay > 0 {
+                    sleep(Duration::from_millis(delay)).await;
+                }
+                unfrozen(&ctl).await;
+                let _ = w.write_all(&held).await;
+                let _ = w.shutdown().await;
+                return;
+            };
+            let ends_answer = msg[0] == b'Z';
+            held.extend_from_slice(&msg);
+            if delay > 0 && !ends_answer {
+                continue;
+            }
+            if delay > 0 {
+                ctl.answer_held.send_modify(|n| *n += 1);
+                sleep(Duration::from_millis(delay)).await;
+            }
+            unfrozen(&ctl).await;
+            if w.write_all(&held).await.is_err() {
+                return;
+            }
+            held.clear();
+        }
+    }
+
+    // ── Tests ────────────────────────────────────────────────────────────
+
+    /// Test 1: the leader task stops (frozen process, working network). A
+    /// stops reporting leader within `validity`; PostgreSQL ends A's idle
+    /// session after the lease; B takes over; the two never overlap; the
+    /// thawed A stays follower.
+    #[tokio::test]
+    #[serial]
+    async fn frozen_leader_loses_lock_to_follower_after_lease() -> Result<()> {
+        let h = boot().await?;
+        let t = fast();
+        let (a, ca, b, cb) = leader_and_follower(&h.url, &h.url).await;
+
+        a.pause_for_test(true);
+        let paused_at = Instant::now();
+        assert!(
+            wait_exclusive(&a, &b, t.validity + Duration::from_millis(500), || !a
+                .is_leader())
+            .await,
+            "a frozen leader must stop reporting leader within validity"
+        );
+        assert!(
+            wait_exclusive(&a, &b, takeover_bound(&t), || b.is_leader()).await,
+            "B must take over within the lease bound ({:?} since the pause)",
+            paused_at.elapsed()
+        );
+        assert!(
+            paused_at.elapsed() >= t.lease - t.retry_interval - t.ping_timeout,
+            "B must not take over before A's session could have expired"
+        );
+
+        // Thaw: A's next ping fails and A stays follower.
+        a.pause_for_test(false);
+        let until = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < until {
+            assert!(!a.is_leader(), "a thawed ex-leader must not report leader");
+            assert!(b.is_leader(), "B keeps the lock");
+            sleep(Duration::from_millis(20)).await;
+        }
+        ca.cancel();
+        cb.cancel();
+        Ok(())
+    }
+
+    /// Test 2: the network to the database goes silent while both ends keep
+    /// their sockets (the incident's shape). A's ping times out; its backend
+    /// lives on until the lease ends it; then B takes over.
+    #[tokio::test]
+    #[serial]
+    async fn partitioned_leader_loses_lock_to_follower_after_lease() -> Result<()> {
+        let h = boot().await?;
+        let t = fast();
+        let proxy = PgProxy::start(upstream_of(&h.url)).await;
+        let (a, ca, b, cb) = leader_and_follower(&proxy.url_for(&h.url), &h.url).await;
+        let pid_a = holder_pid(&h.pool).await.expect("A holds the lock");
+
+        proxy.ctl.frozen.store(true, Ordering::SeqCst);
+        let frozen_at = Instant::now();
+        assert!(
+            wait_exclusive(
+                &a,
+                &b,
+                t.ping_timeout + t.retry_interval + Duration::from_millis(500),
+                || !a.is_leader()
+            )
+            .await,
+            "A's ping must time out and clear its validity"
+        );
+        assert!(
+            backend_alive(&h.pool, pid_a).await,
+            "A dropped its socket, but the frozen proxy keeps A's session open"
+        );
+        assert!(
+            wait_exclusive(&a, &b, takeover_bound(&t), || b.is_leader()).await,
+            "B must take over once the lease ends A's session ({:?} since the freeze)",
+            frozen_at.elapsed()
+        );
+        assert!(
+            !backend_alive(&h.pool, pid_a).await,
+            "the lease must have ended A's session"
+        );
+        ca.cancel();
+        cb.cancel();
+        Ok(())
+    }
+
+    /// Test 3: a ping `Query` message that arrives only in part leaves the
+    /// idle-session timer armed (spec § 4.2's protocol rule).
+    #[tokio::test]
+    #[serial]
+    async fn partial_ping_message_does_not_stop_the_lease() -> Result<()> {
+        let h = boot().await?;
+        let t = fast();
+        let proxy = PgProxy::start(upstream_of(&h.url)).await;
+        let (a, ca, b, cb) = leader_and_follower(&proxy.url_for(&h.url), &h.url).await;
+
+        let mut cut = proxy.ctl.query_cut.subscribe();
+        proxy.ctl.cut_next_query_after.store(5, Ordering::SeqCst);
+        tokio::time::timeout(Duration::from_secs(3), cut.changed())
+            .await
+            .expect("A's next ping is cut")?;
+        let cut_at = Instant::now();
+        // "SELECT 1" as a Query: type byte, int32 length, the text and a NUL.
+        assert_eq!(*cut.borrow(), (5, 14), "cut inside A's ping message");
+
+        assert!(
+            wait_exclusive(&a, &b, takeover_bound(&t), || b.is_leader()).await,
+            "B must take over although A's backend waits mid-message ({:?} since the cut)",
+            cut_at.elapsed()
+        );
+        ca.cancel();
+        cb.cancel();
+        Ok(())
+    }
+
+    /// Test 4: a healthy leader keeps its session and lock across several
+    /// leases.
+    #[tokio::test]
+    #[serial]
+    async fn healthy_leader_keeps_lock_past_lease() -> Result<()> {
+        let h = boot().await?;
+        let t = fast();
+        let (a, ca, b, cb) = leader_and_follower(&h.url, &h.url).await;
+        let pid = holder_pid(&h.pool).await.expect("A holds the lock");
+
+        let until = Instant::now() + 3 * t.lease;
+        while Instant::now() < until {
+            assert!(a.is_leader(), "a healthy leader keeps reporting leader");
+            assert!(!b.is_leader(), "the follower never leads");
+            assert_eq!(
+                holder_pid(&h.pool).await,
+                Some(pid),
+                "the leader session is never replaced"
+            );
+            sleep(Duration::from_millis(250)).await;
+        }
+        ca.cancel();
+        cb.cancel();
+        Ok(())
+    }
+
+    /// Test 5: a session ended early (administrator, connection reset) lets B
+    /// take over at once; A notices on its next ping.
+    #[tokio::test]
+    #[serial]
+    async fn early_session_end_overlap_is_bounded() -> Result<()> {
+        let h = boot().await?;
+        let t = fast();
+        let (a, ca, b, cb) = leader_and_follower(&h.url, &h.url).await;
+        let pid = holder_pid(&h.pool).await.expect("A holds the lock");
+
+        sqlx::query("SELECT pg_terminate_backend($1)")
+            .bind(pid)
+            .execute(&h.pool)
+            .await?;
+        let ended_at = Instant::now();
+        assert!(
+            wait_for(
+                t.retry_interval + t.ping_timeout + Duration::from_millis(500),
+                || { !a.is_leader() }
+            )
+            .await,
+            "A must notice the ended session on its next ping"
+        );
+        assert!(
+            wait_for(takeover_bound(&t), || b.is_leader()).await,
+            "B takes over ({:?} after the termination)",
+            ended_at.elapsed()
+        );
+        ca.cancel();
+        cb.cancel();
+        Ok(())
+    }
+
+    /// Test 6: as test 5, but a successful answer sent before the
+    /// termination reaches A only afterwards. The overlap stays within
+    /// `2 × ping_timeout + retry_interval`, never past `validity`.
+    #[tokio::test]
+    #[serial]
+    async fn early_session_end_with_late_answers_is_bounded() -> Result<()> {
+        let h = boot().await?;
+        let t = fast();
+        let proxy = PgProxy::start(upstream_of(&h.url)).await;
+        let (a, ca, b, cb) = leader_and_follower(&proxy.url_for(&h.url), &h.url).await;
+        let pid = holder_pid(&h.pool).await.expect("A holds the lock");
+
+        let mut held = proxy.ctl.answer_held.subscribe();
+        proxy.ctl.answer_delay_ms.store(350, Ordering::SeqCst);
+        tokio::time::timeout(Duration::from_secs(3), held.changed())
+            .await
+            .expect("an answer to A is held")?;
+        sqlx::query("SELECT pg_terminate_backend($1)")
+            .bind(pid)
+            .execute(&h.pool)
+            .await?;
+        let ended_at = Instant::now();
+
+        let bound =
+            (2 * t.ping_timeout + t.retry_interval).min(t.validity) + Duration::from_millis(500);
+        assert!(
+            wait_for(bound, || !a.is_leader()).await,
+            "A must stop reporting leader within {bound:?} of the termination"
+        );
+        assert!(
+            wait_for(takeover_bound(&t), || b.is_leader()).await,
+            "B takes over ({:?} after the termination)",
+            ended_at.elapsed()
+        );
+        ca.cancel();
+        cb.cancel();
+        Ok(())
+    }
+
+    /// Test 7: a ping already on its way when A freezes restarts the idle
+    /// interval when it arrives — once (spec § 5.1, bound from the freeze).
+    #[tokio::test]
+    #[serial]
+    async fn delayed_ping_extends_the_session_by_one_lease_only() -> Result<()> {
+        let h = boot().await?;
+        let t = fast();
+        let delay = Duration::from_millis(300);
+        let proxy = PgProxy::start(upstream_of(&h.url)).await;
+        let (a, ca, b, cb) = leader_and_follower(&proxy.url_for(&h.url), &h.url).await;
+
+        let mut held = proxy.ctl.query_held.subscribe();
+        proxy
+            .ctl
+            .request_delay_ms
+            .store(delay.as_millis() as u64, Ordering::SeqCst);
+        tokio::time::timeout(Duration::from_secs(3), held.changed())
+            .await
+            .expect("a ping of A is held")?;
+        a.pause_for_test(true);
+        let paused_at = Instant::now();
+
+        // The held ping reaches PostgreSQL `delay` after the pause and
+        // restarts the idle interval there.
+        let earliest = delay + t.lease - Duration::from_millis(150);
+        assert!(
+            !wait_exclusive(&a, &b, earliest, || b.is_leader()).await,
+            "B took over {:?} after the pause, before the delayed ping's lease could end",
+            paused_at.elapsed()
+        );
+        assert!(
+            wait_exclusive(&a, &b, delay + takeover_bound(&t) - earliest, || b
+                .is_leader())
+            .await,
+            "B must take over within the bound from the freeze ({:?})",
+            paused_at.elapsed()
+        );
+        ca.cancel();
+        cb.cancel();
+        Ok(())
+    }
+
+    /// Test 8: the PostgreSQL < 14 fallback keys on the real server error for
+    /// an unknown parameter.
+    #[tokio::test]
+    #[serial]
+    async fn lease_setup_maps_unrecognized_parameter_to_unsupported() -> Result<()> {
+        let h = boot().await?;
+        let mut conn = PgConnection::connect(&h.url).await?;
+        let lease = Duration::from_millis(2500);
+        assert_eq!(
+            apply_lease(&mut conn, "stroem_no_such_parameter", lease).await?,
+            LeaseStatus::Unsupported
+        );
+        assert_eq!(
+            apply_lease(&mut conn, "idle_session_timeout", lease).await?,
+            LeaseStatus::Enforced
+        );
+        let (shown,): (String,) = sqlx::query_as("SHOW idle_session_timeout")
+            .fetch_one(&mut conn)
+            .await?;
+        assert_eq!(shown, "2500ms");
+        Ok(())
+    }
+
+    /// Test 9: a leader whose gated loop stays stalled for `release_after`
+    /// releases the lock and does not take it back while the stall lasts; a
+    /// shorter stall changes nothing.
+    #[tokio::test]
+    #[serial]
+    async fn stalled_loop_releases_lock_after_persistence_and_blocks_reacquire() -> Result<()> {
+        let h = boot().await?;
+        let t = fast();
+        let stalled = Arc::new(AtomicBool::new(false));
+        let (a, ca) = start(&h.url);
+        let flag = stalled.clone();
+        a.set_fitness_probe(Arc::new(move || {
+            flag.load(Ordering::SeqCst).then_some("scheduler")
+        }));
+        assert!(wait_for(Duration::from_secs(5), || a.is_leader()).await);
+        let (b, cb) = start(&h.url);
+        sleep(Duration::from_millis(800)).await;
+        assert!(a.is_leader() && !b.is_leader());
+
+        // A short stall: no release.
+        stalled.store(true, Ordering::SeqCst);
+        sleep(Duration::from_millis(250)).await;
+        stalled.store(false, Ordering::SeqCst);
+        let until = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < until {
+            assert!(
+                a.is_leader(),
+                "a stall shorter than release_after must not release"
+            );
+            sleep(Duration::from_millis(20)).await;
+        }
+
+        // A persistent stall: A keeps the lock for release_after, then lets go.
+        stalled.store(true, Ordering::SeqCst);
+        let stalled_at = Instant::now();
+        let hold = t.release_after - Duration::from_millis(100);
+        while stalled_at.elapsed() < hold {
+            assert!(a.is_leader(), "A keeps the lock until the stall persisted");
+            sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            wait_exclusive(
+                &a,
+                &b,
+                t.release_after + 2 * (t.retry_interval + t.ping_timeout),
+                || !a.is_leader()
+            )
+            .await,
+            "A must release once the stall persisted"
+        );
+        assert!(
+            wait_exclusive(&a, &b, Duration::from_secs(5), || b.is_leader()).await,
+            "B takes over after the release"
+        );
+
+        // While stalled, A does not take the lock even when it is free.
+        cb.cancel();
+        let until = Instant::now() + Duration::from_millis(1500);
+        while Instant::now() < until {
+            assert!(!a.is_leader(), "a stalled replica must not acquire");
+            sleep(Duration::from_millis(20)).await;
+        }
+        stalled.store(false, Ordering::SeqCst);
+        assert!(
+            wait_for(Duration::from_secs(5), || a.is_leader()).await,
+            "A acquires once its loops make progress again"
+        );
+        ca.cancel();
+        Ok(())
+    }
+
+    /// Test 10: followers can name the session holding the lock.
+    #[tokio::test]
+    #[serial]
+    async fn follower_reports_lock_holder() -> Result<()> {
+        let h = boot().await?;
+        let mut conn = PgConnection::connect(&h.url).await?;
+        assert_eq!(lock_holder(&mut conn).await?, None, "nobody holds it yet");
+
+        let (a, ca) = start(&h.url);
+        assert!(wait_for(Duration::from_secs(5), || a.is_leader()).await);
+        let holder = lock_holder(&mut conn).await?.expect("A holds the lock");
+        assert_eq!(holder.application_name.as_deref(), Some(APPLICATION_NAME));
+        assert!(
+            holder.backend_start.is_some(),
+            "same role: the row is visible"
+        );
+        let (app,): (String,) =
+            sqlx::query_as("SELECT application_name FROM pg_stat_activity WHERE pid = $1")
+                .bind(holder.pid)
+                .fetch_one(&mut conn)
+                .await?;
+        assert_eq!(app, APPLICATION_NAME);
+        ca.cancel();
+        Ok(())
+    }
 }

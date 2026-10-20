@@ -46,7 +46,7 @@ pub struct Heartbeat(AtomicI64);
 
 const NEVER: i64 = i64::MIN;
 
-fn monotonic_ms() -> i64 {
+pub(crate) fn monotonic_ms() -> i64 {
     static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
     let epoch = *EPOCH.get_or_init(std::time::Instant::now);
     i64::try_from(epoch.elapsed().as_millis()).unwrap_or(i64::MAX)
