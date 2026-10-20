@@ -33,3 +33,4 @@ mod rerun_integration_test;
 mod restart_integration_test;
 mod s3_integration_test;
 mod state_upload_test;
+mod trigger_status_test;

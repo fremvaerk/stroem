@@ -274,12 +274,23 @@ pub async fn get_task(
         None
     };
 
-    let triggers: Vec<TriggerInfo> = workspace
+    let viewer = crate::trigger_status::viewer_for(&state, &auth_user).await?;
+    let triggers_enabled = state.workspaces.triggers_enabled(&ws);
+    let mut trigger_items: Vec<crate::trigger_status::TriggerStatusItem> = workspace
         .triggers
         .iter()
         .filter(|(_, t)| t.task() == name)
-        .map(|(trig_name, trigger)| TriggerInfo::from_def(trig_name, trigger, 5))
+        .map(
+            |(trig_name, trigger)| crate::trigger_status::TriggerStatusItem {
+                workspace: ws.clone(),
+                fires_here: trigger.enabled() && triggers_enabled,
+                def: trigger.clone(),
+                info: TriggerInfo::from_def(trig_name, trigger, 5),
+            },
+        )
         .collect();
+    crate::trigger_status::attach_run_status(&state, viewer.as_ref(), &mut trigger_items).await?;
+    let triggers: Vec<TriggerInfo> = trigger_items.into_iter().map(|i| i.info).collect();
 
     // Build connections map keyed by each input's `type:` AS WRITTEN (the UI
     // looks the list up by the field's own type string). Candidates are every
