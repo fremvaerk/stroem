@@ -97,6 +97,27 @@ export interface TriggerInfo {
   enabled: boolean;
   input: Record<string, unknown>;
   next_runs: string[];
+  last_run?: TriggerLastRun | null;
+  last_run_hidden?: boolean;
+  missed?: MissedRuns | null;
+}
+
+export interface TriggerLastRun {
+  job_id: string;
+  created_at: string;
+  status: string;
+  retry_job_id?: string;
+}
+
+export interface MissedRuns {
+  count: number;
+  capped: boolean;
+  first: string;
+}
+
+export interface AttentionTrigger extends TriggerInfo {
+  workspace: string;
+  last_run_failed: boolean;
 }
 
 export interface TaskDetail {

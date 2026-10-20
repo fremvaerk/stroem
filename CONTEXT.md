@@ -38,8 +38,10 @@ holds what the words mean. Keep both in sync when a term is added or sharpened.
 - **Full read** — the whole log as an NDJSON stream (`?full=true`); for a finished job the in-memory union of local and archive while it fits `merge_max_bytes`/`merge_max_lines`, else one source.
 - **Log source** — which source answered a read: `local`, `archive`, `merged` or `none` (`X-Stroem-Log-Source`).
 - **Native value** — the value a `json` input field takes from a string that is exactly one `{{ expression }}`: the expression's JSON value (object, array, number, …), not its rendered text.
-
-See `CLAUDE.md` for how these pieces fit together (architecture, conventions, key patterns).
+- **Last fire** — the newest job of a trigger, of any status including `skipped`. A `skipped` row proves the scheduler fired, so the Last fire is the base of the Missed run mark. The "last run" the UI shows ignores `skipped` rows.
+- **Missed run** — a scheduled fire time that is later than the trigger's Last fire (the first such time is skipped when it is less than 1 second after the Last fire: the clock tolerance), at least the grace period (5 minutes) in the past, and has no job. Counted only for enabled scheduler triggers that fire on this server; only the trigger's own next run clears it.
 - **Leader lease** — the `idle_session_timeout` (`leader.lease_secs`, default 30 s; every other leader timing is derived from it) carried by the session that holds the leader lock: PostgreSQL ends a leader session that has sent nothing for that long, which frees the lock even when the leader's node keeps the TCP session alive. Needs PostgreSQL ≥ 14. Spec `docs/superpowers/specs/2026-10-20-leader-stale-lock-design.md`.
 - **Leader validity** — how long a replica may act as leader after its last successful ping was sent (2/3 of the lease, default 20 s): `LeaderElection::is_leader()` is false once it lapses, even if no ping has failed yet.
 - **Self-release** — the leader dropping the lock because one of its leader-gated loops (scheduler, recovery, event source) has been unfit — `Stalled`, or ran and then exited (`Stopped`) — for `leader.self_release_after_secs` (default 30 s, `0` = off); it does not try to become leader again while that lasts (a `Stopped` loop lasts until the process restarts).
+
+See `CLAUDE.md` for how these pieces fit together (architecture, conventions, key patterns).

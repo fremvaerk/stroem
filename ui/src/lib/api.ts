@@ -2,6 +2,7 @@ import type {
   WorkspaceInfo,
   TaskListItem,
   TaskDetail,
+  AttentionTrigger,
   TriggerInfo,
   JobListItem,
   JobDetail,
@@ -303,6 +304,10 @@ export async function listTriggers(
   return apiFetch<TriggerInfo[]>(
     `/api/workspaces/${encodeURIComponent(workspace)}/triggers`,
   );
+}
+
+export async function listAttentionTriggers(): Promise<AttentionTrigger[]> {
+  return apiFetch<AttentionTrigger[]>("/api/triggers/attention");
 }
 
 // Stats

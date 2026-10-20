@@ -339,3 +339,23 @@ async fn test_051_052_templated_refs_schema() -> Result<()> {
     assert!(valid(pool.clone()).await);
     Ok(())
 }
+
+/// Migration 053: the two partial indexes behind the trigger last-run lookup.
+#[tokio::test]
+async fn test_053_trigger_run_indexes() -> Result<()> {
+    let pool = setup_db().await?;
+    let defs: Vec<(String, String)> = sqlx::query_as(
+        "SELECT indexname::text, indexdef FROM pg_indexes WHERE tablename = 'job' \
+         AND indexname IN ('idx_job_trigger_runs', 'idx_job_trigger_skipped') ORDER BY indexname",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(defs.len(), 2);
+    assert!(
+        defs[0].1.contains("'_fingerprint'") && defs[0].1.contains("<> 'skipped'"),
+        "{}",
+        defs[0].1
+    );
+    assert!(defs[1].1.contains("status = 'skipped'"), "{}", defs[1].1);
+    Ok(())
+}

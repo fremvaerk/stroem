@@ -11,6 +11,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { StatusBadge } from "@/components/status-badge";
+import { TriggersAttentionCard } from "@/components/triggers-attention-card";
 import { LoadingSpinner } from "@/components/loading-spinner";
 import { getStats, listJobs } from "@/lib/api";
 import type { DashboardStats } from "@/lib/api";
@@ -116,6 +117,8 @@ export function DashboardPage() {
           </Card>
         ))}
       </div>
+
+      <TriggersAttentionCard />
 
       <Card>
         <CardHeader>

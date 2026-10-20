@@ -94,6 +94,10 @@ export default defineConfig({
               slug: "operations/migration-051-052",
             },
             {
+              label: "Migration 053 — Trigger Run Indexes",
+              slug: "operations/migration-053",
+            },
+            {
               label: "Upgrading to 0.18.1 — JSON Inputs",
               slug: "operations/upgrade-0-18-1-json-input",
             },
