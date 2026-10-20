@@ -192,7 +192,10 @@ done
 # Kill the leader
 kubectl delete pod <leader-pod> --grace-period=60
 
-# Verify the other pod takes over within ~10s
+# Verify the other pod takes over. With the default lease and a prompt
+# network this takes a few seconds (a follower tries every lease_secs / 6);
+# with a longer leader.lease_secs, wait at least lease_secs / 6 + a few
+# seconds (see "Leader settings").
 sleep 15
 kubectl exec <surviving-pod> -- wget -qO- \
   --header="Authorization: Bearer $TOKEN" \
