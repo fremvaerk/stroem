@@ -1,12 +1,27 @@
 # A frozen leader must not keep the leader lock
 
-Status: revision 5, approved by Codex (round 4); implemented on branch `fix/leader-stale-lock` (2026-10-20)
+Status: revision 6 (the user's decisions on Q1–Q3), under Codex review;
+revision 5 was approved by Codex (round 4) and implemented on branch
+`fix/leader-stale-lock` (2026-10-20)
 
-Code: `crates/stroem-server/src/leader.rs`, `web/health.rs`, `scheduler.rs`,
-`main.rs`; tests `crates/stroem-server/tests/ha_test.rs`; test image
-`crates/stroem-test-support/src/lib.rs`.
+Code: `crates/stroem-server/src/leader.rs`, `config.rs`, `web/health.rs`,
+`scheduler.rs`, `main.rs`; tests `crates/stroem-server/tests/ha_test.rs`;
+test image `crates/stroem-test-support/src/lib.rs`.
 
 ## Revision history
+
+**Revision 6 (2026-10-20, the user's decisions on § 9).**
+- Q1: self-release stays (§ 4.4).
+- Q2: the timing is configurable through two settings, `leader.lease_secs`
+  (default 30) and `leader.self_release_after_secs` (default 30, `0` = off);
+  every other value is derived from the lease, with caps (§ 4.1). The
+  defaults are the values of revision 5.
+- Q3: a gated loop that ran and then EXITED (`Stopped`) makes the leader
+  release too, and `/livez` fails on such a loop on every replica, not only
+  on the leader (§ 4.4, § 4.4.1). `/healthz/detail` follows.
+- At shutdown the gated loops exit (`Stopped`). The leader loop does not
+  start an iteration once `cancel` has fired, and an iteration that starts
+  just before is a first sighting, which cannot release (§ 4.4).
 
 **Revision 5 (2026-10-20, Codex implementation review round 1 — tests and
 docs only, no production-code finding).** Test 7 holds the ping until the
@@ -144,19 +159,21 @@ Goals:
 - G1. A leader that stops talking to PostgreSQL loses the lock within a
   bounded time, even when its node's kernel keeps the TCP session alive and
   the kubelet cannot restart the pod: PostgreSQL ends its session at most
-  N = 30 s after the session last became idle, and a follower completes the
-  takeover one attempt later (§ 5.1 gives the bound with attempt durations:
-  ~35 s typical, ≤ 55 s worst case, from the session's last idle start; from
-  the freeze, add the delivery delay of a leader message already in flight
-  — milliseconds on a working network, bounded by the client kernel's TCP
-  retransmission limit on a degraded one).
-- G2. A replica never acts on a leadership belief older than V = 20 s. Two
-  replicas never both read `is_leader() == true` when the takeover follows a
-  lease expiry; when the old session ends early, the overlap is bounded
-  (§ 5.2.1).
-- G3. A leader whose leader-gated loop is `Stalled` for 30 s gives the lock
-  up instead of holding it for a process that does no leader work (§ 4.4).
-  A loop that EXITED (`Stopped`) is out of G3 (§ 4.4, Q3).
+  N (the lease, default 30 s) after the session last became idle, and a
+  follower completes the takeover one attempt later (§ 5.1 gives the bound
+  with attempt durations: ~35 s typical, ≤ 55 s worst case with the
+  defaults, from the session's last idle start; from the freeze, add the
+  delivery delay of a leader message already in flight — milliseconds on a
+  working network, bounded by the client kernel's TCP retransmission limit
+  on a degraded one).
+- G2. A replica never acts on a leadership belief older than V (the
+  validity, 2N/3, default 20 s). Two replicas never both read `is_leader()
+  == true` when the takeover follows a lease expiry; when the old session
+  ends early, the overlap is bounded (§ 5.2.1).
+- G3. A leader whose leader-gated loop is `Stalled`, or ran and then
+  exited (`Stopped`), for `release_after` (default 30 s) gives the lock up
+  instead of holding it for a process that does no leader work (§ 4.4).
+  Operators can turn this off (`leader.self_release_after_secs: 0`).
 - G4. Operators can see who holds the lock, and whether that holder is
   stale, from the follower logs, without database access.
 
@@ -173,70 +190,117 @@ implemented):
   `docs/internal/TODO.md`; stays open). This design shortens the leaderless
   gap from hours to tens of seconds; it does not close it (§ 5.3).
 - Write-level fencing of leader work (§ 5.2.3).
-- Changes to the recovery sweeper, the event-source manager or `/livez`.
+- Changes to the recovery sweeper or the event-source manager.
 
 ## 3. Overview
 
-Four changes in the leader-election path, one in the scheduler:
+Five changes in the leader-election path, one in the scheduler, one in the
+health endpoints:
 
 1. **Server-enforced lease** — the leader session carries
-   `idle_session_timeout = 30s`. The leader pings every 5 s, so a healthy
-   leader is never idle that long; PostgreSQL ends a silent leader's session
-   and with it the lock.
+   `idle_session_timeout` = N (default 30 s). The leader pings every 5 s, so
+   a healthy leader is never idle that long; PostgreSQL ends a silent
+   leader's session and with it the lock.
 2. **Leader validity** — `is_leader()` is `true` only while the last
-   successful ping was SENT less than 20 s ago; every leader query gets a
-   client-side timeout.
-3. **Self-release on a stalled gated loop** — when the scheduler, recovery
-   sweeper or event-source loop has been `Stalled` (the `/livez` rule) for
-   30 s, the leader drops the lock and does not take it again while the
-   stall lasts.
+   successful ping was SENT less than V (default 20 s) ago; every leader
+   query gets a client-side timeout.
+3. **Self-release on an unfit gated loop** — when the scheduler, recovery
+   sweeper or event-source loop has been `Stalled` (the `/livez` rule), or
+   ran and then exited (`Stopped`), for `release_after` (default 30 s), the
+   leader drops the lock and does not take it again while that lasts.
 4. **Diagnostics** — followers log the lock holder (pid, client address,
    application name, backend start, idle time) and warn when it looks stale;
    the leader logs why it lost the lock.
-5. **Scheduler startup beat** — the scheduler beats once before its initial
+5. **Configuration** — a `leader:` section with `lease_secs` and
+   `self_release_after_secs`; the other values are derived (§ 4.1).
+6. **Scheduler startup beat** — the scheduler beats once before its initial
    trigger load, so a hang there is `Stalled`, not healthy forever.
+7. **Health contract** — `/livez` and `/healthz/detail` report a loop that
+   ran and then exited as `stopped` on every replica (§ 4.4.1).
 
 ## 4. Design
 
-### 4.1 Timing
+### 4.1 Timing and configuration
 
-| Name | Value | Meaning |
-|---|---|---|
-| `retry_interval` | 5 s | unchanged: pause between loop iterations (ping when leader, acquire attempt when follower) |
-| `ping_timeout` | 5 s | new: client-side bound on one leader ping |
-| `acquire_timeout` | 10 s | new: bound on one whole acquire attempt (connect 5 s as today + lease setup + lock query + holder report) |
-| `validity` (V) | 20 s | new: `is_leader()` is `true` only while the last successful ping was sent less than V ago |
-| `lease` (N) | 30 s | new: `idle_session_timeout` of the leader session |
-| `release_after` | 30 s | new: how long a gated loop must stay `Stalled` before the leader releases (§ 4.4) |
+Two settings, in a new `leader:` section of `ServerConfig`
+(`config::LeaderConfig`, `#[serde(default)]`, `deny_unknown_fields`):
 
-Invariants, checked by a unit test on the defaults and by a debug assertion
-in `start_with`:
+```yaml
+leader:
+  lease_secs: 30               # N: idle_session_timeout of the leader session
+  self_release_after_secs: 30  # release_after (§ 4.4); 0 = self-release off
+```
 
-- `2 × ping_timeout + retry_interval < validity` (15 s < 20 s) — a leader
-  whose pings succeed never loses validity between two of them: from the
-  send of one ping to the answer of the next there are at most one ping
-  duration, one pause and one more ping duration.
-- `validity < lease` — the **cushion** `lease − validity` (10 s) separates
-  a frozen leader's last valid moment from the earliest moment PostgreSQL
-  can end an idle session (§ 5.2).
+Env overrides `STROEM__LEADER__LEASE_SECS` and
+`STROEM__LEADER__SELF_RELEASE_AFTER_SECS` (a plain struct, so the `config`
+crate's string-to-integer coercion applies; a test checks it). Every other
+value is derived from the lease `L` by `LeaderTiming::from_lease(lease,
+release_after)`, in integer milliseconds:
+
+| Name | Formula | Default (L = 30 s) | Meaning |
+|---|---|---|---|
+| `retry_interval` | min(L/6, 5 s) | 5 s | unchanged: pause between loop iterations (ping when leader, acquire attempt when follower) |
+| `ping_timeout` | min(L/6, 5 s) | 5 s | new: client-side bound on one leader ping |
+| `acquire_timeout` | min(L/3, 10 s) | 10 s | new: bound on one whole acquire attempt (connect + lease setup + lock query + holder report) |
+| `validity` (V) | 2L/3 | 20 s | new: `is_leader()` is `true` only while the last successful ping was sent less than V ago |
+| `lease` (N) | L | 30 s | new: `idle_session_timeout` of the leader session |
+| `release_after` | `self_release_after_secs`; `None` when 0 | 30 s | new: how long a gated loop must stay unfit before the leader releases (§ 4.4) |
+
+`LeaderTiming::default()` is `from_lease(30 s, Some(30 s))`: the values of
+revision 5. `CONNECT_TIMEOUT` (5 s) stays a constant inside the acquire
+attempt; for a lease below 30 s the outer `acquire_timeout` (down to 3.3 s)
+is the effective bound.
+
+Invariants (`LeaderTiming::check`):
+
+- `2 × ping_timeout + retry_interval < validity` — a leader whose pings
+  succeed never loses validity between two of them: from the send of one
+  ping to the answer of the next there are at most one ping duration, one
+  pause and one more ping duration.
+- `validity < lease` — the **cushion** `lease − validity` (L/3, default
+  10 s) separates a frozen leader's last valid moment from the earliest
+  moment PostgreSQL can end an idle session (§ 5.2).
 - `lease ≥ 3 × retry_interval` — at least two scheduled pings must be
   missed before the server ends a healthy session.
 
-**Configurability: none.** The values are constants in `leader.rs`, bundled
-in a `LeaderTiming` struct that tests construct with sub-second values
-through `LeaderElection::start_with`. Reasons:
+They hold for every allowed lease. For L < 30 s nothing is capped: L/2 <
+2L/3 < L, and L ≥ L/2. For L ≥ 30 s: 15 s < 2L/3 (≥ 20 s) < L, and L ≥
+15 s. Integer division moves each value by under 1 ms, while every gap is
+at least L/6 ≥ 1.6 s. A unit test runs `check` for every whole second from
+10 s to 3600 s. `ServerConfig::validate` rejects a range violation and also
+runs `check` on the derived timing (a release build has no debug
+assertions); `start_with` keeps its debug assertion for test timings.
 
-- The lease only has to beat the ping cadence, which Strøm controls. There
-  is no workload-dependent pause to tune for (no garbage collector); a
-  process that cannot run a 5 s timer task for 30 s is the failure this
-  design exists to detect.
-- A knob invites values that break the invariants above (e.g. a lease below
-  the ping cadence makes every leader flap).
-- No HA section exists in `ServerConfig`; adding one for an unused knob adds
-  surface for nothing.
+Ranges, enforced by `ServerConfig::validate`:
 
-If an operator later needs it, a `leader:` section can be added without a
-contract change.
+- `lease_secs`: 10 to 3600. Below 10 s a follower opens a new attempt
+  connection more often than every 1.7 s. Above 1 h a frozen leader blocks
+  the takeover for over an hour, which defeats G1.
+- `self_release_after_secs`: 0 (off) or 1 to 3600.
+
+Why caps on the ping, the attempt and the retry: they detect a broken
+connection and pace the follower, which has nothing to do with how long a
+leader may be silent. Uncapped, `lease_secs: 3600` would leave a hung ping
+undetected for 10 min, keep a follower 10 min between attempts, and widen
+§ 5.2.1's early-end overlap to 30 min. With the caps, that overlap is
+≤ 15 s for every allowed lease (L/2 below 30 s).
+
+What the lease trades:
+
+- **Smaller lease:** faster takeover of a frozen leader (≈ N + one
+  attempt); a leader runtime starved longer than 2N/3 loses validity, and
+  longer than N loses the lock; below 30 s, more attempt connections per
+  follower.
+- **Larger lease:** slower takeover; more tolerance for a starved leader
+  runtime. Not more tolerance for a slow database: a ping slower than
+  5 s still drops the connection.
+
+Each replica uses its own values. The no-overlap argument (§ 5.2.1) needs
+`validity < lease` within ONE replica — the leader's validity against its
+own session's lease — so replicas with different values (a configuration
+rollout) are safe. A follower's holder report (§ 4.6) compares the holder's
+idle time with its own lease; a healthy leader is idle ≤ 5 s, below every
+allowed lease, so different values cause no false WARN.
 
 ### 4.2 Lease: `idle_session_timeout` on the leader session
 
@@ -244,7 +308,7 @@ contract change.
 
 1. connect (5 s timeout, `application_name = stroem-leader`, unchanged);
 2. `SELECT set_config('idle_session_timeout', $1, false)` with
-   `$1 = '30000ms'` — session scope (`is_local = false`), outside any
+   `$1 = '{N in ms}ms'` (default `'30000ms'`) — session scope (`is_local = false`), outside any
    transaction, a bound parameter (no dynamic SQL);
 3. `SELECT pg_try_advisory_lock(x'5354524D4C445201'::bigint),
    pg_backend_pid()` — sent with the **simple query protocol**
@@ -328,8 +392,8 @@ and `is_leader()` becomes `true` again. Only a ping error, a ping timeout, a
 release or shutdown drops the connection.
 
 Every query on the leader connection gets a client-side bound: the ping
-(`raw_sql("SELECT 1")`, § 4.2's protocol rule) `ping_timeout` (5 s), the
-whole acquire attempt `acquire_timeout` (10 s). A
+(`raw_sql("SELECT 1")`, § 4.2's protocol rule) `ping_timeout` (default
+5 s), the whole acquire attempt `acquire_timeout` (default 10 s). A
 timed-out query leaves the sqlx connection in an unknown protocol state, so
 it is dropped; dropping it closes the socket. If the lock had been granted,
 PostgreSQL releases it when the backend sees the close, or at the latest
@@ -339,101 +403,162 @@ when the lease ends the idle session.
 and the `stroem_leader_status` gauge; all now see validity. No caller
 changes.
 
-### 4.4 Self-release when a leader-gated loop is stalled
+### 4.4 Self-release when a leader-gated loop is unfit
 
-**Decision: implement, for `Stalled` that persists for `release_after`
-(30 s).**
+**Decision (user, Q1 and Q3): implement, for a loop that is `Stalled`, or
+ran and then exited (`Stopped`), when that persists for `release_after`
+(default 30 s; `leader.self_release_after_secs`, `0` = off).**
 
 `LeaderElection` gets an optional fitness probe, installed once by `main.rs`
 after `AppState` exists (the election is started before `AppState`, so a
 setter, not a constructor argument):
 
 ```rust
-pub type FitnessProbe = Arc<dyn Fn() -> Option<&'static str> + Send + Sync>;
+pub enum LoopFault { Stalled, Stopped }
+pub struct UnfitLoop { pub name: &'static str, pub fault: LoopFault }
+pub type FitnessProbe = Arc<dyn Fn() -> Option<UnfitLoop> + Send + Sync>;
 impl LeaderElection { pub fn set_fitness_probe(&self, probe: FitnessProbe); }
 ```
 
-The probe returns the name of a leader-gated loop that is `Stalled` —
-`health::task_health(alive, beat_age, stall_after) == Stalled`, with the
-same three loops and thresholds as `/livez` (scheduler 300 s, event source
-600 s, recovery `max(1800, 5 × sweep_interval_secs)`). `health.rs` factors
-`background_report` into a function of `(&BackgroundTasks,
-recovery_stall_secs)` so the probe can own clones of the `Arc`s it reads and
-`/livez` keeps calling the same code.
+The probe (`health::leader_fitness_probe`, built on `health::unfit_loop`)
+returns the first leader-gated loop, in the order scheduler, recovery,
+event source, that is either:
 
-The leader loop keeps `unfit_since: Option<Instant>` (set on the first
-iteration the probe returns `Some`, cleared on the first that returns
-`None`). Each iteration, before pinging or acquiring:
+- `Stalled` — `health::task_health(alive, beat_age, stall_after) ==
+  Stalled`, with the same thresholds as `/livez` (scheduler 300 s, event
+  source 600 s, recovery `max(1800, 5 × sweep_interval_secs)`); or
+- `Stopped` after it STARTED — its `AliveGuard` is gone and its heartbeat
+  has beaten at least once (`TaskReport::started`, the rule `/livez` uses,
+  § 4.4.1). A loop that never beat (not spawned yet, router-only tests) is
+  not unfit.
 
-| Holding the lock | Probe | Action |
-|---|---|---|
-| yes | `Some(loop)`, unfit for ≥ `release_after` | **release**: validity `i64::MIN`, drop the connection, WARN `Releasing leader lock: the {loop} loop is stalled (no progress for {age}s)` |
-| yes | `Some(loop)`, unfit for < `release_after` | ping (§ 4.3); WARN once when the stall is first seen |
-| yes | `None` | ping (§ 4.3) |
-| no | `Some(loop)` (any duration) | **do not attempt** to acquire; WARN once per transition, INFO when it clears |
-| no | `None` | try to acquire (§ 4.2) |
+`health.rs` factors `background_report` into a function of
+`(&BackgroundTasks, recovery_stall_secs)` so the probe can own clones of
+the `Arc`s it reads and `/livez` keeps calling the same code.
+
+The leader loop keeps `unfit: Option<(UnfitLoop, Instant)>`: set on the
+first iteration the probe returns `Some`, cleared on the first that returns
+`None`. If the named loop or fault changes within one unfit stretch, the
+record takes the new `UnfitLoop` and keeps the first sighting's time (the
+replica stayed unfit). Each iteration, before pinging or acquiring:
+
+| Self-release | Holding the lock | Probe | Action |
+|---|---|---|---|
+| off (`release_after = None`) | any | not called | ping or acquire as in § 4.2–4.3; no fitness log line |
+| on | yes | `Some(loop)`, unfit for ≥ `release_after` | **release**: validity `i64::MIN`, drop the connection, WARN `Releasing leader lock: the {loop} loop {is stalled \| has stopped} ({age}s); not taking the lock again while that lasts` |
+| on | yes | `Some(loop)`, unfit for < `release_after` | ping (§ 4.3); WARN once when the stretch starts |
+| on | yes | `None` | ping (§ 4.3) |
+| on | no | `Some(loop)` (any duration) | **do not attempt** to acquire; WARN once when the stretch starts, INFO when it ends |
+| on | no | `None` | try to acquire (§ 4.2) |
 
 The decision is a pure function (`leader::next_action(holding, unfit_for:
-Option<Duration>, release_after)`), unit-tested.
+Option<Duration>, release_after: Duration)`), unit-tested; "off" is decided
+before it: `iterate` does not call the probe when `release_after` is
+`None`, so `unfit` stays `None`.
 
-Timing: a stall that started at `t` is `Stalled` from `t + threshold`; the
-probe sees it on the next iteration (≤ `retry_interval + ping_timeout` =
-10 s later); the release happens on the first iteration at least
-`release_after` after that — i.e. by `t + threshold + 10 s + 30 s + 10 s`
-(5 min 50 s for the scheduler). Slower than G1; it is a different failure
-(the process still talks to PostgreSQL), and the thresholds are the ones
-operators already know from `/livez`.
+Timing:
+
+- `Stalled`: a stall that started at `t` is `Stalled` from `t +
+  threshold`; the probe sees it on the next iteration (≤ `retry_interval +
+  ping_timeout`, default 10 s, later); the release happens on the first
+  iteration at least `release_after` after that — i.e. by `t + threshold +
+  10 s + 30 s + 10 s` with the defaults (5 min 50 s for the scheduler).
+- `Stopped`: no threshold; a loop that exits at `t` is released by `t +
+  10 s + 30 s + 10 s` (50 s) with the defaults.
+
+Slower than G1; it is a different failure (the process still talks to
+PostgreSQL), and the thresholds are the ones operators already know from
+`/livez`.
 
 Reasoning:
 
 - **Why it helps.** In this incident, and in the 2026-09-16 scheduler hang,
   the process could keep pinging while doing no leader work. The lease
   (§ 4.2) covers only a leader task that stops pinging; a leader task that
-  keeps pinging for a process whose scheduler is stuck holds the lock for as
-  long as the process lives. `/livez` already reports that state, but only
-  the kubelet acts on `/livez`, and in this incident the kubelet could not
-  reach the node.
+  keeps pinging for a process whose scheduler is stuck, or whose scheduler
+  task panicked, holds the lock for as long as the process lives. `/livez`
+  already reports that state, but only the kubelet acts on `/livez`, and in
+  this incident the kubelet could not reach the node.
 - **False positives — more sensitive than a restart, accepted.** The probe
-  uses `/livez`'s thresholds, and `release_after` (30 s) matches Helm's
-  default liveness policy (`periodSeconds: 10`, `failureThreshold: 3`), so
-  with default probes a stall long enough to release is, give or take one
-  probe period, a stall long enough to restart the pod today. It is NOT
-  equivalent: with liveness probes disabled or loosened, release happens
-  where no restart would, and after a release the process's in-flight work
-  continues (a restart would end it; § 5.2.2). We accept the more sensitive
-  policy: a release costs a handover (and the fires of § 5.3), while a
-  stalled leader costs every trigger until the stall ends.
+  uses `/livez`'s rules, and the default `release_after` (30 s) matches
+  Helm's default liveness policy (`periodSeconds: 10`, `failureThreshold:
+  3`), so with default probes an unfit stretch long enough to release is,
+  give or take one probe period, one long enough to restart the pod today.
+  It is NOT equivalent: with liveness probes disabled or loosened, release
+  happens where no restart would, and after a release the process's
+  in-flight work continues (a restart would end it; § 5.2.2). We accept the
+  more sensitive policy: a release costs a handover (and the fires of
+  § 5.3), while an unfit leader costs every trigger until the fault ends.
+  Operators who disagree set `self_release_after_secs: 0`.
 - **Known false-positive source.** A single scheduler fire whose `ref:`
   target resolves cold for longer than 300 s (TODO.md, "A scheduler fire
   with a cold or slow ref resolves inline") — now hands the lock to a
   healthy replica shortly before the kubelet restarts the pod.
-- **No flapping back.** A stalled replica does not attempt to acquire, so it
+- **No flapping back.** An unfit replica does not attempt to acquire, so it
   cannot win the lock back from a healthy follower. Once its loops beat
   again it is eligible again, but the lock is held by the new leader, so it
-  stays follower. Leadership moves at most once per stall.
+  stays follower. Leadership moves at most once per unfit stretch. A
+  `Stopped` loop never comes back within the process (nothing respawns a
+  loop task), so that replica stays follower until it restarts — and
+  § 4.4.1 makes its `/livez` fail, so the kubelet restarts it.
 - **Single-replica deployments.** With no follower, a release leaves no
-  leader until the loop recovers or the kubelet restarts the pod; the two
-  healthy loops pause too. Today the same state ends in a restart of the
-  whole process, which pauses them as well. Accepted.
-- **Why not `Stopped` (Q3).** `Stalled` fails `/livez` on every replica, so
-  a replica that released stays visible to the kubelet. `Stopped` (a loop
-  task exited — only by panic outside shutdown) fails `/livez` only on the
-  leader. A leader that released on `Stopped` would become a follower whose
-  `/livez` is green: never restarted, never eligible again, and in a
-  single-replica deployment leaderless for good. Covering `Stopped` needs
-  `/livez` to fail on a started-then-stopped loop on every replica — a
-  change to the health contract this spec does not make. So a leader whose
-  loop panicked keeps the lock and fails `/livez`, as today: unbounded when
-  the kubelet cannot act. This needs two independent failures (a loop panic
-  and an unreachable node); accepted, open question Q3.
-- **Never-beaten loops.** `task_health(alive, None, _)` is `Ok`: a loop that
-  hangs before its first beat is healthy forever. The recovery and
+  leader until the fault ends or the process restarts; the healthy loops
+  pause too. With liveness probes, today the same state ends in a restart
+  of the whole process, which pauses them as well. Without liveness probes
+  (Docker Compose, probes disabled), a `Stopped` loop now pauses ALL leader
+  work until someone restarts the process, where before only that loop's
+  work stopped. Accepted and documented in the HA guide, with
+  `self_release_after_secs: 0` as the remedy for such a deployment.
+- **Shutdown.** On `cancel` the three gated loops exit, which reads as
+  `Stopped` after start. `run_loop` does not start an iteration once
+  `cancel` has fired (`!cancel.is_cancelled()` next to the `paused`
+  check); its `select!` then returns on `cancel`. An iteration that starts
+  just before `cancel` reads the probe before the loops have exited, or —
+  in a window of nanoseconds — sees them for the first time, with an
+  unfit time of about 0, below every allowed `release_after` (≥ 1 s): no
+  release, at most one WARN.
+- **Never-beaten loops.** `task_health(alive, None, _)` is `Ok`, and a
+  `Stopped` loop that never beat is not unfit: a loop that hangs or panics
+  before its first beat is invisible to the probe. The recovery and
   event-source loops beat first thing; the scheduler runs `load_triggers`
   first (`scheduler.rs:88–92`). It now beats once before that call (change
-  5), so a hang there becomes `Stalled` after 300 s like any other.
+  6), so a hang there becomes `Stalled` after 300 s like any other.
 
 The fitness probe is optional: `LeaderElection::start` without a probe
-behaves exactly like § 4.2–4.3 (every existing test).
+behaves exactly like § 4.2–4.3 (every existing test), and so does a timing
+with `release_after = None` with a probe installed.
+
+#### 4.4.1 Health contract: a loop that ran and then exited
+
+`health.rs` changes two rules (spec 2026-09-17's split of the probes stays):
+
+| Endpoint | Before | After |
+|---|---|---|
+| `/livez` | `stopped` (503) for a `Stopped` loop that started, **on the leader only** | `stopped` (503) for a `Stopped` loop that started, **on every replica** |
+| `/healthz/detail` per loop | `stopped` for every `Stopped` loop on the leader, `follower` for every `Stopped` loop elsewhere | `stopped` when the loop is `Stopped` and (this replica is leader, or the loop started); `follower` only for a never-started loop on a follower |
+
+`stalled`, `ok`, the never-started rule and the status codes are
+unchanged.
+
+- **Why every replica.** Followers run the loops too. A follower whose loop
+  panicked cannot do that loop's work if it becomes leader, and with § 4.4
+  it never becomes leader again; only a restart repairs it. The same
+  reasoning already applies to `Stalled` ("a hung standby is no standby").
+  Without this change, a leader that released on `Stopped` would become a
+  follower with a green `/livez`: never restarted, never eligible again.
+- **Shutdown.** The loops exit on `cancel`, so `/livez` reads `stopped` on
+  every replica for the rest of a shutdown (seconds). Before, it could read
+  `stopped` on the leader in the same window, until the leader loop cleared
+  the validity. The kubelet does not act on it: for a pod that has a
+  deletion timestamp, the prober stops the liveness and startup probes and
+  records success (`pkg/kubelet/prober/worker.go`). Outside Kubernetes,
+  nothing acts on `/livez`.
+- **Existing tests stay unchanged and green:**
+  `healthz_follower_reports_follower_not_503` (never started → `follower`),
+  `livez_ok_when_tasks_fresh_or_never_started`,
+  `livez_fails_when_started_task_exited_on_leader`,
+  `healthz_leader_reports_stopped_when_scheduler_guard_dropped` (leader,
+  never started → `stopped`).
 
 ### 4.5 Gated loops: unchanged
 
@@ -459,8 +584,12 @@ The residual is analysed in § 5.2.2.
 
 ### 4.6 Diagnostics
 
-Leader side (`leader.rs`):
+Leader side (`leader.rs`; durations are the configured values, shown here
+with the defaults):
 
+- Start: INFO `LeaderElection started (lease=30s, validity=20s,
+  retry=5s, ping_timeout=5s, acquire_timeout=10s, self-release after 30s)`,
+  or `… self-release off`.
 - Acquire: `Acquired leader lock (key=0x5354524d4c445201, backend pid=…,
   lease=30s)` or `… lease not enforced`.
 - Loss, by cause:
@@ -472,7 +601,7 @@ Leader side (`leader.rs`):
   - other ping error: WARN `Leader connection lost: {err:#}` (as today);
   - ping timeout: WARN `Leader ping timed out after 5s; dropping the leader
     connection`;
-  - release on stall: § 4.4.
+  - release on an unfit loop: § 4.4.
 
 Follower side: after a failed `pg_try_advisory_lock`, on the same attempt
 connection and at most once per 60 s, the follower reads the holder:
@@ -521,15 +650,22 @@ gauge is only exported when `metrics.public` is `false`).
   upgrade; the new contract is compatible with the old one (§ 7).
 - `application_name = stroem-leader` (operators' holder queries and
   `leader_connection_lost_triggers_reflag_to_follower` select on it).
-- `/livez`, `/healthz`, `/healthz/detail` semantics.
+- `/healthz` semantics; `/livez` and `/healthz/detail` change only as
+  § 4.4.1 says.
 
 ## 5. Failure analysis
 
 ### 5.1 Bounds and scenarios
 
 Assumptions: the database answers the leader's millisecond statements in
-milliseconds; the follower's runtime runs its 5 s timer roughly on time; the
-network between the follower and the database works.
+milliseconds; the follower's runtime runs its retry timer roughly on time;
+the network between the follower and the database works.
+
+Numbers in § 5 use the default timing (N = 30 s, V = 20 s, retry and ping
+timeout 5 s, attempt 10 s). For another lease, put the § 4.1 values into the
+same formulas: for example the worst-case takeover is `N + 2 ×
+acquire_timeout + retry_interval`, and the starved-runtime rows below read
+"V to N" and "> N".
 
 Takeover after a frozen leader. Let `i` be the moment the old leader's
 backend last became idle (just after answering its last ping).
@@ -567,7 +703,9 @@ backend last became idle (just after answering its last ping).
 | Healthy leader, its runtime starved 20–30 s | n/a | `is_leader()` false for the starved stretch, lock kept; next successful ping restores it. Scheduler triggers that came due in the stretch are advanced as by a follower (missed) |
 | Healthy leader, runtime starved > 30 s | n/a | session ended; failover (the frozen-leader outcome) |
 | PostgreSQL < 14 | as row 1 "before" | no lease: a frozen leader keeps the lock (WARN at startup); validity, ping timeout and self-release still apply |
-| Gated loop panicked (`Stopped`) on the leader | lock kept, `/livez` fails, kubelet restarts | unchanged (Q3) |
+| Gated loop panicked (`Stopped`) on the leader | lock kept, `/livez` fails, kubelet restarts if it can reach the node | release `release_after` after the probe sees it (§ 4.4 timing) → follower acquires one attempt later; the ex-leader stays follower and its `/livez` fails, so the kubelet restarts it |
+| Gated loop panicked on a follower | `/livez` green; the replica stays up but cannot do that loop's work as leader | the replica does not acquire; `/livez` fails → kubelet restart (§ 4.4.1) |
+| Self-release off (`self_release_after_secs: 0`) | n/a | the two rows above and the crawling row behave as "before"; lease and validity unchanged |
 | Stalled scheduler on a single replica | `/livez` restart | release after `release_after` (recovery and event source pause too), then the `/livez` restart |
 
 ### 5.2 Split brain
@@ -596,7 +734,8 @@ moment the session ended. Overlap:
   succeed, so the newest validity deadline comes from a query sent before
   `E`: `valid_until ≤ E + V`. This covers a late successful acquire answer
   too (its deadline is the lock query's send time + V).
-- **leader task running: ≤ `2 × ping_timeout + retry_interval` (15 s).** The
+- **leader task running: ≤ `2 × ping_timeout + retry_interval` (15 s for
+  every lease ≥ 30 s, because of the § 4.1 caps; L/2 below).** The
   answer to a ping sent before `E` can still arrive, successful, up to
   `ping_timeout` after `E`; the next ping is sent `retry_interval` later and
   fails or times out within `ping_timeout`, clearing validity. With a prompt
@@ -676,8 +815,9 @@ small per handover.
 Followers advance triggers without firing. A trigger that comes due between
 the moment the old leader stops firing and the moment the new leader
 acquires is never fired by anyone: after a frozen leader, from the freeze to
-the takeover (§ 5.1: ≤ 55 s on a working network); after a stalled scheduler, the stall plus
-`release_after` plus one attempt. Today: the whole outage (16.5 h). Replay
+the takeover (§ 5.1: ≤ 55 s on a working network); after a stalled or
+stopped scheduler, the stall (or the exit) plus `release_after` plus one
+attempt. Today: the whole outage (16.5 h). Replay
 stays an open TODO item.
 
 ## 6. Testing
@@ -695,14 +835,29 @@ the user before changing that test. `docker-compose.yml` (e2e) already uses
 ### 6.2 Unit tests (in-module)
 
 - `leader.rs`: default `LeaderTiming` satisfies the § 4.1 invariants, and
-  the test timing below does too; validity arithmetic (`is_leader` false
-  at/after `valid_until`, `always()`, `never()`); `next_action` table of
-  § 4.4 incl. the `release_after` boundary; `lease_setting(Duration)` →
-  `"30000ms"`; SQLSTATE classification (`42704` → `Unsupported`, other
-  codes → error; `57P05` → lease-expired wording).
-- `health.rs`: the factored report — a backdated scheduler beat yields
-  `Some("scheduler")`; fresh beats, a not-yet-started loop and a `Stopped`
-  loop yield `None`.
+  the test timings below do too; `from_lease`: `check` passes for every
+  whole second from 10 s to 3600 s, `from_lease(30 s, Some(30 s))` equals
+  revision 5's values, the values at 10 s (1666 / 1666 / 3333 / 6666 ms)
+  and at 3600 s (5 s / 5 s / 10 s / 2400 s); validity arithmetic
+  (`is_leader` false at/after `valid_until`, `always()`, `never()`);
+  `next_action` table of § 4.4 incl. the `release_after` boundary; the
+  "off" rule: with `release_after = None` the probe is not called (a probe
+  that counts its calls stays at 0) and the result is `None`;
+  `track_fitness` keeps the first sighting's time when the named loop or
+  fault changes; the `UnfitLoop` wording (`is stalled` / `has stopped`);
+  `lease_setting(Duration)` → `"30000ms"`; SQLSTATE classification
+  (`42704` → `Unsupported`, other codes → error; `57P05` → lease-expired
+  wording).
+- `config.rs`: no `leader:` section → defaults 30 / 30; YAML values are
+  read; env overrides `STROEM__LEADER__LEASE_SECS` and
+  `STROEM__LEADER__SELF_RELEASE_AFTER_SECS` (strings) are coerced; an
+  unknown field is rejected; `validate` rejects `lease_secs` 9 and 3601 and
+  `self_release_after_secs` 3601, accepts 10, 3600 and 0; `timing()` maps
+  `self_release_after_secs: 0` to `release_after = None`.
+- `health.rs`: `unfit_loop` — a backdated scheduler beat yields `scheduler`
+  `Stalled`; a recovery loop that beat and then lost its guard yields
+  `recovery` `Stopped`; fresh beats and a loop that never beat (guard not
+  held) yield `None`.
 
 ### 6.3 Integration tests (`crates/stroem-server/tests/ha_test.rs`)
 
@@ -801,11 +956,34 @@ Tests:
     manager; the change is one statement before that call, checked in
     review.
 
-Existing tests keep the default timing and must pass unchanged.
+12. `stopped_loop_releases_lock_through_the_health_probe`: an `AppState`
+    whose leader is A (`fast()` timing) and whose loops are marked alive
+    and beaten; A gets `health::leader_fitness_probe(&state)` — the real
+    probe, not a flag; B follows. Drop the scheduler's alive flag (the
+    loop started, so it is `Stopped`). A releases within `release_after +
+    2 × (retry_interval + ping_timeout)` + 1 s; B acquires; never both
+    `true`. With B cancelled, A does not acquire for 1.5 s, and `/livez` on
+    A's router answers 503 `stopped` while A is a follower.
+13. `self_release_off_ignores_an_unfit_loop`: A with `fast()` timing but
+    `release_after = None`, and a probe that always returns a `Stopped`
+    loop; B follows. For 3 × `fast().release_after` after A leads, A stays
+    leader at every sample and B never reads `true`.
+14. `livez_fails_when_started_task_exited_on_follower` (router test, like
+    `livez_fails_for_stalled_loop_on_follower`): a follower whose loops are
+    alive and beaten, then the recovery flag dropped: `/livez` 503
+    `{"status": "stopped"}`; `/healthz/detail` `recovery` = `stopped`,
+    `scheduler` = `ok`.
+
+Existing tests keep the default timing and must pass unchanged, except
+that test 9's probe returns an `UnfitLoop`.
 
 ## 7. Rollout
 
-- No migration, no configuration, no API change. Lock key unchanged.
+- No migration, no API change. Lock key unchanged. One new optional
+  configuration section, `leader:` (§ 4.1); without it, every value is
+  revision 5's.
+- Behaviour change: a replica whose gated loop panicked fails `/livez`
+  even as a follower, so its liveness probe restarts it (§ 4.4.1).
 - Mixed fleet during a rolling upgrade: old replicas lead without a lease,
   new ones with it; both interoperate. The incident can recur until every
   replica runs the release.
@@ -821,21 +999,28 @@ Existing tests keep the default timing and must pass unchanged.
 ## 8. Docs
 
 - `docs/src/content/docs/operations/high-availability.md`: the lease and
-  validity, PostgreSQL ≥ 14, self-release, the frozen-node failure mode,
+  validity, PostgreSQL ≥ 14, self-release (stalled and stopped loops), the
+  `leader:` settings with the derived values and what the lease trades,
+  the single-replica note without liveness probes, the `/livez` change for
+  followers, the frozen-node failure mode,
   holder logs, Karpenter `NodeRepair`, the alert, RDS keepalives,
   missed-fire replay and duplicate fires still open.
+- `docs/src/content/docs/getting-started/configuration.md`: the `leader:`
+  section and its env overrides.
 - `CLAUDE.md` § High Availability: the lease, validity, self-release,
-  diagnostics, test image.
-- `CONTEXT.md`: **Leader lease**, **Leader validity**.
+  the settings, diagnostics, test image; § Health Check: the `Stopped`
+  rule of § 4.4.1.
+- `CONTEXT.md`: **Leader lease**, **Leader validity**, **Self-release**
+  (stalled or stopped).
 - `docs/internal/TODO.md`: the incident under Bugs, `[x]` with this fix;
-  missed-fire replay stays open; open items for write-level fencing,
-  durable occurrence deduplication and `Stopped` self-release (Q3).
+  missed-fire replay stays open; open items for write-level fencing and
+  durable occurrence deduplication; the `Stopped` self-release item `[x]`.
 
-## 9. Open questions for the user
+## 9. Decisions (user, 2026-10-20)
 
-- Q1. Self-release (§ 4.4) is in, with 30 s persistence. Confirm, or cut it
-  to diagnostics only.
-- Q2. Lease 30 s / validity 20 s, not configurable (§ 4.1).
-- Q3. A leader whose gated loop panicked (`Stopped`) keeps the lock, as
-  today. Covering it needs `/livez` to fail on a started-then-stopped loop
-  on every replica (a health-contract change). Default: not in this change.
+- Q1. Self-release (§ 4.4): keep it.
+- Q2. Timing: configurable, with two settings, `leader.lease_secs` and
+  `leader.self_release_after_secs` (`0` = off); the other values are
+  derived (§ 4.1).
+- Q3. A loop that ran and then exited (`Stopped`): covered in this change,
+  with the `/livez` change on every replica (§ 4.4, § 4.4.1).
