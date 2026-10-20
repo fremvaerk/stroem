@@ -40,3 +40,6 @@ holds what the words mean. Keep both in sync when a term is added or sharpened.
 - **Native value** — the value a `json` input field takes from a string that is exactly one `{{ expression }}`: the expression's JSON value (object, array, number, …), not its rendered text.
 
 See `CLAUDE.md` for how these pieces fit together (architecture, conventions, key patterns).
+
+- **Last fire** — the newest job of a trigger, of any status including `skipped`. A `skipped` row proves the scheduler fired, so the Last fire is the base of the Missed run mark. The "last run" the UI shows ignores `skipped` rows.
+- **Missed run** — a scheduled fire time that is later than the trigger's Last fire, at least the grace period (5 minutes) in the past, and has no job. Counted only for enabled scheduler triggers that fire on this server; only the trigger's own next run clears it.

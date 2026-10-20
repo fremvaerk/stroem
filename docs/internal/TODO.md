@@ -1851,6 +1851,17 @@ enumerated scope.
 - [ ] `mcp/tools.rs`'s dependency-flattening (`FlowStepSummary.depends_on`, see the `BTreeSet` reorder item above) loses `accept`-set information entirely, not just reordering it — an LLM calling `get_task` sees only a flat list of dependency NAMES, with no way to tell that one is optional/conditionally-accepted (`accept: [completed, failed]`) versus a plain must-complete dependency. Fixing this means giving the MCP-facing summary type a richer shape than a bare name list.
 - [ ] No writer-contract test covers a RESTART carrying a step forward into the new `depends_on`/`accept` model — the existing writer-contract tests (every `status='skipped'` write takes a `SkipReason`) don't exercise `JobStepRepo::seed_steps_tx`'s carried-over rows alongside a dependent whose edge uses the new `accept` shape. Narrower, still-live survivor of a removed "Cascade test gaps" TODO line that otherwise named retired-flag-specific or now-covered-elsewhere sub-items.
 
+## Trigger Run Status (2026-10-20)
+
+Accepted limitations of the last-run and missed-run status (spec `docs/superpowers/specs/2026-10-20-trigger-run-status-design.md` §8). Each is a possible follow-up.
+
+- [ ] A trigger re-enabled after `enabled: false` (or a workspace switched back from `triggers: false`) shows the fire times it skipped while disabled as missed, until it fires again. The database does not record when it was enabled.
+- [ ] A changed cron or timezone is evaluated against a last run made under the old schedule; this can show a false mark until the trigger fires once on the new schedule.
+- [ ] Job retention (`retention.job_days`) can delete the last run of a rarely firing trigger: it then shows "never" and no mark.
+- [ ] A trigger renamed in YAML is a new trigger (new `source_id`): "never" until it fires.
+- [ ] The Dashboard card skips workspaces in load error; their triggers reappear after the workspace loads.
+- [ ] A manual run, Re-run or Restart does not clear the missed mark or the "last run failed" state. This is a user decision (spec §5.1), not a bug; revisit only if the user asks.
+
 ## Review: Architecture / Deepening Review (2026-09-11)
 
 Architecture review at v0.16.3 (`e02a089`) scoped to the hot spots of the last 200 commits, using the deep-module vocabulary (module / interface / depth / seam / adapter / leverage / locality). Four parallel explore agents (creation, claim-and-execute, orchestration, model+validation), then merged with the 2026-09-08 architecture review (11 candidates: 3 shipped, 5 independently re-derived, 3 carried forward) and reconciled against `codebase-review-2026-03-01.md`. Every claim below was verified by direct file read at 0.16.3.
