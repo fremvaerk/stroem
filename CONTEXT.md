@@ -40,3 +40,6 @@ holds what the words mean. Keep both in sync when a term is added or sharpened.
 - **Native value** — the value a `json` input field takes from a string that is exactly one `{{ expression }}`: the expression's JSON value (object, array, number, …), not its rendered text.
 
 See `CLAUDE.md` for how these pieces fit together (architecture, conventions, key patterns).
+- **Leader lease** — the `idle_session_timeout` (30 s) carried by the session that holds the leader lock: PostgreSQL ends a leader session that has sent nothing for that long, which frees the lock even when the leader's node keeps the TCP session alive. Needs PostgreSQL ≥ 14. Spec `docs/superpowers/specs/2026-10-20-leader-stale-lock-design.md`.
+- **Leader validity** — how long a replica may act as leader after its last successful ping was sent (20 s, below the lease): `LeaderElection::is_leader()` is false once it lapses, even if no ping has failed yet.
+- **Self-release** — the leader dropping the lock because one of its leader-gated loops (scheduler, recovery, event source) has been `Stalled` for 30 s; it does not try to become leader again while the stall lasts.

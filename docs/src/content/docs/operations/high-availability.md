@@ -23,6 +23,20 @@ SELECT pg_try_advisory_lock(0x5354524D4C445201);  -- "STRMLDR" + version 0x01
 
 The replica that acquires the lock becomes the **leader** and runs all three tasks. Followers run the loops but skip the work each tick (so they're warm and can take over instantly). If the leader's connection drops (pod restart, network blip, DB restart) Postgres releases the lock automatically — within ~5 s a follower acquires it. No external coordinator (etcd, ZooKeeper, Raft) is required.
 
+### When the leader stops working
+
+A session-level advisory lock lives as long as the database session. A leader process that is frozen or crawling — on a node that Kubernetes can no longer reach but whose kernel still answers TCP — would keep that session, and the lock, for as long as the node lives. (This happened in production: a node went silent, its leader pod kept the lock, and no replica was leader for 16.5 hours; every cron trigger in that window was missed.) Three mechanisms bound it:
+
+- **Lease.** The leader session runs with `idle_session_timeout = 30s`. The leader pings its session every 5 s, so a healthy leader is never idle that long; when the process stops talking, PostgreSQL ends the session after 30 s and the lock is free. A follower takes over on its next attempt — about 35 s after the old leader's last ping, at most 55 s when the database answers slowly. From the lock query on, the leader session uses only single-message (simple-protocol) queries, so a request cut off in transit cannot leave the session waiting without the timer.
+- **Validity.** A replica reports itself leader only while its last successful ping was sent less than 20 s ago, and a ping that takes longer than 5 s drops the connection. A process that thaws after its session was ended does not act on an old belief, and a leader cut off from the database stops acting as leader within seconds.
+- **Self-release.** When the scheduler, recovery sweeper or event-source loop on the leader has been **stalled** (the `/livez` rule below) for 30 s, the leader releases the lock and does not take it again until the loop makes progress. A follower takes over. A loop that **exited** (`stopped`) does not release the lock: the leader keeps failing `/livez` and relies on the kubelet, as before.
+
+The values are fixed (not configurable). The lease needs **PostgreSQL 14 or later**, which Strøm already requires; on an older server the leader logs `Leader lease not enforced: the database does not support idle_session_timeout (PostgreSQL < 14)` once and runs without the lease (validity and self-release still apply).
+
+When the lease ends a leader session, PostgreSQL logs `FATAL: terminating connection due to idle-session timeout` for the `stroem-leader` connection, and the old leader (if it ever runs again) logs `Leader lease expired: PostgreSQL ended the leader session …`. Neither is an error by itself — it is the lease doing its job.
+
+**Who holds the lock.** Every follower reads the lock holder once a minute and logs it at INFO when it changes (and every 15 minutes): `Leader lock held by pid … (client 10.0.1.23, application stroem-leader, backend_start …, state idle, idle 2s)`. The client address is the leader pod's IP. A holder that looks stale — idle for longer than the lease, or not a Strøm leader — is logged at WARN every minute. The leader logs `Acquired leader lock (key=…, backend pid=…, lease=30s)`.
+
 ### Cross-replica events (Postgres LISTEN/NOTIFY)
 
 Three things need to propagate across replicas immediately, not via the next poll cycle:
@@ -51,7 +65,7 @@ The split is deliberate: a hung scheduler gets the pod restarted through `/livez
 
 | Component | Requirement |
 |---|---|
-| **Postgres** | Reachable from every replica (single primary; RDS Multi-AZ recommended for prod). All HA coordination flows through it. |
+| **Postgres** | PostgreSQL 14 or later (the leader lease uses `idle_session_timeout`), reachable from every replica (single primary; RDS Multi-AZ recommended for prod). All HA coordination flows through it. A transaction-pooling proxy (PgBouncer in transaction mode) between Strøm and Postgres breaks the session-level leader lock. |
 | **Log archive (S3 / EFS / local PVC mounted RWX)** | Optional but strongly recommended for **finished-job** logs. While a job is running, the NOTIFY listener mirrors chunks onto every replica's local disk, so REST reads work from any pod. After the job ends, the local file is only uploaded to the archive on the replica that ran the job; without an archive, replicas that didn't mirror every chunk (e.g. cold-started after the job ran) return partial or empty logs. With S3 configured, every replica reads finished-job logs from the shared bucket. |
 | **Shared `auth.jwt_secret`** | If auth is enabled, the same secret value must be set on every replica. Otherwise refresh tokens minted on one pod won't validate on another. Same for `auth.refresh_secret`. The bundled Helm chart's `_validations.tpl` aborts `helm template`/`helm install` when `server.replicas > 1` and auth is enabled but no JWT secret is supplied — guard against accidental split-brain. The server also logs a `HA: auth.jwt_secret loaded (len=N)` message at startup so you can confirm the pods loaded a secret (the value itself is not logged). |
 | **PodDisruptionBudget** | The bundled Helm chart enables a PDB with `minAvailable: 1` by default (`server.podDisruptionBudget.enabled: true`). |
@@ -123,6 +137,13 @@ server:
 - Spread replicas across nodes (and ideally across availability zones) with `topologySpreadConstraints`. The defaults spread by `kubernetes.io/hostname`; for AZ spread add a second entry with `topologyKey: topology.kubernetes.io/zone`.
 - Workers can also run on Spot — the recovery sweeper already handles dead workers (stale heartbeat → steps failed → orchestration cascades).
 
+## Node failures
+
+The lease covers a leader whose node stops working but is never replaced. Two cluster-side settings shorten such an outage further and are recommended:
+
+- **Karpenter node repair.** With `NodeRepair=false`, Karpenter leaves a `NotReady` node in place; in the production incident the silent node ran for 16 hours. Enable node repair (feature gate `NodeRepair=true`) so unhealthy nodes are replaced.
+- **TCP keepalives on the database side** (RDS: `tcp_keepalives_idle`, `tcp_keepalives_interval`, `tcp_keepalives_count`) only close a session whose peer stops answering. A frozen node whose kernel still answers keeps the session alive indefinitely — that is the case the lease exists for. Keepalive tuning is not a substitute.
+
 ## Failover rehearsal
 
 ```bash
@@ -156,11 +177,22 @@ kubectl exec <surviving-pod> -- wget -qO- \
   - `stroem_workspace_reloaded`: The receiving replica's own poll cycle (default 30s) re-converges to the new revision.
   - `stroem_job_log_chunk`: A missed segment is absent from the replica's mirror, so REST reads served from that pod will be short until backfill (manual `getJobLogs` refetch after the live tail catches up, or archive read after job completion). The publishing replica's local file is always complete.
 - **Pinned commits for [git refs](/guides/git-refs/) are per replica.** Each replica keeps its own [pin store](/getting-started/configuration/#pin_store) (never share `pin_store.dir` between replicas — the second one refuses to start) and its own branch/tag listing, so two jobs created on different replicas within one `poll_interval_secs` window can resolve a branch to different commits. A step claimed on a replica that has not loaded its commit yet is released and retried while that replica loads it — up to 30 times, each cycle taking up to `pin_store.claim_load_budget_secs` + 10 s + the worker's next poll (a little over 5 minutes in all when the git server fails fast, about 15 minutes or more when it hangs; see [Git Refs → Claim](/guides/git-refs/#claim)); during a git outage, job detail of a job connected to such a commit can answer `503` on that replica only.
+- **Missed and duplicate cron fires during a handover.** Followers advance cron triggers without firing them, so a trigger that comes due between the moment the old leader stops firing and the moment the new leader takes over is never fired (after a frozen leader: up to ~55 s; after a stalled scheduler: the stall plus 30 s). There is no replay of missed fires yet. In rare cases (the new leader takes over within milliseconds of a due time while the old leader is still firing it) one occurrence can fire twice.
+- **Overlap after an early session end.** When the leader session ends early — an administrator terminates it, the connection is reset — a follower can take over at once while the old leader still believes it leads for up to 15 s (never more than 20 s). Work it starts in that window runs alongside the new leader's.
 - **Rate limiter (Tower Governor) is per-replica.** Login / refresh / signup limits are enforced per pod, so effective cluster-wide limits are roughly `replicas × per-pod-limit`. Acceptable for current security posture; if you need exact global limits, terminate at the Ingress layer or front the cluster with a CDN-level rate limiter.
 
 ## Monitoring leader flips
 
 Each replica exposes `stroem_leader_status` (1 on the leader, 0 on followers)
-via the [Metrics endpoint](./metrics). A `max(stroem_leader_status) == 0`
-alert catches a stuck-no-leader situation; rapid changes in
-`changes(stroem_leader_status[5m])` indicate flapping.
+via the [Metrics endpoint](./metrics) (not exported when `metrics.public` is
+`true`). Alert on a cluster with no leader:
+
+```yaml
+- alert: StroemNoLeader
+  expr: sum(stroem_leader_status) == 0
+  for: 5m
+```
+
+Rapid changes in `changes(stroem_leader_status[5m])` indicate flapping. When
+the alert fires, the follower logs name the lock holder (see
+[When the leader stops working](#when-the-leader-stops-working)).
