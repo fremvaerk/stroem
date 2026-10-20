@@ -126,7 +126,7 @@ impl LeaderTiming {
             retry_interval: sixth,
             ping_timeout: sixth,
             acquire_timeout: Duration::from_millis(ms / 3).min(MAX_ACQUIRE_TIMEOUT),
-            validity: Duration::from_millis(ms / 3 * 2),
+            validity: Duration::from_millis(ms.saturating_mul(2) / 3),
             lease,
             release_after,
         }
@@ -825,6 +825,11 @@ mod tests {
         assert_eq!(short.validity, ms(6666));
         assert_eq!(short.lease, Duration::from_secs(10));
         assert_eq!(short.release_after, None);
+        // Validity is floor(2 × L / 3), not 2 × floor(L / 3).
+        assert_eq!(
+            LeaderTiming::from_lease(Duration::from_secs(11), None).validity,
+            ms(7333)
+        );
 
         let long = LeaderTiming::from_lease(Duration::from_secs(3600), Some(ms(60_000)));
         assert_eq!(long.retry_interval, Duration::from_secs(5));
