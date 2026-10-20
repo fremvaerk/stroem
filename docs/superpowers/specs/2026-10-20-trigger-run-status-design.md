@@ -1,7 +1,7 @@
 # Trigger run status: last run, result and missed runs
 
-Status: approved by the user 2026-10-20, pending Codex review (revision 3 — facts verified against the
-code at `8c3849d6`, builder check answered; history in §11).
+Status: approved by the user 2026-10-20, in Codex review (revision 4 — Codex round 1 fixed;
+history in §11).
 
 Markers used below: **(user)** = decided by the user in the brainstorm; **(my call)** = proposed
 by the designer, open to the user's correction; **(builder's call)** = left to the implementer.
@@ -72,13 +72,26 @@ workspace, so match on `source_id`, never on `job.workspace`).
 |---|---|---|---|
 | scheduler | `trigger` | `scheduler.rs::fire_trigger` → `trigger_target::create_target_job`; `concurrency: skip` writes a `status = 'skipped'` row via `JobRepo::create_skipped` | — (a `skipped` row is a run) |
 | webhook | `webhook` | `web/hooks.rs` (`source_id = "{ws}/{trigger_key}"` — the map key, **not** the webhook's `name:` URL segment) | — |
-| event source | `event_source` | consumer: `event_source.rs::create_event_source_job` (`task_name` = the trigger's `task`) | `task_name` = the trigger's consumer `task` |
+| event source | `event_source` | consumer: `event_source.rs::create_event_source_job` | the job input has the `_event_source` key (the consumer marker, below) |
 
 Event-source **emitted** jobs (`web/worker_api/event_source.rs::emit_event`) use the same
 `source_type = 'event_source'` and the same `source_id` (the worker sends it; the endpoint
 checks it is `"{req.workspace}/{trigger}"` and that `req.task` is the trigger's `target_task`).
-Both kinds live in the defining workspace; only `task_name` tells them apart. Emitted jobs are
-not runs of the trigger.
+Both kinds live in the defining workspace. Emitted jobs are not runs of the trigger.
+
+**Consumer marker.** A consumer job is told apart from an emitted job by a fact persisted on the
+job row, not by the trigger's current configuration: `create_event_source_job` writes the
+`_event_source` object into the consumer's input (since the feature shipped, 084a454f), and the
+claim already uses exactly `source_type = 'event_source'` + `input ? '_event_source'` to decide
+that a job is a consumer (`web/worker_api/jobs.rs`, `event_source_config`). The trigger's
+current `task` / `target_task` must **not** be used: validation only checks the current
+configuration (`stroem-common/src/validation.rs`, consumer ≠ target), so after the consumer
+`task` changes (A → C) or consumer and target swap (A/B → B/A), a `task_name` filter would hide
+real consumer history or count old emitted jobs as runs. With the marker, all of the trigger's
+consumer jobs count, whatever their `task_name`. Accepted residual, same as the claim today: an
+emitted payload that itself carries an `_event_source` key (emitted input = trigger `input`
+defaults merged with the payload object, `stroem-worker/src/executor.rs`) is treated as a
+consumer by the claim and therefore here too (TODO.md).
 
 Not runs of the trigger **(user)**: any other job of the same task — a manual run
 (`source_type = user/api/mcp`), a Re-run (`rerun`) or Restart (`restart`) of the trigger's run,
@@ -211,30 +224,41 @@ Workspace shown by key, like the rest of the job/task UI.
 
 ### 7.2 Queries and index
 
-- Last runs are read with **one query per request**, not per trigger, and each trigger's
-  lookup must be an index probe for its newest rows, not a scan of its history (a 5-minute
-  trigger has ~8 600 runs per 30 days of retention). Per trigger the query needs the last
-  fire (newest row, any status), the last run (newest non-`skipped` row — the walk past
-  `skipped` rows is bounded by how long one run blocks the schedule) and, when that run has a
-  retry chain, the chain's newest job (`idx_job_retry_of`, migration 027). A shape that does
-  this:
-  `unnest($types, $ids) AS w(source_type, source_id)` `CROSS JOIN LATERAL (SELECT … FROM job
-  WHERE … ORDER BY created_at DESC LIMIT 1)`. A plain `DISTINCT ON` over all matching rows
-  reads every run and is not acceptable for the Dashboard's 5-second refresh.
+- Last runs are read with **one query per request**, not per trigger. Per trigger the query
+  needs: the last fire (newest row, any status), the last run (newest non-`skipped` row, or
+  for an event source the newest consumer job) and, when that run has a retry chain, the
+  chain's newest job (`retry_of_job_id` = the run, `idx_job_retry_of`, migration 027; ≤ 10
+  rows).
+- **Every one of these lookups is a direct index probe whose cost does not depend on how many
+  other rows the trigger's `source_id` has** — not on its run history (a 5-minute trigger has
+  ~8 600 runs per 30 days of retention), not on `skipped` rows (task timeouts and the server
+  default timeouts are optional, so one blocked run under `concurrency: skip` can collect an
+  unbounded number of `skipped` rows — a `* * * * * *` trigger blocked for 30 days writes ~2.6
+  million), and not on emitted event-source jobs (a long-lived consumer can emit without
+  limit). An index that holds those rows and is walked past them does not meet this.
+- A shape that meets it (the builder may choose an equivalent one): two partial indexes in one
+  new migration,
+  - *runs*: `job (source_type, source_id, created_at DESC) WHERE (source_type IN ('trigger',
+    'webhook') AND status <> 'skipped') OR (source_type = 'event_source' AND input ?
+    '_event_source')` — the newest row is the last run;
+  - *skipped fires*: `job (source_id, created_at DESC) WHERE source_type = 'trigger' AND status
+    = 'skipped'` — the last fire `L` is the later of the newest run and the newest skipped row;
+
+  each probed with `unnest(…) CROSS JOIN LATERAL (SELECT … WHERE <the index predicate> AND
+  source_type = … AND source_id = … ORDER BY created_at DESC LIMIT 1)`. Queries must repeat the
+  partial-index predicate so the planner can use it. A plain `DISTINCT ON` over all matching
+  rows reads every run and is not acceptable for the Dashboard's 5-second refresh. Both
+  indexes are also small: they hold only trigger jobs, not manual, child, hook or emitted ones.
+- Prove it in stroem-db tests with `EXPLAIN` (like
+  `templated_refs_test::claim_and_unmatched_sweep_still_use_a_ready_partial_index`): the
+  last-run probe uses the *runs* index with thousands of `skipped` rows and thousands of
+  emitted jobs newer than the run, and does no sequential scan.
 - No existing index serves this. `idx_job_source_active (source_type, source_id)` is partial
   (`status IN ('pending','running')`, migration 013); `idx_job_source_type (source_type)` is
-  partial and excludes `'trigger'` (migration 031). Add a migration with an index such as
-  `job (source_type, source_id, created_at DESC)`. `job` is large in prod: follow CLAUDE.md
-  § Database — own migration (053), `CREATE INDEX IF NOT EXISTS` under a new name, a header
+  partial and excludes `'trigger'` (migration 031). `job` is large in prod: follow CLAUDE.md
+  § Database — own migration (053), `CREATE INDEX IF NOT EXISTS` under new names, a header
   with the manual `CREATE INDEX CONCURRENTLY` pre-run (migration 050 is the model), and a
   user-facing upgrade note under `docs/src/content/docs/operations/`.
-- **Event sources**: the consumer lookup filters `task_name`, but emitted jobs share the
-  consumer's `(source_type, source_id)`, so walking that index backwards would read every
-  emitted job created since the consumer started (a long-lived consumer can have emitted
-  thousands). The lookup must not depend on the number of emitted jobs — e.g. include
-  `task_name` in the probe, or find the consumer through another selective path (builder's
-  call; prove it with `EXPLAIN` in a test, like stroem-db
-  `templated_refs_test::claim_and_unmatched_sweep_still_use_a_ready_partial_index`).
 
 ### 7.3 ACL
 
@@ -289,8 +313,8 @@ Workspace shown by key, like the rest of the job/task UI.
 
 API field names and the Dashboard endpoint shape; pill colours beyond reusing `StatusBadge`;
 loading and error states (the Dashboard must still render when the new call fails); how often
-the Dashboard refreshes the new block (it may refresh less often than every 5 s); the
-event-source lookup mechanism (§7.2); test split.
+the Dashboard refreshes the new block (it may refresh less often than every 5 s); the exact
+index shape, within §7.2's requirement; test split.
 
 ## 10. Tests and docs (repo rules)
 
@@ -304,7 +328,10 @@ event-source lookup mechanism (§7.2); test split.
   run / Re-run / Restart does not clear a mark or change the result, a task retry does;
   disabled trigger and `triggers: false` give no mark; ACL hides denied
   triggers and omits last-run fields of a job the user may not view; the Dashboard call
-  returns only "needs attention" triggers; the index is used (`EXPLAIN`).
+  returns only "needs attention" triggers; an event source whose consumer `task` changed
+  (A → C) or whose consumer and target swapped still counts its consumer jobs, never its
+  emitted ones; a run blocked behind many `skipped` rows is still found; the indexes are
+  used (`EXPLAIN`, §7.2).
 - Migration test in stroem-db (`migration_test.rs`).
 - UI: vitest for the three parts (column, warning box, Dashboard card hidden/shown/failed
   call).
@@ -325,3 +352,8 @@ event-source lookup mechanism (§7.2); test split.
   (§5.1, §8); warning box text follows. My calls: the last run shown skips `skipped` rows while
   the last fire `L` does not (§5.2); bad timezone → UTC like the scheduler (§5.3); ACL load
   failure fails closed; a failed run the user may not view is not on the Dashboard (§7.3).
+- **Rev 4** (Codex round 1): the last-run probe no longer walks past `skipped` rows (their
+  number is unbounded — timeouts are optional) — §7.2 now requires probes independent of
+  `skipped` rows, emitted jobs and history, with a two-partial-index shape; event-source
+  consumers are identified by the persisted `_event_source` input marker the claim already
+  uses, not by the trigger's current `task` (§5.1).
