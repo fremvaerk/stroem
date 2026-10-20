@@ -1,6 +1,7 @@
 use crate::state::AppState;
 use crate::trigger_status::{
-    attach_run_status, trigger_visible, viewer_for, LastRun, MissedRuns, TriggerStatusItem,
+    attach_run_status, last_run_failed, needs_attention, sort_attention, trigger_visible,
+    viewer_for, LastRun, MissedRuns, TriggerStatusItem,
 };
 use crate::web::api::get_workspace_or_error;
 use crate::web::api::middleware::AuthUser;
@@ -126,6 +127,53 @@ pub async fn list_triggers(
     let triggers: Vec<TriggerInfo> = items.into_iter().map(|i| i.info).collect();
 
     Ok(Json(triggers))
+}
+
+/// A trigger from any workspace that needs attention.
+#[derive(Debug, Serialize)]
+pub struct AttentionTrigger {
+    pub workspace: String,
+    #[serde(flatten)]
+    pub trigger: TriggerInfo,
+    pub last_run_failed: bool,
+}
+
+/// GET /api/triggers/attention — Triggers across all workspaces that missed
+/// scheduled runs or whose last run failed
+#[tracing::instrument(skip(state, auth_user))]
+pub async fn list_attention_triggers(
+    State(state): State<Arc<AppState>>,
+    auth_user: Option<AuthUser>,
+) -> Result<impl IntoResponse, AppError> {
+    let viewer = viewer_for(&state, &auth_user).await?;
+    let mut items: Vec<TriggerStatusItem> = Vec::new();
+    for (ws, config) in state.workspaces.get_all_configs().await {
+        let triggers_enabled = state.workspaces.triggers_enabled(&ws);
+        for (name, trigger) in &config.triggers {
+            if !trigger_visible(&state, viewer.as_ref(), &ws, &config, trigger.task()) {
+                continue;
+            }
+            items.push(TriggerStatusItem {
+                workspace: ws.clone(),
+                fires_here: trigger.enabled() && triggers_enabled,
+                def: trigger.clone(),
+                info: TriggerInfo::from_def(name, trigger, 0),
+            });
+        }
+    }
+    attach_run_status(&state, viewer.as_ref(), &mut items).await?;
+    let mut rows: Vec<AttentionTrigger> = items
+        .into_iter()
+        .filter(needs_attention)
+        .map(|item| AttentionTrigger {
+            last_run_failed: last_run_failed(&item),
+            workspace: item.workspace,
+            trigger: item.info,
+        })
+        .collect();
+    sort_attention(&mut rows);
+
+    Ok(Json(rows))
 }
 
 #[cfg(test)]

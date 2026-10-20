@@ -10,6 +10,7 @@ use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use sqlx::PgPool;
 use std::collections::HashMap;
+use std::sync::Arc;
 use stroem_common::models::workflow::WorkspaceConfig;
 use stroem_db::{ApiKeyRepo, UserGroupRepo, UserRepo};
 use stroem_server::auth::generate_api_key;
@@ -58,6 +59,7 @@ struct Env {
     pool: PgPool,
     /// API key of a default admin, used when a request names no key.
     admin: String,
+    workspaces: Arc<WorkspaceManager>,
     _tmp: TempDir,
 }
 
@@ -132,12 +134,14 @@ async fn setup(acl: bool, etl_triggers_off: bool) -> Result<Env> {
     }
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
     let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None);
+    let workspaces = Arc::clone(&state.workspaces);
     let router = build_router(state, CancellationToken::new());
     let admin = api_key(&pool, "default-admin@test.com", true, None).await;
     Ok(Env {
         router,
         pool,
         admin,
+        workspaces,
         _tmp: tmp,
     })
 }
@@ -664,5 +668,156 @@ async fn responses_never_carry_job_input_or_output() -> Result<()> {
     let (status, body) = get(&env, "/api/workspaces/etl/tasks/nightly", None).await;
     assert_eq!(status, StatusCode::OK);
     assert!(!body.contains("s3cr3t"), "{body}");
+    Ok(())
+}
+
+async fn attention(env: &Env, key: Option<&str>) -> Vec<Value> {
+    let (status, body) = get(env, "/api/triggers/attention", key).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    serde_json::from_str(&body).unwrap()
+}
+
+fn row_names(rows: &[Value]) -> Vec<String> {
+    rows.iter()
+        .map(|r| {
+            format!(
+                "{}/{}",
+                r["workspace"].as_str().unwrap(),
+                r["name"].as_str().unwrap()
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn attention_lists_missed_and_failed_only() -> Result<()> {
+    let env = setup(false, false).await?;
+    seed(
+        &env.pool,
+        Seed {
+            ago_secs: 2.0 * DAY,
+            ..Default::default()
+        },
+    )
+    .await;
+    seed(
+        &env.pool,
+        Seed {
+            source_id: "etl/every5",
+            status: "failed",
+            ago_secs: 100.0,
+            ..Default::default()
+        },
+    )
+    .await;
+    seed(
+        &env.pool,
+        Seed {
+            source_id: "etl/cross",
+            ago_secs: 100.0,
+            ..Default::default()
+        },
+    )
+    .await;
+    seed(
+        &env.pool,
+        Seed {
+            ws: "ops",
+            source_id: "ops/nightly",
+            status: "cancelled",
+            ago_secs: 100.0,
+            ..Default::default()
+        },
+    )
+    .await;
+    let rows = attention(&env, None).await;
+    assert_eq!(row_names(&rows), ["etl/nightly", "etl/every5"], "{rows:?}");
+    assert_eq!(rows[0]["last_run_failed"], false);
+    assert!(rows[0]["missed"]["count"].as_u64().unwrap() >= 1);
+    assert_eq!(rows[1]["last_run_failed"], true);
+    assert!(rows[1]["missed"].is_null());
+    assert_eq!(rows[1]["last_run"]["status"], "failed");
+    Ok(())
+}
+
+#[tokio::test]
+async fn attention_skips_a_workspace_in_load_error() -> Result<()> {
+    let env = setup(false, false).await?;
+    for (ws, id, ago) in [("etl", "etl/every5", 100.0), ("ops", "ops/nightly", 200.0)] {
+        seed(
+            &env.pool,
+            Seed {
+                ws,
+                source_id: id,
+                status: "failed",
+                ago_secs: ago,
+                ..Default::default()
+            },
+        )
+        .await;
+    }
+    assert_eq!(
+        row_names(&attention(&env, None).await),
+        ["etl/every5", "ops/nightly"]
+    );
+    env.workspaces.mark_unavailable_for_test("ops");
+    assert_eq!(row_names(&attention(&env, None).await), ["etl/every5"]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn attention_respects_acl() -> Result<()> {
+    let env = setup(true, false).await?;
+    let viewer = api_key(&env.pool, "viewer@test.com", false, Some("viewers")).await;
+    let admin = api_key(&env.pool, "admin@test.com", true, None).await;
+    // Pinned job in a private folder: the viewer may not see this failed run,
+    // but the trigger is also missed.
+    seed(
+        &env.pool,
+        Seed {
+            status: "failed",
+            git_ref: Some("main"),
+            folder: Some("private"),
+            ago_secs: 2.0 * DAY,
+            ..Default::default()
+        },
+    )
+    .await;
+    // Failed run of a trigger whose task is denied to the viewer.
+    seed(
+        &env.pool,
+        Seed {
+            task: "secret-task",
+            source_id: "etl/sec",
+            status: "failed",
+            ago_secs: 100.0,
+            ..Default::default()
+        },
+    )
+    .await;
+    // Failed run the viewer may see.
+    seed(
+        &env.pool,
+        Seed {
+            source_id: "etl/every5",
+            status: "failed",
+            ago_secs: 100.0,
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let rows = attention(&env, Some(&viewer)).await;
+    assert_eq!(row_names(&rows), ["etl/nightly", "etl/every5"], "{rows:?}");
+    assert!(rows[0]["last_run"].is_null());
+    assert_eq!(rows[0]["last_run_hidden"], true);
+    assert_eq!(rows[0]["last_run_failed"], false);
+    assert_eq!(rows[1]["last_run_failed"], true);
+
+    let rows = attention(&env, Some(&admin)).await;
+    let names = row_names(&rows);
+    assert!(names.contains(&"etl/sec".to_string()), "{names:?}");
+    let nightly = rows.iter().find(|r| r["name"] == "nightly").unwrap();
+    assert_eq!(nightly["last_run_failed"], true);
     Ok(())
 }

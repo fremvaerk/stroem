@@ -136,3 +136,132 @@ fn source_type_mapping() {
     assert_eq!(source_type_of(&hook), "webhook");
     assert_eq!(source_type_of(&es), "event_source");
 }
+
+fn attention_item(
+    name: &str,
+    fires_here: bool,
+    last: Option<(&str, &str)>,
+    hidden: bool,
+    missed: Option<u32>,
+) -> TriggerStatusItem {
+    let def: TriggerDef =
+        serde_yaml::from_str("type: scheduler\ncron: '0 1 * * *'\ntask: a\n").unwrap();
+    let mut info = TriggerInfo::from_def(name, &def, 0);
+    info.last_run = last.map(|(status, at)| LastRun {
+        job_id: Uuid::new_v4(),
+        created_at: t(at),
+        status: status.to_string(),
+        retry_job_id: None,
+    });
+    info.last_run_hidden = hidden;
+    info.missed = missed.map(|count| MissedRuns {
+        count,
+        capped: false,
+        first: t("2026-10-20T01:00:00Z"),
+    });
+    TriggerStatusItem {
+        workspace: "etl".to_string(),
+        fires_here,
+        def,
+        info,
+    }
+}
+
+#[test]
+fn needs_attention_rules() {
+    let at = "2026-10-20T01:00:00Z";
+    assert!(needs_attention(&attention_item(
+        "a",
+        true,
+        None,
+        false,
+        Some(1)
+    )));
+    assert!(needs_attention(&attention_item(
+        "a",
+        true,
+        Some(("failed", at)),
+        false,
+        None
+    )));
+    for status in ["cancelled", "skipped", "completed"] {
+        assert!(!needs_attention(&attention_item(
+            "a",
+            true,
+            Some((status, at)),
+            false,
+            None
+        )));
+    }
+    assert!(!needs_attention(&attention_item(
+        "a",
+        false,
+        Some(("failed", at)),
+        false,
+        None
+    )));
+    assert!(!needs_attention(&attention_item(
+        "a",
+        false,
+        None,
+        false,
+        Some(3)
+    )));
+    // A hidden run never makes a trigger need attention by itself.
+    assert!(!needs_attention(&attention_item(
+        "a", true, None, true, None
+    )));
+}
+
+fn attention(item: TriggerStatusItem) -> AttentionTrigger {
+    let failed = last_run_failed(&item);
+    AttentionTrigger {
+        workspace: item.workspace,
+        last_run_failed: failed,
+        trigger: item.info,
+    }
+}
+
+#[test]
+fn attention_order() {
+    let mut v = vec![
+        attention(attention_item(
+            "failed-old",
+            true,
+            Some(("failed", "2026-10-19T00:00:00Z")),
+            false,
+            None,
+        )),
+        attention(attention_item(
+            "missed-2",
+            true,
+            Some(("completed", "2026-10-18T00:00:00Z")),
+            false,
+            Some(2),
+        )),
+        attention(attention_item(
+            "failed-new",
+            true,
+            Some(("failed", "2026-10-20T00:00:00Z")),
+            false,
+            None,
+        )),
+        attention(attention_item(
+            "missed-5",
+            true,
+            Some(("failed", "2026-10-17T00:00:00Z")),
+            false,
+            Some(5),
+        )),
+    ];
+    sort_attention(&mut v);
+    let names: Vec<&str> = v.iter().map(|a| a.trigger.name.as_str()).collect();
+    assert_eq!(names, ["missed-5", "missed-2", "failed-new", "failed-old"]);
+    assert!(v[0].last_run_failed && !v[1].last_run_failed);
+}
+
+#[test]
+fn hidden_failed_run_is_not_last_run_failed() {
+    let item = attention_item("a", true, None, true, Some(1));
+    assert!(!last_run_failed(&item));
+}

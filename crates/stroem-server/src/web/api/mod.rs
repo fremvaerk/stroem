@@ -295,6 +295,10 @@ pub fn build_api_routes(state: Arc<AppState>) -> Router {
         )
         .route("/workspaces/{ws}/triggers", get(triggers::list_triggers))
         .route(
+            "/triggers/attention",
+            get(triggers::list_attention_triggers),
+        )
+        .route(
             "/workspaces/{ws}/tasks/{name}/execute",
             post(tasks::execute_task),
         )

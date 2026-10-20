@@ -5,7 +5,7 @@
 use crate::acl::{job_coords_task_path, load_user_acl_context, make_task_path, TaskPermission};
 use crate::state::AppState;
 use crate::web::api::middleware::AuthUser;
-use crate::web::api::triggers::TriggerInfo;
+use crate::web::api::triggers::{AttentionTrigger, TriggerInfo};
 use anyhow::Context;
 use chrono::{DateTime, Duration, Utc};
 use chrono_tz::Tz;
@@ -196,6 +196,39 @@ pub async fn attach_run_status(
         }
     }
     Ok(())
+}
+
+/// The last run failed and the viewer may see it. A hidden run never counts.
+pub fn last_run_failed(item: &TriggerStatusItem) -> bool {
+    !item.info.last_run_hidden
+        && item
+            .info
+            .last_run
+            .as_ref()
+            .is_some_and(|r| r.status == "failed")
+}
+
+/// A trigger that fires here and either missed runs or last failed.
+pub fn needs_attention(item: &TriggerStatusItem) -> bool {
+    item.fires_here && (item.info.missed.is_some() || last_run_failed(item))
+}
+
+/// Missed first (most missed first), then the rest by newest last run; ties by
+/// workspace and name.
+pub fn sort_attention(items: &mut [AttentionTrigger]) {
+    items.sort_by(|a, b| {
+        let a_missed = a.trigger.missed.as_ref().map(|m| m.count);
+        let b_missed = b.trigger.missed.as_ref().map(|m| m.count);
+        let a_run = a.trigger.last_run.as_ref().map(|r| r.created_at);
+        let b_run = b.trigger.last_run.as_ref().map(|r| r.created_at);
+        match (a_missed, b_missed) {
+            (Some(x), Some(y)) => y.cmp(&x),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => b_run.cmp(&a_run),
+        }
+        .then_with(|| (&a.workspace, &a.trigger.name).cmp(&(&b.workspace, &b.trigger.name)))
+    });
 }
 
 /// The `job.source_type` a trigger's jobs carry.
