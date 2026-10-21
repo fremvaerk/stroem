@@ -158,10 +158,16 @@ function convertStarlightSyntax(content: string): string {
   );
 }
 
+// Root-relative doc links (`](/guides/hooks/)`) mean nothing outside the site.
+function absolutizeLinks(content: string): string {
+  return content.replace(/\]\(\/(?!\/)/g, `](${BASE_URL}/`);
+}
+
 function processFile(filePath: string): string {
   const raw = readFileSync(filePath, "utf-8");
   let content = stripFrontmatter(raw);
   content = convertStarlightSyntax(content);
+  content = absolutizeLinks(content);
   return content.trim();
 }
 
