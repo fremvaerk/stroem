@@ -337,7 +337,7 @@ Returns job metadata and all steps with statuses.
 }
 ```
 
-`skip_reason` is `null` unless `status` is `skipped`; then one of `condition`, `empty`, `cascade`, `unreachable` (see the [Conditionals guide](/guides/conditionals/#skip-reasons)).
+`skip_reason` is `null` unless `status` is `skipped`; then one of `condition`, `empty`, `cascade`, `unreachable` (see the [Conditionals guide](/guides/conditionals/#outcomes-and-skip-reasons)).
 
 `ref` is set on a [pinned job](/guides/git-refs/) — the ref as written;
 `revision` is then the resolved commit. On a step, `action_workspace` /
@@ -407,7 +407,7 @@ POST /api/jobs/{id}/restart
 
 Creates a new job for the same task and input, rerunning only the given step and its
 dependents; every other step is carried over from the source job unchanged (see
-[Re-running and Restarting Jobs](/stroem/guides/rerun-and-restart)). Requires Run
+[Re-running and Restarting Jobs](/guides/rerun-and-restart)). Requires Run
 permission on the task. The source job must be terminal, must be a **top-level** job
 (not a `type: task` child, agent tool call, hook or uploaded-state job) and must have
 `raw_input` recorded (jobs predating Re-run prefill are rejected).

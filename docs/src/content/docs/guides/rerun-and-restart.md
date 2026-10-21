@@ -101,6 +101,6 @@ API for those: `POST /api/workspaces/{ws}/tasks/{task}/execute` with
 
 ## Related
 
-- [Hooks](/stroem/guides/hooks) — workspace-level hooks fire for both `rerun` and `restart` jobs (they're top-level sources), and `hook.failed_steps[].carried_over` flags failures that came from the source job rather than this run.
-- [Retry Mechanisms](/stroem/guides/retry) — automatic step/task retry, a different mechanism for handling failures without user intervention.
-- [API Reference](/stroem/reference/api) — `POST /api/jobs/{id}/restart` request/response shapes.
+- [Hooks](/guides/hooks) — workspace-level hooks fire for both `rerun` and `restart` jobs (they're top-level sources), and `hook.failed_steps[].carried_over` flags failures that came from the source job rather than this run.
+- [Retry Mechanisms](/guides/retry) — automatic step/task retry, a different mechanism for handling failures without user intervention.
+- [API Reference](/reference/api) — `POST /api/jobs/{id}/restart` request/response shapes.

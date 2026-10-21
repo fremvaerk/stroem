@@ -391,6 +391,6 @@ If every list tool returns empty and reads/executes report "not found", the auth
 
 ## See Also
 
-- [Workflow Authoring](/docs/guides/workflow-authoring/) — Learn how to define tasks and actions
-- [API Reference](/docs/api-reference/) — REST API documentation
-- [Task Actions](/docs/guides/action-types/) — Available action types for tasks
+- [Workflow Authoring](/guides/workflow-basics/) — Learn how to define tasks and actions
+- [API Reference](/reference/api/) — REST API documentation
+- [Task Actions](/guides/action-types/) — Available action types for tasks

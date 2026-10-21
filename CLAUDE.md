@@ -131,7 +131,10 @@ bun run dev            # Dev server
 bun run build          # Build static site (also regenerates llms.txt)
 bun run generate-llms  # Regenerate llms.txt only
 bun run preview        # Preview built site
+bun run test           # Unit tests for docs/plugins/
 ```
+
+- **Internal links never carry the site base** (`base: "/stroem"` in `docs/astro.config.mjs`). Markdown links are root-relative without it (`[Hooks](/guides/hooks/)`): the Sätteri mdast plugin `docs/plugins/base-links.mjs` adds the base at build time (Astro 7's default Markdown processor is Sätteri, so it is a Sätteri plugin, not a remark plugin — `markdown.remarkPlugins` would need `@astrojs/markdown-remark` and switch every page to unified). Sidebar `link:` values are base-less too, because Starlight adds the base itself (`/stroem/llms.txt` rendered as `/stroem/stroem/llms.txt`). The llms generator turns the same links into absolute `https://fremvaerk.github.io/stroem/…` URLs.
 
 ### LLM Reference (llms.txt)
 
