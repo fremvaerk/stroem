@@ -326,7 +326,7 @@ A webhook trigger shows its last run (the newest job it created, with the result
 
 ## Event source triggers
 
-For long-running queue consumers that create jobs from external events, see the dedicated [Event Sources](/stroem/guides/event-sources/) guide.
+For long-running queue consumers that create jobs from external events, see the dedicated [Event Sources](/guides/event-sources/) guide.
 
 Event sources reference a consumer task and a target task:
 

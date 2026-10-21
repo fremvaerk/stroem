@@ -161,7 +161,7 @@ In this flow:
 
 ## Configuration
 
-State storage uses the same archive backend as [log storage](/guides/logs/) by default. Override with a dedicated section:
+State storage uses the same archive backend as [log storage](/operations/log-storage/) by default. Override with a dedicated section:
 
 ```yaml
 # server-config.yaml

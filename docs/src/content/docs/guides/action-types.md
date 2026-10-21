@@ -555,7 +555,7 @@ Approval gates are dispatched server-side — workers never see them and no work
 ### Approval lifecycle
 
 1. **Pending**: Step is ready to execute but waiting for approval.
-2. **Suspended**: Step is paused and awaiting human decision. Triggers `on_suspended` hooks (see [Hooks](/guides/hooks/#on_suspended)).
+2. **Suspended**: Step is paused and awaiting human decision. Triggers `on_suspended` hooks (see [Hooks](/guides/hooks/#on_suspended-hooks)).
 3. **Completed** or **Failed**: Approver has made a decision; the step transitions to the final state and the job continues.
 
 ### Basic approval
@@ -651,4 +651,4 @@ Timed-out steps fail with a message like `"Approval step timed out after 24h"`. 
 
 ### Using on_suspended hooks
 
-When a step enters `suspended` state, `on_suspended` hooks fire to notify approvers. See [Hooks](/guides/hooks/#on_suspended) for full documentation and examples.
+When a step enters `suspended` state, `on_suspended` hooks fire to notify approvers. See [Hooks](/guides/hooks/#on_suspended-hooks) for full documentation and examples.
