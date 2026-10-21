@@ -1,9 +1,16 @@
 import { defineConfig } from "astro/config";
 import starlight from "@astrojs/starlight";
+import { satteri } from "@astrojs/markdown-satteri";
+import baseLinks from "./plugins/base-links.mjs";
+
+const base = "/stroem";
 
 export default defineConfig({
   site: "https://fremvaerk.github.io",
-  base: "/stroem",
+  base,
+  markdown: {
+    processor: satteri({ mdastPlugins: [baseLinks(base)] }),
+  },
   integrations: [
     starlight({
       title: "Strøm",
