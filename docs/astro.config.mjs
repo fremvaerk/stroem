@@ -126,12 +126,12 @@ export default defineConfig({
             { label: "Worker API", slug: "reference/worker-api" },
             {
               label: "LLM Index (llms.txt)",
-              link: "/stroem/llms.txt",
+              link: "/llms.txt",
               attrs: { target: "_blank" },
             },
             {
               label: "LLM Full Reference (llms-full.txt)",
-              link: "/stroem/llms-full.txt",
+              link: "/llms-full.txt",
               attrs: { target: "_blank" },
             },
           ],
