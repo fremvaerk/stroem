@@ -182,7 +182,7 @@ Job A (failed at deploy step)      retry_job_id → B
       └─ Job C (success)           retry_of_job_id → A
 ```
 
-In the UI, a retry job shows **retry of `<first job>`** under its title and its attempt number in the **Source** card; a failed attempt that was retried shows a **Retried** link to the next attempt. If the first job has since been deleted by [retention](/operations/retention/), the pointer is cleared (`ON DELETE SET NULL`), and the next retry points at the attempt that just failed instead — not at the earliest attempt that still exists.
+In the UI, a retry job shows **retry of `<first job>`** under its title and its attempt number in the **Source** card; a failed attempt that was retried shows a **Retried** link to the next attempt. A job that you [restarted or re-ran](/guides/rerun-and-restart/#re-run) shows a **Later runs** card instead. If the first job has since been deleted by [retention](/operations/retention/), the pointer is cleared (`ON DELETE SET NULL`), and the next retry points at the attempt that just failed instead — not at the earliest attempt that still exists.
 
 ### When to use task retry
 

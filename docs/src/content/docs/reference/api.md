@@ -333,6 +333,15 @@ Returns job metadata and all steps with statuses.
       "task_ref": null,
       "task_revision": null
     }
+  ],
+  "derived_jobs": [
+    {
+      "id": "e5f6a7b8-...",
+      "source_type": "restart",
+      "status": "running",
+      "created_at": "2025-02-10T12:30:00Z",
+      "restart_from_step": "say-hello"
+    }
   ]
 }
 ```
@@ -348,6 +357,13 @@ action), `action_ref` the ref it was resolved through, and
 step's task runs at. A `type: task` step also lists its `child_jobs[]`
 (`id`, `workspace`, `task_name`, `status`, `created_at`, `ref`,
 `revision`).
+
+`derived_jobs[]` lists the [Restarts and Re-runs](/guides/rerun-and-restart/)
+created from this job, newest first: `id`, `source_type` (`restart` or
+`rerun`), `status`, `created_at` and `restart_from_step` (`null` for a
+re-run). Hook jobs are not listed. With ACL configured, a run you may not
+view is left out. It is an empty array when nothing was created from the
+job.
 
 Secret values are masked as `••••••` everywhere in the response except
 identifiers (ids, names, statuses, revisions, refs, timestamps): workspace
