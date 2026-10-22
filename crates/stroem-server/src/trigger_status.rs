@@ -77,7 +77,8 @@ pub async fn viewer_for(
     }))
 }
 
-fn denied(state: &AppState, viewer: &Viewer, workspace: &str, task_path: &str) -> bool {
+/// True when `viewer` may not even View `task_path` (the ACL answers `Deny`).
+pub(crate) fn denied(state: &AppState, viewer: &Viewer, workspace: &str, task_path: &str) -> bool {
     matches!(
         state.acl.evaluate(
             workspace,

@@ -5,8 +5,8 @@ pub mod repos;
 pub use pool::{create_pool, migration_fingerprint, run_migrations};
 pub use repos::api_key::{ApiKeyRepo, ApiKeyRow};
 pub use repos::job::{
-    ClosureBounds, ClosurePinRow, DurationStatsRow, JobAclScope, JobPinCols, JobRepo, JobRow,
-    RecentDurationRow, RedactionClosure, RetentionJobInfo, StalledPinnedJob,
+    ClosureBounds, ClosurePinRow, DerivedRunRow, DurationStatsRow, JobAclScope, JobPinCols,
+    JobRepo, JobRow, RecentDurationRow, RedactionClosure, RetentionJobInfo, StalledPinnedJob,
 };
 pub use repos::job_ref_pin::{JobRefPinRepo, JobRefPinRow};
 pub use repos::job_step::{

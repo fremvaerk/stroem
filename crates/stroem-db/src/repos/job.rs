@@ -113,6 +113,23 @@ pub struct RetentionJobInfo {
     pub created_at: DateTime<Utc>,
 }
 
+/// A row of [`JobRepo::list_derived_runs`]: a Restart or Re-run created from
+/// another job. Its identifiers, plus the job-row ACL coordinates
+/// (`workspace`, `task_name`, `git_ref`, `task_folder`) — a pinned restart
+/// takes its folder from the new commit, so it can differ from the source's.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct DerivedRunRow {
+    pub job_id: Uuid,
+    pub workspace: String,
+    pub task_name: String,
+    pub source_type: String,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub restart_from_step: Option<String>,
+    pub git_ref: Option<String>,
+    pub task_folder: Option<String>,
+}
+
 /// A row of [`JobRepo::get_stalled_pinned_jobs`]: the job and its own pin's
 /// workspace + commit (`revision`), so recovery can skip the other jobs of a
 /// pin it just failed to load.
@@ -1074,6 +1091,28 @@ impl JobRepo {
         .await
         .context("Failed to list child jobs")?;
         Ok(jobs)
+    }
+
+    /// The Restarts and Re-runs created from `source_job_id`, newest first —
+    /// the forward side of `source_job_id` lineage (served by
+    /// `idx_job_source_job_id`). Hook jobs carry `source_job_id` too
+    /// (migration 048) but are not new runs, so they are left out.
+    pub async fn list_derived_runs(
+        pool: &PgPool,
+        source_job_id: Uuid,
+    ) -> Result<Vec<DerivedRunRow>> {
+        let rows = sqlx::query_as::<_, DerivedRunRow>(
+            "SELECT job_id, workspace, task_name, source_type, status, created_at, \
+                    restart_from_step, git_ref, task_folder \
+             FROM job \
+             WHERE source_job_id = $1 AND source_type IN ('restart', 'rerun') \
+             ORDER BY created_at DESC, job_id DESC",
+        )
+        .bind(source_job_id)
+        .fetch_all(pool)
+        .await
+        .context("Failed to list derived runs")?;
+        Ok(rows)
     }
 
     /// `type: task` **descendant** jobs that are terminal while the parent step

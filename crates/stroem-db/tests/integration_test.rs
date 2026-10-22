@@ -5866,3 +5866,57 @@ async fn test_seed_steps_tx_unknown_step_aborts() -> Result<()> {
     assert!(format!("{err:#}").contains("ghost"), "{err:#}");
     Ok(())
 }
+
+/// The forward side of `source_job_id` lineage: a source's Restarts and
+/// Re-runs, newest first. A hook job also carries `source_job_id` (migration
+/// 048) but is not a new run; another source's restart is not listed.
+#[tokio::test]
+async fn test_list_derived_runs_lists_restarts_and_reruns_newest_first() -> Result<()> {
+    let pool = setup_db().await?;
+
+    async fn insert(
+        pool: &PgPool,
+        source_type: &str,
+        source_job_id: Option<Uuid>,
+        restart_from_step: Option<&str>,
+        minutes_ago: i32,
+    ) -> Result<Uuid> {
+        let job_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO job (job_id, workspace, task_name, mode, status, source_type, \
+                              source_job_id, restart_from_step, created_at) \
+             VALUES ($1, 'default', 't', 'distributed', 'failed', $2, $3, $4, \
+                     NOW() - make_interval(mins => $5))",
+        )
+        .bind(job_id)
+        .bind(source_type)
+        .bind(source_job_id)
+        .bind(restart_from_step)
+        .bind(minutes_ago)
+        .execute(pool)
+        .await?;
+        Ok(job_id)
+    }
+
+    let source = insert(&pool, "api", None, None, 60).await?;
+    let other = insert(&pool, "api", None, None, 60).await?;
+    let restart = insert(&pool, "restart", Some(source), Some("b"), 30).await?;
+    let _hook = insert(&pool, "hook", Some(source), None, 20).await?;
+    let rerun = insert(&pool, "rerun", Some(source), None, 10).await?;
+    let _other_restart = insert(&pool, "restart", Some(other), Some("a"), 5).await?;
+
+    let rows = JobRepo::list_derived_runs(&pool, source).await?;
+    let ids: Vec<Uuid> = rows.iter().map(|r| r.job_id).collect();
+    assert_eq!(ids, vec![rerun, restart], "newest first, hook excluded");
+    assert_eq!(rows[0].source_type, "rerun");
+    assert_eq!(rows[0].restart_from_step, None);
+    assert_eq!(rows[1].source_type, "restart");
+    assert_eq!(rows[1].restart_from_step.as_deref(), Some("b"));
+    assert_eq!(rows[1].workspace, "default");
+    assert_eq!(rows[1].task_name, "t");
+    assert_eq!(rows[1].status, "failed");
+
+    // A run with nothing derived from it, and a derived run itself.
+    assert!(JobRepo::list_derived_runs(&pool, rerun).await?.is_empty());
+    Ok(())
+}
