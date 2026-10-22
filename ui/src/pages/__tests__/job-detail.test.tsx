@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Routes, Route } from "react-router";
 import type { DerivedJobRef, JobDetail, JobStep, TaskDetail } from "@/lib/types";
 
@@ -27,6 +27,7 @@ import {
   listWorkers,
   getStepLogs,
 } from "@/lib/api";
+import { POLL_LATER_RUN_MS, POLL_SETTLED_MS } from "@/lib/job-status";
 import { JobDetailPage } from "../job-detail";
 
 const mockGetJob = vi.mocked(getJob);
@@ -512,5 +513,84 @@ describe("JobDetailPage — later runs", () => {
 
     expect(await screen.findByText("pipeline")).toBeTruthy();
     expect(screen.queryByTestId("job-later-runs")).toBeNull();
+  });
+});
+
+describe("JobDetailPage — later runs refresh on a settled job", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(getTaskStats).mockRejectedValue(new Error("no stats"));
+    vi.mocked(listJobArtifacts).mockResolvedValue([]);
+    vi.mocked(listWorkers).mockResolvedValue({ items: [], total: 0 });
+    vi.mocked(getStepLogs).mockResolvedValue({ logs: "", truncated: false, total_bytes: 0, returned_bytes: 0 });
+    mockGetTask.mockResolvedValue(task(true));
+    // Before the render: the poll's setInterval starts in an effect after mount.
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** Lets the pending fetches settle and the timers due within `ms` fire. */
+  const advance = (ms: number) =>
+    act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+
+  it("updates the status of a restart that finishes while the page is open", async () => {
+    mockGetJob
+      .mockResolvedValueOnce(job({ derived_jobs: [derived(1, { source_type: "restart", status: "running" })] }))
+      .mockResolvedValue(job({ derived_jobs: [derived(1, { source_type: "restart", status: "completed" })] }));
+    renderPage();
+    await advance(1);
+
+    const row = () => within(screen.getByTestId("job-later-runs")).getByRole("listitem");
+    expect(row().textContent).toBe("restart11111111running");
+
+    await advance(POLL_LATER_RUN_MS);
+    expect(row().textContent).toBe("restart11111111completed");
+    expect(mockGetJob).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows a run made from the job after the page loaded", async () => {
+    mockGetJob
+      .mockResolvedValueOnce(job({ derived_jobs: [] }))
+      .mockResolvedValue(job({ derived_jobs: [derived(1)] }));
+    renderPage();
+    await advance(1);
+    expect(screen.getByText("pipeline")).toBeTruthy();
+    expect(screen.queryByTestId("job-later-runs")).toBeNull();
+
+    await advance(POLL_SETTLED_MS);
+    const links = within(screen.getByTestId("job-later-runs")).getAllByRole("link");
+    expect(links.map((l) => l.textContent)).toEqual(["11111111"]);
+  });
+
+  it("does not poll a settled job from an older server", async () => {
+    mockGetJob.mockResolvedValue(job());
+    renderPage();
+    await advance(1);
+    expect(screen.getByText("pipeline")).toBeTruthy();
+
+    await advance(POLL_SETTLED_MS * 3);
+    expect(mockGetJob).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not poll a settled child job, which cannot be restarted", async () => {
+    mockGetJob.mockResolvedValue(
+      job({
+        parent_job_id: "99999999-9999-9999-9999-999999999999",
+        parent_step_name: "call",
+        source_type: "task",
+        derived_jobs: [],
+      }),
+    );
+    renderPage();
+    await advance(1);
+    expect(screen.getByText("pipeline")).toBeTruthy();
+
+    await advance(POLL_SETTLED_MS * 3);
+    expect(mockGetJob).toHaveBeenCalledTimes(1);
   });
 });

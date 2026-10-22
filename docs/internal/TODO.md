@@ -1875,7 +1875,7 @@ Accepted limitations of the last-run and missed-run status (spec `docs/superpowe
 
 Job detail lists a job's Restarts and Re-runs (`derived_jobs[]`, "Later runs" card). Known limits, each a possible follow-up:
 
-- [ ] `derived_jobs[]` is not bounded: an API client that re-runs one source job thousands of times makes every job-detail poll of that source list (and ACL-check) every run. The UI shows only five. A `LIMIT` plus a total count would bound it.
+- [ ] `derived_jobs[]` is not bounded: an API client that re-runs one source job thousands of times makes every job-detail poll of that source list (and ACL-check) every run — and an open page of a settled top-level job polls every 30 s (10 s while a later run is live). The UI shows only five. A `LIMIT` plus a total count would bound it.
 - [ ] "+N more" is plain text: the Jobs page has no `source_job_id` filter to link to.
 - [ ] MCP `get_job_status` does not report the derived runs (it builds its own response).
 

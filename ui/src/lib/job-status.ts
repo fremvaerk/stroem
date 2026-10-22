@@ -104,3 +104,46 @@ export function laterRuns(
   );
   return { shown: sorted.slice(0, cap), more: Math.max(0, sorted.length - cap) };
 }
+
+/** Job page poll: a step is running or suspended. */
+export const POLL_ACTIVE_MS = 3_000;
+/** Job page poll: the job is pending or running, or a step retry is due. */
+export const POLL_LIVE_MS = 8_000;
+/** Job page poll: the job has settled, but a Restart or Re-run of it still runs. */
+export const POLL_LATER_RUN_MS = 10_000;
+/** Job page poll: the job has settled; someone may still restart or re-run it. */
+export const POLL_SETTLED_MS = 30_000;
+
+/**
+ * How often the job page re-fetches the job, in ms, or `null` to stop. A live
+ * job polls on an adaptive interval: a job with suspended steps is `running`,
+ * so approval gates are covered, and a step with a future `retry_at` keeps the
+ * badge moving. Once the job has settled, only its Later runs card can still
+ * change — a restart runs on, or a new one is made in another tab — so a
+ * top-level job keeps a slow poll. A child or hook job cannot be restarted or
+ * re-run, and an older server sends no `derived_jobs`, so neither polls.
+ */
+export function jobPollInterval(
+  job: {
+    status: string;
+    steps: { status: string; retry_at: string | null }[];
+    parent_job_id: string | null;
+    source_type: string;
+    derived_jobs?: DerivedJobRef[];
+  },
+  now: number,
+): number | null {
+  const retryPending = job.steps.some(
+    (s) => s.retry_at != null && Date.parse(s.retry_at) > now,
+  );
+  if (job.status === "pending" || job.status === "running" || retryPending) {
+    const active = job.steps.some((s) => s.status === "running" || s.status === "suspended");
+    return active ? POLL_ACTIVE_MS : POLL_LIVE_MS;
+  }
+  if (!isTerminalJobStatus(job.status) || job.derived_jobs === undefined || !isTopLevelJob(job)) {
+    return null;
+  }
+  return job.derived_jobs.some((d) => !isTerminalJobStatus(d.status))
+    ? POLL_LATER_RUN_MS
+    : POLL_SETTLED_MS;
+}

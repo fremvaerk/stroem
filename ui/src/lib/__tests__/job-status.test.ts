@@ -1,9 +1,14 @@
 import { describe, it, expect } from "vitest";
 import {
   LATER_RUNS_SHOWN,
+  POLL_ACTIVE_MS,
+  POLL_LATER_RUN_MS,
+  POLL_LIVE_MS,
+  POLL_SETTLED_MS,
   isTerminalJobStatus,
   isTopLevelJob,
   jobLineage,
+  jobPollInterval,
   laterRuns,
 } from "../job-status";
 import type { DerivedJobRef } from "../types";
@@ -184,5 +189,72 @@ describe("laterRuns", () => {
     );
     expect(laterRuns(runs).more).toBe(0);
     expect(laterRuns(runs).shown).toHaveLength(LATER_RUNS_SHOWN);
+  });
+});
+
+describe("jobPollInterval", () => {
+  const NOW = Date.parse("2026-10-22T12:00:00Z");
+  type PollJob = Parameters<typeof jobPollInterval>[0];
+  const pollJob = (overrides: Partial<PollJob> = {}): PollJob => ({
+    status: "failed",
+    steps: [{ status: "failed", retry_at: null }],
+    parent_job_id: null,
+    source_type: "api",
+    derived_jobs: [],
+    ...overrides,
+  });
+  const derived = (status: string): DerivedJobRef => ({
+    id: "d",
+    source_type: "restart",
+    status,
+    created_at: "2026-10-22T11:00:00Z",
+    restart_from_step: "build",
+  });
+
+  it("polls fast while a step runs or waits for approval", () => {
+    for (const status of ["running", "suspended"]) {
+      const job = pollJob({ status: "running", steps: [{ status, retry_at: null }] });
+      expect(jobPollInterval(job, NOW)).toBe(POLL_ACTIVE_MS);
+    }
+  });
+
+  it("polls at the live rate for a pending or running job with no active step", () => {
+    for (const status of ["pending", "running"]) {
+      const job = pollJob({ status, steps: [{ status: "ready", retry_at: null }] });
+      expect(jobPollInterval(job, NOW)).toBe(POLL_LIVE_MS);
+    }
+  });
+
+  it("keeps the live rate while a step retry is still due", () => {
+    const due = pollJob({ steps: [{ status: "ready", retry_at: "2026-10-22T12:00:05Z" }] });
+    expect(jobPollInterval(due, NOW)).toBe(POLL_LIVE_MS);
+    const past = pollJob({ steps: [{ status: "failed", retry_at: "2026-10-22T11:59:55Z" }] });
+    expect(jobPollInterval(past, NOW)).toBe(POLL_SETTLED_MS);
+  });
+
+  it("keeps a slow poll on a settled top-level job, for its later runs", () => {
+    for (const status of ["completed", "failed", "cancelled"]) {
+      expect(jobPollInterval(pollJob({ status }), NOW)).toBe(POLL_SETTLED_MS);
+    }
+    const done = pollJob({ derived_jobs: [derived("completed"), derived("failed")] });
+    expect(jobPollInterval(done, NOW)).toBe(POLL_SETTLED_MS);
+  });
+
+  it("polls faster while a restart or re-run of the settled job is live", () => {
+    for (const status of ["pending", "running"]) {
+      const job = pollJob({ derived_jobs: [derived("completed"), derived(status)] });
+      expect(jobPollInterval(job, NOW)).toBe(POLL_LATER_RUN_MS);
+    }
+  });
+
+  it("stops for a settled job that can get no later runs", () => {
+    const child = pollJob({ parent_job_id: "p", source_type: "task" });
+    expect(jobPollInterval(child, NOW)).toBeNull();
+    const hook = pollJob({ source_type: "hook" });
+    expect(jobPollInterval(hook, NOW)).toBeNull();
+  });
+
+  it("stops for a settled job from an older server that sends no derived_jobs", () => {
+    expect(jobPollInterval(pollJob({ derived_jobs: undefined }), NOW)).toBeNull();
   });
 });
