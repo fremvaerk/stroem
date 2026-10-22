@@ -1,5 +1,12 @@
 import { describe, it, expect } from "vitest";
-import { isTerminalJobStatus, isTopLevelJob, jobLineage } from "../job-status";
+import {
+  LATER_RUNS_SHOWN,
+  isTerminalJobStatus,
+  isTopLevelJob,
+  jobLineage,
+  laterRuns,
+} from "../job-status";
+import type { DerivedJobRef } from "../types";
 
 describe("isTerminalJobStatus", () => {
   it("accepts the three statuses a job actually settles at", () => {
@@ -122,5 +129,60 @@ describe("jobLineage", () => {
     expect(
       jobLineage({ ...base, source_type: "user", source_job_id: "src" }),
     ).toBeNull();
+  });
+});
+
+describe("laterRuns", () => {
+  const run = (id: string, created_at: string): DerivedJobRef => ({
+    id,
+    source_type: "rerun",
+    status: "completed",
+    created_at,
+    restart_from_step: null,
+  });
+
+  it("is empty when nothing was derived, or the server is older", () => {
+    expect(laterRuns([])).toEqual({ shown: [], more: 0 });
+    expect(laterRuns(undefined)).toEqual({ shown: [], more: 0 });
+  });
+
+  it("orders newest first whatever the input order", () => {
+    const runs = [
+      run("old", "2026-10-22T07:00:00Z"),
+      run("new", "2026-10-22T09:00:00Z"),
+      run("mid", "2026-10-22T08:00:00.5Z"),
+    ];
+    expect(laterRuns(runs).shown.map((r) => r.id)).toEqual(["new", "mid", "old"]);
+  });
+
+  it("compares times, not strings: fractional seconds of other lengths", () => {
+    // As strings "…00Z" sorts after "…00.5Z"; as times it is earlier.
+    const runs = [run("whole", "2026-10-22T07:00:00Z"), run("half", "2026-10-22T07:00:00.5Z")];
+    expect(laterRuns(runs).shown.map((r) => r.id)).toEqual(["half", "whole"]);
+  });
+
+  it("keeps the server order for runs in the same millisecond", () => {
+    const runs = [
+      run("first", "2026-10-22T07:00:00.123456Z"),
+      run("second", "2026-10-22T07:00:00.123123Z"),
+    ];
+    expect(laterRuns(runs).shown.map((r) => r.id)).toEqual(["first", "second"]);
+  });
+
+  it(`shows at most ${LATER_RUNS_SHOWN} and counts the rest`, () => {
+    const runs = Array.from({ length: 7 }, (_, i) =>
+      run(`r${i}`, `2026-10-22T07:0${i}:00Z`),
+    );
+    const later = laterRuns(runs);
+    expect(later.shown.map((r) => r.id)).toEqual(["r6", "r5", "r4", "r3", "r2"]);
+    expect(later.more).toBe(2);
+  });
+
+  it("does not count when the runs fit", () => {
+    const runs = Array.from({ length: LATER_RUNS_SHOWN }, (_, i) =>
+      run(`r${i}`, `2026-10-22T07:0${i}:00Z`),
+    );
+    expect(laterRuns(runs).more).toBe(0);
+    expect(laterRuns(runs).shown).toHaveLength(LATER_RUNS_SHOWN);
   });
 });

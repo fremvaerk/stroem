@@ -17,9 +17,9 @@ import { useTitle } from "@/hooks/use-title";
 import { useWorkerNames } from "@/hooks/use-worker-names";
 import { formatTime, formatDuration, formatDurationMs } from "@/lib/formatting";
 import { computeEta } from "@/lib/eta";
-import { isTopLevelJob, jobLineage } from "@/lib/job-status";
+import { isTopLevelJob, jobLineage, laterRuns } from "@/lib/job-status";
 import { formatPin } from "@/lib/job-ref";
-import type { JobLineage } from "@/lib/job-status";
+import type { JobLineage, LaterRuns } from "@/lib/job-status";
 import type { ArtifactItem } from "@/lib/api";
 import type { JobDetail, TaskStatsResponse } from "@/lib/types";
 
@@ -59,6 +59,40 @@ function LineageLink({ lineage }: { lineage: JobLineage }) {
         </>
       )}
     </span>
+  );
+}
+
+/**
+ * The "Later runs" card: "restart 0438a27a <status> from build" /
+ * "re-run 1a2b3c4d <status>", newest first, then "+N more".
+ */
+function LaterRunsList({ runs }: { runs: LaterRuns }) {
+  return (
+    <ul data-testid="job-later-runs" className="space-y-1">
+      {runs.shown.map((run) => (
+        <li key={run.id} className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+          <span className="text-xs font-normal text-muted-foreground">
+            {run.source_type === "restart" ? "restart" : "re-run"}
+          </span>
+          <Link
+            to={`/jobs/${run.id}`}
+            className="font-mono text-xs text-primary hover:underline"
+            title={run.id}
+          >
+            {run.id.substring(0, 8)}
+          </Link>
+          <StatusBadge status={run.status} />
+          {run.source_type === "restart" && run.restart_from_step && (
+            <span className="text-xs font-normal text-muted-foreground">
+              from <span className="font-mono">{run.restart_from_step}</span>
+            </span>
+          )}
+        </li>
+      ))}
+      {runs.more > 0 && (
+        <li className="text-xs font-normal text-muted-foreground">+{runs.more} more</li>
+      )}
+    </ul>
   );
 }
 
@@ -312,6 +346,7 @@ export function JobDetailPage() {
   const topLevel = isTopLevelJob(job);
   const lineage = jobLineage(job);
   const lineageNote = lineage && lineageDetail(job, lineage);
+  const later = laterRuns(job.derived_jobs);
 
   return (
     <div className="space-y-6">
@@ -500,6 +535,9 @@ export function JobDetailPage() {
                   ),
                 },
               ]
+            : []),
+          ...(later.shown.length > 0
+            ? [{ label: "Later runs", value: <LaterRunsList runs={later} /> }]
             : []),
         ]}
       />

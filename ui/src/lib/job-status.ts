@@ -1,3 +1,5 @@
+import type { DerivedJobRef } from "./types";
+
 /** Job statuses that admit no further step transitions. */
 const TERMINAL_JOB_STATUSES = ["completed", "failed", "cancelled"];
 
@@ -76,4 +78,29 @@ export function jobLineage(job: {
     default:
       return null;
   }
+}
+
+/** Rows the "Later runs" card shows; the rest are only counted. */
+export const LATER_RUNS_SHOWN = 5;
+
+/** The Restarts and Re-runs a job page lists: the newest `shown`, then a count. */
+export interface LaterRuns {
+  shown: DerivedJobRef[];
+  more: number;
+}
+
+/**
+ * The Restarts and Re-runs created from a job, newest first, at most `cap` of
+ * them; `more` counts the rest. The sort is stable, so runs with the same
+ * millisecond keep the server's order (it sorts on full precision). An older
+ * server sends no `derived_jobs`, which reads as none.
+ */
+export function laterRuns(
+  derived: DerivedJobRef[] | undefined,
+  cap: number = LATER_RUNS_SHOWN,
+): LaterRuns {
+  const sorted = [...(derived ?? [])].sort(
+    (a, b) => Date.parse(b.created_at) - Date.parse(a.created_at),
+  );
+  return { shown: sorted.slice(0, cap), more: Math.max(0, sorted.length - cap) };
 }
