@@ -99,7 +99,7 @@ async fn fail_task_step(
     snapshots: &Snapshots,
     extra_secret_values: &[String],
     persist_override: Option<&str>,
-    expected: Option<StepStatus>,
+    expected: Option<(StepStatus, TaskPinCols<'_>)>,
 ) -> Result<bool> {
     // Two of the callers pass a Tera render error (task-step input, approval
     // message). Tera's own text quotes the offending value, so a template
@@ -117,12 +117,14 @@ async fn fail_task_step(
     let scrubbed = crate::workspace_set::redact_secrets_in_str(err, &secret_values);
 
     // `expected` guards the write (task dispatch, see `handle_task_steps_pass`):
-    // a dispatcher that no longer owns the step — another one claimed or
-    // failed it — writes nothing and does not re-cascade.
+    // the status and the task stamp this dispatcher resolved with. A
+    // dispatcher that no longer owns the step — another one claimed, failed
+    // or stamped it — writes nothing and does not re-cascade.
     let persisted = persist_override.unwrap_or(&scrubbed);
     let applied = match expected {
-        Some(status) => {
-            JobStepRepo::mark_failed_if(pool, job_id, step_name, persisted, status).await?
+        Some((status, task_pin)) => {
+            JobStepRepo::fail_task_dispatch(pool, job_id, step_name, persisted, status, task_pin)
+                .await?
         }
         None => {
             JobStepRepo::mark_failed(pool, job_id, step_name, persisted).await?;
@@ -149,6 +151,17 @@ async fn fail_task_step(
     )
     .await;
     Ok(true)
+}
+
+/// A step's task stamp as `JobStepRepo::claim_task_dispatch` and
+/// `fail_task_dispatch` compare it: `(task_workspace, task_ref,
+/// task_revision)`, `None` when unstamped.
+type TaskPinCols<'a> = Option<(&'a str, &'a str, &'a str)>;
+
+fn stamp_cols(task_stamp: &Option<(String, PinRef)>) -> TaskPinCols<'_> {
+    task_stamp
+        .as_ref()
+        .map(|(ws, pin)| (ws.as_str(), pin.git_ref.as_str(), pin.commit.as_str()))
 }
 
 /// Build the value-free message persisted for an owner-side render error
@@ -483,6 +496,10 @@ async fn handle_task_steps_pass(
         if step.status != StepStatus::Ready.as_ref() || step.action_type != "task" {
             continue;
         }
+        // The task stamp this dispatcher works with: the row's (stamped at
+        // creation, or by an earlier dispatch), else the one a templated ref
+        // stamps below. Every write of this pass is conditioned on it.
+        let mut task_stamp = PinRef::of_step_task(step);
 
         // Get the referenced task name from action_spec
         let action_spec = step
@@ -510,7 +527,7 @@ async fn handle_task_steps_pass(
                 snapshots,
                 &[],
                 None,
-                Some(StepStatus::Ready),
+                Some((StepStatus::Ready, stamp_cols(&task_stamp))),
             )
             .await?;
             continue;
@@ -534,7 +551,7 @@ async fn handle_task_steps_pass(
                         snapshots,
                         &[],
                         None,
-                        Some(StepStatus::Ready),
+                        Some((StepStatus::Ready, stamp_cols(&task_stamp))),
                     )
                     .await?;
                     continue;
@@ -558,7 +575,7 @@ async fn handle_task_steps_pass(
                         snapshots,
                         &[],
                         None,
-                        Some(StepStatus::Ready),
+                        Some((StepStatus::Ready, stamp_cols(&task_stamp))),
                     )
                     .await?;
                     continue;
@@ -585,7 +602,6 @@ async fn handle_task_steps_pass(
         // 2. Task owner T: the `task_*` stamp when there is one (git-refs spec
         //    § 7.3 — never inferred from the parent job), else today's live
         //    resolution.
-        let mut task_stamp = PinRef::of_step_task(step);
         // Spec 2026-10-15 § 5.6: an unstamped step whose action carries a
         // templated `ref:` is resolved now, and stamped.
         if task_stamp.is_none() {
@@ -623,7 +639,7 @@ async fn handle_task_steps_pass(
                             snapshots,
                             &scrub,
                             withheld.as_deref(),
-                            Some(StepStatus::Ready),
+                            Some((StepStatus::Ready, stamp_cols(&task_stamp))),
                         )
                         .await?;
                         continue;
@@ -652,7 +668,7 @@ async fn handle_task_steps_pass(
                     snapshots,
                     &scrub,
                     None,
-                    Some(StepStatus::Ready),
+                    Some((StepStatus::Ready, stamp_cols(&task_stamp))),
                 )
                 .await?;
                 continue;
@@ -699,7 +715,7 @@ async fn handle_task_steps_pass(
                                 snapshots,
                                 &scrub,
                                 None,
-                                Some(StepStatus::Ready),
+                                Some((StepStatus::Ready, stamp_cols(&task_stamp))),
                             )
                             .await?;
                             continue;
@@ -733,7 +749,7 @@ async fn handle_task_steps_pass(
                         snapshots,
                         &scrub,
                         None,
-                        Some(StepStatus::Ready),
+                        Some((StepStatus::Ready, stamp_cols(&task_stamp))),
                     )
                     .await?;
                     continue;
@@ -785,7 +801,7 @@ async fn handle_task_steps_pass(
                         snapshots,
                         &scrub,
                         persist_override.as_deref(),
-                        Some(StepStatus::Ready),
+                        Some((StepStatus::Ready, stamp_cols(&task_stamp))),
                     )
                     .await?;
                     continue;
@@ -849,7 +865,7 @@ async fn handle_task_steps_pass(
                     snapshots,
                     &scrub,
                     persist_override.as_deref(),
-                    Some(StepStatus::Ready),
+                    Some((StepStatus::Ready, stamp_cols(&task_stamp))),
                 )
                 .await?;
                 continue;
@@ -862,11 +878,10 @@ async fn handle_task_steps_pass(
         // or failed the step, or stamped a pin after this one resolved
         // without one — writes nothing more and creates no child. Failures
         // before this point write only a `ready` row, after it only a
-        // `running` one.
-        let claim_pin = task_stamp
-            .as_ref()
-            .map(|(ws, pin)| (ws.as_str(), pin.git_ref.as_str(), pin.commit.as_str()));
-        if !JobStepRepo::claim_task_dispatch(pool, job_id, &step.step_name, claim_pin).await? {
+        // `running` one — each only while the row carries `task_stamp`.
+        if !JobStepRepo::claim_task_dispatch(pool, job_id, &step.step_name, stamp_cols(&task_stamp))
+            .await?
+        {
             tracing::info!(
                 %job_id,
                 step = %step.step_name,
@@ -982,7 +997,7 @@ async fn handle_task_steps_pass(
                     snapshots,
                     &scrub,
                     persist_override.as_deref(),
-                    Some(StepStatus::Running),
+                    Some((StepStatus::Running, stamp_cols(&task_stamp))),
                 )
                 .await?;
             }

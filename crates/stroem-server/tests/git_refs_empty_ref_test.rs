@@ -506,9 +506,10 @@ async fn concurrent_dispatchers_create_one_child() -> Result<()> {
 }
 
 /// A dispatcher that resolved an empty ref loses the claim once another one
-/// has stamped a pin on the step: it creates no child and leaves the stamp.
+/// has stamped a pin on the step, and cannot fail it either: it creates no
+/// child and leaves the stamp.
 #[tokio::test]
-async fn a_dispatcher_without_a_pin_loses_the_claim_to_a_stamp() -> Result<()> {
+async fn a_dispatcher_without_a_pin_loses_to_a_stamp() -> Result<()> {
     let fx = de_fixture().await?;
     let job_id = df_create(&fx, "tr-task-empty-later", json!({})).await?;
     de_ready_undispatched(&fx.pool, job_id).await;
@@ -527,6 +528,18 @@ async fn a_dispatcher_without_a_pin_loses_the_claim_to_a_stamp() -> Result<()> {
     assert!(
         !stroem_db::JobStepRepo::claim_task_dispatch(&fx.pool, job_id, "call", None).await?,
         "the empty-ref dispatcher's claim"
+    );
+    assert!(
+        !stroem_db::JobStepRepo::fail_task_dispatch(
+            &fx.pool,
+            job_id,
+            "call",
+            "a stale failure",
+            stroem_common::models::job::StepStatus::Ready,
+            None,
+        )
+        .await?,
+        "the empty-ref dispatcher's failure"
     );
     let call = df_step(&fx.pool, job_id, "call").await;
     assert_eq!(call.status, "ready");

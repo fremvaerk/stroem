@@ -511,11 +511,11 @@ The ref-input render's errors are caller-side (bucket `C`, never withheld)
 and go through `fail_task_step`, value-free.
 
 Failures go through `fail_task_step`, as every dispatch failure does today.
-(Amended 2026-10-23: its write is guarded — `ready` before the dispatch
-claim, `running` after it — and the claim `JobStepRepo::claim_task_dispatch`
-has one winner, conditioned on the task stamp the dispatcher resolved with,
-so an empty-ref dispatcher cannot create an unpinned child after another
-one stamped a pin.) The ref template is written by the action owner `O`, so
+(Amended 2026-10-23: the claim `JobStepRepo::claim_task_dispatch` has one
+winner, and it and every failure write (`fail_task_dispatch`: `ready` before
+the claim, `running` after it) are conditioned on the task stamp the
+dispatcher resolved with, so an empty-ref dispatcher can neither create an
+unpinned child nor fail the step after another one stamped a pin.) The ref template is written by the action owner `O`, so
 its render error is withheld when `O != A` (owner-side origin, CLAUDE.md
 § Cross-Workspace References); a post-render error is value-free in every
 case.

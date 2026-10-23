@@ -857,25 +857,38 @@ impl JobStepRepo {
         Ok(())
     }
 
-    /// [`Self::mark_failed`], but only while the step is `expected`. Returns
-    /// whether it wrote. Task dispatch passes `Ready` before its claim and
-    /// `Running` after it, so a dispatcher that lost the claim cannot fail
-    /// the winner's step.
-    pub async fn mark_failed_if(
+    /// A `type: task` dispatch failure, fenced like
+    /// [`Self::claim_task_dispatch`]: written only while the step is
+    /// `expected` AND its task stamp is `task_pin` (`None` = unstamped).
+    /// Returns whether it wrote. Dispatch passes `Ready` before its claim and
+    /// `Running` after it, so a dispatcher that lost the claim, or that
+    /// resolved before another one stamped a pin, cannot fail the step.
+    pub async fn fail_task_dispatch(
         pool: &PgPool,
         job_id: Uuid,
         step_name: &str,
         error: &str,
         expected: StepStatus,
+        task_pin: Option<(&str, &str, &str)>,
     ) -> Result<bool> {
+        let (workspace, git_ref, commit) = match task_pin {
+            Some((w, r, c)) => (Some(w), Some(r), Some(c)),
+            None => (None, None, None),
+        };
         let r = sqlx::query(
             "UPDATE job_step SET status = 'failed', error_message = $1, completed_at = NOW() \
-             WHERE job_id = $2 AND step_name = $3 AND status = $4",
+             WHERE job_id = $2 AND step_name = $3 AND status = $4 \
+               AND task_workspace IS NOT DISTINCT FROM $5 \
+               AND task_ref IS NOT DISTINCT FROM $6 \
+               AND task_revision IS NOT DISTINCT FROM $7",
         )
         .bind(error)
         .bind(job_id)
         .bind(step_name)
         .bind(expected.as_ref())
+        .bind(workspace)
+        .bind(git_ref)
+        .bind(commit)
         .execute(pool)
         .await
         .context("Failed to mark step as failed")?;

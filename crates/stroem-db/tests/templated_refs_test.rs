@@ -513,26 +513,61 @@ async fn claim_task_dispatch_has_one_winner_for_the_stamp_it_resolved_with() -> 
     Ok(())
 }
 
-/// A failure guarded on a status writes only while the step has it: a
-/// dispatcher that lost the claim cannot fail the winner's `running` step.
+/// A dispatch failure is fenced like the claim: the step's status AND the task
+/// stamp the dispatcher resolved with. A dispatcher that lost the claim cannot
+/// fail the winner's `running` step, and one that resolved without a pin
+/// cannot fail a step another dispatcher stamped meanwhile.
 #[tokio::test]
-async fn mark_failed_if_writes_only_the_expected_status() -> Result<()> {
+async fn fail_task_dispatch_writes_only_the_row_the_dispatcher_resolved() -> Result<()> {
     use stroem_common::models::job::StepStatus;
     let pool = setup_db().await;
     let job_id = create_job(&pool, "etl", "t").await;
     ready_task_step(&pool, job_id, "call").await?;
     assert!(JobStepRepo::claim_task_dispatch(&pool, job_id, "call", None).await?);
-    assert!(!JobStepRepo::mark_failed_if(&pool, job_id, "call", "stale", StepStatus::Ready).await?);
+    assert!(
+        !JobStepRepo::fail_task_dispatch(&pool, job_id, "call", "stale", StepStatus::Ready, None)
+            .await?
+    );
     let row = JobStepRepo::get_step(&pool, job_id, "call").await?.unwrap();
     assert_eq!(row.status, "running");
     assert_eq!(row.error_message, None);
-    assert!(JobStepRepo::mark_failed_if(&pool, job_id, "call", "boom", StepStatus::Running).await?);
+    assert!(
+        JobStepRepo::fail_task_dispatch(&pool, job_id, "call", "boom", StepStatus::Running, None)
+            .await?
+    );
     let row = JobStepRepo::get_step(&pool, job_id, "call").await?.unwrap();
     assert_eq!(row.status, "failed");
     assert_eq!(row.error_message.as_deref(), Some("boom"));
+
+    // An unstamped failure loses once another dispatcher stamped a pin; the
+    // stamp's own failure writes.
+    ready_task_step(&pool, job_id, "stamped").await?;
+    assert!(JobStepRepo::stamp_task_pin(&pool, job_id, "stamped", "etl", "release/2.3", C1).await?);
+    assert!(
+        !JobStepRepo::fail_task_dispatch(
+            &pool,
+            job_id,
+            "stamped",
+            "stale",
+            StepStatus::Ready,
+            None
+        )
+        .await?
+    );
+    assert_eq!(step_status(&pool, job_id, "stamped").await, "ready");
+    let pin = Some(("etl", "release/2.3", C1));
+    assert!(
+        JobStepRepo::fail_task_dispatch(&pool, job_id, "stamped", "bad", StepStatus::Ready, pin)
+            .await?
+    );
+    assert_eq!(step_status(&pool, job_id, "stamped").await, "failed");
+
     // A ready step fails from `ready`, and then a claim loses.
     ready_task_step(&pool, job_id, "early").await?;
-    assert!(JobStepRepo::mark_failed_if(&pool, job_id, "early", "bad", StepStatus::Ready).await?);
+    assert!(
+        JobStepRepo::fail_task_dispatch(&pool, job_id, "early", "bad", StepStatus::Ready, None)
+            .await?
+    );
     assert!(!JobStepRepo::claim_task_dispatch(&pool, job_id, "early", None).await?);
     assert_eq!(step_status(&pool, job_id, "early").await, "failed");
     Ok(())
