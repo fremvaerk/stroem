@@ -1,0 +1,77 @@
+# TEMPORARY: dry run of the release build-binaries matrix. Remove before merge.
+name: Release binaries dry run
+
+on:
+  push:
+    branches: [feat/release-aarch64]
+
+concurrency:
+  group: release-binaries-dryrun-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-binaries:
+    name: Build ${{ matrix.name }}
+    # Native build per architecture: the arm64 leg runs on GitHub's hosted
+    # arm64 runner, so no cross toolchain and no QEMU-emulated rustc.
+    strategy:
+      matrix:
+        include:
+          - name: linux-amd64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - name: linux-arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: rust:1-bookworm
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.target }}
+
+      # Build frontend (rust-embed needs static/ populated)
+      - name: Install bun
+        run: |
+          apt-get update && apt-get install -y unzip
+          curl -fsSL https://bun.sh/install | bash
+          echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
+
+      - name: Build frontend
+        working-directory: ui
+        run: |
+          export PATH="$HOME/.bun/bin:$PATH"
+          bun install --frozen-lockfile && bun run build
+
+      # Build all three binaries
+      - name: Build stroem-server
+        run: cargo build --release -p stroem-server
+
+      - name: Build stroem-worker
+        run: cargo build --release -p stroem-worker
+
+      - name: Build stroem-cli
+        run: cargo build --release -p stroem-cli
+
+      # Package archives
+      - name: Package
+        run: |
+          for bin in stroem-server stroem-worker stroem stroem-api; do
+            tar czf "${bin}-${{ matrix.target }}.tar.gz" \
+              -C target/release "${bin}"
+          done
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: binaries-${{ matrix.name }}
+          path: |
+            stroem-*-${{ matrix.target }}.tar.gz
+            stroem-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
