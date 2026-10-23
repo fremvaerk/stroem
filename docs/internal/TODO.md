@@ -938,6 +938,9 @@ Full analysis + the decided peek policy: `docs/superpowers/specs/2026-09-17-work
 - [ ] Retry for final log flush and S3 upload
 - [ ] Extract `stroem-orchestrator` crate (orchestrator, job_creator, job_recovery, hooks, scheduler)
 - [ ] Kube runner artifact mount (sidecar uploader) — `/artifacts/` is not exposed on kube runners today; matches the existing state file-mount gap. Likely needs an init/sidecar that scans the emptyDir after main exits and POSTs to the worker upload endpoint.
+- [x] linux aarch64 releases — `release.yml` builds the binaries natively on `ubuntu-24.04-arm` (four `*-aarch64-unknown-linux-gnu.tar.gz` assets) and publishes multi-arch (`linux/amd64,linux/arm64`) release images.
+- [ ] Multi-arch `latest` / `sha-*` images from `build.yml` (needs native per-arch image builds + a manifest merge; today `linux/amd64` only) — open decision.
+- [ ] `aarch64-apple-darwin` build of the `stroem` CLI — open decision.
 
 ## Review: Unmatched Step Recovery (2026-03-05)
 

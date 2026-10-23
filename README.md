@@ -8,31 +8,33 @@ Strøm replaces the need for multiple tools (RunDeck, Windmill, GitHub Actions, 
 
 ### Pre-built binaries
 
-Download the latest release from [GitHub Releases](https://github.com/fremvaerk/stroem/releases). Binaries are available for:
+Download the latest release from [GitHub Releases](https://github.com/fremvaerk/stroem/releases). Each release has one archive per binary and Linux target:
 
-| Platform | Archive |
-|----------|---------|
-| Linux (x86_64) | `stroem-{server,worker,cli}-x86_64-unknown-linux-gnu.tar.gz` |
-| Linux (ARM64) | `stroem-{server,worker,cli}-aarch64-unknown-linux-gnu.tar.gz` |
-| macOS (Intel) | `stroem-{server,worker,cli}-x86_64-apple-darwin.tar.gz` |
-| macOS (Apple Silicon) | `stroem-{server,worker,cli}-aarch64-apple-darwin.tar.gz` |
-| Windows (x86_64) | `stroem-{server,worker,cli}-x86_64-pc-windows-msvc.zip` |
+| Platform | Archives |
+|----------|----------|
+| Linux (x86_64) | `stroem-server-x86_64-unknown-linux-gnu.tar.gz`, `stroem-worker-x86_64-unknown-linux-gnu.tar.gz`, `stroem-x86_64-unknown-linux-gnu.tar.gz`, `stroem-api-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux (ARM64) | `stroem-server-aarch64-unknown-linux-gnu.tar.gz`, `stroem-worker-aarch64-unknown-linux-gnu.tar.gz`, `stroem-aarch64-unknown-linux-gnu.tar.gz`, `stroem-api-aarch64-unknown-linux-gnu.tar.gz` |
+
+`stroem` is the local workspace CLI and `stroem-api` the remote server client. The binaries are built on Debian 12 (glibc 2.36) and run on Linux distributions with that glibc or a newer one. macOS and Windows binaries are not published; build those from source.
 
 ```bash
-# Example: install the CLI on macOS ARM64
-curl -fsSL https://github.com/fremvaerk/stroem/releases/latest/download/stroem-cli-aarch64-apple-darwin.tar.gz \
-  | tar xz -C /usr/local/bin
+# Example: install the stroem CLI on Linux
+ARCH=$(uname -m)   # x86_64 or aarch64
+curl -fsSL "https://github.com/fremvaerk/stroem/releases/latest/download/stroem-${ARCH}-unknown-linux-gnu.tar.gz" \
+  | sudo tar xz -C /usr/local/bin
 ```
 
 ### Docker images
 
-Multi-arch images (amd64 + arm64) are published to GHCR:
+Images are published to GHCR. Release tags (`X.Y.Z`, `X.Y`, `X`) are multi-arch (`linux/amd64` + `linux/arm64`):
 
 ```bash
-docker pull ghcr.io/fremvaerk/stroem-server:latest
-docker pull ghcr.io/fremvaerk/stroem-worker:latest
-docker pull ghcr.io/fremvaerk/stroem-runner:latest  # base image for script-in-container steps
+docker pull ghcr.io/fremvaerk/stroem-server:0.18
+docker pull ghcr.io/fremvaerk/stroem-worker:0.18
+docker pull ghcr.io/fremvaerk/stroem-runner:0.18  # base image for script-in-container steps
 ```
+
+The `latest` and `sha-<commit>` tags are built from `main` and are `linux/amd64` only. Releases up to v0.18.3 have `linux/amd64` images and x86_64 archives only.
 
 ## Quickstart (Docker Compose)
 
