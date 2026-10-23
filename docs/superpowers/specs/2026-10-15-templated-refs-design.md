@@ -510,9 +510,12 @@ the owner's secrets, which bucket `D` renders with, out of the ref context.
 The ref-input render's errors are caller-side (bucket `C`, never withheld)
 and go through `fail_task_step`, value-free.
 
-Failures go through `fail_task_step`, as every dispatch failure does today;
-its unguarded `mark_failed` is part of the known double-dispatch gap (§ 14),
-which this spec neither fixes nor widens. The ref template is written by the action owner `O`, so
+Failures go through `fail_task_step`, as every dispatch failure does today.
+(Amended 2026-10-23: its write is guarded — `ready` before the dispatch
+claim, `running` after it — and the claim `JobStepRepo::claim_task_dispatch`
+has one winner, conditioned on the task stamp the dispatcher resolved with,
+so an empty-ref dispatcher cannot create an unpinned child after another
+one stamped a pin.) The ref template is written by the action owner `O`, so
 its render error is withheld when `O != A` (owner-side origin, CLAUDE.md
 § Cross-Workspace References); a post-render error is value-free in every
 case.
@@ -901,10 +904,12 @@ UI (Vitest): the `ref:` label on a deferred step row.
 - The claim SQL does not read the job's status, so a `ready` step can be
   claimed in the window between `JobRepo::cancel` and
   `cancel_pending_steps` (pre-existing, every step kind; § 5.7).
-- Idempotent `type: task` / `type: approval` dispatch (winner-only
-  `mark_running_server` / `mark_suspended`, one child per parent step, atomic
+- Idempotent `type: approval` dispatch (winner-only `mark_suspended`, atomic
   suspend + message), and then recovery of a `ready` task / approval row left
   by a crash (§ 5.8; Codex round 2 N4/N5; lifecycle-hardening spec).
+  `type: task` dispatch has one winner since 2026-10-23
+  (`JobStepRepo::claim_task_dispatch`); its claim and the child insert are
+  still two transactions.
 - Templated refs on hooks, event sources, agent task tools, scheduler triggers.
 
 ## Revision history

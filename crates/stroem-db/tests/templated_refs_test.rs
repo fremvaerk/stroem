@@ -431,6 +431,113 @@ async fn stamp_task_pin_only_stamps_a_ready_unstamped_step() -> Result<()> {
     Ok(())
 }
 
+/// A ready `type: task` step, unstamped.
+async fn ready_task_step(pool: &PgPool, job_id: Uuid, name: &str) -> Result<()> {
+    let mut task_step = deferred_step(job_id, name);
+    task_step.action_type = "task".to_string();
+    task_step.required_ability = String::new();
+    task_step.ref_template = None;
+    JobStepRepo::create_steps(pool, &[task_step]).await?;
+    Ok(())
+}
+
+async fn step_status(pool: &PgPool, job_id: Uuid, name: &str) -> String {
+    JobStepRepo::get_step(pool, job_id, name)
+        .await
+        .unwrap()
+        .unwrap()
+        .status
+}
+
+/// The dispatch claim: one winner, and only for the task stamp the dispatcher
+/// resolved with — an unstamped claim loses to a stamp written after it
+/// rendered an empty ref, and a stamped claim needs that exact stamp.
+#[tokio::test]
+async fn claim_task_dispatch_has_one_winner_for_the_stamp_it_resolved_with() -> Result<()> {
+    let pool = setup_db().await;
+    let job_id = create_job(&pool, "etl", "t").await;
+    ready_task_step(&pool, job_id, "plain").await?;
+    ready_task_step(&pool, job_id, "pinned").await?;
+
+    // Unstamped: the first claim wins, the second loses.
+    assert!(
+        !JobStepRepo::claim_task_dispatch(&pool, job_id, "plain", Some(("etl", "main", C1)))
+            .await?
+    );
+    assert!(JobStepRepo::claim_task_dispatch(&pool, job_id, "plain", None).await?);
+    assert!(!JobStepRepo::claim_task_dispatch(&pool, job_id, "plain", None).await?);
+    let row = JobStepRepo::get_step(&pool, job_id, "plain")
+        .await?
+        .unwrap();
+    assert_eq!(row.status, "running");
+    assert!(row.started_at.is_some());
+
+    // Another dispatcher stamped a pin: an unstamped claim and a claim for
+    // another stamp lose; the stamp's own claim wins once.
+    assert!(JobStepRepo::stamp_task_pin(&pool, job_id, "pinned", "etl", "release/2.3", C1).await?);
+    assert!(!JobStepRepo::claim_task_dispatch(&pool, job_id, "pinned", None).await?);
+    assert!(
+        !JobStepRepo::claim_task_dispatch(
+            &pool,
+            job_id,
+            "pinned",
+            Some(("etl", "release/2.3", C2))
+        )
+        .await?
+    );
+    assert!(
+        !JobStepRepo::claim_task_dispatch(
+            &pool,
+            job_id,
+            "pinned",
+            Some(("billing", "release/2.3", C1))
+        )
+        .await?
+    );
+    assert_eq!(step_status(&pool, job_id, "pinned").await, "ready");
+    assert!(
+        JobStepRepo::claim_task_dispatch(&pool, job_id, "pinned", Some(("etl", "release/2.3", C1)))
+            .await?
+    );
+    assert!(
+        !JobStepRepo::claim_task_dispatch(
+            &pool,
+            job_id,
+            "pinned",
+            Some(("etl", "release/2.3", C1))
+        )
+        .await?
+    );
+    // A claimed step can no longer be stamped.
+    assert!(!JobStepRepo::stamp_task_pin(&pool, job_id, "plain", "etl", "main", C2).await?);
+    Ok(())
+}
+
+/// A failure guarded on a status writes only while the step has it: a
+/// dispatcher that lost the claim cannot fail the winner's `running` step.
+#[tokio::test]
+async fn mark_failed_if_writes_only_the_expected_status() -> Result<()> {
+    use stroem_common::models::job::StepStatus;
+    let pool = setup_db().await;
+    let job_id = create_job(&pool, "etl", "t").await;
+    ready_task_step(&pool, job_id, "call").await?;
+    assert!(JobStepRepo::claim_task_dispatch(&pool, job_id, "call", None).await?);
+    assert!(!JobStepRepo::mark_failed_if(&pool, job_id, "call", "stale", StepStatus::Ready).await?);
+    let row = JobStepRepo::get_step(&pool, job_id, "call").await?.unwrap();
+    assert_eq!(row.status, "running");
+    assert_eq!(row.error_message, None);
+    assert!(JobStepRepo::mark_failed_if(&pool, job_id, "call", "boom", StepStatus::Running).await?);
+    let row = JobStepRepo::get_step(&pool, job_id, "call").await?.unwrap();
+    assert_eq!(row.status, "failed");
+    assert_eq!(row.error_message.as_deref(), Some("boom"));
+    // A ready step fails from `ready`, and then a claim loses.
+    ready_task_step(&pool, job_id, "early").await?;
+    assert!(JobStepRepo::mark_failed_if(&pool, job_id, "early", "bad", StepStatus::Ready).await?);
+    assert!(!JobStepRepo::claim_task_dispatch(&pool, job_id, "early", None).await?);
+    assert_eq!(step_status(&pool, job_id, "early").await, "failed");
+    Ok(())
+}
+
 /// Spec § 8, contract deviation 1: the claim and the unmatched sweep keep
 /// using a partial `status = 'ready'` index after the sweep gains its
 /// `<> 'deferred'` conjunct. The WHERE clauses are copies of the two

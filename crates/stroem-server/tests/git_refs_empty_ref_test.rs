@@ -10,12 +10,16 @@ use anyhow::Result;
 use axum::http::StatusCode;
 use serde_json::json;
 use sqlx::PgPool;
+use stroem_common::models::workflow::WorkspaceConfig;
 use stroem_db::{JobRefPinRepo, JobRepo, JobRow, JobStepRow};
+use stroem_server::config::JobDefaults;
+use stroem_server::render_context::Snapshots;
+use stroem_server::settlement::dispatch::handle_task_steps;
 use uuid::Uuid;
 
 /// `etl` main: `type: task` actions whose templated ref reads the step input,
 /// on tasks the default branch has.
-const DE_MAIN_ACTIONS: &str = "\nactions:\n  call-child-at:\n    type: task\n    task: tr-child\n    ref: \"{{ input.branch }}\"\n  call-self-at:\n    type: task\n    task: tr-self-empty\n    ref: \"{{ input.branch }}\"\n";
+const DE_MAIN_ACTIONS: &str = "\nactions:\n  call-child:\n    type: task\n    task: tr-child\n  call-child-at:\n    type: task\n    task: tr-child\n    ref: \"{{ input.branch }}\"\n  call-self-at:\n    type: task\n    task: tr-self-empty\n    ref: \"{{ input.branch }}\"\n";
 
 /// Appended to `df_etl_main()`'s `tasks:` section (its last key), then a
 /// webhook trigger.
@@ -36,6 +40,22 @@ const DE_MAIN_TASKS: &str = r#"
         action: call-self-at
         input:
           branch: "  "
+  tr-task-empty-later:
+    flow:
+      first:
+        action: hello
+      call:
+        action: call-child-at
+        depends_on: [first]
+        input:
+          branch: ""
+  tr-task-plain-later:
+    flow:
+      first:
+        action: hello
+      call:
+        action: call-child
+        depends_on: [first]
   tr-each-mixed:
     flow:
       run:
@@ -73,6 +93,15 @@ const DE_RELEASE_TASKS: &str = r#"
     flow:
       call:
         action: call-nightly-tpl
+        input:
+          branch: ""
+  tr-task-empty-pinned-later:
+    flow:
+      first:
+        action: hello
+      call:
+        action: call-nightly-tpl
+        depends_on: [first]
         input:
           branch: ""
 "#;
@@ -377,5 +406,131 @@ async fn an_empty_webhook_ref_creates_an_unpinned_job() -> Result<()> {
             .await?
             .is_empty());
     }
+    Ok(())
+}
+
+// ─── The dispatch claim ────────────────────────────────────────────────────
+
+/// `first` completed and `call` promoted to `ready` behind the cascade's back,
+/// so no dispatcher has seen `call` yet.
+async fn de_ready_undispatched(pool: &PgPool, job_id: Uuid) {
+    for (step, status) in [("first", "completed"), ("call", "ready")] {
+        sqlx::query("UPDATE job_step SET status = $3 WHERE job_id = $1 AND step_name = $2")
+            .bind(job_id)
+            .bind(step)
+            .bind(status)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+}
+
+/// `n` dispatch passes over `job_id` at the same time, as concurrent
+/// `advance` calls (two replicas, a completion and a recovery tick) run them.
+async fn de_dispatch_concurrently(
+    fx: &PinnedFixture,
+    cfg: &WorkspaceConfig,
+    job_id: Uuid,
+    n: usize,
+) -> Result<()> {
+    let job = JobRepo::get(&fx.pool, job_id).await?.unwrap();
+    let task = cfg.tasks.get(&job.task_name).expect("task in config");
+    let snapshots = Snapshots::default();
+    let passes = (0..n).map(|_| {
+        handle_task_steps(
+            fx.mgr(),
+            &fx.pool,
+            cfg,
+            "etl",
+            job_id,
+            task,
+            JobDefaults::default(),
+            &snapshots,
+        )
+    });
+    for result in futures_util::future::join_all(passes).await {
+        result?;
+    }
+    Ok(())
+}
+
+async fn de_children(pool: &PgPool, parent: Uuid) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM job WHERE parent_job_id = $1")
+        .bind(parent)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// Concurrent dispatchers of one ready `type: task` step create ONE child:
+/// the dispatch claim has one winner, and the losers write nothing — for an
+/// empty templated ref, for a task without `ref:`, and for an empty ref that
+/// inherits the pin of a pinned job (stamped by the first dispatcher).
+#[tokio::test]
+async fn concurrent_dispatchers_create_one_child() -> Result<()> {
+    let fx = de_fixture().await?;
+    let live = fx.mgr().get_config("etl").await.expect("etl loaded");
+    let pinned = fx
+        .mgr()
+        .pins()
+        .ensure("etl", &fx.commits.etl_release)
+        .await?
+        .config
+        .clone();
+    for (task, is_pinned) in [
+        ("tr-task-empty-later", false),
+        ("tr-task-plain-later", false),
+        ("tr-task-empty-pinned-later", true),
+    ] {
+        let (job_id, cfg) = if is_pinned {
+            (fx.create_pinned_etl_job(task).await?, pinned.as_ref())
+        } else {
+            (df_create(&fx, task, json!({})).await?, live.as_ref())
+        };
+        de_ready_undispatched(&fx.pool, job_id).await;
+        de_dispatch_concurrently(&fx, cfg, job_id, 4).await?;
+        let call = df_step(&fx.pool, job_id, "call").await;
+        assert_eq!(call.status, "running", "{task}: {:?}", call.error_message);
+        assert_eq!(call.error_message, None, "{task}");
+        assert_eq!(de_children(&fx.pool, job_id).await, 1, "{task}");
+        let child = de_child_of(&fx.pool, job_id).await;
+        if is_pinned {
+            assert_eq!(call.task_ref.as_deref(), Some("release/2.3"), "{task}");
+            assert_eq!(child.git_ref.as_deref(), Some("release/2.3"), "{task}");
+        } else {
+            assert_eq!(call.task_ref, None, "{task}");
+            assert_eq!(child.git_ref, None, "{task}");
+        }
+    }
+    Ok(())
+}
+
+/// A dispatcher that resolved an empty ref loses the claim once another one
+/// has stamped a pin on the step: it creates no child and leaves the stamp.
+#[tokio::test]
+async fn a_dispatcher_without_a_pin_loses_the_claim_to_a_stamp() -> Result<()> {
+    let fx = de_fixture().await?;
+    let job_id = df_create(&fx, "tr-task-empty-later", json!({})).await?;
+    de_ready_undispatched(&fx.pool, job_id).await;
+    // What a concurrent dispatcher that rendered a branch writes first.
+    assert!(
+        stroem_db::JobStepRepo::stamp_task_pin(
+            &fx.pool,
+            job_id,
+            "call",
+            "etl",
+            "release/2.3",
+            &fx.commits.etl_release,
+        )
+        .await?
+    );
+    assert!(
+        !stroem_db::JobStepRepo::claim_task_dispatch(&fx.pool, job_id, "call", None).await?,
+        "the empty-ref dispatcher's claim"
+    );
+    let call = df_step(&fx.pool, job_id, "call").await;
+    assert_eq!(call.status, "ready");
+    assert_eq!(call.task_ref.as_deref(), Some("release/2.3"));
+    assert_eq!(de_children(&fx.pool, job_id).await, 0);
     Ok(())
 }

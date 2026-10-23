@@ -1,6 +1,10 @@
 # Task-Step Lifecycle Hardening — Design
 
-Status: problem statement, not yet designed
+Status: problem statement, not yet designed. 2026-10-23: (i) is closed for
+`type: task` steps — `JobStepRepo::claim_task_dispatch` (winner-only
+`ready` → `running`, conditioned on the step's task stamp) and guarded
+failures (`mark_failed_if`: `ready` before the claim, `running` after it).
+The claim and the child insert are still two transactions ((ii) unchanged).
 Ships in: unscheduled; after `2026-09-16-cross-workspace-task-actions-design.md`
 Builds on: `2026-09-08-cascade-concurrency-hardening-design.md` (deferred; the
 per-job advisory lock and row-locked verification vector it designs are the
