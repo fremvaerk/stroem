@@ -17,8 +17,19 @@ env:
 
 jobs:
   build-binaries:
-    name: Build linux-amd64
-    runs-on: ubuntu-latest
+    name: Build ${{ matrix.name }}
+    # Native build per architecture: the arm64 leg runs on GitHub's hosted
+    # arm64 runner, so no cross toolchain and no QEMU-emulated rustc.
+    strategy:
+      matrix:
+        include:
+          - name: linux-amd64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - name: linux-arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
     container:
       image: rust:1-bookworm
     steps:
@@ -26,7 +37,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: release-x86_64-unknown-linux-gnu
+          shared-key: release-${{ matrix.target }}
 
       # Build frontend (rust-embed needs static/ populated)
       - name: Install bun
@@ -55,17 +66,17 @@ jobs:
       - name: Package
         run: |
           for bin in stroem-server stroem-worker stroem stroem-api; do
-            tar czf "${bin}-x86_64-unknown-linux-gnu.tar.gz" \
+            tar czf "${bin}-${{ matrix.target }}.tar.gz" \
               -C target/release "${bin}"
           done
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: binaries-linux-amd64
+          name: binaries-${{ matrix.name }}
           path: |
-            stroem-*-x86_64-unknown-linux-gnu.tar.gz
-            stroem-x86_64-unknown-linux-gnu.tar.gz
+            stroem-*-${{ matrix.target }}.tar.gz
+            stroem-${{ matrix.target }}.tar.gz
           if-no-files-found: error
 
   build-server:
@@ -81,19 +92,23 @@ jobs:
           name: binaries-linux-amd64
           path: artifacts/
 
-      # - name: Download linux-arm64 binary
-      #   uses: actions/download-artifact@v8
-      #   with:
-      #     name: binaries-linux-arm64
-      #     path: artifacts/
+      - name: Download linux-arm64 binary
+        uses: actions/download-artifact@v8
+        with:
+          name: binaries-linux-arm64
+          path: artifacts/
 
       - name: Prepare binaries for Docker build
         run: |
           mkdir -p dist
           tar xzf artifacts/stroem-server-x86_64-unknown-linux-gnu.tar.gz -C dist
           mv dist/stroem-server dist/stroem-server-linux-amd64
-          # tar xzf artifacts/stroem-server-aarch64-unknown-linux-gnu.tar.gz -C dist
-          # mv dist/stroem-server dist/stroem-server-linux-arm64
+          tar xzf artifacts/stroem-server-aarch64-unknown-linux-gnu.tar.gz -C dist
+          mv dist/stroem-server dist/stroem-server-linux-arm64
+
+      # The Dockerfile's RUN layers only apt-get and download tools, so the
+      # arm64 image builds under QEMU; the binary itself is pre-built.
+      - uses: docker/setup-qemu-action@v4
 
       - uses: docker/setup-buildx-action@v4
 
@@ -116,7 +131,7 @@ jobs:
         with:
           context: .
           file: docker/Dockerfile.server.release
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -134,19 +149,23 @@ jobs:
           name: binaries-linux-amd64
           path: artifacts/
 
-      # - name: Download linux-arm64 binary
-      #   uses: actions/download-artifact@v8
-      #   with:
-      #     name: binaries-linux-arm64
-      #     path: artifacts/
+      - name: Download linux-arm64 binary
+        uses: actions/download-artifact@v8
+        with:
+          name: binaries-linux-arm64
+          path: artifacts/
 
       - name: Prepare binaries for Docker build
         run: |
           mkdir -p dist
           tar xzf artifacts/stroem-worker-x86_64-unknown-linux-gnu.tar.gz -C dist
           mv dist/stroem-worker dist/stroem-worker-linux-amd64
-          # tar xzf artifacts/stroem-worker-aarch64-unknown-linux-gnu.tar.gz -C dist
-          # mv dist/stroem-worker dist/stroem-worker-linux-arm64
+          tar xzf artifacts/stroem-worker-aarch64-unknown-linux-gnu.tar.gz -C dist
+          mv dist/stroem-worker dist/stroem-worker-linux-arm64
+
+      # The Dockerfile's RUN layers only apt-get and download tools, so the
+      # arm64 image builds under QEMU; the binary itself is pre-built.
+      - uses: docker/setup-qemu-action@v4
 
       - uses: docker/setup-buildx-action@v4
 
@@ -169,7 +188,7 @@ jobs:
         with:
           context: .
           file: docker/Dockerfile.worker.release
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -179,6 +198,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+
+      - uses: docker/setup-qemu-action@v4
 
       - uses: docker/setup-buildx-action@v4
 
@@ -201,7 +222,7 @@ jobs:
         with:
           context: .
           file: Dockerfile.runner
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
