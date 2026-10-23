@@ -15,7 +15,7 @@ Download the latest release from [GitHub Releases](https://github.com/fremvaerk/
 | Linux (x86_64) | `stroem-server-x86_64-unknown-linux-gnu.tar.gz`, `stroem-worker-x86_64-unknown-linux-gnu.tar.gz`, `stroem-x86_64-unknown-linux-gnu.tar.gz`, `stroem-api-x86_64-unknown-linux-gnu.tar.gz` |
 | Linux (ARM64) | `stroem-server-aarch64-unknown-linux-gnu.tar.gz`, `stroem-worker-aarch64-unknown-linux-gnu.tar.gz`, `stroem-aarch64-unknown-linux-gnu.tar.gz`, `stroem-api-aarch64-unknown-linux-gnu.tar.gz` |
 
-`stroem` is the local workspace CLI and `stroem-api` the remote server client. The binaries are built on Debian 12 (glibc 2.36) and run on Linux distributions with that glibc or a newer one. macOS and Windows binaries are not published; build those from source.
+`stroem` is the local workspace CLI and `stroem-api` the remote server client. The binaries are built on Debian 12 (glibc 2.36) and run on Linux distributions with that glibc or a newer one. `stroem-server` also needs OpenSSL 3 (`libssl3` on Debian and Ubuntu). macOS and Windows binaries are not published; build those from source.
 
 ```bash
 # Example: install the stroem CLI on Linux
