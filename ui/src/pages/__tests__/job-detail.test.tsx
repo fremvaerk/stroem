@@ -1,7 +1,7 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Routes, Route } from "react-router";
-import type { JobDetail, JobStep, TaskDetail } from "@/lib/types";
+import type { DerivedJobRef, JobDetail, JobStep, TaskDetail } from "@/lib/types";
 
 vi.mock("@/lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/api")>();
@@ -27,6 +27,7 @@ import {
   listWorkers,
   getStepLogs,
 } from "@/lib/api";
+import { POLL_LATER_RUN_MS, POLL_SETTLED_MS } from "@/lib/job-status";
 import { JobDetailPage } from "../job-detail";
 
 const mockGetJob = vi.mocked(getJob);
@@ -429,5 +430,167 @@ describe("JobDetailPage — navigation to the task and the source job", () => {
 
     expect(await screen.findByText("user (ala@example.com)")).toBeTruthy();
     expect(screen.queryByTestId("job-lineage")).toBeNull();
+  });
+});
+
+/** A later run of the fixture job; `n` sets both the id digit and the minute. */
+function derived(n: number, overrides: Partial<DerivedJobRef> = {}): DerivedJobRef {
+  return {
+    id: `${n}`.repeat(8) + "-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    source_type: "rerun",
+    status: "completed",
+    created_at: `2026-09-01T11:0${n}:00Z`,
+    restart_from_step: null,
+    ...overrides,
+  };
+}
+
+describe("JobDetailPage — later runs", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(getTaskStats).mockRejectedValue(new Error("no stats"));
+    vi.mocked(listJobArtifacts).mockResolvedValue([]);
+    vi.mocked(listWorkers).mockResolvedValue({ items: [], total: 0 });
+    vi.mocked(getStepLogs).mockResolvedValue({ logs: "", truncated: false, total_bytes: 0, returned_bytes: 0 });
+    mockGetTask.mockResolvedValue(task(true));
+  });
+
+  it("links to each restart and re-run, newest first, with the restart step", async () => {
+    mockGetJob.mockResolvedValue(
+      job({
+        derived_jobs: [
+          derived(2, { status: "running" }),
+          derived(1, { source_type: "restart", status: "failed", restart_from_step: "build" }),
+        ],
+      }),
+    );
+    renderPage();
+
+    const card = await screen.findByTestId("job-later-runs");
+    expect(screen.getByText("Later runs")).toBeTruthy();
+    const rows = within(card).getAllByRole("listitem");
+    expect(rows.map((r) => r.textContent)).toEqual([
+      "re-run22222222running",
+      "restart11111111failedfrom build",
+    ]);
+    const links = within(card).getAllByRole("link");
+    expect(links.map((l) => l.getAttribute("href"))).toEqual([
+      "/jobs/22222222-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      "/jobs/11111111-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    ]);
+  });
+
+  it("shows the newest five and counts the rest", async () => {
+    mockGetJob.mockResolvedValue(
+      job({ derived_jobs: [1, 2, 3, 4, 5, 6, 7].map((n) => derived(n)) }),
+    );
+    renderPage();
+
+    const card = await screen.findByTestId("job-later-runs");
+    const links = within(card).getAllByRole("link");
+    expect(links.map((l) => l.textContent)).toEqual([
+      "77777777",
+      "66666666",
+      "55555555",
+      "44444444",
+      "33333333",
+    ]);
+    expect(within(card).getByText("+2 more")).toBeTruthy();
+  });
+
+  it("shows no card when nothing was created from the job", async () => {
+    mockGetJob.mockResolvedValue(job({ derived_jobs: [] }));
+    renderPage();
+
+    expect(await screen.findByText("pipeline")).toBeTruthy();
+    expect(screen.queryByTestId("job-later-runs")).toBeNull();
+    expect(screen.queryByText("Later runs")).toBeNull();
+  });
+
+  it("shows no card for an older server that sends no derived_jobs", async () => {
+    mockGetJob.mockResolvedValue(job());
+    renderPage();
+
+    expect(await screen.findByText("pipeline")).toBeTruthy();
+    expect(screen.queryByTestId("job-later-runs")).toBeNull();
+  });
+});
+
+describe("JobDetailPage — later runs refresh on a settled job", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(getTaskStats).mockRejectedValue(new Error("no stats"));
+    vi.mocked(listJobArtifacts).mockResolvedValue([]);
+    vi.mocked(listWorkers).mockResolvedValue({ items: [], total: 0 });
+    vi.mocked(getStepLogs).mockResolvedValue({ logs: "", truncated: false, total_bytes: 0, returned_bytes: 0 });
+    mockGetTask.mockResolvedValue(task(true));
+    // Before the render: the poll's setInterval starts in an effect after mount.
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** Lets the pending fetches settle and the timers due within `ms` fire. */
+  const advance = (ms: number) =>
+    act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+
+  it("updates the status of a restart that finishes while the page is open", async () => {
+    mockGetJob
+      .mockResolvedValueOnce(job({ derived_jobs: [derived(1, { source_type: "restart", status: "running" })] }))
+      .mockResolvedValue(job({ derived_jobs: [derived(1, { source_type: "restart", status: "completed" })] }));
+    renderPage();
+    await advance(1);
+
+    const row = () => within(screen.getByTestId("job-later-runs")).getByRole("listitem");
+    expect(row().textContent).toBe("restart11111111running");
+
+    await advance(POLL_LATER_RUN_MS);
+    expect(row().textContent).toBe("restart11111111completed");
+    expect(mockGetJob).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows a run made from the job after the page loaded", async () => {
+    mockGetJob
+      .mockResolvedValueOnce(job({ derived_jobs: [] }))
+      .mockResolvedValue(job({ derived_jobs: [derived(1)] }));
+    renderPage();
+    await advance(1);
+    expect(screen.getByText("pipeline")).toBeTruthy();
+    expect(screen.queryByTestId("job-later-runs")).toBeNull();
+
+    await advance(POLL_SETTLED_MS);
+    const links = within(screen.getByTestId("job-later-runs")).getAllByRole("link");
+    expect(links.map((l) => l.textContent)).toEqual(["11111111"]);
+  });
+
+  it("does not poll a settled job from an older server", async () => {
+    mockGetJob.mockResolvedValue(job());
+    renderPage();
+    await advance(1);
+    expect(screen.getByText("pipeline")).toBeTruthy();
+
+    await advance(POLL_SETTLED_MS * 3);
+    expect(mockGetJob).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not poll a settled child job, which cannot be restarted", async () => {
+    mockGetJob.mockResolvedValue(
+      job({
+        parent_job_id: "99999999-9999-9999-9999-999999999999",
+        parent_step_name: "call",
+        source_type: "task",
+        derived_jobs: [],
+      }),
+    );
+    renderPage();
+    await advance(1);
+    expect(screen.getByText("pipeline")).toBeTruthy();
+
+    await advance(POLL_SETTLED_MS * 3);
+    expect(mockGetJob).toHaveBeenCalledTimes(1);
   });
 });

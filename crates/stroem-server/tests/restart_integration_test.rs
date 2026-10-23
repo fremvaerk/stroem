@@ -1747,6 +1747,81 @@ async fn restart_rejects_hook_sourced_job() -> Result<()> {
     Ok(())
 }
 
+/// Job detail links a job to the Restarts and Re-runs created from it
+/// (`derived_jobs[]`, newest first). The `on_error` hook job also carries the
+/// source's `source_job_id` (migration 048) but is not a new run, so it is
+/// not listed.
+#[tokio::test(flavor = "multi_thread")]
+async fn job_detail_lists_restarts_and_reruns_but_not_hook_jobs() -> Result<()> {
+    let app = build_test_app("default", line_workspace_with_task_hook()).await?;
+    let source_id = run_source_job_failing_at_b(&app).await?;
+
+    let hooks: Vec<(Uuid,)> =
+        sqlx::query_as("SELECT job_id FROM job WHERE source_type = 'hook' AND source_job_id = $1")
+            .bind(source_id)
+            .fetch_all(&app.pool)
+            .await?;
+    assert_eq!(hooks.len(), 1, "the on_error hook job links to its source");
+
+    let source = get_job(&app, &source_id.to_string()).await?;
+    assert_eq!(source["derived_jobs"], json!([]), "{source}");
+
+    let (st, body) = restart_req(&app, source_id, json!({"from_step": "b"})).await?;
+    assert_eq!(st, StatusCode::CREATED, "{body}");
+    let restart_id = body["job_id"].as_str().unwrap().to_string();
+    let (st, body) = execute_task(
+        &app,
+        "default",
+        "line",
+        json!({"input": {"note": "n2"}, "source_job_id": source_id}),
+    )
+    .await?;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let rerun_id = body["job_id"].as_str().unwrap().to_string();
+
+    let source = get_job(&app, &source_id.to_string()).await?;
+    let derived = source["derived_jobs"].as_array().expect("derived_jobs");
+    let ids: Vec<&str> = derived.iter().map(|d| d["id"].as_str().unwrap()).collect();
+    assert_eq!(
+        ids,
+        vec![rerun_id.as_str(), restart_id.as_str()],
+        "{source}"
+    );
+
+    let rerun = &derived[0];
+    assert_eq!(rerun["source_type"], "rerun");
+    assert_eq!(rerun["restart_from_step"], JsonValue::Null);
+    let restart = &derived[1];
+    assert_eq!(restart["source_type"], "restart");
+    assert_eq!(restart["restart_from_step"], "b");
+    for entry in derived {
+        let keys: std::collections::BTreeSet<&str> = entry
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            std::collections::BTreeSet::from([
+                "created_at",
+                "id",
+                "restart_from_step",
+                "source_type",
+                "status",
+            ]),
+            "identifiers only: redaction skips derived_jobs whole: {entry}"
+        );
+        let id = entry["id"].as_str().unwrap();
+        let job = get_job(&app, id).await?;
+        assert_eq!(entry["status"], job["status"], "{entry}");
+        assert_eq!(job["source_job_id"], json!(source_id.to_string()));
+        // A later run is not itself the source of anything.
+        assert_eq!(job["derived_jobs"], json!([]), "{job}");
+    }
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn restart_and_rerun_reject_a_type_task_child_job() -> Result<()> {
     let app = build_test_app("default", task_action_workspace()).await?;

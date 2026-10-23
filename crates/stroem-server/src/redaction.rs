@@ -147,6 +147,9 @@ pub const JOB_IDENTIFIER_KEYS: &[&str] = &[
     "retry_job_id",
     "retry_attempt",
     "max_retries",
+    // Links to this job's Restarts and Re-runs (`DerivedJobRef`): skipped
+    // whole, like a step's `child_jobs`, so it must only ever hold identifiers.
+    "derived_jobs",
 ];
 
 /// Step-entry keys that carry identifiers, timestamps or enums. `child_jobs`
@@ -785,6 +788,49 @@ mod tests {
         redact_job_response(&mut v, &secrets);
         assert_eq!(v["steps"][0]["child_jobs"], json!([child]));
         assert_eq!(v["steps"][0]["input"]["env"], json!(REDACTED));
+    }
+
+    /// `derived_jobs[]` links a job to its Restarts and Re-runs (id, source
+    /// type, status, timestamp, step name) — a short secret must not mangle
+    /// them.
+    #[test]
+    fn redact_job_response_leaves_derived_job_links_alone() {
+        let secrets = vec!["failed".to_string(), "b".to_string()];
+        let derived = json!({
+            "id": "00000000-0000-0000-0000-00000000000b",
+            "source_type": "restart",
+            "status": "failed",
+            "created_at": "2026-10-22T00:00:00Z",
+            "restart_from_step": "b"
+        });
+        let mut v = json!({
+            "input": {"why": "failed"},
+            "derived_jobs": [derived.clone()]
+        });
+        redact_job_response(&mut v, &secrets);
+        assert_eq!(v["derived_jobs"], json!([derived]));
+        assert_eq!(v["input"]["why"], json!(REDACTED));
+    }
+
+    /// After a permanent pin failure every content string is masked, but the
+    /// links to later runs stay usable.
+    #[test]
+    fn mask_job_response_keeps_derived_job_links() {
+        let derived = json!({
+            "id": "00000000-0000-0000-0000-000000000002",
+            "source_type": "rerun",
+            "status": "running",
+            "created_at": "2026-10-22T00:00:00Z",
+            "restart_from_step": null
+        });
+        let mut v = json!({
+            "job_id": "j1",
+            "output": {"r": "anything"},
+            "derived_jobs": [derived.clone()]
+        });
+        JobRedaction::MaskAll.apply_job_response(&mut v);
+        assert_eq!(v["derived_jobs"], json!([derived]));
+        assert_eq!(v["output"]["r"], json!(REDACTED));
     }
 
     #[test]

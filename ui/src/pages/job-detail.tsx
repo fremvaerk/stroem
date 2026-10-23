@@ -17,9 +17,9 @@ import { useTitle } from "@/hooks/use-title";
 import { useWorkerNames } from "@/hooks/use-worker-names";
 import { formatTime, formatDuration, formatDurationMs } from "@/lib/formatting";
 import { computeEta } from "@/lib/eta";
-import { isTopLevelJob, jobLineage } from "@/lib/job-status";
+import { isTopLevelJob, jobLineage, jobPollInterval, laterRuns } from "@/lib/job-status";
 import { formatPin } from "@/lib/job-ref";
-import type { JobLineage } from "@/lib/job-status";
+import type { JobLineage, LaterRuns } from "@/lib/job-status";
 import type { ArtifactItem } from "@/lib/api";
 import type { JobDetail, TaskStatsResponse } from "@/lib/types";
 
@@ -59,6 +59,40 @@ function LineageLink({ lineage }: { lineage: JobLineage }) {
         </>
       )}
     </span>
+  );
+}
+
+/**
+ * The "Later runs" card: "restart 0438a27a <status> from build" /
+ * "re-run 1a2b3c4d <status>", newest first, then "+N more".
+ */
+function LaterRunsList({ runs }: { runs: LaterRuns }) {
+  return (
+    <ul data-testid="job-later-runs" className="space-y-1">
+      {runs.shown.map((run) => (
+        <li key={run.id} className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+          <span className="text-xs font-normal text-muted-foreground">
+            {run.source_type === "restart" ? "restart" : "re-run"}
+          </span>
+          <Link
+            to={`/jobs/${run.id}`}
+            className="font-mono text-xs text-primary hover:underline"
+            title={run.id}
+          >
+            {run.id.substring(0, 8)}
+          </Link>
+          <StatusBadge status={run.status} />
+          {run.source_type === "restart" && run.restart_from_step && (
+            <span className="text-xs font-normal text-muted-foreground">
+              from <span className="font-mono">{run.restart_from_step}</span>
+            </span>
+          )}
+        </li>
+      ))}
+      {runs.more > 0 && (
+        <li className="text-xs font-normal text-muted-foreground">+{runs.more} more</li>
+      )}
+    </ul>
   );
 }
 
@@ -208,18 +242,13 @@ export function JobDetailPage() {
     return m;
   }, [stats]);
 
-  // Auto-refresh while pending or running (adaptive interval)
-  // A job with suspended steps has status "running", so this covers approval gates too.
-  // Also keep polling when any step has a future retry_at so the badge doesn't freeze.
+  // Auto-refresh: adaptive while the job is live, slow once it has settled so
+  // the Later runs card stays current. `jobPollInterval` has the rules.
   useEffect(() => {
-    const hasRetryPending = job?.steps?.some(
-      (s) => s.retry_at != null && new Date(s.retry_at) > new Date(),
-    );
-    if (!job || (job.status !== "pending" && job.status !== "running" && !hasRetryPending)) return;
-    const hasActiveSteps = job.steps.some(
-      (s) => s.status === "running" || s.status === "suspended",
-    );
-    const interval = setInterval(load, hasActiveSteps ? 3000 : 8000);
+    if (!job) return;
+    const ms = jobPollInterval(job, Date.now());
+    if (ms == null) return;
+    const interval = setInterval(load, ms);
     return () => clearInterval(interval);
   }, [job, load]);
 
@@ -312,6 +341,7 @@ export function JobDetailPage() {
   const topLevel = isTopLevelJob(job);
   const lineage = jobLineage(job);
   const lineageNote = lineage && lineageDetail(job, lineage);
+  const later = laterRuns(job.derived_jobs);
 
   return (
     <div className="space-y-6">
@@ -500,6 +530,9 @@ export function JobDetailPage() {
                   ),
                 },
               ]
+            : []),
+          ...(later.shown.length > 0
+            ? [{ label: "Later runs", value: <LaterRunsList runs={later} /> }]
             : []),
         ]}
       />

@@ -278,6 +278,61 @@ pub struct JobDetailResponse {
     pub retry_job_id: Option<Uuid>,
     pub retry_attempt: i32,
     pub max_retries: Option<i32>,
+    /// Restarts and Re-runs created from this job, newest first — the forward
+    /// side of `source_job_id`. Skipped whole by redaction
+    /// (`JOB_IDENTIFIER_KEYS`), so [`DerivedJobRef`] holds identifiers only.
+    pub derived_jobs: Vec<DerivedJobRef>,
+}
+
+/// One `derived_jobs[]` entry of job detail. Identifiers, an enum, a status,
+/// a step name and a timestamp — never content: redaction does not walk it.
+#[derive(Debug, Serialize)]
+pub struct DerivedJobRef {
+    pub id: Uuid,
+    /// `restart` or `rerun`.
+    pub source_type: String,
+    pub status: String,
+    pub created_at: chrono::DateTime<Utc>,
+    pub restart_from_step: Option<String>,
+}
+
+/// The `derived_jobs[]` of job detail. Each run is authorised by its own row
+/// (the `check_job_acl` rule): a pinned restart takes its folder from the new
+/// commit, so a viewer of the source may be denied it. Denied runs are left
+/// out.
+async fn derived_job_refs(
+    state: &AppState,
+    auth_user: &Option<AuthUser>,
+    rows: Vec<stroem_db::DerivedRunRow>,
+) -> Result<Vec<DerivedJobRef>, AppError> {
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+    let viewer = crate::trigger_status::viewer_for(state, auth_user).await?;
+    let mut refs = Vec::with_capacity(rows.len());
+    for row in rows {
+        if let Some(viewer) = &viewer {
+            let path = crate::acl::job_coords_task_path(
+                state,
+                &row.workspace,
+                &row.task_name,
+                row.git_ref.as_deref(),
+                row.task_folder.as_deref(),
+            )
+            .await;
+            if crate::trigger_status::denied(state, viewer, &row.workspace, &path) {
+                continue;
+            }
+        }
+        refs.push(DerivedJobRef {
+            id: row.job_id,
+            source_type: row.source_type,
+            status: row.status,
+            created_at: row.created_at,
+            restart_from_step: row.restart_from_step,
+        });
+    }
+    Ok(refs)
 }
 
 /// GET /api/jobs/:id - Get job detail with steps
@@ -309,6 +364,11 @@ pub async fn get_job(
     let children = JobRepo::list_children(&state.pool, job_id)
         .await
         .context("list child jobs")?;
+
+    let derived = JobRepo::list_derived_runs(&state.pool, job_id)
+        .await
+        .context("list derived runs")?;
+    let derived_jobs = derived_job_refs(&state, &auth_user, derived).await?;
 
     let mut steps_json: Vec<serde_json::Value> = steps
         .iter()
@@ -531,6 +591,7 @@ pub async fn get_job(
         retry_job_id: job.retry_job_id,
         retry_attempt: job.retry_attempt,
         max_retries: job.max_retries,
+        derived_jobs,
     };
 
     // Whole-response redaction (spec § 7.4): every content string of the job
@@ -1208,7 +1269,71 @@ mod tests {
             retry_job_id: None,
             retry_attempt: 0,
             max_retries: None,
+            derived_jobs: vec![],
         }
+    }
+
+    fn derived_fixture() -> DerivedJobRef {
+        DerivedJobRef {
+            id: Uuid::from_u128(2),
+            source_type: "restart".to_string(),
+            status: "failed".to_string(),
+            created_at: "2026-10-22T07:00:00Z".parse().unwrap(),
+            restart_from_step: Some("deploy".to_string()),
+        }
+    }
+
+    /// `derived_jobs[]` is skipped whole by redaction, so its entry must stay
+    /// identifiers only: a new field here needs a decision, not a default.
+    #[test]
+    fn derived_job_ref_serialises_identifiers_only() {
+        let v = serde_json::to_value(derived_fixture()).unwrap();
+        let keys: std::collections::BTreeSet<&str> =
+            v.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            std::collections::BTreeSet::from([
+                "created_at",
+                "id",
+                "restart_from_step",
+                "source_type",
+                "status",
+            ])
+        );
+        assert!(crate::redaction::JOB_IDENTIFIER_KEYS.contains(&"derived_jobs"));
+    }
+
+    /// A permanent pin failure masks every content string of job detail; the
+    /// links to the job's Restarts and Re-runs stay intact.
+    #[test]
+    fn mask_all_keeps_derived_job_ids() {
+        let response = JobDetailResponse {
+            input: Some(json!({"env": "prod"})),
+            derived_jobs: vec![derived_fixture()],
+            ..job_detail_fixture()
+        };
+        let mut v = serde_json::to_value(&response).unwrap();
+        let expected = v["derived_jobs"].clone();
+        crate::redaction::JobRedaction::MaskAll.apply_job_response(&mut v);
+        assert_eq!(v["derived_jobs"], expected);
+        assert_eq!(
+            v["derived_jobs"][0]["id"],
+            json!("00000000-0000-0000-0000-000000000002")
+        );
+        assert_eq!(v["derived_jobs"][0]["restart_from_step"], json!("deploy"));
+        assert_eq!(v["input"]["env"], json!(REDACTED));
+    }
+
+    /// A secret equal to a status or step name does not break the links.
+    #[test]
+    fn redaction_keeps_derived_job_links() {
+        let response = JobDetailResponse {
+            derived_jobs: vec![derived_fixture()],
+            ..job_detail_fixture()
+        };
+        let v = redacted(&response, &["deploy".to_string(), "failed".to_string()]);
+        assert_eq!(v["derived_jobs"][0]["restart_from_step"], json!("deploy"));
+        assert_eq!(v["derived_jobs"][0]["status"], json!("failed"));
     }
 
     #[test]
@@ -1245,6 +1370,7 @@ mod tests {
             retry_job_id: None,
             retry_attempt: 0,
             max_retries: None,
+            derived_jobs: vec![],
         };
         let v = redacted(&response, &secrets);
         assert_eq!(v["input"]["token"], json!(REDACTED));
@@ -1314,6 +1440,7 @@ mod tests {
             retry_job_id: None,
             retry_attempt: 0,
             max_retries: None,
+            derived_jobs: vec![],
         };
         let v = redacted(&response, &secrets);
         let raw = &v["raw_input"];

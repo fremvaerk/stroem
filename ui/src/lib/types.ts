@@ -160,6 +160,15 @@ export interface ChildJobRef {
   revision?: string | null;
 }
 
+/** A Restart or Re-run created from a job: one `derived_jobs[]` entry of job detail. */
+export interface DerivedJobRef {
+  id: string;
+  source_type: "restart" | "rerun";
+  status: string;
+  created_at: string;
+  restart_from_step: string | null;
+}
+
 export interface JobStep {
   step_name: string;
   action_name: string;
@@ -230,6 +239,8 @@ export interface JobDetail {
   retry_attempt: number;
   max_retries: number | null;
   steps: JobStep[];
+  /** Restarts and Re-runs created from this job, newest first. Optional: older servers omit it. */
+  derived_jobs?: DerivedJobRef[];
 }
 
 export interface PaginatedResponse<T> {

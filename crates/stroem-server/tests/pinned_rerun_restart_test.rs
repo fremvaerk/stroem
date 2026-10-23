@@ -433,6 +433,133 @@ async fn pinned_rerun_and_restart_require_run_on_the_folder_at_the_new_commit() 
     .await
 }
 
+/// `derived_jobs[]` of job detail authorises each later run by its own row:
+/// a pinned Re-run or Restart takes its folder from the commit it resolved to,
+/// so a viewer of the source may be denied it. A run the viewer may not View
+/// is left out; the others stay listed.
+#[tokio::test(flavor = "multi_thread")]
+async fn job_detail_hides_a_later_run_the_viewer_may_not_view() -> Result<()> {
+    const DENIED: &str = "denied@test.local";
+    const VIEWER: &str = "viewer@test.local";
+    const BOTH: &str = "both@test.local";
+    let rule = |tasks: &str, action: AclAction, users: &[&str]| AclRule {
+        workspace: "etl".into(),
+        tasks: vec![tasks.into()],
+        action,
+        groups: vec![],
+        users: users.iter().map(|u| u.to_string()).collect(),
+    };
+    let user = |email: &'static str| FixtureUser {
+        email,
+        groups: vec![],
+        admin: false,
+    };
+    rr_bounded(async {
+        let fx = pinned_workspace_fixture(PinnedFixtureOpts {
+            acl: Some(AclConfig {
+                default: AclAction::Deny,
+                rules: vec![
+                    rule("rel/*", AclAction::Run, &[DENIED, VIEWER, BOTH]),
+                    rule("locked/*", AclAction::View, &[VIEWER]),
+                    rule("locked/*", AclAction::Run, &[BOTH]),
+                ],
+            }),
+            users: vec![user(DENIED), user(VIEWER), user(BOTH)],
+            ..rr_opts()
+        })
+        .await?;
+        let source = rr_failed_pinned_source(&fx, json!({"ok": true})).await?;
+        let both = fx.api_key(BOTH, false).await;
+        let rerun_uri = "/api/workspaces/etl/tasks/only-on-release/execute";
+        let rerun_body = json!({"input": {}, "source_job_id": source});
+
+        // Re-run while the task is still in `rel`.
+        let (st, body) = api_req(
+            &fx.router,
+            "POST",
+            rerun_uri,
+            Some(&both),
+            Some(rerun_body.clone()),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "re-run in rel: {body}");
+        let rerun_rel = body["job_id"].as_str().unwrap().to_string();
+
+        // The task moves to `locked`; the next Re-run and Restart carry it.
+        fx.etl.commit(
+            "release/2.3",
+            "release/2.3",
+            &[(
+                RR_YAML_PATH,
+                &RR_ETL_RELEASE.replace("folder: rel", "folder: locked"),
+            )],
+        );
+        let (st, body) =
+            api_req(&fx.router, "POST", rerun_uri, Some(&both), Some(rerun_body)).await;
+        assert_eq!(st, StatusCode::OK, "re-run in locked: {body}");
+        let rerun_locked = body["job_id"].as_str().unwrap().to_string();
+        let (st, body) = api_req(
+            &fx.router,
+            "POST",
+            &format!("/api/jobs/{source}/restart"),
+            Some(&both),
+            Some(json!({"from_step": "b"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "restart in locked: {body}");
+        let restart_locked = body["job_id"].as_str().unwrap().to_string();
+        for id in [&rerun_locked, &restart_locked] {
+            let row = JobRepo::get(&fx.pool, id.parse()?).await?.unwrap();
+            assert_eq!(row.task_folder.as_deref(), Some("locked"), "{id}");
+        }
+
+        let all = vec![
+            restart_locked.clone(),
+            rerun_locked.clone(),
+            rerun_rel.clone(),
+        ];
+        for (email, expected) in [
+            (DENIED, vec![rerun_rel.clone()]),
+            (VIEWER, all.clone()),
+            (BOTH, all.clone()),
+        ] {
+            let key = fx.api_key(email, false).await;
+            let (st, detail) = api_req(
+                &fx.router,
+                "GET",
+                &format!("/api/jobs/{source}"),
+                Some(&key),
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{email}: {detail}");
+            let ids: Vec<String> = detail["derived_jobs"]
+                .as_array()
+                .expect("derived_jobs")
+                .iter()
+                .map(|d| d["id"].as_str().unwrap().to_string())
+                .collect();
+            assert_eq!(ids, expected, "{email}: {detail}");
+        }
+
+        // The hidden runs are denied to DENIED on their own paths too.
+        let denied = fx.api_key(DENIED, false).await;
+        for id in [&rerun_locked, &restart_locked] {
+            let (st, body) = api_req(
+                &fx.router,
+                "GET",
+                &format!("/api/jobs/{id}"),
+                Some(&denied),
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::NOT_FOUND, "{id}: {body}");
+        }
+        Ok(())
+    })
+    .await
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn rerun_and_restart_of_pinned_source_are_400_when_the_tip_lost_the_task() -> Result<()> {
     rr_bounded(async {

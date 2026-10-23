@@ -1871,6 +1871,14 @@ Accepted limitations of the last-run and missed-run status (spec `docs/superpowe
 - [ ] The Dashboard card skips workspaces in load error; their triggers reappear after the workspace loads.
 - [ ] A manual run, Re-run or Restart does not clear the missed mark or the "last run failed" state. This is a user decision (spec §5.1), not a bug; revisit only if the user asks.
 
+## Job Derived Runs (2026-10-22)
+
+Job detail lists a job's Restarts and Re-runs (`derived_jobs[]`, "Later runs" card). Known limits, each a possible follow-up:
+
+- [ ] `derived_jobs[]` is not bounded: an API client that re-runs one source job thousands of times makes every job-detail poll of that source list (and ACL-check) every run — and an open page of a settled top-level job polls every 30 s (10 s while a later run is live). The UI shows only five. A `LIMIT` plus a total count would bound it.
+- [ ] "+N more" is plain text: the Jobs page has no `source_job_id` filter to link to.
+- [ ] MCP `get_job_status` does not report the derived runs (it builds its own response).
+
 ## Review: Architecture / Deepening Review (2026-09-11)
 
 Architecture review at v0.16.3 (`e02a089`) scoped to the hot spots of the last 200 commits, using the deep-module vocabulary (module / interface / depth / seam / adapter / leverage / locality). Four parallel explore agents (creation, claim-and-execute, orchestration, model+validation), then merged with the 2026-09-08 architecture review (11 candidates: 3 shipped, 5 independently re-derived, 3 carried forward) and reconciled against `codebase-review-2026-03-01.md`. Every claim below was verified by direct file read at 0.16.3.
