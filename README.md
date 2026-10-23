@@ -35,7 +35,7 @@ docker pull ghcr.io/fremvaerk/stroem-worker:${VERSION}
 docker pull ghcr.io/fremvaerk/stroem-runner:${VERSION}  # base image for script-in-container steps
 ```
 
-The `latest` and `sha-<commit>` tags are built from `main` and are `linux/amd64` only. Releases up to v0.18.3 have `linux/amd64` images and x86_64 archives only.
+The `sha-<commit>` and `latest` tags are built from `main` and are `linux/amd64` only. A release also points `latest` at its multi-arch image until the next `main` build replaces it, so pull a release tag when you need `linux/arm64`. Releases up to v0.18.3 have `linux/amd64` images and x86_64 archives only.
 
 ## Quickstart (Docker Compose)
 
