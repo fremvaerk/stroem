@@ -1,6 +1,8 @@
 # Templated refs (`ref: "{{ … }}"`)
 
 Status: implemented (plan docs/superpowers/plans/2026-10-16-templated-refs.md)
+Amended 2026-10-23: D6 option A — an empty rendered value means "no ref"
+(§ 4.2 rule 3, § 5.3, § 5.6, § 6); until then it was an error.
 Builds on: `2026-10-02-git-refs-design.md` (the git-refs spec, cited as GR),
 `2026-10-06-tera-2-upgrade-design.md` (cited as T2),
 `2026-09-11-render-context-owner-design.md`.
@@ -109,7 +111,7 @@ containing `{{` or `{%` (`crates/stroem-common/src/git_ref.rs:55`).
 | D3 | Where a template is allowed | Flow-step `ref:`, `type: task` action `ref:`, webhook trigger `ref:` | Scheduler trigger (static input only); hooks, event sources, agent task tools (`ref:` itself unsupported, GR § 4.6) |
 | D4 | Trust gate | **None** — extends GR D7 (§ 10.1) | Required / optional `ref_allow` glob list next to the ref; owner-workspace policy |
 | D5 | One commit per ref per job | A persisted memo, table `job_ref_pin`, seeded at creation, first writer wins | Per-step commits (a moving branch splits the job) |
-| D6 | Empty rendered value | Error | Treat as "no ref" (follow-up, § 14); the git source's default branch (surprising inside a pinned job) |
+| D6 | Empty rendered value | "No ref" (option A, 2026-10-23): resolved as if the `ref:` key were absent | Error (the choice until 2026-10-23); the git source's default branch (surprising inside a pinned job) |
 | D7 | Temporary git failure while resolving at promotion | Fail the step (like `type: task` dispatch) | Keep `ready`, retry with a cap, recovery re-advances |
 | D8 | Creation-time pre-check of templated refs | **None** | Syntax rule (`{{ input.x }}` resolves at creation); a template-text scanner; a reduced-context test render (unsound: `default` hides undefined variables, § 2) |
 | D9 | How a deferred step stays unclaimable | `action_type = 'deferred'` **and** `required_ability = 'deferred'`; claim SQL and index unchanged; the claim handler rejects a capability outside `KNOWN_ABILITIES`, as register does | Add `'deferred'` to the claim `NOT IN` list (needs a new partial index on `job_step`) |
@@ -155,7 +157,16 @@ Hooks, event sources and agent task tools still reject every `ref:`
    input is a step-input render, not a ref render: it keeps today's
    step-input context, `secret` and `vals` included.)
 3. **Post-render check.** The rendered value is trimmed, then:
-   - empty → error (D6);
+   - empty → no ref (D6, amended 2026-10-23). Decided first
+     (`git_ref::rendered_ref_value`), so no pin loads: a flow step builds the
+     row an un-ref'd step gets (`resolve_step_row` with no ref, against the
+     job's config); a `type: task` action resolves its task as creation does
+     for an un-ref'd action (inherited pin stamped, the static self-reference
+     rule); a webhook takes the un-ref'd trigger target. The owner rules
+     (rule 4: a git owner, not a library item) still apply to the template,
+     whatever the value. A later step of an unpinned job reads its action from
+     the config at promotion, not at creation (its files stay the job's
+     revision);
    - contains a known secret value → error (§ 10.3);
    - `parse_git_ref` → a branch, a tag or a full 40-hex SHA, exactly as a
      static ref (a template marker in the RENDERED value is also rejected, so
@@ -357,7 +368,7 @@ its context. Instances that render the same value share one commit through
 
 ### 5.5 Failure
 
-- Every resolution error — render error, empty value, secret in the value,
+- Every resolution error — render error, secret in the value,
   invalid name, ref not found, commit not found, a non-git owner, a missing
   action, `type: agent`, a failed connection pre-check, and a temporary
   `PinUnavailable` (D7) — fails the step through a NEW guarded write,
@@ -408,7 +419,7 @@ its context. Instances that render the same value share one commit through
      error with `downcast_ref` (`PinError`, `GitRefError`, `PinLoadWithheld`,
      `RefResolveError`, `TemplateError`) and turn it into a new
      `RenderedRefError { kind }`, whose `Display` is a fixed sentence per kind
-     (`Empty`, `Invalid`, `SecretValue`, `NotFound`, `NotGit`, `NoAction`,
+     (`Invalid`, `SecretValue`, `NotFound`, `NotGit`, `NoAction`,
      `AgentAction`, `LoadWithheld`, `Unavailable`, `Render`, `Unresolvable` for
      an untyped error). It is the only error that leaves a resolution
      function, so the job log, `error_message`, `tracing`, the webhook's error
@@ -499,9 +510,12 @@ the owner's secrets, which bucket `D` renders with, out of the ref context.
 The ref-input render's errors are caller-side (bucket `C`, never withheld)
 and go through `fail_task_step`, value-free.
 
-Failures go through `fail_task_step`, as every dispatch failure does today;
-its unguarded `mark_failed` is part of the known double-dispatch gap (§ 14),
-which this spec neither fixes nor widens. The ref template is written by the action owner `O`, so
+Failures go through `fail_task_step`, as every dispatch failure does today.
+(Amended 2026-10-23: the claim `JobStepRepo::claim_task_dispatch` has one
+winner, and it and every failure write (`fail_task_dispatch`: `ready` before
+the claim, `running` after it) are conditioned on the task stamp the
+dispatcher resolved with, so an empty-ref dispatcher can neither create an
+unpinned child nor fail the step after another one stamped a pin.) The ref template is written by the action owner `O`, so
 its render error is withheld when `O != A` (owner-side origin, CLAUDE.md
 § Cross-Workspace References); a post-render error is value-free in every
 case.
@@ -583,8 +597,8 @@ config snapshot, re-authenticate against the fresh secret. Then:
    error log (`web/hooks.rs:113`) or `classify_execute_error`.
 
 Errors go through `classify_execute_error`'s `RenderedRefError` branch: an
-empty value, an invalid value, a render error, a secret value and a ref that
-is not found are 400; `Unavailable` is 500.
+invalid value, a render error, a secret value and a ref that is not found are
+400; `Unavailable` is 500. An empty value is no ref (D6): the un-ref'd target.
 No job is created. The job is an ordinary pinned job: `job.git_ref` holds the
 rendered value, so state partitions, redaction and re-run/restart (which
 re-resolve `job.git_ref`, `web/api/pinned_source.rs::resolve_source_pin`) need
@@ -776,7 +790,7 @@ error kind).
 Unit (`#[cfg(test)]`):
 
 - `classify_ref`: static, `{{`, `{%`.
-- Post-render check: trim, empty, a secret value inside, invalid name, short-SHA
+- Post-render check: trim, empty = no ref, a secret value inside, invalid name, short-SHA
   hint, a template marker in the rendered value.
 - `render_context::build` for `StepRef` and `TaskActionRef`, and
   `render_context::webhook_ref`: no `secret`; `each` only for `StepRef` with a
@@ -798,7 +812,7 @@ in `tests/main.rs`; `PinnedFixture`):
   after the branch moves between creation and promotion; two promotions of the
   same rendered value across a branch move get one commit.
 - Failures (each fails the step with a value-free message and the job
-  settles): empty value, ref not found, non-git owner, missing action,
+  settles): ref not found, non-git owner, missing action,
   `type: agent`, secret in the value, `break_remote` (temporary).
 - Resolved type `task` (child created from `T@ref`) and `approval` (step
   `suspended`).
@@ -849,8 +863,8 @@ in `tests/main.rs`; `PinnedFixture`):
   value; action defaults are not in the ref context.
 - `type: task` action with a templated `ref:` resolved at dispatch; owner-side
   render error withheld when `O != A`.
-- Webhook `{{ input.body.ref }}`: a pinned job; empty value and unknown ref →
-  400; `break_remote` → 500.
+- Webhook `{{ input.body.ref }}`: a pinned job; unknown ref → 400;
+  `break_remote` → 500; empty value → the un-ref'd target.
 - Redaction: after resolution, job detail masks the resolved pin's secrets
   (extend `read_path_audit_test.rs`).
 
@@ -874,8 +888,6 @@ UI (Vitest): the `ref:` label on a deferred step row.
 
 ## 14. Out of scope / follow-ups (TODO.md)
 
-- An empty rendered value meaning "no ref" (D6 option A). Safe to add later:
-  it turns an error into a behaviour.
 - A trust gate for templated refs (`ref_allow` globs, or an owner-workspace
   policy — GR roadmap item).
 - Closing the transformed-secret path (§ 10.1, D13): a restricted ref
@@ -892,10 +904,12 @@ UI (Vitest): the `ref:` label on a deferred step row.
 - The claim SQL does not read the job's status, so a `ready` step can be
   claimed in the window between `JobRepo::cancel` and
   `cancel_pending_steps` (pre-existing, every step kind; § 5.7).
-- Idempotent `type: task` / `type: approval` dispatch (winner-only
-  `mark_running_server` / `mark_suspended`, one child per parent step, atomic
+- Idempotent `type: approval` dispatch (winner-only `mark_suspended`, atomic
   suspend + message), and then recovery of a `ready` task / approval row left
   by a crash (§ 5.8; Codex round 2 N4/N5; lifecycle-hardening spec).
+  `type: task` dispatch has one winner since 2026-10-23
+  (`JobStepRepo::claim_task_dispatch`); its claim and the child insert are
+  still two transactions.
 - Templated refs on hooks, event sources, agent task tools, scheduler triggers.
 
 ## Revision history

@@ -95,30 +95,37 @@ pub fn classify_ref(s: &str) -> RefKind {
     }
 }
 
+/// The value a rendered `ref:` template asks for, trimmed; `None` when it is
+/// empty, which means "no ref" (spec 2026-10-15 D6, option A): the step, the
+/// `type: task` dispatch or the webhook job runs as if the `ref:` key were
+/// absent. Decided before [`check_rendered_ref`], so whitespace-only is empty
+/// too and an empty value never loads a pin.
+pub fn rendered_ref_value(rendered: &str) -> Option<&str> {
+    let value = rendered.trim();
+    (!value.is_empty()).then_some(value)
+}
+
 /// Why a RENDERED ref value is refused (spec 2026-10-15 § 4.2 rule 3). It
 /// carries no part of the value: callers turn it into a value-free message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderedRefRejection {
-    /// Empty after trimming (D6).
-    Empty,
     /// Contains a value of the ref secret set (§ 10.3).
     SecretValue,
-    /// Not a branch, a tag or a full commit SHA — a template marker included.
+    /// Not a branch, a tag or a full commit SHA — a template marker included,
+    /// and an empty value (callers send an empty value down the "no ref" path
+    /// with [`rendered_ref_value`] first).
     Invalid,
 }
 
-/// The post-render check: trim; refuse an empty value; refuse a value that
-/// contains any of `secrets` (empty strings ignored); refuse anything
-/// [`parse_git_ref`] refuses. Returns the trimmed value, which is the string
-/// the ref memo is keyed by.
+/// The post-render check: trim; refuse a value that contains any of
+/// `secrets` (empty strings ignored); refuse anything [`parse_git_ref`]
+/// refuses, an empty value included. Returns the trimmed value, which is the
+/// string the ref memo is keyed by.
 pub fn check_rendered_ref(
     rendered: &str,
     secrets: &[String],
 ) -> Result<String, RenderedRefRejection> {
     let value = rendered.trim();
-    if value.is_empty() {
-        return Err(RenderedRefRejection::Empty);
-    }
     if secrets
         .iter()
         .any(|s| !s.is_empty() && value.contains(s.as_str()))
@@ -304,10 +311,21 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_or_blank_rendered_ref_is_no_ref() {
+        for blank in ["", " ", " \n\t", "\u{a0}"] {
+            assert_eq!(rendered_ref_value(blank), None, "{blank:?}");
+        }
+        assert_eq!(rendered_ref_value("  release/2.3\n"), Some("release/2.3"));
+        // A value that is not empty is checked, never treated as no ref.
+        assert_eq!(rendered_ref_value("a..b"), Some("a..b"));
+    }
+
+    #[test]
     fn rendered_ref_rejections_in_spec_order() {
+        // A caller that skips `rendered_ref_value` still gets no empty ref.
         assert_eq!(
             check_rendered_ref(" \n\t", &[]),
-            Err(RenderedRefRejection::Empty)
+            Err(RenderedRefRejection::Invalid)
         );
         let secrets = vec!["hunter2-long".to_string(), String::new()];
         // The secret check runs before the parse, so an invalid name that

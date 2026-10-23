@@ -4,8 +4,10 @@
 //! the commit (one per `(job, owner, ref)`, table `job_ref_pin`), checks the
 //! value against the job's ref secret set before and after the commit's
 //! config loads, and writes the step's real columns with the code job
-//! creation uses. Runs in `Settlement::advance` and `dispatch::init`, after
-//! the cascade and before task dispatch. `cascade::run` stays pure.
+//! creation uses. A value that renders empty means "no ref" (D6 option A):
+//! the row is built as an un-ref'd step's would be. Runs in
+//! `Settlement::advance` and `dispatch::init`, after the cascade and before
+//! task dispatch. `cascade::run` stays pure.
 //!
 //! A rendered value is private until both secret checks pass: no span, log
 //! line or error text carries it (§ 5.5). Every step failure is a
@@ -18,7 +20,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use sqlx::PgPool;
-use stroem_common::git_ref::check_rendered_ref;
+use stroem_common::git_ref::{check_rendered_ref, rendered_ref_value};
 use stroem_common::models::job::StepStatus;
 use stroem_common::models::workflow::{FlowStep, TaskDef, WorkspaceConfig};
 use stroem_common::template::render_ref_template;
@@ -403,16 +405,41 @@ async fn resolve_one(
         Scope::StepRef,
     );
 
-    // 2. Render, then the post-render check against the ref secret set.
+    // 2. Render. The row is built by the code creation uses, from the row's
+    // own owner and action name (decided at creation) and the job config's
+    // flow step.
     let rendered = match render_ref_template(template, ctx.as_value()) {
         Ok(r) => r,
         Err(e) => return Ok(Err(RenderedRefError::from_error(&e, owner))),
     };
+    let mut written = flow_step.clone();
+    written.action = written_action(owner, workspace_name, &step.action_name);
+    let Some(rendered) = rendered_ref_value(&rendered) else {
+        // Empty: no ref (D6 option A). The step resolves as an un-ref'd one
+        // against the job's config — no secret set, no commit, no memo row.
+        written.git_ref = None;
+        return build_row(
+            workspaces,
+            pool,
+            workspace_config,
+            workspace_name,
+            job,
+            &step.step_name,
+            &written,
+            None,
+            owner,
+            &step.action_name,
+            defaults,
+        )
+        .await;
+    };
+
+    // The post-render check against the ref secret set.
     let secrets = match ref_secret_set(workspaces, pool, job).await? {
         Ok(s) => s,
         Err(e) => return Ok(Err(e)),
     };
-    let value = match check_rendered_ref(&rendered, &secrets) {
+    let value = match check_rendered_ref(rendered, &secrets) {
         Ok(v) => v,
         Err(r) => return Ok(Err(RenderedRefError::from_rejection(r, owner))),
     };
@@ -423,11 +450,7 @@ async fn resolve_one(
         return Ok(Err(e));
     }
 
-    // 5–6. `value` passed both checks: it is an identifier from here on. The
-    // row is built by the code creation uses, from the row's own owner and
-    // action name (decided at creation) and the job config's flow step.
-    let mut written = flow_step.clone();
-    written.action = written_action(owner, workspace_name, &step.action_name);
+    // 5–6. `value` passed both checks: it is an identifier from here on.
     build_row(
         workspaces,
         pool,
@@ -436,7 +459,7 @@ async fn resolve_one(
         job,
         &step.step_name,
         &written,
-        &value,
+        Some(&value),
         owner,
         &step.action_name,
         defaults,
@@ -534,7 +557,9 @@ pub(crate) async fn select_commit(
 /// § 5.3 steps 5–6 through `job_creator::resolve_step_row`, with nested
 /// static refs kept in the job's memo too (contract deviation 8): the memo is
 /// seeded from `job_ref_pin`, every entry the row met is written first-writer-
-/// wins, and the row is rebuilt (at most 3 times) when one disagrees.
+/// wins, and the row is rebuilt (at most 3 times) when one disagrees. `value`
+/// `None` is an empty rendered value: `written` carries no `ref:` and resolves
+/// as an un-ref'd step.
 #[allow(clippy::too_many_arguments)]
 async fn build_row(
     workspaces: &WorkspaceManager,
@@ -544,7 +569,7 @@ async fn build_row(
     job: &JobRow,
     step_name: &str,
     written: &FlowStep,
-    value: &str,
+    value: Option<&str>,
     owner: &str,
     action_name: &str,
     defaults: JobDefaults,
@@ -571,9 +596,7 @@ async fn build_row(
             ws_set: &ws_set,
             defaults,
         };
-        let row = match resolve_step_row(&ctx, step_name, written, StepStatus::Ready, Some(value))
-            .await
-        {
+        let row = match resolve_step_row(&ctx, step_name, written, StepStatus::Ready, value).await {
             Ok(row) => row,
             Err(e) => return Ok(Err(RenderedRefError::from_error(&e, owner))),
         };
@@ -581,8 +604,11 @@ async fn build_row(
         // the deferred row's values must win over the live config of an
         // unpinned job (which can re-point the step's `action:` before
         // promotion). `written_action` spells them so that the row keeps
-        // them; this checks the result.
-        if row.action_workspace.as_deref() != Some(owner) || row.action_name != action_name {
+        // them; this checks the result. Without a ref, an action of the job's
+        // own config has no `action_workspace`.
+        if row.action_workspace.as_deref().unwrap_or(workspace_name) != owner
+            || row.action_name != action_name
+        {
             return Ok(Err(RenderedRefError::new(
                 RenderedRefKind::Unresolvable,
                 owner,

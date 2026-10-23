@@ -758,6 +758,40 @@ impl JobStepRepo {
         Ok(())
     }
 
+    /// The dispatch claim of a `type: task` step: `ready` → `running`, only
+    /// while the step's task stamp (`task_workspace`, `task_ref`,
+    /// `task_revision`) is `task_pin` — `None` means unstamped. Returns
+    /// whether this caller won. A dispatcher that loses (another one claimed
+    /// or failed the step, or stamped a pin after this one resolved without
+    /// one) must not create a child.
+    pub async fn claim_task_dispatch(
+        pool: &PgPool,
+        job_id: Uuid,
+        step_name: &str,
+        task_pin: Option<(&str, &str, &str)>,
+    ) -> Result<bool> {
+        let (workspace, git_ref, commit) = match task_pin {
+            Some((w, r, c)) => (Some(w), Some(r), Some(c)),
+            None => (None, None, None),
+        };
+        let r = sqlx::query(
+            "UPDATE job_step SET status = 'running', started_at = NOW() \
+             WHERE job_id = $1 AND step_name = $2 AND status = 'ready' \
+               AND task_workspace IS NOT DISTINCT FROM $3 \
+               AND task_ref IS NOT DISTINCT FROM $4 \
+               AND task_revision IS NOT DISTINCT FROM $5",
+        )
+        .bind(job_id)
+        .bind(step_name)
+        .bind(workspace)
+        .bind(git_ref)
+        .bind(commit)
+        .execute(pool)
+        .await
+        .context("claim task step for dispatch")?;
+        Ok(r.rows_affected() == 1)
+    }
+
     /// Cancel running server-managed steps (for_each placeholders, type:task steps).
     /// These have no worker to kill — just transition from running to cancelled.
     pub async fn cancel_server_managed_steps(pool: &PgPool, job_id: Uuid) -> Result<u64> {
@@ -821,6 +855,44 @@ impl JobStepRepo {
         .context("Failed to mark step as failed")?;
 
         Ok(())
+    }
+
+    /// A `type: task` dispatch failure, fenced like
+    /// [`Self::claim_task_dispatch`]: written only while the step is
+    /// `expected` AND its task stamp is `task_pin` (`None` = unstamped).
+    /// Returns whether it wrote. Dispatch passes `Ready` before its claim and
+    /// `Running` after it, so a dispatcher that lost the claim, or that
+    /// resolved before another one stamped a pin, cannot fail the step.
+    pub async fn fail_task_dispatch(
+        pool: &PgPool,
+        job_id: Uuid,
+        step_name: &str,
+        error: &str,
+        expected: StepStatus,
+        task_pin: Option<(&str, &str, &str)>,
+    ) -> Result<bool> {
+        let (workspace, git_ref, commit) = match task_pin {
+            Some((w, r, c)) => (Some(w), Some(r), Some(c)),
+            None => (None, None, None),
+        };
+        let r = sqlx::query(
+            "UPDATE job_step SET status = 'failed', error_message = $1, completed_at = NOW() \
+             WHERE job_id = $2 AND step_name = $3 AND status = $4 \
+               AND task_workspace IS NOT DISTINCT FROM $5 \
+               AND task_ref IS NOT DISTINCT FROM $6 \
+               AND task_revision IS NOT DISTINCT FROM $7",
+        )
+        .bind(error)
+        .bind(job_id)
+        .bind(step_name)
+        .bind(expected.as_ref())
+        .bind(workspace)
+        .bind(git_ref)
+        .bind(commit)
+        .execute(pool)
+        .await
+        .context("Failed to mark step as failed")?;
+        Ok(r.rows_affected() == 1)
     }
 
     /// Record a step failure and decide its retry in ONE transaction, so a row

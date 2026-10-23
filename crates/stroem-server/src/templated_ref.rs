@@ -20,7 +20,6 @@ use crate::workspace::pins::{PinError, PinLoadWithheld};
 /// Why a rendered ref could not be used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderedRefKind {
-    Empty,
     Invalid,
     SecretValue,
     NotFound {
@@ -57,7 +56,6 @@ impl RenderedRefError {
 
     pub fn from_rejection(r: RenderedRefRejection, workspace: &str) -> Self {
         let kind = match r {
-            RenderedRefRejection::Empty => RenderedRefKind::Empty,
             RenderedRefRejection::SecretValue => RenderedRefKind::SecretValue,
             RenderedRefRejection::Invalid => RenderedRefKind::Invalid,
         };
@@ -126,7 +124,6 @@ impl fmt::Display for RenderedRefError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let ws = &self.workspace;
         match self.kind {
-            RenderedRefKind::Empty => f.write_str("the rendered ref is empty"),
             RenderedRefKind::Invalid => {
                 f.write_str("the rendered ref is not a valid branch, tag or full commit SHA")
             }
@@ -321,10 +318,6 @@ mod tests {
     fn rejections_map_one_to_one() {
         use stroem_common::git_ref::RenderedRefRejection as R;
         assert_eq!(
-            RenderedRefError::from_rejection(R::Empty, "etl").kind,
-            RenderedRefKind::Empty
-        );
-        assert_eq!(
             RenderedRefError::from_rejection(R::SecretValue, "etl").kind,
             RenderedRefKind::SecretValue
         );
@@ -333,8 +326,8 @@ mod tests {
             RenderedRefKind::Invalid
         );
         assert_eq!(
-            RenderedRefError::from_rejection(R::Empty, "etl").to_string(),
-            "the rendered ref is empty"
+            RenderedRefError::from_rejection(R::Invalid, "etl").to_string(),
+            "the rendered ref is not a valid branch, tag or full commit SHA"
         );
     }
 }

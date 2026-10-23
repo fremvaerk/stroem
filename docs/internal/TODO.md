@@ -91,8 +91,8 @@ Last updated: 2026-06-03.
 - [ ] **Task-state storage hardening** — per-snapshot keys, download by claim-supplied key (wire change), prune surviving-reference check, extractor policy, backfill of pre-047 `state_json`. Problem statement: `docs/superpowers/specs/2026-09-13-task-state-storage-hardening-design.md`.
 - [ ] **`DispatchEnv` for settlement dispatch** — `handle_task_steps`, `handle_task_steps_pass` and `dispatch::init` now take 8 parameters each (`#[allow(clippy::too_many_arguments)]` ×3 added in the render-context work); `workspaces`, `pool`, `workspace_config`, `workspace_name`, `defaults`, `snapshots` are one per-entry dispatch environment the state tier already bundles as `Settlement`. A `DispatchEnv<'a>` collapses five arguments and removes all three allows.
 - [ ] Cross-workspace `type: task` carried lifecycle risks (same exposure as any `type: task` child today, sharpened by cross-team ownership) — problem statement `docs/superpowers/specs/2026-09-16-task-step-lifecycle-hardening-design.md`:
-  - [ ] Double dispatch: two concurrent settlement passes can both see a step ready and both create a child.
-  - [ ] A stale dispatcher can fail a winner's step after another dispatcher already succeeded.
+  - [x] Double dispatch: two concurrent settlement passes can both see a step ready and both create a child. Closed for `type: task` steps 2026-10-23 by `JobStepRepo::claim_task_dispatch` (winner-only `ready` → `running`, conditioned on the task stamp the dispatcher resolved with). Approval dispatch is still unclaimed (`mark_suspended`).
+  - [x] A stale dispatcher can fail a winner's step after another dispatcher already succeeded. Closed for `type: task` steps 2026-10-23: `fail_task_step` writes through `JobStepRepo::fail_task_dispatch` — `ready` before the claim, `running` after it, each only while the row carries the task stamp the dispatcher resolved with.
   - [ ] Dispatch is not crash-safe: a crash between marking the step `running` and the child's commit leaves a `running` step with no child and no automatic repair.
   - [ ] A child missed by cancellation's enumeration snapshot when committed just after it, by a dispatcher working from an earlier readiness read.
   - [ ] A timed-out parent step does not cancel its child, and a stale child can settle a retried replacement attempt.
@@ -1195,7 +1195,8 @@ Feature: `ref:` (branch | tag | full SHA) on flow-step actions, `type: task` act
 
 Feature: `ref: "{{ … }}"` on flow steps, `type: task` actions and webhook triggers (spec `docs/superpowers/specs/2026-10-15-templated-refs-design.md`, CLAUDE.md § Git refs, guide `guides/git-refs.md` § Templated refs, `operations/migration-051-052.md`).
 
-- [ ] An empty rendered value meaning "no ref" (D6 option A).
+- [x] An empty rendered value meaning "no ref" (D6 option A). Done 2026-10-23 (`git_ref::rendered_ref_value`; flow step, `type: task` dispatch and webhook; tests `tests/git_refs_empty_ref_test.rs`).
+- [ ] An empty templated ref on a later step of an unpinned job reads its action definition from the live config at promotion, not at creation, while its files stay the job's revision (an un-ref'd step reads both at creation). Loading the config at `job.revision` through the PinStore would make them equal, at the cost of a pin load (and a git failure mode) per resolution.
 - [ ] A trust gate for templated refs (`ref_allow` globs, or an owner-workspace policy).
 - [ ] Close the transformed-secret path (D13): a restricted ref grammar, or masking ref identifiers in every outlet.
 - [ ] A `type: task` ref and its child input from ONE evaluation of the caller's step input (§ 5.6 renders it twice).
@@ -1204,7 +1205,7 @@ Feature: `ref: "{{ … }}"` on flow steps, `type: task` actions and webhook trig
 - [ ] A creation-time pre-check for templates that read only `input` (D8).
 - [ ] Per-run ref override from API / UI / MCP / CLI (GR § 16).
 - [ ] The claim SQL does not read the job's status: a `ready` step can be claimed between `JobRepo::cancel` and `cancel_pending_steps` (pre-existing, every step kind).
-- [ ] Idempotent `type: task` / `type: approval` dispatch, then recovery of a `ready` task / approval row left by a crash (lifecycle-hardening spec).
+- [ ] Idempotent `type: approval` dispatch, then recovery of a `ready` task / approval row left by a crash (lifecycle-hardening spec). `type: task` dispatch has one winner since 2026-10-23 (`JobStepRepo::claim_task_dispatch`); its claim and the child insert are still two transactions.
 - [ ] A cascade error after a server-side step failure is logged and swallowed: `dispatch::orchestrate_after_server_step_failure` (task / approval dispatch failures) and the deferred failure path in `settlement::deferred` (same pattern). A transient DB error there leaves dependents `pending` under a `running` job; for an UNPINNED job no recovery phase revisits it (Phase 4.5 lists pinned jobs only, Phase 4.6 needs a `ready` deferred row), so it waits for the job timeout or an operator cancel (pre-existing; Codex implementation review 2026-10-16).
 - [ ] The dispatch round of `advance` / `init` (`settlement::deferred::DispatchRounds`, final review 2026-10-16) repeats only for a NEW deferred `ready` row. A plain `type: task` step promoted by an APPROVAL dispatch failure (`fail_task_step` → cascade, after the round's task dispatch) is still not dispatched until the next advance, and no recovery phase re-advances a `ready` task row (pre-existing). Widening the repeat condition to any newly `ready` `task` / `approval` row would close it, but changes jobs without `ref:`, so it was left out of the templated-refs branch.
 - [ ] Templated refs on hooks, event sources, agent task tools, scheduler triggers.

@@ -6,7 +6,7 @@
 use anyhow::{Context, Result};
 use sqlx::PgPool;
 use std::collections::HashMap;
-use stroem_common::git_ref::{check_rendered_ref, classify_ref, RefKind};
+use stroem_common::git_ref::{check_rendered_ref, classify_ref, rendered_ref_value, RefKind};
 use stroem_common::models::job::{JobStatus, StepStatus};
 use stroem_common::models::workflow::{InputFieldDef, TaskDef, WorkspaceConfig};
 use stroem_common::template::{
@@ -18,8 +18,8 @@ use uuid::Uuid;
 
 use crate::config::JobDefaults;
 use crate::job_creator::{
-    compute_depth, create_job_for_task_inner, ref_world_sets, resolve_task_ref, task_at,
-    CreationMode, OwnerConfig, ResolvedTask, MAX_TASK_DEPTH,
+    compute_depth, create_job_for_task_inner, ref_world_sets, resolve_task_for_step,
+    resolve_task_ref, task_at, CreationMode, OwnerConfig, RefMemo, ResolvedTask, MAX_TASK_DEPTH,
 };
 use crate::refs::{plan_reference, RefPlan, RefWorld};
 use crate::render_context::{self, JobContext, LoopSlot, Scope, Snapshots};
@@ -99,7 +99,8 @@ async fn fail_task_step(
     snapshots: &Snapshots,
     extra_secret_values: &[String],
     persist_override: Option<&str>,
-) -> Result<()> {
+    expected: Option<(StepStatus, TaskPinCols<'_>)>,
+) -> Result<bool> {
     // Two of the callers pass a Tera render error (task-step input, approval
     // message). Tera's own text quotes the offending value, so a template
     // touching `{{ secret.* }}` would embed the secret; the template error is
@@ -115,9 +116,31 @@ async fn fail_task_step(
     secret_values.extend_from_slice(extra_secret_values);
     let scrubbed = crate::workspace_set::redact_secrets_in_str(err, &secret_values);
 
-    tracing::error!("{}", scrubbed);
+    // `expected` guards the write (task dispatch, see `handle_task_steps_pass`):
+    // the status and the task stamp this dispatcher resolved with. A
+    // dispatcher that no longer owns the step — another one claimed, failed
+    // or stamped it — writes nothing and does not re-cascade.
     let persisted = persist_override.unwrap_or(&scrubbed);
-    JobStepRepo::mark_failed(pool, job_id, step_name, persisted).await?;
+    let applied = match expected {
+        Some((status, task_pin)) => {
+            JobStepRepo::fail_task_dispatch(pool, job_id, step_name, persisted, status, task_pin)
+                .await?
+        }
+        None => {
+            JobStepRepo::mark_failed(pool, job_id, step_name, persisted).await?;
+            true
+        }
+    };
+    if !applied {
+        tracing::warn!(
+            %job_id,
+            step = %step_name,
+            "step changed under this dispatcher; its failure is not recorded: {}",
+            scrubbed
+        );
+        return Ok(false);
+    }
+    tracing::error!("{}", scrubbed);
     orchestrate_after_server_step_failure(
         pool,
         job_id,
@@ -127,7 +150,18 @@ async fn fail_task_step(
         snapshots,
     )
     .await;
-    Ok(())
+    Ok(true)
+}
+
+/// A step's task stamp as `JobStepRepo::claim_task_dispatch` and
+/// `fail_task_dispatch` compare it: `(task_workspace, task_ref,
+/// task_revision)`, `None` when unstamped.
+type TaskPinCols<'a> = Option<(&'a str, &'a str, &'a str)>;
+
+fn stamp_cols(task_stamp: &Option<(String, PinRef)>) -> TaskPinCols<'_> {
+    task_stamp
+        .as_ref()
+        .map(|(ws, pin)| (ws.as_str(), pin.git_ref.as_str(), pin.commit.as_str()))
 }
 
 /// Build the value-free message persisted for an owner-side render error
@@ -190,6 +224,10 @@ async fn resolve_stamped_task(
 enum TemplatedTaskRef {
     /// Resolved, checked and stamped on the parent step: `(T, pin)`.
     Stamped(String, PinRef),
+    /// The ref rendered empty — no ref (D6 option A) — and the task inherits
+    /// no pin: dispatch resolves it live, as for an un-ref'd action. Nothing
+    /// is written; the dispatch claim requires the row to be still unstamped.
+    NoRef,
     /// Another dispatcher stamped the step first, or it left `ready`: leave
     /// it alone.
     Moved,
@@ -204,8 +242,9 @@ enum TemplatedTaskRef {
 /// (which decides the real step-input render) is unknown until the ref is.
 /// `input_ctx` is the step-input context (`Scope::ChildTaskInput`). The
 /// rendered value is private until both secret checks pass (inside
-/// `select_commit`): no message here carries it. The outer `Err` is a DB
-/// error.
+/// `select_commit`): no message here carries it. An empty rendered value
+/// resolves the task as job creation does for an un-ref'd action
+/// ([`no_ref_task`]). The outer `Err` is a DB error.
 #[allow(clippy::too_many_arguments)]
 async fn resolve_templated_task_ref(
     workspaces: &WorkspaceManager,
@@ -217,6 +256,7 @@ async fn resolve_templated_task_ref(
     template: &str,
     task_ref: &str,
     base_ws: &str,
+    base_cfg: &WorkspaceConfig,
     workspace_name: &str,
 ) -> Result<TemplatedTaskRef> {
     let fail = |e: RenderedRefError| TemplatedTaskRef::Failed {
@@ -283,11 +323,17 @@ async fn resolve_templated_task_ref(
         }
         Err(e) => return Ok(fail(RenderedRefError::from_plan_error(e, base_ws))),
     };
+    let Some(rendered) = rendered_ref_value(&rendered) else {
+        return no_ref_task(
+            workspaces, pool, job, step, task_ref, base_ws, base_cfg, &world,
+        )
+        .await;
+    };
     let secrets = match ref_secret_set(workspaces, pool, job).await? {
         Ok(s) => s,
         Err(e) => return Ok(fail(e)),
     };
-    let value = match check_rendered_ref(&rendered, &secrets) {
+    let value = match check_rendered_ref(rendered, &secrets) {
         Ok(v) => v,
         Err(r) => return Ok(fail(RenderedRefError::from_rejection(r, &target.owner))),
     };
@@ -343,6 +389,81 @@ async fn resolve_templated_task_ref(
     Ok(TemplatedTaskRef::Stamped(target.owner, pin))
 }
 
+/// A `type: task` action whose templated `ref:` rendered empty: no ref (D6
+/// option A). The task is resolved as job creation resolves an un-ref'd
+/// action's (`job_creator::resolve_step_row`): relative to the action owner
+/// O, inheriting the pin of the config O is read from — the action's own
+/// pin, else the job's for an action of the job's own config. The static
+/// self-reference rule applies; an inherited pin is stamped like a templated
+/// one, so a re-dispatch finds it.
+#[allow(clippy::too_many_arguments)]
+async fn no_ref_task(
+    workspaces: &WorkspaceManager,
+    pool: &PgPool,
+    job: &JobRow,
+    step: &stroem_db::JobStepRow,
+    task_ref: &str,
+    base_ws: &str,
+    base_cfg: &WorkspaceConfig,
+    world: &RefWorld<'_>,
+) -> Result<TemplatedTaskRef> {
+    let job_pin = PinRef::of_job(job);
+    let base_pin = match (PinRef::of_step_action(step), &step.action_workspace) {
+        (Some(p), _) => Some(p),
+        (None, None) => job_pin.clone(),
+        (None, Some(_)) => None,
+    };
+    let (resolved, pin) = match resolve_task_for_step(
+        workspaces,
+        base_ws,
+        base_cfg,
+        base_pin.as_ref(),
+        task_ref,
+        None,
+        world,
+        &RefMemo::new(),
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return Ok(TemplatedTaskRef::Failed {
+                message: format!(
+                    "Failed to resolve task for step '{}': {:#}",
+                    step.step_name, e
+                ),
+                withheld: None,
+            })
+        }
+    };
+    if resolved.workspace == job.workspace && resolved.task_name == job.task_name && pin == job_pin
+    {
+        return Ok(TemplatedTaskRef::Failed {
+            message: format!(
+                "[ref] step '{}': task '{}' is a self-reference to '{}/{}' (invalid)",
+                step.step_name, task_ref, job.workspace, job.task_name
+            ),
+            withheld: None,
+        });
+    }
+    let Some(pin) = pin else {
+        return Ok(TemplatedTaskRef::NoRef);
+    };
+    if !JobStepRepo::stamp_task_pin(
+        pool,
+        job.job_id,
+        &step.step_name,
+        &resolved.workspace,
+        &pin.git_ref,
+        &pin.commit,
+    )
+    .await?
+    {
+        return Ok(TemplatedTaskRef::Moved);
+    }
+    Ok(TemplatedTaskRef::Stamped(resolved.workspace, pin))
+}
+
 /// One dispatch pass over the currently-ready `type: task` steps.
 /// Returns `true` if any step was marked failed during this pass.
 #[allow(clippy::too_many_arguments)]
@@ -375,6 +496,10 @@ async fn handle_task_steps_pass(
         if step.status != StepStatus::Ready.as_ref() || step.action_type != "task" {
             continue;
         }
+        // The task stamp this dispatcher works with: the row's (stamped at
+        // creation, or by an earlier dispatch), else the one a templated ref
+        // stamps below. Every write of this pass is conditioned on it.
+        let mut task_stamp = PinRef::of_step_task(step);
 
         // Get the referenced task name from action_spec
         let action_spec = step
@@ -392,7 +517,7 @@ async fn handle_task_steps_pass(
                 "Maximum task nesting depth ({}) exceeded for task '{}'",
                 MAX_TASK_DEPTH, task_ref
             );
-            fail_task_step(
+            failed_any |= fail_task_step(
                 pool,
                 job_id,
                 &step.step_name,
@@ -402,9 +527,9 @@ async fn handle_task_steps_pass(
                 snapshots,
                 &[],
                 None,
+                Some((StepStatus::Ready, stamp_cols(&task_stamp))),
             )
             .await?;
-            failed_any = true;
             continue;
         }
 
@@ -416,7 +541,7 @@ async fn handle_task_steps_pass(
                 Ok(handle) => Some(handle),
                 Err(line) => {
                     let err = format!("{} (owner of action '{}')", line, step.action_name);
-                    fail_task_step(
+                    failed_any |= fail_task_step(
                         pool,
                         job_id,
                         &step.step_name,
@@ -426,9 +551,9 @@ async fn handle_task_steps_pass(
                         snapshots,
                         &[],
                         None,
+                        Some((StepStatus::Ready, stamp_cols(&task_stamp))),
                     )
                     .await?;
-                    failed_any = true;
                     continue;
                 }
             },
@@ -440,7 +565,7 @@ async fn handle_task_steps_pass(
                         "workspace '{}' is not available (owner of action '{}')",
                         base_ws, step.action_name
                     );
-                    fail_task_step(
+                    failed_any |= fail_task_step(
                         pool,
                         job_id,
                         &step.step_name,
@@ -450,9 +575,9 @@ async fn handle_task_steps_pass(
                         snapshots,
                         &[],
                         None,
+                        Some((StepStatus::Ready, stamp_cols(&task_stamp))),
                     )
                     .await?;
-                    failed_any = true;
                     continue;
                 }
             },
@@ -477,7 +602,6 @@ async fn handle_task_steps_pass(
         // 2. Task owner T: the `task_*` stamp when there is one (git-refs spec
         //    § 7.3 — never inferred from the parent job), else today's live
         //    resolution.
-        let mut task_stamp = PinRef::of_step_task(step);
         // Spec 2026-10-15 § 5.6: an unstamped step whose action carries a
         // templated `ref:` is resolved now, and stamped.
         if task_stamp.is_none() {
@@ -496,14 +620,16 @@ async fn handle_task_steps_pass(
                     template,
                     task_ref,
                     base_ws,
+                    base_cfg,
                     workspace_name,
                 )
                 .await?
                 {
                     TemplatedTaskRef::Stamped(t_ws, pin) => task_stamp = Some((t_ws, pin)),
+                    TemplatedTaskRef::NoRef => {}
                     TemplatedTaskRef::Moved => continue,
                     TemplatedTaskRef::Failed { message, withheld } => {
-                        fail_task_step(
+                        failed_any |= fail_task_step(
                             pool,
                             job_id,
                             &step.step_name,
@@ -513,9 +639,9 @@ async fn handle_task_steps_pass(
                             snapshots,
                             &scrub,
                             withheld.as_deref(),
+                            Some((StepStatus::Ready, stamp_cols(&task_stamp))),
                         )
                         .await?;
-                        failed_any = true;
                         continue;
                     }
                 }
@@ -532,7 +658,7 @@ async fn handle_task_steps_pass(
                     "Failed to resolve task for step '{}': {:#}",
                     step.step_name, e
                 );
-                fail_task_step(
+                failed_any |= fail_task_step(
                     pool,
                     job_id,
                     &step.step_name,
@@ -542,9 +668,9 @@ async fn handle_task_steps_pass(
                     snapshots,
                     &scrub,
                     None,
+                    Some((StepStatus::Ready, stamp_cols(&task_stamp))),
                 )
                 .await?;
-                failed_any = true;
                 continue;
             }
         };
@@ -579,7 +705,7 @@ async fn handle_task_steps_pass(
                             // already identifies the origin for THIS render
                             // call — unlike the owner-side branches (a)/(b)/(c)
                             // below, which is why those need typed markers.)
-                            fail_task_step(
+                            failed_any |= fail_task_step(
                                 pool,
                                 job_id,
                                 &step.step_name,
@@ -589,9 +715,9 @@ async fn handle_task_steps_pass(
                                 snapshots,
                                 &scrub,
                                 None,
+                                Some((StepStatus::Ready, stamp_cols(&task_stamp))),
                             )
                             .await?;
-                            failed_any = true;
                             continue;
                         }
                     }
@@ -613,7 +739,7 @@ async fn handle_task_steps_pass(
                         "step '{}': action_spec.input is not an input schema: {}",
                         step.step_name, e
                     );
-                    fail_task_step(
+                    failed_any |= fail_task_step(
                         pool,
                         job_id,
                         &step.step_name,
@@ -623,9 +749,9 @@ async fn handle_task_steps_pass(
                         snapshots,
                         &scrub,
                         None,
+                        Some((StepStatus::Ready, stamp_cols(&task_stamp))),
                     )
                     .await?;
-                    failed_any = true;
                     continue;
                 }
             },
@@ -665,7 +791,7 @@ async fn handle_task_steps_pass(
                     let owner_boundary = base_ws != workspace_name;
                     let persist_override = owner_boundary
                         .then(|| withheld_owner_render_error(&step.step_name, base_ws));
-                    fail_task_step(
+                    failed_any |= fail_task_step(
                         pool,
                         job_id,
                         &step.step_name,
@@ -675,9 +801,9 @@ async fn handle_task_steps_pass(
                         snapshots,
                         &scrub,
                         persist_override.as_deref(),
+                        Some((StepStatus::Ready, stamp_cols(&task_stamp))),
                     )
                     .await?;
-                    failed_any = true;
                     continue;
                 }
             }
@@ -729,7 +855,7 @@ async fn handle_task_steps_pass(
                 let owner_boundary = is_owner_side && base_ws != workspace_name;
                 let persist_override =
                     owner_boundary.then(|| withheld_owner_render_error(&step.step_name, base_ws));
-                fail_task_step(
+                failed_any |= fail_task_step(
                     pool,
                     job_id,
                     &step.step_name,
@@ -739,12 +865,30 @@ async fn handle_task_steps_pass(
                     snapshots,
                     &scrub,
                     persist_override.as_deref(),
+                    Some((StepStatus::Ready, stamp_cols(&task_stamp))),
                 )
                 .await?;
-                failed_any = true;
                 continue;
             }
         };
+
+        // The dispatch claim: one dispatcher moves the step `ready` → `running`,
+        // and only while its task stamp is the one this pass resolved with
+        // (`None`: unstamped). A dispatcher that lost — another one claimed
+        // or failed the step, or stamped a pin after this one resolved
+        // without one — writes nothing more and creates no child. Failures
+        // before this point write only a `ready` row, after it only a
+        // `running` one — each only while the row carries `task_stamp`.
+        if !JobStepRepo::claim_task_dispatch(pool, job_id, &step.step_name, stamp_cols(&task_stamp))
+            .await?
+        {
+            tracing::info!(
+                %job_id,
+                step = %step.step_name,
+                "task step was claimed, failed or stamped by another dispatcher; skipped"
+            );
+            continue;
+        }
 
         // Persist rendered input to DB so the job detail API shows resolved values.
         // When O == A the merged input (bucket C + D) is safe to show on the
@@ -762,9 +906,6 @@ async fn handle_task_steps_pass(
         {
             tracing::warn!("Failed to persist rendered input: {:#}", e);
         }
-
-        // Mark step as running (server-side, so we don't process it again)
-        JobStepRepo::mark_running_server(pool, job_id, &step.step_name).await?;
 
         // Transition parent job to running if still pending
         JobRepo::mark_running_if_pending_server(pool, job_id).await?;
@@ -846,7 +987,7 @@ async fn handle_task_steps_pass(
                 let owner_boundary = is_owner_side && resolved.workspace != workspace_name;
                 let persist_override = owner_boundary
                     .then(|| withheld_owner_render_error(&step.step_name, &resolved.workspace));
-                fail_task_step(
+                failed_any |= fail_task_step(
                     pool,
                     job_id,
                     &step.step_name,
@@ -856,9 +997,9 @@ async fn handle_task_steps_pass(
                     snapshots,
                     &scrub,
                     persist_override.as_deref(),
+                    Some((StepStatus::Running, stamp_cols(&task_stamp))),
                 )
                 .await?;
-                failed_any = true;
             }
         }
     }
@@ -954,6 +1095,7 @@ pub async fn handle_approval_steps(
                                 snapshots,
                                 &[],
                                 None,
+                                None,
                             )
                             .await?;
                             continue;
@@ -1005,6 +1147,7 @@ pub async fn handle_approval_steps(
                         workspace_config,
                         snapshots,
                         &[],
+                        None,
                         None,
                     )
                     .await?;

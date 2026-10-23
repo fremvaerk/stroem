@@ -102,10 +102,11 @@ async fn webhook_handler(
 
     // Spec 2026-10-15 § 6: a templated `ref:` renders from this request's
     // input through the private path; its errors are value-free
-    // `RenderedRefError`s before they reach this log or the classifier.
+    // `RenderedRefError`s before they reach this log or the classifier. A
+    // value that renders empty is no ref: the target an un-ref'd trigger has.
     let resolved = match wh.git_ref.as_deref() {
         Some(t) if classify_ref(t) == RefKind::Template => {
-            crate::trigger_target::resolve_templated_trigger_target(
+            match crate::trigger_target::resolve_templated_trigger_target(
                 &state.workspaces,
                 &wh.ws_name,
                 &defining_config,
@@ -114,7 +115,20 @@ async fn webhook_handler(
                 &input_value,
             )
             .await
-            .map_err(anyhow::Error::new)
+            {
+                Ok(Some(target)) => Ok(target),
+                Ok(None) => {
+                    crate::trigger_target::resolve_trigger_target(
+                        &state.workspaces,
+                        &wh.ws_name,
+                        &defining_config,
+                        &wh.task,
+                        None,
+                    )
+                    .await
+                }
+                Err(e) => Err(anyhow::Error::new(e)),
+            }
         }
         static_ref => {
             crate::trigger_target::resolve_trigger_target(

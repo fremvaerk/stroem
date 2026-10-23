@@ -622,7 +622,6 @@ async fn one_commit_per_ref_survives_a_branch_move() -> Result<()> {
 async fn resolution_failures_fail_the_step_with_a_value_free_message() -> Result<()> {
     let fx = df_fixture().await?;
     let cases: &[(&str, serde_json::Value, &str)] = &[
-        ("tr-input", json!({"branch": "  "}), "[ref] step 'run': the rendered ref is empty"),
         (
             "tr-input",
             json!({"branch": "release/9.9"}),
@@ -925,7 +924,12 @@ async fn webhook_templated_ref_creates_a_pinned_job() -> Result<()> {
 async fn webhook_templated_ref_errors_are_value_free_400s_and_create_nothing() -> Result<()> {
     let fx = df_hook_fixture("secrets:\n  hook_token: hk-77aa66bb99\n").await?;
     let cases = [
-        (json!({"ref": "  "}), "the rendered ref is empty"),
+        // Empty is no ref (D6 option A): the un-ref'd target, which the
+        // default branch does not have.
+        (
+            json!({"ref": "  "}),
+            "Task 'nightly' not found in workspace 'etl'",
+        ),
         (
             json!({"ref": "release/9.9"}),
             "the rendered ref was not found in workspace 'etl'",
