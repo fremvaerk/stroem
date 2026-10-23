@@ -950,6 +950,26 @@ PV_STEP() { echo "$PV_DETAIL" | jq -r --arg f "$1" '.steps[] | select(.step_name
 [ "$(PV_STEP ref_template)" = "{{ input.branch }}" ] || fail "pick-version ref_template is '$(PV_STEP ref_template)'"
 pass "templated ref: the input chose release/1 ($REFS_R1_SHA)"
 
+info "Triggering pick-version with branch='' (an empty templated ref is no ref)..."
+EXEC_RESP_PE=$(acurl -X POST "$BASE_URL/api/workspaces/refs/tasks/pick-version/execute" \
+    -H "Content-Type: application/json" -d '{"input": {"branch": ""}}')
+PE_JOB_ID=$(echo "$EXEC_RESP_PE" | jq -r '.job_id')
+[ -n "$PE_JOB_ID" ] && [ "$PE_JOB_ID" != "null" ] || fail "pick-version (empty) execute failed: $EXEC_RESP_PE"
+PE_POLLED=0; PE_STATUS="pending"
+while [ "$PE_STATUS" != "completed" ] && [ "$PE_STATUS" != "failed" ]; do
+    sleep 2; PE_POLLED=$((PE_POLLED + 2))
+    [ "$PE_POLLED" -lt "$MAX_POLL" ] || { acurl "$BASE_URL/api/jobs/$PE_JOB_ID" | jq .; fail "pick-version (empty) did not finish"; }
+    PE_DETAIL=$(acurl "$BASE_URL/api/jobs/$PE_JOB_ID"); PE_STATUS=$(echo "$PE_DETAIL" | jq -r '.status'); printf "."
+done; echo ""
+[ "$PE_STATUS" = "completed" ] || { echo "$PE_DETAIL" | jq .; fail "pick-version (empty) failed"; }
+PE_STEP() { echo "$PE_DETAIL" | jq -r --arg f "$1" '.steps[] | select(.step_name=="run") | .[$f]'; }
+[ "$(echo "$PE_DETAIL" | jq -r '.steps[] | select(.step_name=="run") | .output.version')" = "main" ] \
+    || fail "pick-version (empty) ran '$(echo "$PE_DETAIL" | jq -r '.steps[0].output.version')', expected main"
+[ "$(PE_STEP action_ref)" = "null" ] || fail "pick-version (empty) action_ref is '$(PE_STEP action_ref)', expected none"
+[ "$(PE_STEP action_revision)" = "null" ] || fail "pick-version (empty) pinned $(PE_STEP action_revision), expected none"
+[ "$(echo "$PE_DETAIL" | jq -r '.ref')" = "null" ] || fail "pick-version (empty) job.ref is '$(echo "$PE_DETAIL" | jq -r '.ref')'"
+pass "templated ref: an empty value ran the default branch's files, with no pin"
+
 # --- 21. json input type: native values between steps, API object input ---
 info "Triggering json-demo (json input type)..."
 EXEC_RESP_JS=$(acurl -X POST "$BASE_URL/api/workspaces/default/tasks/json-demo/execute" \

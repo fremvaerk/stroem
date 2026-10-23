@@ -9,7 +9,7 @@ use crate::workspace::pins::PinRef;
 use crate::workspace::{ConfigHandle, WorkspaceManager};
 use anyhow::Result;
 use std::sync::Arc;
-use stroem_common::git_ref::check_rendered_ref;
+use stroem_common::git_ref::{check_rendered_ref, rendered_ref_value};
 use stroem_common::models::workflow::WorkspaceConfig;
 use stroem_common::template::render_ref_template;
 
@@ -114,8 +114,12 @@ pub(crate) async fn resolve_trigger_target(
 /// it from the webhook job input, check it against the live set, resolve it
 /// and load the commit through the private path, check it against the
 /// selected commit's secrets — only then is it an identifier, and the target
-/// is exactly a static-ref one. Every error is a value-free
-/// `RenderedRefError`; nothing is written here.
+/// is exactly a static-ref one. `None`: the value rendered empty, which means
+/// no ref (D6 option A) — the caller resolves the target as an un-ref'd
+/// trigger's ([`resolve_trigger_target`] with no ref). The owner rules of a
+/// templated ref (a git owner, not a library item) apply before the render,
+/// whatever the value. Every error is a value-free `RenderedRefError`;
+/// nothing is written here.
 pub(crate) async fn resolve_templated_trigger_target(
     workspaces: &WorkspaceManager,
     defining_ws: &str,
@@ -123,7 +127,7 @@ pub(crate) async fn resolve_templated_trigger_target(
     task_ref: &str,
     template: &str,
     input: &serde_json::Value,
-) -> std::result::Result<ResolvedTarget, RenderedRefError> {
+) -> std::result::Result<Option<ResolvedTarget>, RenderedRefError> {
     let (libraries, configured, git) = crate::job_creator::ref_world_sets(workspaces);
     let world = RefWorld {
         library_names: &libraries,
@@ -142,8 +146,11 @@ pub(crate) async fn resolve_templated_trigger_target(
 
     let ctx = crate::render_context::webhook_ref(input);
     let rendered = render_ref_template(template, ctx.as_value()).map_err(fail)?;
+    let Some(rendered) = rendered_ref_value(&rendered) else {
+        return Ok(None);
+    };
     let live = collect_redaction_values(&WorkspaceSet::load(workspaces, defining_ws, None).await);
-    let value = check_rendered_ref(&rendered, &live)
+    let value = check_rendered_ref(rendered, &live)
         .map_err(|r| RenderedRefError::from_rejection(r, &owner))?;
     let pin = workspaces
         .pins()
@@ -162,7 +169,7 @@ pub(crate) async fn resolve_templated_trigger_target(
         .get(&target.local_name)
         .cloned()
         .ok_or_else(|| RenderedRefError::new(RenderedRefKind::NoAction, &owner))?;
-    Ok(ResolvedTarget {
+    Ok(Some(ResolvedTarget {
         workspace: owner,
         task_name: target.local_name,
         pin: Some(PinRef {
@@ -171,7 +178,7 @@ pub(crate) async fn resolve_templated_trigger_target(
         }),
         task_folder: task.folder.clone(),
         config: ConfigHandle::Pinned(pinned),
-    })
+    }))
 }
 
 /// R4: create the top-level job for a resolved target —

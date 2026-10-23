@@ -501,7 +501,6 @@ mod classify_execute_error_tests {
             AppError::Internal(_)
         ));
         for kind in [
-            RenderedRefKind::Empty,
             RenderedRefKind::Invalid,
             RenderedRefKind::SecretValue,
             RenderedRefKind::NotFound { short_sha: false },
@@ -521,10 +520,13 @@ mod classify_execute_error_tests {
             }
         }
         // Wrapped in a context layer: the body is still the bare sentence.
-        let wrapped = anyhow::Error::new(RenderedRefError::new(RenderedRefKind::Empty, "etl"))
-            .context("outer layer");
+        let wrapped =
+            anyhow::Error::new(RenderedRefError::new(RenderedRefKind::SecretValue, "etl"))
+                .context("outer layer");
         match classify_execute_error(wrapped) {
-            AppError::BadRequest(msg) => assert_eq!(msg, "the rendered ref is empty"),
+            AppError::BadRequest(msg) => {
+                assert_eq!(msg, "the rendered ref contains a secret value")
+            }
             other => panic!("expected BadRequest, got {other:?}"),
         }
     }

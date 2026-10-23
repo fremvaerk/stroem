@@ -6,7 +6,7 @@
 use anyhow::{Context, Result};
 use sqlx::PgPool;
 use std::collections::HashMap;
-use stroem_common::git_ref::{check_rendered_ref, classify_ref, RefKind};
+use stroem_common::git_ref::{check_rendered_ref, classify_ref, rendered_ref_value, RefKind};
 use stroem_common::models::job::{JobStatus, StepStatus};
 use stroem_common::models::workflow::{InputFieldDef, TaskDef, WorkspaceConfig};
 use stroem_common::template::{
@@ -18,8 +18,8 @@ use uuid::Uuid;
 
 use crate::config::JobDefaults;
 use crate::job_creator::{
-    compute_depth, create_job_for_task_inner, ref_world_sets, resolve_task_ref, task_at,
-    CreationMode, OwnerConfig, ResolvedTask, MAX_TASK_DEPTH,
+    compute_depth, create_job_for_task_inner, ref_world_sets, resolve_task_for_step,
+    resolve_task_ref, task_at, CreationMode, OwnerConfig, RefMemo, ResolvedTask, MAX_TASK_DEPTH,
 };
 use crate::refs::{plan_reference, RefPlan, RefWorld};
 use crate::render_context::{self, JobContext, LoopSlot, Scope, Snapshots};
@@ -190,6 +190,9 @@ async fn resolve_stamped_task(
 enum TemplatedTaskRef {
     /// Resolved, checked and stamped on the parent step: `(T, pin)`.
     Stamped(String, PinRef),
+    /// The ref rendered empty — no ref (D6 option A) — and the task inherits
+    /// no pin: dispatch resolves it live, as for an un-ref'd action.
+    NoRef,
     /// Another dispatcher stamped the step first, or it left `ready`: leave
     /// it alone.
     Moved,
@@ -204,8 +207,9 @@ enum TemplatedTaskRef {
 /// (which decides the real step-input render) is unknown until the ref is.
 /// `input_ctx` is the step-input context (`Scope::ChildTaskInput`). The
 /// rendered value is private until both secret checks pass (inside
-/// `select_commit`): no message here carries it. The outer `Err` is a DB
-/// error.
+/// `select_commit`): no message here carries it. An empty rendered value
+/// resolves the task as job creation does for an un-ref'd action
+/// ([`no_ref_task`]). The outer `Err` is a DB error.
 #[allow(clippy::too_many_arguments)]
 async fn resolve_templated_task_ref(
     workspaces: &WorkspaceManager,
@@ -217,6 +221,7 @@ async fn resolve_templated_task_ref(
     template: &str,
     task_ref: &str,
     base_ws: &str,
+    base_cfg: &WorkspaceConfig,
     workspace_name: &str,
 ) -> Result<TemplatedTaskRef> {
     let fail = |e: RenderedRefError| TemplatedTaskRef::Failed {
@@ -283,11 +288,17 @@ async fn resolve_templated_task_ref(
         }
         Err(e) => return Ok(fail(RenderedRefError::from_plan_error(e, base_ws))),
     };
+    let Some(rendered) = rendered_ref_value(&rendered) else {
+        return no_ref_task(
+            workspaces, pool, job, step, task_ref, base_ws, base_cfg, &world,
+        )
+        .await;
+    };
     let secrets = match ref_secret_set(workspaces, pool, job).await? {
         Ok(s) => s,
         Err(e) => return Ok(fail(e)),
     };
-    let value = match check_rendered_ref(&rendered, &secrets) {
+    let value = match check_rendered_ref(rendered, &secrets) {
         Ok(v) => v,
         Err(r) => return Ok(fail(RenderedRefError::from_rejection(r, &target.owner))),
     };
@@ -341,6 +352,81 @@ async fn resolve_templated_task_ref(
         return Ok(TemplatedTaskRef::Moved);
     }
     Ok(TemplatedTaskRef::Stamped(target.owner, pin))
+}
+
+/// A `type: task` action whose templated `ref:` rendered empty: no ref (D6
+/// option A). The task is resolved as job creation resolves an un-ref'd
+/// action's (`job_creator::resolve_step_row`): relative to the action owner
+/// O, inheriting the pin of the config O is read from — the action's own
+/// pin, else the job's for an action of the job's own config. The static
+/// self-reference rule applies; an inherited pin is stamped like a templated
+/// one, so a re-dispatch finds it.
+#[allow(clippy::too_many_arguments)]
+async fn no_ref_task(
+    workspaces: &WorkspaceManager,
+    pool: &PgPool,
+    job: &JobRow,
+    step: &stroem_db::JobStepRow,
+    task_ref: &str,
+    base_ws: &str,
+    base_cfg: &WorkspaceConfig,
+    world: &RefWorld<'_>,
+) -> Result<TemplatedTaskRef> {
+    let job_pin = PinRef::of_job(job);
+    let base_pin = match (PinRef::of_step_action(step), &step.action_workspace) {
+        (Some(p), _) => Some(p),
+        (None, None) => job_pin.clone(),
+        (None, Some(_)) => None,
+    };
+    let (resolved, pin) = match resolve_task_for_step(
+        workspaces,
+        base_ws,
+        base_cfg,
+        base_pin.as_ref(),
+        task_ref,
+        None,
+        world,
+        &RefMemo::new(),
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return Ok(TemplatedTaskRef::Failed {
+                message: format!(
+                    "Failed to resolve task for step '{}': {:#}",
+                    step.step_name, e
+                ),
+                withheld: None,
+            })
+        }
+    };
+    if resolved.workspace == job.workspace && resolved.task_name == job.task_name && pin == job_pin
+    {
+        return Ok(TemplatedTaskRef::Failed {
+            message: format!(
+                "[ref] step '{}': task '{}' is a self-reference to '{}/{}' (invalid)",
+                step.step_name, task_ref, job.workspace, job.task_name
+            ),
+            withheld: None,
+        });
+    }
+    let Some(pin) = pin else {
+        return Ok(TemplatedTaskRef::NoRef);
+    };
+    if !JobStepRepo::stamp_task_pin(
+        pool,
+        job.job_id,
+        &step.step_name,
+        &resolved.workspace,
+        &pin.git_ref,
+        &pin.commit,
+    )
+    .await?
+    {
+        return Ok(TemplatedTaskRef::Moved);
+    }
+    Ok(TemplatedTaskRef::Stamped(resolved.workspace, pin))
 }
 
 /// One dispatch pass over the currently-ready `type: task` steps.
@@ -496,11 +582,13 @@ async fn handle_task_steps_pass(
                     template,
                     task_ref,
                     base_ws,
+                    base_cfg,
                     workspace_name,
                 )
                 .await?
                 {
                     TemplatedTaskRef::Stamped(t_ws, pin) => task_stamp = Some((t_ws, pin)),
+                    TemplatedTaskRef::NoRef => {}
                     TemplatedTaskRef::Moved => continue,
                     TemplatedTaskRef::Failed { message, withheld } => {
                         fail_task_step(
