@@ -127,7 +127,9 @@ context is narrower than a step input's:
 | a `type: task` action | `input` (the step's input rendered as strings), `job` |
 | a webhook trigger | `input` (the webhook job input) |
 
-None of them has `secret`, and `vals` is an unknown filter there.
+None of them has `secret`, and `vals` is an unknown filter there. A value
+that renders empty, or only whitespace, means no ref: the step, the task or
+the webhook job runs as if the `ref:` key were absent.
 
 ## Step name rules
 

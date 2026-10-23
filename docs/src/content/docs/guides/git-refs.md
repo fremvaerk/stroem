@@ -126,12 +126,45 @@ and the same ref value runs the same commit — static and templated refs
 alike — even if the branch moves while the job runs. A task retry, a re-run
 and a restart resolve again.
 
-**Errors.** The rendered value is trimmed. These fail the step — never the
-job creation — with a message that never shows the value:
+**An empty value means no ref.** The rendered value is trimmed. A value
+that is empty, or only whitespace, means no ref: the step, the `type: task`
+step or the webhook job runs as if the `ref:` key were absent. That is the
+job's own commit in a pinned job, the workspace's live config in other jobs,
+and the owner's live config for `ws.action`. A `type: task` action in a
+pinned job keeps the job's commit, and a task that would call itself fails
+the step, as without `ref:`. The step shows no ref. So an optional input can
+choose the branch:
+
+```yaml
+tasks:
+  deploy:
+    input:
+      branch: { type: string }
+    flow:
+      build:
+        action: build
+        ref: "{{ input.branch | default(value='') }}"   # blank: as without ref
+```
+
+The owner rules still apply to the template: the owner must be a git
+workspace and cannot be a library, whatever the value. One difference
+remains in a job without a pin: a step that becomes ready after the job
+starts reads its action definition from the live config at that time, not at
+job creation. For an action of the job's own workspace, its files stay those
+of the job's revision.
+
+:::caution[Upgrade every replica first]
+A server replica that runs 0.18.3 or older fails a step whose templated ref
+renders empty (`the rendered ref is empty`) and answers `400` to such a
+webhook. Do not rely on an empty value until every server replica runs a
+release with this change.
+:::
+
+**Errors.** These fail the step — never the job creation — with a message
+that never shows the value:
 
 | Rendered value | Step error |
 |---|---|
-| empty | `[ref] step '…': the rendered ref is empty` |
 | not a branch, tag or full SHA | `… is not a valid branch, tag or full commit SHA` |
 | contains a secret value | `… contains a secret value` |
 | no such branch or tag | `… was not found in workspace '…'` |
@@ -540,6 +573,11 @@ merge to your workspaces' default branches accordingly.
 release with this feature.** An older replica ignores the unknown `ref:` key
 and silently runs the default branch instead.
 
+**An empty templated ref** means no ref only on a release after 0.18.3. An
+older replica fails the step (`the rendered ref is empty`), and a webhook
+answers `400`. Upgrade every server replica before a workspace relies on an
+empty value.
+
 The same release changes some behaviour for **every** job, including jobs
 that use no `ref:` at all: redaction of webhook, MCP and worker-detail
 output, webhook re-authentication after `force_refresh`, task state of
@@ -549,8 +587,7 @@ cross-workspace steps, and how old revisions' files are served. Read
 ## Not yet supported
 
 - A templated `ref` on scheduler triggers, hooks, event sources and agent
-  task tools; an empty rendered value meaning "no ref"; an allow-list of the
-  refs a template may choose.
+  task tools; an allow-list of the refs a template may choose.
 - A per-run ref override (testing a feature branch from the UI, API, MCP or
   CLI).
 - `ref` on hooks, event sources, agent actions and agent task tools.

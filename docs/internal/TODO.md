@@ -1195,7 +1195,8 @@ Feature: `ref:` (branch | tag | full SHA) on flow-step actions, `type: task` act
 
 Feature: `ref: "{{ … }}"` on flow steps, `type: task` actions and webhook triggers (spec `docs/superpowers/specs/2026-10-15-templated-refs-design.md`, CLAUDE.md § Git refs, guide `guides/git-refs.md` § Templated refs, `operations/migration-051-052.md`).
 
-- [ ] An empty rendered value meaning "no ref" (D6 option A).
+- [x] An empty rendered value meaning "no ref" (D6 option A). Done 2026-10-23 (`git_ref::rendered_ref_value`; flow step, `type: task` dispatch and webhook; tests `tests/git_refs_empty_ref_test.rs`).
+- [ ] An empty templated ref on a later step of an unpinned job reads its action definition from the live config at promotion, not at creation, while its files stay the job's revision (an un-ref'd step reads both at creation). Loading the config at `job.revision` through the PinStore would make them equal, at the cost of a pin load (and a git failure mode) per resolution.
 - [ ] A trust gate for templated refs (`ref_allow` globs, or an owner-workspace policy).
 - [ ] Close the transformed-secret path (D13): a restricted ref grammar, or masking ref identifiers in every outlet.
 - [ ] A `type: task` ref and its child input from ONE evaluation of the caller's step input (§ 5.6 renders it twice).
