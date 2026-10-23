@@ -28,9 +28,10 @@ curl -fsSL "https://github.com/fremvaerk/stroem/releases/latest/download/stroem-
 Images are published to GHCR. Release tags (`X.Y.Z`, `X.Y`, `X`) are multi-arch (`linux/amd64` + `linux/arm64`):
 
 ```bash
-docker pull ghcr.io/fremvaerk/stroem-server:0.18
-docker pull ghcr.io/fremvaerk/stroem-worker:0.18
-docker pull ghcr.io/fremvaerk/stroem-runner:0.18  # base image for script-in-container steps
+VERSION=X.Y.Z   # a release version; X.Y and X tags are published too
+docker pull ghcr.io/fremvaerk/stroem-server:${VERSION}
+docker pull ghcr.io/fremvaerk/stroem-worker:${VERSION}
+docker pull ghcr.io/fremvaerk/stroem-runner:${VERSION}  # base image for script-in-container steps
 ```
 
 The `latest` and `sha-<commit>` tags are built from `main` and are `linux/amd64` only. Releases up to v0.18.3 have `linux/amd64` images and x86_64 archives only.
