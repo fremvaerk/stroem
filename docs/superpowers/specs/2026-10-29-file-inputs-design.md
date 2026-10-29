@@ -12,6 +12,9 @@ Status: draft, revision 1 (2026-10-29). Branch `feat/file-inputs`.
   NOT EXISTS` raced, § 4.7); `merge_missing_action_fields` copies by target
   type (§ 5.1); `create_upload_url` needs `auth.base_url` (§ 7.5, F18
   corrected). Open for the user: which files a step receives (§ 5.4).
+- **Revision 3** (2026-10-29) — the user decided U9: every runner step gets
+  every file of its job; consequences recorded in § 4.6 and § 5.4; agent
+  steps get none (author's call).
 
 ## 1. Goal
 
@@ -59,6 +62,7 @@ These came from the user in the brainstorming conversation. They are not open.
 | U6 | A flow step can give the job's file to a **`type: task` child** or to an **action with a `file` field**, **also across workspaces**. |
 | U7 | The pod `/state` repair found during recon is a **separate task**, not part of this change (§ 15). |
 | U8 | The user accepted the lifecycle and the client list played back in the conversation: two-call model (upload → execute), Re-run / Restart reuse the source file, unused uploads expire, the job page lists input files with a download link, `stroem-api trigger --file`, `stroem run` takes a local path, and the first version excludes webhooks, scheduler triggers and event sources as file sources, multiple files per field, and secret masking of file content. |
+| U9 | **Every runner step gets every file of its job** (chosen over "only the files the step uses" and "all, except cross-workspace actions"), with the consequences in § 5.4. |
 
 ## 3. Facts (recon, at `42b4b1e3`)
 
@@ -272,10 +276,15 @@ Every edge that carries a file is already an edge of the redaction closure
 (CLAUDE.md § Git refs → Redaction), so no content leaves the closure that a
 viewer of the closure could not already reach.
 
-**Cross-workspace consequence (U6, recorded on purpose):** a file given to a
-child job in workspace T can be downloaded by anyone with View on that child
-job (job-row ACL: T's task folder). Giving a file to another workspace's task
-means giving it to that task's viewers.
+**Cross-workspace consequences (U6, U9, recorded on purpose):**
+
+- a file given to a child job in workspace T can be downloaded by anyone
+  with View on that child job (job-row ACL: T's task folder). Giving a file
+  to another workspace's task means giving it to that task's viewers;
+- a step that runs another workspace's action receives **all** files of the
+  job (§ 5.4), so that workspace's script can read them. Using another
+  workspace's action in a task with `file` fields means trusting that
+  action with those files.
 
 ### 4.7 Retention and the orphan sweep
 
@@ -374,6 +383,21 @@ sha256 }]`: every `(field, file)` pair the step's S1 and S2/S3 contexts expose
 (task-level pairs and prepared-action pairs; the same file under two fields is
 two pairs, placed twice). The worker places exactly these; the server rendered
 exactly these paths.
+
+**Every runner step gets every file of its job (U9, the user's decision
+after the builder check).** The S1 context holds the whole job input, so
+every task-level file is a pair of every claimed step, whether or not the
+step uses it. Consequences, accepted:
+
+- a **cross-workspace action** step (owner ≠ `job.workspace`) receives all
+  of the caller job's files, not only the ones given to its `file` fields;
+  the owner's script can list `/inputs` and read them (§ 4.6);
+- every `for_each` instance downloads every file (one pod init container
+  per instance pod); the guide says so;
+- § 6.5 (old worker) applies to every runner step of a job that has a file.
+
+Agent steps (`type: agent`) have no runner and no file system for the step;
+they receive no `input_files` and never fail § 6.5 (author's call).
 
 ## 6. Delivery to runners
 
