@@ -6,6 +6,12 @@ Status: draft, revision 1 (2026-10-29). Branch `feat/file-inputs`.
 
 - **Revision 1** (2026-10-29) — first draft, from the brainstorming
   conversation of 2026-10-26 / 2026-10-29 and three read-only code recons.
+- **Revision 2** (2026-10-29) — after the builder check. Author's calls:
+  `file` field-name rule checked at validation, creation and claim (§ 4.1,
+  F19); sweep-vs-creation lock protocol replaced (a single `UPDATE … WHERE
+  NOT EXISTS` raced, § 4.7); `merge_missing_action_fields` copies by target
+  type (§ 5.1); `create_upload_url` needs `auth.base_url` (§ 7.5, F18
+  corrected). Open for the user: which files a step receives (§ 5.4).
 
 ## 1. Goal
 
@@ -129,8 +135,13 @@ Inputs and templates
 - F17. Upload identity today: `resolve_source_id` (`state_upload.rs:283`)
   yields `user:{email}` / `api_key:{prefix}` / `None` (auth off). API keys
   belong to a user (`008_api_keys.sql:3`, `user_id NOT NULL`).
-- F18. MCP: `execute_task` (`mcp/tools.rs:493`) takes `input` as a JSON object;
-  `auth.base_url` is required when MCP is enabled (`config.rs:876`).
+- F18. MCP: `execute_task` (`mcp/tools.rs:493`) takes `input` as a JSON object.
+  `auth.base_url` is required when MCP is enabled **and** an `auth` section
+  exists (`config.rs:876`, inside `if let Some(ref auth)`). With no `auth`
+  section MCP is open (`mcp/auth.rs` returns no user) and there is no
+  `base_url`.
+- F19. Input field names have no character rule (`validation.rs`), and the
+  server does not run workspace validation at load (F12).
 
 ## 4. Model and lifecycle
 
@@ -146,6 +157,15 @@ validation at load — F12 / CLAUDE.md):
 - rejected with `default`, `options`, `multiple`, `secret`;
 - rejected as a connection-type property type (`validation.rs:792` list);
 - rejected in an approval action's input (`validate_approval_action`);
+- the **name** of a `file` field (task or action) must match
+  `^[A-Za-z0-9_][A-Za-z0-9_-]*$` (F19: no rule exists today). The name
+  becomes a directory on the worker host, an env value in the pod init
+  container and part of the rendered path, so `../x` or `a b` must never get
+  there. Because the server does not validate at load, job creation checks
+  the same rule for every `file` field of the task, and claim checks it for
+  the `file` fields of the step's persisted `action_spec.input`; a failure is
+  a value-free 400 / claim failure `input field name is not valid for a file
+  field`. No existing workspace has `file` fields, so nothing breaks;
 - `stroem validate` **warns** when a task with a `required` `file` field is the
   target of a scheduler trigger, an event-source trigger or a webhook (none of
   them can supply a file, § 4.5).
@@ -224,7 +244,8 @@ non-string value — fails creation with a value-free 400:
 `Input field 'data_file': the file is not available` (never the ID, name or
 path; § 8). The attachment rows are written in the **creation transaction**
 (for a retry, the same transaction as `JobRepo::link_retry_tx`), taking
-`FOR SHARE` on each `input_file` row so the sweep cannot delete it mid-way.
+`FOR SHARE` on each `input_file` row and re-checking `deleting_at IS NULL`
+on the locked row (§ 4.7 gives the sweep's side of this protocol).
 
 ### 4.5 Required file fields (behaviour difference, decision)
 
@@ -263,11 +284,23 @@ means giving it to that task's viewers.
   Never delete a blob here.
 - **Orphan sweep** (same leader-gated retention tick, one heartbeat per file):
   an `input_file` with **no** `job_input_file` row and `created_at` older than
-  `upload_ttl_secs` is deleted in three steps: (1) in one statement set
-  `deleting_at` only if still unattached (`… WHERE NOT EXISTS (attachment)`),
-  (2) delete the blob, (3) delete the row. A creation that loses the race sees
-  `deleting_at` (§ 4.4) and fails with the value-free 400. A blob-delete error
-  leaves the row with `deleting_at` set; the next sweep retries step 2.
+  `upload_ttl_secs` is deleted in three steps: (1) in ONE transaction:
+  `SELECT … FOR UPDATE` on the `input_file` row, then — in a SEPARATE
+  statement, so it reads with a fresh READ COMMITTED snapshot taken after the
+  lock was granted — check that no `job_input_file` row exists, and only then
+  set `deleting_at`; (2) delete the blob; (3) delete the row.
+  A single `UPDATE … WHERE NOT EXISTS (attachment)` is **not** enough: its
+  `NOT EXISTS` is evaluated on the snapshot taken before it waits for a
+  creation's `FOR SHARE` lock, and PostgreSQL re-checks the condition only
+  when the target row itself changed — the attachment insert does not change
+  it, so the sweep would mark (and delete) a file a job just attached.
+  With `FOR UPDATE` first, a concurrent creation either committed its
+  attachment before the lock was granted (the second statement sees it; the
+  sweep stops) or blocks on its `FOR SHARE` until the sweep commits, then
+  reads the new row version with `deleting_at` set and fails with the
+  value-free 400 (§ 4.4). A blob-delete error leaves the row with
+  `deleting_at` set; the next sweep retries step 2. Tested with both
+  interleavings (§ 13).
 - Expired upload tokens (`expires_at` past) are deleted by the same sweep.
 
 ## 5. Template values
@@ -290,9 +323,15 @@ means giving it to that task's viewers.
 So `input: { path: "{{ input.data_file }}" }` gives a `string` action field the
 path, and `input: { data: "{{ input.data_file }}" }` gives a `file` action field
 the same file (and in the action body `{{ input.data }}` is
-`{root}/data/{safe_name}`). `merge_missing_action_fields` (F13) copies the
-stored form (the ID) into a same-named unset action field; that is a valid A3
-value.
+`{root}/data/{safe_name}`).
+
+`merge_missing_action_fields` (F13) copies a job-input value into a
+same-named, unset action field without looking at its type. For a task-level
+`file` field it copies by **target type** (decision): into a `file` action
+field, the stored form (the ID — a valid A3 value); into any other action
+field, the template form (the path `{claim root}/{task field}/{safe_name}`),
+so a script never receives a bare file ID. The path is then in the step's
+prepared input like any other string.
 
 The ID → path mapping happens in `render_context::build` (F14), driven by:
 the job's `job_input_file` rows for `input` of the job (not the live task
@@ -384,8 +423,10 @@ document the limitation in the file-inputs guide if confirmed.
   --retry-delay 5 -H "Authorization: Bearer $STROEM_WORKER_TOKEN" -o
   "/inputs/$F/$N" "$U"` (the `workspace_init_script` retry policy; download to
   a file, never a pipe). No user-controlled text is ever interpolated into the
-  script (names are also safe by construction, § 4.2 — two independent
-  guards). Field names are identifiers already.
+  script. Independently of that, the values in the env are safe by
+  construction: file names by § 4.2, field names by the § 4.1 name rule
+  (checked at creation and at claim, since the server does not validate at
+  load).
 - Per the user's standing rule for generated shell: the emitted script is
   **executed** in tests against a wiremock server and in the real curl image,
   not only asserted as text.
@@ -461,8 +502,12 @@ Two calls: upload (§ 4.2), then execute with `{"input": {"data_file":
 - **Upload URL**: a new tool `create_upload_url { workspace, task_name,
   file_name }` (Run on the task) returns `{ upload_url, method: "POST",
   max_bytes, expires_at }`. `upload_url =
-  {auth.base_url}/api/uploads/{token}` (F18: `base_url` always exists when
-  MCP is on); `token` = 32 random bytes, stored as SHA-256 only, TTL
+  {auth.base_url}/api/uploads/{token}`. Without `auth.base_url` (only
+  possible with no `auth` section, F18) the tool answers a fixed tool error
+  `upload URLs need auth.base_url; send the file inline or use the REST
+  upload` — no URL is ever built from request headers (the same spoofing
+  reason `config.rs:870-875` gives for the OAuth issuer). So a token always
+  has a user (`user_id NOT NULL`). `token` = 32 random bytes, stored as SHA-256 only, TTL
   `input_files.upload_url_ttl_secs` (default 900), **single use**. `POST`
   with the raw body and **no** Bearer header (the agent's shell does not have
   the MCP token); the token is the capability. The response is the § 4.2
