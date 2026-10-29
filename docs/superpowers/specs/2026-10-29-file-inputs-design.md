@@ -27,6 +27,18 @@ Status: draft, revision 1 (2026-10-29). Branch `feat/file-inputs`.
   § 8); (4) the pod init script creates `/inputs/$ID` before the download
   (§ 6.4); (5) the pod init script verifies size and SHA-256 (§ 6.4);
   (6) `stroem run` stays local-script-only (§ 7.4).
+- **Revision 5** (2026-10-29) — Codex spec review round 2 (round-1 findings
+  all confirmed fixed; 3 new findings, all verified and fixed): (1) a pure
+  trigger preflight runs after target resolution and BEFORE the scheduler's
+  concurrency policy, so a required `file` field makes the fire `MISSED`
+  without a skipped row or a cancellation (§ 4.5); A1 is now limited to
+  creations a caller starts directly (§ 4.4); (2) uploads accept
+  `source_job_id` and reuse the Re-run authorisation and pinned-source
+  resolution, so a pinned Re-run can replace a file (§ 4.2, § 7.2); (3) retry
+  A2 checks the job that just failed (`CreationMode::Retry.failed_job_id`),
+  not the chain root (§ 4.4, § 4.6); the § 4.6 closure sentence now says
+  what is true (a file follows only existing input-copy edges; content is
+  never redacted).
 
 ## 1. Goal
 
@@ -183,13 +195,30 @@ validation at load — F12 / CLAUDE.md):
 
 ### 4.2 Upload
 
-`POST /api/workspaces/{ws}/tasks/{task}/files?name=<file name>`
+`POST /api/workspaces/{ws}/tasks/{task}/files?name=<file name>[&source_job_id=<id>]`
 
 - Body: the raw file bytes (F2 pattern, no multipart). `Content-Type` header is
   stored as sent (default `application/octet-stream`).
-- Auth/ACL: **Run** on the task (the `check_run_permission` mapping: View →
-  403, Deny → 404). The task must exist in the live workspace and declare at
-  least one `file` field, else 400.
+- Auth/ACL, which task schema decides — the same two paths as execute:
+  - **without `source_job_id`**: **Run** on the LIVE task (the
+    `check_run_permission` mapping: View → 403, Deny → 404); the live task
+    must declare at least one `file` field, else 400.
+  - **with `source_job_id`** (a replacement file for a Re-run; Restart takes
+    no new input, `RestartJobRequest` at `web/api/jobs.rs:653`, and only
+    replays the source's files through A2):
+    the Re-run authorisation sequence, reused as is — the source must be a
+    top-level job of this `{ws}` and `{task}` (`is_top_level_job`, else 400);
+    `check_job_acl` on the SOURCE job (Deny → 404); a pinned source's ref is
+    re-resolved with `pinned_source::resolve_source_pin`
+    (`web/api/pinned_source.rs:44`) and the selected task — at that commit
+    for a pinned source, live otherwise — gets `require_task_run`
+    (`web/api/tasks.rs:594`: Deny → 404, View → 403) and must declare a
+    `file` field, else 400. So a pinned Re-run whose task exists only at its
+    ref, or whose `file` field exists only there, can replace a file
+    (`web/api/tasks.rs:472-505` is the execute-side precedent).
+
+  The row records `(workspace, task_name)` either way, which is all A1
+  (§ 4.4) matches on; the execute call re-resolves and re-checks on its own.
 - Body limit: `DefaultBodyLimit = input_files.max_file_bytes`.
 - The handler **streams** the body to storage (§ 9) while computing size and
   SHA-256. Over the limit → 413, nothing kept.
@@ -244,11 +273,21 @@ every task-level `file` field with a value is resolved by exactly one of:
   off there are no identities: `uploaded_by_user_id` is NULL and any caller
   matches a NULL-owner upload (everything is open in that mode anyway).
   Uploading once and executing several times within the TTL is allowed.
+  **A1 is available only to creations a caller starts directly**: execute
+  (UI, REST API, `stroem-api`), MCP `execute_task`, Re-run and Restart.
+  Scheduler, webhook, event-source, hook, `type: task`, agent-tool and retry
+  creations never resolve a value through A1 — a trigger or a hook cannot
+  hold an upload (U8), even a NULL-owner one with auth off.
 - **A2 — lineage.** The ID is attached (`job_input_file`) to the job this
-  creation derives from: `source_job_id` (Re-run, Restart), `retry_of_job_id`
-  (task retry), `parent_job_id` (`type: task` child). The field name may differ
-  (a child's field). No uploader or TTL check: the source job's viewers can
-  already download it, and the creating caller passed that job's ACL.
+  creation derives from, named by the creation itself, never re-derived from
+  a column of the new row: `source_job_id` (Re-run, Restart); for a task
+  retry, the job that **just failed** — `CreationMode::Retry.failed_job_id`,
+  whose input the retry copies (`settlement/retry.rs:139`, `:144-147`) — NOT
+  `retry_of_job_id`, which names the chain's root (`:123`); `parent_job_id`
+  (`type: task` child). The field name may differ (a child's field). No
+  uploader or TTL check: the source job's viewers can already download it,
+  and the creating caller passed that job's ACL (a retry has no caller; its
+  input is the failed job's own).
 
 Anything else — unknown ID, other user, other task, expired, being deleted, a
 non-string value — fails creation with a value-free 400:
@@ -266,11 +305,28 @@ on the locked row (§ 4.7 gives the sweep's side of this protocol).
 
 Unlike every other type (F12), a `required` `file` field with no value fails
 creation in **every** creation mode: 400 with the word "required" in the
-outermost message (`classify_execute_error` → 400); a scheduler fire becomes
-`Trigger '…' MISSED: …` with no side effects (§ Git refs trigger rules); a
-webhook answers 400; an event-source emit is logged and dropped. Reason: a
-step whose file is missing can only fail later at claim with a less useful
-message, and U8 accepted "MISSED" for the scheduler case.
+outermost message (`classify_execute_error` → 400); a webhook answers 400; an
+event-source emit is logged and dropped. Reason: a step whose file is missing
+can only fail later at claim with a less useful message, and U8 accepted
+"MISSED" for the scheduler case.
+
+**Trigger preflight (before any concurrency policy).** The scheduler applies
+its concurrency policy BEFORE it creates the job: `skip` writes a skipped row
+and `cancel_previous` cancels the running jobs (`scheduler.rs:434-455`,
+`:485-496`), and only then `create_target_job` runs (`:530-542`). A
+creation-time failure would therefore come after those side effects. So a
+pure check, `file_inputs::trigger_preflight(target task, trigger input)`,
+runs right after `trigger_target::resolve_trigger_target`
+(`scheduler.rs:418-430`, whose failure branch already logs `MISSED`) and
+before the policy, on the resolved target's task schema (live or pinned): it fails when
+the target task has a `required` `file` field, or when the trigger's `input:`
+gives a value to any `file` field (a trigger cannot hold an upload, § 4.4
+A1). A failure takes the existing resolution-failure branch: `Trigger '…'
+MISSED: …`, no skipped row, no cancellation, not replayed. The webhook calls
+the same preflight after its own target resolution (→ 400 via
+`classify_execute_error`, before any job row). Creation-time validation stays
+as the backstop. Event sources have no concurrency policy (only
+`max_in_flight` backpressure), so the creation-time check suffices there.
 
 ### 4.6 Lineage edges
 
@@ -278,14 +334,19 @@ message, and U8 accepted "MISSED" for the scheduler case.
 |---|---|---|---|
 | Re-run | `source_job_id` | yes | `raw_input` keeps the ID; A2 |
 | Restart | `source_job_id` | yes | `raw_input` replayed; A2 |
-| Task retry | `retry_of_job_id` | yes | resolved `input` copied; A2, in the `link_retry_tx` transaction |
+| Task retry | `CreationMode::Retry.failed_job_id` (not `retry_of_job_id`, the root) | yes | the failed job's resolved `input` copied; A2 against that job, in the `link_retry_tx` transaction |
 | `type: task` child (same or other workspace, U6) | `parent_job_id` | yes | § 5.3 reverse lookup → ID → A2 |
 | Agent task-tool child | `parent_job_id` | no (v1) | § 7.6 |
 | Hook job | `source_job_id` | no (v1) | `hook.input` shows the stored IDs; a hook action / `type: task` hook whose input has a required `file` field fails creation (logged to the source job) |
 
-Every edge that carries a file is already an edge of the redaction closure
-(CLAUDE.md § Git refs → Redaction), so no content leaves the closure that a
-viewer of the closure could not already reach.
+Every edge that carries a file is an edge along which the job INPUT is
+already copied today (`raw_input` for Re-run / Restart, the failed job's
+`input` for a retry, the rendered step input for a child): a file ID travels
+exactly where its input value already travels, and no new copy path between
+jobs is added. File CONTENT is never redacted (U8), so the redaction closure
+(CLAUDE.md § Git refs → Redaction) is not extended; the `input_files[]`
+names and content types a job shows are redacted with that job's own set
+(§ 7.2).
 
 **Cross-workspace consequences (U6, U9, recorded on purpose):**
 
@@ -519,7 +580,9 @@ path: a fleet of old workers would loop.
   source's ID (A2), taken from `input_files[]` by field — **never** from
   `raw_input` / `input`, whose strings the redaction walk may mask (a secret
   that is a substring of an ID, or `MaskAll`); replacing uploads a new file
-  (A1).
+  with `?source_job_id=` (§ 4.2, so a pinned source's task is the one checked)
+  and sends its ID (A1). Restart takes no input (`RestartJobRequest`); it
+  replays the source's files (A2).
 - Job detail API gains `input_files: [{ field, file_id, name, size_bytes,
   content_type }]`; the job page shows an "Input files" card with download
   links.
@@ -666,12 +729,13 @@ base64 form fits the `/mcp` 2 MiB body limit).
 | `template::resolve_connection_inputs*`, `resolve_rerun_sentinels` | nothing (primitive) — confirm with tests |
 | `render_context::build` | ID → path mapping, root per § 5.2 |
 | `job_creator::create_job_for_task_inner` | § 4.4 acceptance, attachment rows, § 4.5 required check, MCP inline storage |
-| `settlement/retry.rs::create_retry_job` | attachment in the `link_retry_tx` transaction (A2) |
+| `settlement/retry.rs::create_retry_job` | attachment in the `link_retry_tx` transaction (A2 against `failed_job_id`) |
+| `trigger_target.rs` / `scheduler.rs` / `web/hooks.rs` | `trigger_preflight` after target resolution, before the concurrency policy (§ 4.5) |
 | `settlement/dispatch.rs::handle_task_steps_pass` | bucket C reverse lookup; child attachment (A2 via parent) |
 | `settlement/hooks.rs` | required-file failure path (§ 4.6) |
 | `web/worker_api/jobs.rs` claim | `inputs_dir`, `input_files` in the response, § 6.5 |
 | `web/worker_api/rendering.rs` | A3 resolution in `prepare_step_action_input` |
-| new `web/api/input_files.rs` | upload, user download, `/api/uploads/{token}` |
+| new `web/api/input_files.rs` | upload (live and `source_job_id` modes, § 4.2), user download, `/api/uploads/{token}` |
 | new `web/worker_api/input_files.rs` | worker download |
 | `web/api/jobs.rs` job detail | `input_files[]` |
 | `redaction.rs` | `INPUT_FILE_IDENTIFIER_KEYS` (`field`, `file_id`) walked in `walk_job_content` (§ 7.2) |
@@ -714,9 +778,16 @@ Per CLAUDE.md § Mandatory Test Coverage, at least:
 - stroem-db integration: migration 054 shape, attach/lineage queries, the
   orphan sweep race (creation vs sweep) with both orders;
 - server integration: upload ACL (Run / View / Deny, auth off), body limit,
-  A1 (other user, other task, expired), A2 for Re-run / Restart / retry /
-  child (same and other workspace), required check per creation mode incl.
-  scheduler MISSED, claim response pairs, old-worker failure, job detail +
+  upload with `source_job_id` for a pinned source whose task exists only at
+  its ref (accepted) and for a source the caller may not view (404), A1
+  (other user, other task, expired, and a trigger / hook creation that names
+  a valid upload — rejected), A2 for Re-run / Restart / retry / child (same
+  and other workspace), the retry chain after a schema change: a second
+  retry after the TTL expired still accepts the file attached to the FIRST
+  retry (A2 against `failed_job_id`, not the root), required check per
+  creation mode, the trigger preflight with `concurrency: skip` and
+  `cancel_previous` (MISSED, no skipped row, nothing cancelled), webhook
+  preflight 400, claim response files, old-worker failure, job detail +
   download ACL on the job row, retention + sweep, upload-URL token single use
   and expiry, metrics;
 - runner: Docker mount in both modes; Kube spec (init container, volume,
