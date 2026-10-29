@@ -15,6 +15,18 @@ Status: draft, revision 1 (2026-10-29). Branch `feat/file-inputs`.
 - **Revision 3** (2026-10-29) — the user decided U9: every runner step gets
   every file of its job; consequences recorded in § 4.6 and § 5.4; agent
   steps get none (author's call).
+- **Revision 4** (2026-10-29) — Codex spec review round 1 (6 findings, all
+  verified against the code and fixed): (1) the path is now
+  `{root}/{file_id}/{safe_name}` — a field-keyed path let a task field and an
+  action field of the same name name one path for two files (§ 5.1, § 5.3,
+  § 5.4, § 6.2); the revision-2 field-name rule is removed, since field names
+  no longer reach a path; (2) `input_files[]` keeps `field` / `file_id` as
+  redaction identifiers and Re-run reads IDs only from there (§ 7.2);
+  (3) `FileInputError` is a typed 400, classified before the `"is not
+  available"` → 500 check, and the message no longer uses that phrase (§ 4.4,
+  § 8); (4) the pod init script creates `/inputs/$ID` before the download
+  (§ 6.4); (5) the pod init script verifies size and SHA-256 (§ 6.4);
+  (6) `stroem run` stays local-script-only (§ 7.4).
 
 ## 1. Goal
 
@@ -42,7 +54,8 @@ actions:
 ```
 
 `{{ input.data_file }}` renders to a path such as
-`/inputs/data_file/report.csv`. The file is read-only in the step.
+`/inputs/file_7f3a91c2…/report.csv` (§ 5.1). The file is read-only in the
+step.
 
 Today the only way into a step is a string-shaped input value rendered into a
 template; artifacts move files the other way (step → server). This feature is
@@ -161,15 +174,9 @@ validation at load — F12 / CLAUDE.md):
 - rejected with `default`, `options`, `multiple`, `secret`;
 - rejected as a connection-type property type (`validation.rs:792` list);
 - rejected in an approval action's input (`validate_approval_action`);
-- the **name** of a `file` field (task or action) must match
-  `^[A-Za-z0-9_][A-Za-z0-9_-]*$` (F19: no rule exists today). The name
-  becomes a directory on the worker host, an env value in the pod init
-  container and part of the rendered path, so `../x` or `a b` must never get
-  there. Because the server does not validate at load, job creation checks
-  the same rule for every `file` field of the task, and claim checks it for
-  the `file` fields of the step's persisted `action_spec.input`; a failure is
-  a value-free 400 / claim failure `input field name is not valid for a file
-  field`. No existing workspace has `file` fields, so nothing breaks;
+- no rule on the field NAME is needed (F19): since revision 4 a field name
+  never reaches a file system path, a pod env value or a script — paths are
+  built from the file ID (§ 5.1);
 - `stroem validate` **warns** when a task with a `required` `file` field is the
   target of a scheduler trigger, an event-source trigger or a webhook (none of
   them can supply a file, § 4.5).
@@ -245,8 +252,12 @@ every task-level `file` field with a value is resolved by exactly one of:
 
 Anything else — unknown ID, other user, other task, expired, being deleted, a
 non-string value — fails creation with a value-free 400:
-`Input field 'data_file': the file is not available` (never the ID, name or
-path; § 8). The attachment rows are written in the **creation transaction**
+`Input field 'data_file': the file cannot be used` (never the ID, name or
+path; § 8). It is a typed, value-free leaf error (`FileInputError`) that
+`classify_execute_error` downcasts to `BadRequest` BEFORE its phrase tiers —
+the generic `"is not available"` check (`web/api/mod.rs:457-460`) would
+otherwise turn it into a 500, which is also why the sentence avoids that
+phrase. The attachment rows are written in the **creation transaction**
 (for a retry, the same transaction as `JobRepo::link_retry_tx`), taking
 `FOR SHARE` on each `input_file` row and re-checking `deleting_at IS NULL`
 on the locked row (§ 4.7 gives the sweep's side of this protocol).
@@ -319,26 +330,30 @@ viewer of the closure could not already reach.
 - The **stored** value (in `job.input`, `raw_input`, `job_step.input`, hook
   payloads, API responses) is the **file ID**.
 - The **template** value of a `file` field is a **path**:
-  `{root}/{field}/{safe_name}`, where `field` is the key under which the value
-  appears in that context (task field for `input` of the job; action field for
-  the prepared action input).
+  `{root}/{file_id}/{safe_name}`. The path is a function of the FILE only,
+  never of the field that holds it (revision 4): the job input (S1) and the
+  prepared action input (S2/S3) are different contexts
+  (`render_context.rs:285-297`), so a field-keyed path let task field `a` and
+  action field `a` name the same path for two different files. With the ID in
+  the path, one file has one path in every context of a step, and two files
+  never share one. `file_id` is `file_` + 32 hex, so the path segment is safe
+  by construction.
 - A `file`-typed **target** field (an action field, or a child task's field)
-  accepts either a file ID or a path of the form `{root}/{field}/{safe_name}`
-  that names a file attached to **this** job (A3). Inside one job the
-  lookup is unambiguous: one file per field, field names are unique keys, and
-  the lookup uses the same `root` the render used. Any other value →
-  `Input field 'x': the file is not available` (value-free).
+  accepts either a file ID or a path `{root}/{file_id}/{safe_name}` whose
+  `root` is the root of that render and whose `file_id` is attached to
+  **this** job (A3). The lookup is by ID, so it is unambiguous. Any other
+  value → `Input field 'x': the file cannot be used` (`FileInputError`,
+  value-free, § 8).
 
 So `input: { path: "{{ input.data_file }}" }` gives a `string` action field the
 path, and `input: { data: "{{ input.data_file }}" }` gives a `file` action field
-the same file (and in the action body `{{ input.data }}` is
-`{root}/data/{safe_name}`).
+the same file; in the action body `{{ input.data }}` is the same path.
 
 `merge_missing_action_fields` (F13) copies a job-input value into a
 same-named, unset action field without looking at its type. For a task-level
 `file` field it copies by **target type** (decision): into a `file` action
 field, the stored form (the ID — a valid A3 value); into any other action
-field, the template form (the path `{claim root}/{task field}/{safe_name}`),
+field, the template form (the path `{claim root}/{file_id}/{safe_name}`),
 so a script never receives a bare file ID. The path is then in the step's
 prepared input like any other string.
 
@@ -367,22 +382,23 @@ inputs" (§ 12).
 
 | Site | `Scope` | `input.<file field>` renders to |
 |---|---|---|
-| S1 step `input:` at claim | `StepInput` | `{claim root}/{task field}/{name}` |
-| S2/S3 action body + image at claim | `ActionBody` | `{claim root}/{action field}/{name}` |
-| S4 agent prompt | `AgentPrompt` | `/inputs/{task field}/{name}` (the agent has no file access; informational) |
-| S5 `when` / `for_each` | `Condition` | `/inputs/{task field}/{name}`; absent optional field → absent as today (`when: "{{ input.data_file }}"` = "a file was given") |
-| S6 `type: task` step input | `ChildTaskInput` | `/inputs/{task field}/{name}` → reverse-looked-up by the child task's `file` field (§ 5.1) |
-| S6 approval message | `ApprovalMessage` | `/inputs/{task field}/{name}` |
-| Templated refs | `StepRef`, `TaskActionRef` | `/inputs/{task field}/{name}` |
+| S1 step `input:` at claim | `StepInput` | `{claim root}/{file_id}/{name}` |
+| S2/S3 action body + image at claim | `ActionBody` | `{claim root}/{file_id}/{name}` |
+| S4 agent prompt | `AgentPrompt` | `/inputs/{file_id}/{name}` (the agent has no file access; informational) |
+| S5 `when` / `for_each` | `Condition` | `/inputs/{file_id}/{name}`; absent optional field → absent as today (`when: "{{ input.data_file }}"` = "a file was given") |
+| S6 `type: task` step input | `ChildTaskInput` | `/inputs/{file_id}/{name}` → looked up by ID for the child task's `file` field (§ 5.1) |
+| S6 approval message | `ApprovalMessage` | `/inputs/{file_id}/{name}` |
+| Templated refs | `StepRef`, `TaskActionRef` | `/inputs/{file_id}/{name}` |
 | Hook input | — (payload, not context) | stored ID |
 
 ### 5.4 What the claim tells the worker
 
-`ClaimResponse` gains `input_files: [{ field, file_id, safe_name, size_bytes,
-sha256 }]`: every `(field, file)` pair the step's S1 and S2/S3 contexts expose
-(task-level pairs and prepared-action pairs; the same file under two fields is
-two pairs, placed twice). The worker places exactly these; the server rendered
-exactly these paths.
+`ClaimResponse` gains `input_files: [{ file_id, safe_name, size_bytes,
+sha256 }]`: every distinct file the step's S1 and S2/S3 contexts expose
+(task-level and prepared-action files, de-duplicated by ID — one file is one
+entry and one path, whatever fields hold it). The worker places exactly
+these at `{root}/{file_id}/{safe_name}`; the server rendered exactly these
+paths.
 
 **Every runner step gets every file of its job (U9, the user's decision
 after the builder check).** The S1 context holds the whole job input, so
@@ -404,8 +420,8 @@ they receive no `input_files` and never fail § 6.5 (author's call).
 ### 6.1 Worker download endpoint
 
 `GET /worker/jobs/{job_id}/input-files/{file_id}` — worker token; 404 unless
-the file is attached to that job (or to its lineage source for a prepared
-action pair — in practice always the job itself, § 4.4); streams the blob
+the file is attached to that job (every file a step can expose is, § 4.4,
+§ 5.1 A3); streams the blob
 (§ 9) with `Content-Length`. Used by the worker (local / docker) and by the pod
 init container.
 
@@ -416,7 +432,7 @@ pinned tarballs (`download_pinned_with_retry` shape).
 
 ### 6.2 `runner: local`
 
-The worker creates `inputs_dir/{field}/{safe_name}` (read-only file mode
+The worker creates `inputs_dir/{file_id}/{safe_name}` (read-only file mode
 `0444`, dirs `0555`) and deletes `inputs_dir` after the step, like the state
 temp dirs. If the claim returned `input_files` but the worker sent no
 `inputs_dir` (cannot happen for a current worker), it fails the step.
@@ -441,19 +457,32 @@ document the limitation in the file-inputs guide if confirmed.
   `workspace-init`.
 - A new `emptyDir` volume **`stroem-inputs`**, mounted read-write in the init
   container and **read-only at `/inputs`** in the main container.
-- The init script is a **constant** text: it loops over `STROEM_INPUT_COUNT`
-  and, for each `i`, reads `STROEM_INPUT_{i}_FIELD`, `STROEM_INPUT_{i}_NAME`,
-  `STROEM_INPUT_{i}_URL` from the environment and runs `curl -sSf --retry 11
-  --retry-delay 5 -H "Authorization: Bearer $STROEM_WORKER_TOKEN" -o
-  "/inputs/$F/$N" "$U"` (the `workspace_init_script` retry policy; download to
-  a file, never a pipe). No user-controlled text is ever interpolated into the
-  script. Independently of that, the values in the env are safe by
-  construction: file names by § 4.2, field names by the § 4.1 name rule
-  (checked at creation and at claim, since the server does not validate at
-  load).
+- The init script is a **constant** text run with `set -eu`. It loops over
+  `STROEM_INPUT_COUNT` and, for each `i`, reads `STROEM_INPUT_{i}_ID`,
+  `_NAME`, `_URL`, `_SIZE` and `_SHA256` from the environment, then:
+  1. `mkdir -p "/inputs/$ID"` (the `emptyDir` starts empty and curl creates
+     no parent directories);
+  2. `curl -sSf --retry 11 --retry-delay 5 -H "Authorization: Bearer
+     $STROEM_WORKER_TOKEN" -o "/inputs/$ID/$NAME" "$URL"` (the
+     `workspace_init_script` retry policy; download to a file, never a pipe);
+  3. checks the byte count (`wc -c`) equals `$SIZE` and the `sha256sum` of
+     the file equals `$SHA256`.
+
+  Any failing step exits non-zero, so the init container fails, the pod
+  never starts its main container and the step fails (the existing pod-failure
+  path). The pod's copy is downloaded on the pod's node, which the worker
+  cannot see (`kubernetes.rs:195-199`), so this check is the ONLY integrity
+  check of that copy; it is the pod-side equivalent of § 6.1. `wc` and
+  `sha256sum` must exist in the configured curl image (busybox provides both
+  in the default `curlimages/curl`); the real-image test proves it.
+  No user-controlled text is ever interpolated into the script, and every env
+  value is safe by construction: IDs are `file_` + hex, names follow § 4.2,
+  size and digest are server-computed.
 - Per the user's standing rule for generated shell: the emitted script is
-  **executed** in tests against a wiremock server and in the real curl image,
-  not only asserted as text.
+  **executed** in tests — against a wiremock server, in the real curl image,
+  starting from an EMPTY `/inputs` — including a size mismatch, a digest
+  mismatch and a 404, each of which must fail the script; not only asserted
+  as text.
 - The worker token reaches this init container the same way it reaches
   `workspace-init` (plain env, known exposure, TODO.md) — accepted, not
   widened.
@@ -487,7 +516,10 @@ path: a fleet of old workers would loop.
 
 - Re-run: the field shows the **source file's** original name and size (from
   the source job's `input_files[]`) and a Replace button. Keeping it sends the
-  source's ID (A2); replacing uploads a new file (A1).
+  source's ID (A2), taken from `input_files[]` by field — **never** from
+  `raw_input` / `input`, whose strings the redaction walk may mask (a secret
+  that is a substring of an ID, or `MaskAll`); replacing uploads a new file
+  (A1).
 - Job detail API gains `input_files: [{ field, file_id, name, size_bytes,
   content_type }]`; the job page shows an "Input files" card with download
   links.
@@ -495,9 +527,17 @@ path: a fleet of old workers would loop.
   (View; Deny → 404), never a live task lookup; headers as for artifacts
   (`nosniff`, sanitized `Content-Disposition`, the artifact inline allow-list,
   everything else attachment).
-- Redaction: `input_files[]` goes through the normal job-detail redaction walk
-  (names are content; IDs are random and never match a secret). No new skip
-  key.
+- Redaction: the walker redacts every string of a job-detail key that is not
+  an identifier key (`redaction.rs:593-610`), and `MaskAll` replaces every
+  string (`redaction.rs:553-555`); a secret that is a substring of a
+  `file_…` ID would also be span-masked inside it. So `input_files[]` is
+  walked like `steps[]`: each entry keeps its identifier keys `field` and
+  `file_id` intact (a new `INPUT_FILE_IDENTIFIER_KEYS`, applied in
+  `walk_job_content` next to `STEP_IDENTIFIER_KEYS`), and `name` and
+  `content_type` are redacted content. `size_bytes` is a number (never
+  masked). Re-run prefill and download links read only those two
+  identifiers. Test: a secret equal to `file` and a `MaskAll` job both leave
+  `field` / `file_id` intact.
 
 ### 7.3 REST API
 
@@ -509,10 +549,11 @@ Two calls: upload (§ 4.2), then execute with `{"input": {"data_file":
 - `stroem-api trigger … --file data_file=./report.csv` (repeatable): uploads
   each file, then executes with the IDs.
 - `stroem run` (local, no server): the value of a `file` field is a local
-  path; the CLI checks it is a regular file, copies it to a temp
-  `{root}/{field}/{safe_name}` (read-only) so paths match the server's shape,
-  and mounts that dir at `/inputs` for docker steps. `stroem run` cannot run
-  pod steps today; unchanged.
+  path; the CLI checks it is a regular file and copies it to a temp
+  `{root}/{local id}/{safe_name}` (read-only) so paths have the server's
+  shape. `stroem run` runs only `type: script` with `runner: local`
+  (`stroem-cli/src/local/run.rs:168-199`, `ShellRunner` only at `:211`) and
+  that scope is unchanged — no Docker or pod support is added here.
 
 ### 7.5 MCP
 
@@ -556,13 +597,24 @@ value.
 
 | Situation | Message |
 |---|---|
-| A1/A2/A3 failure | `Input field '{f}': the file is not available` |
+| A1/A2/A3 failure | `Input field '{f}': the file cannot be used` (`FileInputError`) |
 | Required file missing | `Input field '{f}': a file is required` |
 | Bad name | `invalid file name` (upload, 400) |
 | Too large | `file is larger than {max} bytes` (upload, 413) |
 | MCP inline over cap | `Input field '{f}': inline content is larger than {cap} bytes` |
 | Old worker | § 6.5 fixed text |
 | No archive | `file storage is not configured` (503) |
+
+**Classification.** The creation-time file errors (A1/A2 failure, required
+file missing, MCP inline over cap) are one typed leaf, `FileInputError`
+(fixed kind + field name, no `source`), which `classify_execute_error`
+(`web/api/mod.rs`) downcasts to `BadRequest` BEFORE the `"is not available"`
+check at `:457-460` and the phrase tiers — like `ReplayFieldsError` at
+`:454-456`. Webhook target errors already go through that classifier
+(CLAUDE.md § Git refs → Triggers), so a webhook answers 400; the scheduler
+records `MISSED` and the event source logs and drops, whatever the class.
+Regression tests: unknown, expired, other-user and other-task
+IDs each answer 400 on execute.
 
 The reverse lookup (§ 5.1) is a post-render check, not a new render path; it
 reports only the field name and so stays within the tera-2 spec § 3.4 rules.
@@ -622,6 +674,8 @@ base64 form fits the `/mcp` 2 MiB body limit).
 | new `web/api/input_files.rs` | upload, user download, `/api/uploads/{token}` |
 | new `web/worker_api/input_files.rs` | worker download |
 | `web/api/jobs.rs` job detail | `input_files[]` |
+| `redaction.rs` | `INPUT_FILE_IDENTIFIER_KEYS` (`field`, `file_id`) walked in `walk_job_content` (§ 7.2) |
+| `web/api/mod.rs::classify_execute_error` | `FileInputError` → 400 before the `"is not available"` check (§ 8) |
 | `blob_storage.rs` | real streaming (§ 9) |
 | `recovery.rs` retention | § 4.7 |
 | `stroem-db` | migration 054, `InputFileRepo`, `JobInputFileRepo`, token repo |
@@ -649,7 +703,14 @@ Per CLAUDE.md § Mandatory Test Coverage, at least:
 
 - unit: safe-name derivation (table of hostile names), ID/path classification,
   render-table rows (§ 5.3) per `Scope`, reverse lookup (ID, path, foreign
-  path, other job's path), validation rules (§ 4.1), MCP inline decode + cap;
+  path, other job's path, path with another root), validation rules (§ 4.1),
+  MCP inline decode + cap, `FileInputError` classification (§ 8), redaction
+  of `input_files[]` with a secret equal to `file` and under `MaskAll`
+  (§ 7.2);
+- the revision-4 collision case: task fields `a` and `b` hold two different
+  uploads both named `report.csv`, and action field `a` receives
+  `{{ input.b }}` — S1 and S2/S3 render two different paths, the claim lists
+  two files, and each path holds its own content;
 - stroem-db integration: migration 054 shape, attach/lineage queries, the
   orphan sweep race (creation vs sweep) with both orders;
 - server integration: upload ACL (Run / View / Deny, auth off), body limit,
@@ -660,7 +721,8 @@ Per CLAUDE.md § Mandatory Test Coverage, at least:
   and expiry, metrics;
 - runner: Docker mount in both modes; Kube spec (init container, volume,
   read-only mount, both modes, manifest-merge interaction) and the **executed**
-  init script against wiremock and the real curl image;
+  init script against wiremock and the real curl image, from an empty
+  `/inputs`, with size-mismatch, digest-mismatch and 404 cases (§ 6.4);
 - allocation: § 9;
 - UI: Vitest for the field widget state and Re-run prefill; Playwright upload
   → run → download;
