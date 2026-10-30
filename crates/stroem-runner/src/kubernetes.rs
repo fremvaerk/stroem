@@ -3282,6 +3282,60 @@ mod tests {
         assert!(INPUTS_INIT_SCRIPT.starts_with("set -eu\n"));
     }
 
+    /// The bodies of the `$(…)` references in `text` that the kubelet would
+    /// try to expand in a container `command` (`$((` arithmetic excluded):
+    /// everything from `$(` to the first `)`.
+    fn kubelet_refs(text: &str) -> Vec<&str> {
+        let mut refs = Vec::new();
+        let mut rest = text;
+        while let Some(at) = rest.find("$(") {
+            let after = &rest[at + 2..];
+            if after.starts_with('(') {
+                rest = &after[1..];
+                continue;
+            }
+            let end = after.find(')').unwrap_or(after.len());
+            refs.push(&after[..end]);
+            rest = &after[end..];
+        }
+        refs
+    }
+
+    fn is_env_name(s: &str) -> bool {
+        let mut chars = s.chars();
+        chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    }
+
+    #[test]
+    fn kubelet_refs_finds_command_substitutions_only() {
+        assert_eq!(
+            kubelet_refs("a $(FOO) b $((i + 1)) c $(wc -c < \"$f\") ${BAR}"),
+            vec!["FOO", "wc -c < \"$f\""]
+        );
+        assert!(is_env_name("STROEM_INPUT_0_ID") && is_env_name("_x"));
+        assert!(!is_env_name("wc -c") && !is_env_name("0A") && !is_env_name(""));
+    }
+
+    /// The kubelet expands `$(NAME)` in a container `command` when `NAME` is
+    /// an env var of the container, and turns `$$` into `$`. The init
+    /// script is the first `command` with `$(…)` and `$((…))`, so neither may
+    /// appear in a form the kubelet would rewrite.
+    #[test]
+    fn inputs_init_script_survives_kubelet_expansion() {
+        assert!(!INPUTS_INIT_SCRIPT.contains("$$"));
+        let refs = kubelet_refs(INPUTS_INIT_SCRIPT);
+        assert!(!refs.is_empty(), "the script has command substitutions");
+        for body in refs {
+            assert!(
+                !is_env_name(body),
+                "`$({body})` would be expanded by the kubelet"
+            );
+        }
+    }
+
     // Executed: the script runs on this host against wiremock, and once in
     // the real init image (host tools differ from BusyBox).
 
