@@ -445,7 +445,10 @@ async fn unreadable_input_files_release_the_claim() -> Result<()> {
         log.contains("could not load the job's input files"),
         "{log}"
     );
-    assert!(!log.contains(&up.file_id) && !log.contains("job_input_file"), "{log}");
+    assert!(
+        !log.contains(&up.file_id) && !log.contains("job_input_file"),
+        "{log}"
+    );
 
     // Readable again: the next claim after the delay runs the step.
     sqlx::query("ALTER TABLE job_input_file_away RENAME TO job_input_file")

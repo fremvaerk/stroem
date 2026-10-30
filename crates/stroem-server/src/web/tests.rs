@@ -8,7 +8,10 @@ fn span(uri: &str) -> String {
 #[test]
 fn span_uri_hides_the_upload_token() {
     assert_eq!(span("/api/uploads/0a1b2c3d4e5f"), "/api/uploads/{token}");
-    assert_eq!(span("/api/uploads/0a1b2c3d4e5f?x=1"), "/api/uploads/{token}?x=1");
+    assert_eq!(
+        span("/api/uploads/0a1b2c3d4e5f?x=1"),
+        "/api/uploads/{token}?x=1"
+    );
     assert_eq!(
         span("/api/uploads/0a1b2c3d4e5f/more"),
         "/api/uploads/{token}/more"
