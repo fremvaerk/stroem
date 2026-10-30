@@ -507,6 +507,7 @@ impl StepExecutor {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: step.revision.clone(),
+            inputs: None,
         })
     }
 }

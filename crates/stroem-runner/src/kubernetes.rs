@@ -1874,6 +1874,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let mut labels = HashMap::new();
@@ -1953,6 +1954,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let mut labels = HashMap::new();
@@ -2009,6 +2011,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let mut labels = HashMap::new();
@@ -2062,6 +2065,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let mut labels = HashMap::new();
@@ -2134,6 +2138,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let mut labels = HashMap::new();
@@ -2208,6 +2213,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let labels = HashMap::new();
@@ -2287,6 +2293,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let labels = HashMap::new();
@@ -2361,6 +2368,7 @@ mod tests {
             global_state_out_dir: Some("/tmp/global-state-out".to_string()),
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let labels = HashMap::new();
@@ -2444,6 +2452,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let labels = HashMap::new();
@@ -2505,6 +2514,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let result = runner
@@ -2545,6 +2555,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let pod_json = runner.build_pod_json_with_workspace(
@@ -2607,6 +2618,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: revision.map(str::to_string),
+            inputs: None,
         }
     }
 
@@ -2838,6 +2850,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let pod_json = runner.build_pod_json_with_workspace(
@@ -2904,6 +2917,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let pod_json = runner.build_pod_json_with_workspace(
@@ -2951,6 +2965,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let pod_json = runner.build_pod_json_with_workspace(
@@ -3051,6 +3066,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         }
     }
 
@@ -3201,6 +3217,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
         let pod = runner
             .build_pod_spec("test-pod", &config, "default", make_labels())
@@ -3339,6 +3356,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
         let pod = runner
             .build_pod_spec("test-pod", &config, "default", make_labels())
@@ -3400,6 +3418,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
         let pod = runner
             .build_pod_spec("test-pod", &config, "default", make_labels())
@@ -3473,6 +3492,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
         let pod = runner
             .build_pod_spec("test-pod", &config, "default", make_labels())
@@ -3522,6 +3542,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
         let pod = runner
             .build_pod_spec("test-pod", &config, "default", make_labels())
@@ -3570,6 +3591,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
         let pod = runner
             .build_pod_spec("test-pod", &config, "default", make_labels())
@@ -4425,6 +4447,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let pod = runner.build_pod_json_with_workspace(
@@ -4477,6 +4500,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let token = CancellationToken::new();

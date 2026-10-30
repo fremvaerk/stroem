@@ -142,6 +142,9 @@ impl DockerRunner {
                 if let Some(ref out) = config.artifacts_out_dir {
                     binds.push(format!("{}:/artifacts:rw", out));
                 }
+                if let Some(dir) = config.inputs.as_ref().and_then(|i| i.host_dir.as_ref()) {
+                    binds.push(format!("{}:/inputs:ro", dir));
+                }
 
                 ContainerCreateBody {
                     image: Some(image),
@@ -194,6 +197,9 @@ impl DockerRunner {
                 let mut binds: Vec<String> = Vec::new();
                 if let Some(ref out) = config.artifacts_out_dir {
                     binds.push(format!("{}:/artifacts:rw", out));
+                }
+                if let Some(dir) = config.inputs.as_ref().and_then(|i| i.host_dir.as_ref()) {
+                    binds.push(format!("{}:/inputs:ro", dir));
                 }
                 let host_config = if binds.is_empty() {
                     None
@@ -443,6 +449,7 @@ impl Runner for DockerRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::traits::RunInputs;
     use std::collections::HashMap;
 
     async fn fake_daemon(api_version: &str) -> wiremock::MockServer {
@@ -544,6 +551,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -594,6 +602,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -627,6 +636,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -666,6 +676,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -714,6 +725,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -749,6 +761,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -784,6 +797,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -824,6 +838,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -869,6 +884,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -908,6 +924,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -949,6 +966,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -982,6 +1000,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -1020,6 +1039,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -1055,6 +1075,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -1106,6 +1127,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -1151,6 +1173,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -1191,6 +1214,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -1226,6 +1250,7 @@ mod tests {
             global_state_out_dir: Some("/tmp/global-state-out".to_string()),
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -1270,6 +1295,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: Some("/tmp/art-abc".to_string()),
             workspace_revision: None,
+            inputs: None,
         };
         let container = DockerRunner::build_container_config(&config);
         let binds = container
@@ -1306,6 +1332,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: Some("/tmp/art-xyz".to_string()),
             workspace_revision: None,
+            inputs: None,
         };
         let container = DockerRunner::build_container_config(&config);
         let binds = container.host_config.unwrap().binds.unwrap();
@@ -1313,6 +1340,108 @@ mod tests {
     }
 
     /// Integration test: requires Docker daemon running.
+    fn inputs_config(mode: RunnerMode, inputs: Option<RunInputs>) -> RunConfig {
+        RunConfig {
+            cmd: Some("true".to_string()),
+            script: None,
+            env: HashMap::new(),
+            workdir: "/tmp/ws".to_string(),
+            action_type: "docker".to_string(),
+            image: Some("alpine:latest".to_string()),
+            runner_mode: mode,
+            runner_image: None,
+            entrypoint: None,
+            command: None,
+            pod_manifest_overrides: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
+            args: vec![],
+            state_dir: None,
+            state_out_dir: None,
+            global_state_dir: None,
+            global_state_out_dir: None,
+            artifacts_out_dir: None,
+            workspace_revision: None,
+            inputs,
+        }
+    }
+
+    fn run_inputs(host_dir: Option<&str>) -> RunInputs {
+        RunInputs {
+            job_id: "job-1".to_string(),
+            host_dir: host_dir.map(str::to_string),
+            files: vec![],
+        }
+    }
+
+    #[test]
+    fn with_workspace_binds_inputs_read_only() {
+        let config = inputs_config(
+            RunnerMode::WithWorkspace,
+            Some(run_inputs(Some("/tmp/in-1"))),
+        );
+        let binds = DockerRunner::build_container_config(&config)
+            .host_config
+            .unwrap()
+            .binds
+            .unwrap();
+        assert!(
+            binds.iter().any(|b| b == "/tmp/in-1:/inputs:ro"),
+            "{binds:?}"
+        );
+    }
+
+    #[test]
+    fn no_workspace_binds_inputs_read_only() {
+        let config = inputs_config(RunnerMode::NoWorkspace, Some(run_inputs(Some("/tmp/in-2"))));
+        let binds = DockerRunner::build_container_config(&config)
+            .host_config
+            .expect("host_config must exist when inputs are mounted")
+            .binds
+            .unwrap();
+        assert_eq!(binds, vec!["/tmp/in-2:/inputs:ro".to_string()]);
+    }
+
+    #[test]
+    fn no_inputs_no_bind() {
+        for mode in [RunnerMode::WithWorkspace, RunnerMode::NoWorkspace] {
+            for inputs in [None, Some(run_inputs(None))] {
+                let config = inputs_config(mode.clone(), inputs);
+                let host_config = DockerRunner::build_container_config(&config).host_config;
+                let binds = host_config.and_then(|h| h.binds).unwrap_or_default();
+                assert!(!binds.iter().any(|b| b.contains("/inputs")), "{binds:?}");
+            }
+        }
+    }
+
+    /// Needs a Docker daemon: cargo test -p stroem-runner docker::tests::docker_step_reads_input_file -- --ignored
+    #[tokio::test]
+    #[ignore]
+    async fn docker_step_reads_input_file() {
+        let host = tempfile::tempdir().unwrap();
+        let sub = "file_0123456789abcdef0123456789abcdef";
+        std::fs::create_dir(host.path().join(sub)).unwrap();
+        std::fs::write(host.path().join(sub).join("r.csv"), "a,b\n1,2\n").unwrap();
+        let mut config = inputs_config(
+            RunnerMode::NoWorkspace,
+            Some(run_inputs(Some(host.path().to_str().unwrap()))),
+        );
+        config.cmd = Some(format!(
+            "cat /inputs/{sub}/r.csv; touch /inputs/x 2>/dev/null && echo WRITE_OK || echo WRITE_FAILED"
+        ));
+        let runner = DockerRunner::new().expect("Docker must be available");
+        let result = runner
+            .execute(config, None, CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(result.exit_code, 0, "{}", result.stderr);
+        assert!(result.stdout.contains("a,b"), "{}", result.stdout);
+        assert!(result.stdout.contains("1,2"), "{}", result.stdout);
+        assert!(result.stdout.contains("WRITE_FAILED"), "{}", result.stdout);
+        assert!(!result.stdout.contains("WRITE_OK"), "{}", result.stdout);
+    }
+
     /// Run with: cargo test -p stroem-runner --features docker -- --ignored test_docker_echo
     #[tokio::test]
     #[ignore]
@@ -1340,6 +1469,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let result = runner
@@ -1374,6 +1504,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -1412,6 +1543,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -1453,6 +1585,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let token = CancellationToken::new();
