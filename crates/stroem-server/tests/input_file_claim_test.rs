@@ -156,6 +156,22 @@ tasks:
   foreign:
     input: { data_file: { type: file }, other: { type: string } }
     flow: { run: { action: uses-file, input: { data: "{{ input.other }}" } } }
+  cross-ws:
+    input: { data_file: { type: file }, other_file: { type: file } }
+    flow:
+      run:
+        action: owner.read-data
+        input: { data: "{{ input.data_file }}" }
+"#;
+
+/// The action owner of the `cross-ws` task's step (spec § 5.4: a
+/// cross-workspace action step gets every file of the caller's job).
+const OWNER_YAML: &str = r#"
+actions:
+  read-data:
+    type: script
+    script: 'cat "{{ input.data }}"'
+    input: { data: { type: file } }
 "#;
 
 struct App {
@@ -214,7 +230,11 @@ fn server_config(tmp: &TempDir) -> ServerConfig {
 fn state_with(pool: &PgPool, tmp: &TempDir, archive: Option<Arc<dyn BlobArchive>>) -> AppState {
     let config = server_config(tmp);
     let ws: WorkspaceConfig = serde_yaml::from_str(YAML).unwrap();
-    let mgr = WorkspaceManager::from_configs(vec![("default".to_string(), ws, None)]);
+    let owner: WorkspaceConfig = serde_yaml::from_str(OWNER_YAML).unwrap();
+    let mgr = WorkspaceManager::from_configs(vec![
+        ("default".to_string(), ws, None),
+        ("owner".to_string(), owner, None),
+    ]);
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
     AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None)
         .with_input_blob(archive)
@@ -352,6 +372,49 @@ fn path_under(root: &str, file_id: &str, name: &str) -> String {
 }
 
 // ─── claim: render root and input_files ─────────────────────────────────
+
+/// A cross-workspace ACTION step (owner ≠ `job.workspace`, spec § 5.4, U9):
+/// the claim lists every file of the caller's job — also one no field of
+/// the step names — and A3 accepts the caller's file on the owner's `file`
+/// field (stored as the ID, rendered as the path under the claim root).
+#[tokio::test]
+async fn cross_workspace_action_step_gets_every_job_file() -> Result<()> {
+    let app = build_app().await?;
+    let data = upload(&app, "cross-ws", "data.csv", b"a,b\n").await;
+    let other = upload(&app, "cross-ws", "other.txt", b"unused").await;
+    let job_id = execute(
+        &app,
+        "cross-ws",
+        json!({"data_file": data.file_id, "other_file": other.file_id}),
+    )
+    .await;
+
+    let body = claim_local(&app).await;
+    assert_eq!(body["job_id"], json!(job_id.to_string()));
+    assert_eq!(body["workspace"], json!("owner"), "{body}");
+    let mut listed: Vec<&str> = body["input_files"]
+        .as_array()
+        .expect("input_files")
+        .iter()
+        .map(|f| f["file_id"].as_str().unwrap())
+        .collect();
+    listed.sort_unstable();
+    let mut expected = vec![data.file_id.as_str(), other.file_id.as_str()];
+    expected.sort_unstable();
+    assert_eq!(listed, expected, "{body}");
+    assert_eq!(body["input"]["data"], json!(data.file_id));
+    assert_eq!(
+        body["action_spec"]["script"].as_str().unwrap(),
+        format!(
+            "cat \"{}\"",
+            path_under(INPUTS_DIR, &data.file_id, "data.csv")
+        )
+    );
+    let row = step_row(&app.pool, job_id, "run").await;
+    assert_eq!(row.action_workspace.as_deref(), Some("owner"));
+    assert_eq!(row.status, "running");
+    Ok(())
+}
 
 /// Spec § 5.4 (revision 9): a claim that cannot read the job's
 /// `job_input_file` rows (a transient DB error) releases the step back to
