@@ -1,6 +1,6 @@
 # File inputs (`type: file`)
 
-Status: approved (Codex MERGE-READY on revision 6), revision 9 (2026-10-30).
+Status: approved (Codex MERGE-READY on revision 6), revision 10 (2026-10-30).
 Branch `feat/file-inputs-impl`.
 
 ## Revision history
@@ -86,6 +86,19 @@ Branch `feat/file-inputs-impl`.
   without files). (d) § 10: upper caps on `upload_ttl_secs`,
   `upload_url_ttl_secs` and `max_file_bytes`. Also § 7.5: no upload URL is
   minted without file storage.
+- **Revision 10** (2026-10-30) — Codex implementation review round 1 (two
+  findings). (a) § 7.4: the `stroem run` staging root is private — created
+  atomically with mode `0700`, never an existing directory, like the
+  worker's wrapper (§ 6.2) — because the tree below it is world-readable
+  (`0555` / `0444`) and another host user could read a copy of even a
+  `0600` file. (b) § 4.3 made concrete: without file storage, creation
+  refuses every input that carries a file value with `file storage is not
+  configured` (503 on the HTTP routes, a tool error on MCP) before its
+  transaction — also an existing attachment that a Re-run, a Restart, a
+  task retry or a `type: task` child replays, which database eligibility
+  alone used to accept (the step then failed at delivery). Plus a claim
+  safety net: a runner step of a job with files, claimed on a server
+  without storage, fails with the same text.
 
 ## 1. Goal
 
@@ -323,7 +336,16 @@ Blob key: `{input_files.prefix}{workspace}/{file_id}` (default prefix
 Backend: `input_files.archive` if set, else the artifact archive, else the log
 archive (the `main.rs:283-293` fallback chain). No archive configured → the
 upload route answers 503 and `type: file` jobs cannot be created; startup logs
-one warning.
+one warning. "Cannot be created" (revision 10): every creation whose input
+carries a file value is refused before its transaction with the value-free
+`file storage is not configured` — 503 on the HTTP routes (execute, Re-run,
+Restart), a tool error on MCP, a failed step for a `type: task` child, a
+logged failure for a task retry. This includes an existing attachment that
+a Re-run, Restart, retry or child replays (A2): its eligibility in the
+database does not make it deliverable. A creation without a file value
+needs no storage. Safety net: a claim of a runner step of a job with files
+on a server without storage fails the step with the same text, instead of
+the worker using up its download attempts on 503s (§ 6.1).
 
 ### 4.4 Accepting a value at job creation
 
@@ -588,7 +610,10 @@ pinned tarballs (`download_pinned_with_retry` shape).
 
 The worker creates `inputs_dir/{file_id}/{safe_name}` (read-only file mode
 `0444`, dirs `0555`) and deletes `inputs_dir` after the step, like the state
-temp dirs. If the claim returned `input_files` but the worker sent no
+temp dirs. `inputs_dir` is `{wrapper}/in`: the wrapper
+`{temp}/stroem-inputs-{uuid}` is created with mode `0700`, so other host
+users cannot reach the world-readable tree below it (stated here in
+revision 10; the code already did it). If the claim returned `input_files` but the worker sent no
 `inputs_dir` (cannot happen for a current worker), it fails the step.
 
 ### 6.3 Docker (`runner: docker`, `type: docker`)
@@ -709,7 +734,9 @@ Two calls: upload (§ 4.2), then execute with `{"input": {"data_file":
 - `stroem run` (local, no server): the value of a `file` field is a local
   path; the CLI checks it is a regular file and copies it to a temp
   `{root}/{local id}/{safe_name}` (read-only) so paths have the server's
-  shape. `stroem run` runs only `type: script` with `runner: local`
+  shape. The root is created atomically with mode `0700` (never an
+  existing directory, revision 10), like the worker's wrapper: the tree
+  below it is world-readable. `stroem run` runs only `type: script` with `runner: local`
   (`stroem-cli/src/local/run.rs:168-199`, `ShellRunner` only at `:211`) and
   that scope is unchanged — no Docker or pod support is added here.
 
