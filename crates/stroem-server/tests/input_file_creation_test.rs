@@ -47,6 +47,15 @@ actions:
   noop: { type: script, script: "true" }
   call-required: { type: task, task: files-required }
   call-files: { type: task, task: files }
+  call-other-files: { type: task, task: other.files }
+  call-text: { type: task, task: files-text }
+  think:
+    type: agent
+    provider: anthropic
+    model: claude-sonnet-5
+    prompt: hi
+    tools:
+      - task: files
   needs-file:
     type: script
     script: "true"
@@ -68,6 +77,36 @@ tasks:
     input: { data_file: { type: file } }
     retry: { max_attempts: 3, delay: 1s }
     flow: { run: { action: noop } }
+  files-text:
+    input: { path: { type: string } }
+    flow: { run: { action: noop } }
+  parent-same:
+    input: { data_file: { type: file } }
+    flow:
+      call:
+        action: call-files
+        input: { data_file: "{{ input.data_file }}" }
+  parent-cross:
+    input: { data_file: { type: file } }
+    flow:
+      call:
+        action: call-other-files
+        input: { data_file: "{{ input.data_file }}" }
+  parent-text:
+    input: { data_file: { type: file } }
+    flow:
+      call:
+        action: call-text
+        input: { path: "{{ input.data_file }}" }
+  parent-foreign:
+    input: { other: { type: string } }
+    flow:
+      call:
+        action: call-files
+        input: { data_file: "{{ input.other }}" }
+  agent-wrap:
+    input: { data_file: { type: file } }
+    flow: { think: { action: think } }
   parent-required-child:
     flow: { call: { action: call-required } }
   hooked-required:
@@ -1057,5 +1096,169 @@ async fn when_condition_sees_file_given() -> Result<()> {
     JobStepRepo::mark_completed(&app.pool, job_id, "at_init", None).await?;
     app.state.settlement().advance(job_id).await?;
     assert_eq!(step_status(&app.pool, job_id, "at_advance").await, "ready");
+    Ok(())
+}
+
+async fn child_of(pool: &PgPool, parent: Uuid) -> Uuid {
+    let children = JobRepo::get_child_jobs(pool, parent).await.unwrap();
+    assert_eq!(children.len(), 1, "{children:?}");
+    children[0].job_id
+}
+
+/// Spec § 4.6: a `type: task` step hands the job's file to the child (S6
+/// reverse lookup against the parent's files, then A2 against the parent).
+#[tokio::test]
+async fn task_child_same_workspace_gets_file() -> Result<()> {
+    let app = build_app(Opts::default()).await?;
+    let id = upload(&app.state, "default", "parent-same", None, b"x").await;
+    let (status, body) = execute(
+        &app,
+        "parent-same",
+        None,
+        json!({"input": {"data_file": id}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let child = child_of(&app.pool, job_id_of(&body)).await;
+    assert_eq!(
+        attached(&app.pool, child).await.as_deref(),
+        Some(id.as_str())
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn task_child_cross_workspace_gets_file() -> Result<()> {
+    let app = build_app(Opts::default()).await?;
+    let id = upload(&app.state, "default", "parent-cross", None, b"x").await;
+    let (status, body) = execute(
+        &app,
+        "parent-cross",
+        None,
+        json!({"input": {"data_file": id}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let parent = job_id_of(&body);
+    let child = child_of(&app.pool, parent).await;
+    let job = JobRepo::get(&app.pool, child).await?.unwrap();
+    assert_eq!(job.workspace, "other");
+    assert_eq!(
+        attached(&app.pool, child).await.as_deref(),
+        Some(id.as_str())
+    );
+    let (status, detail) = get(&app, &format!("/api/jobs/{child}")).await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert!(detail.to_string().contains(&id), "{detail}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn task_child_string_field_receives_canonical_path() -> Result<()> {
+    let app = build_app(Opts::default()).await?;
+    let id = upload(&app.state, "default", "parent-text", None, b"x").await;
+    let (status, body) = execute(
+        &app,
+        "parent-text",
+        None,
+        json!({"input": {"data_file": id}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let child = child_of(&app.pool, job_id_of(&body)).await;
+    let job = JobRepo::get(&app.pool, child).await?.unwrap();
+    let path = job.input.as_ref().unwrap()["path"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(path, format!("/inputs/{id}/data.csv"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn task_child_foreign_id_fails_step_value_free() -> Result<()> {
+    let app = build_app(Opts::default()).await?;
+    // An upload that is not attached to the parent job.
+    let foreign = upload(&app.state, "default", "files", None, b"x").await;
+    let (status, body) = execute(
+        &app,
+        "parent-foreign",
+        None,
+        json!({"input": {"other": foreign}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let parent = job_id_of(&body);
+    let steps = JobStepRepo::get_steps_for_job(&app.pool, parent).await?;
+    let step = steps.iter().find(|s| s.step_name == "call").unwrap();
+    assert_eq!(step.status, "failed");
+    let message = step.error_message.clone().unwrap_or_default();
+    assert!(message.contains(CANNOT_USE), "{message}");
+    assert!(!message.contains(&foreign), "{message}");
+    let job = JobRepo::get(&app.pool, parent).await?.unwrap();
+    assert_eq!(job.status, "failed");
+    assert!(JobRepo::get_child_jobs(&app.pool, parent).await?.is_empty());
+    Ok(())
+}
+
+/// Spec § 4.6: an agent tool child never gets A2, so a tool call naming the
+/// parent's own file id is refused.
+#[tokio::test]
+async fn agent_tool_child_gets_no_files() -> Result<()> {
+    let app = build_app(Opts::default()).await?;
+    let id = upload(&app.state, "default", "agent-wrap", None, b"x").await;
+    let (status, body) = execute(
+        &app,
+        "agent-wrap",
+        None,
+        json!({"input": {"data_file": id}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let parent = job_id_of(&body);
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/worker/jobs/{parent}/steps/think/task-tool"))
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {WORKER_TOKEN}"))
+        .body(Body::from(
+            json!({"task_name": "files", "input": {"data_file": id}}).to_string(),
+        ))?;
+    let resp = app.router.clone().oneshot(req).await?;
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await?.to_bytes();
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    assert!(JobRepo::get_child_jobs(&app.pool, parent).await?.is_empty());
+    Ok(())
+}
+
+/// Task 8 carry-over: a Re-run whose file is a FRESH own upload (A1, never
+/// attached to the source) is accepted and attached to the new job.
+#[tokio::test]
+async fn rerun_accepts_fresh_own_replacement_upload() -> Result<()> {
+    let app = build_app(Opts::default()).await?;
+    let old = upload(&app.state, "default", "files", None, b"x").await;
+    let (status, body) = execute(&app, "files", None, json!({"input": {"data_file": old}})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let source = job_id_of(&body);
+    let fresh = upload(&app.state, "default", "files", None, b"new").await;
+    let (status, body) = execute(
+        &app,
+        "files",
+        None,
+        json!({"input": {"data_file": fresh}, "source_job_id": source}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let rerun = job_id_of(&body);
+    assert_eq!(
+        attached(&app.pool, rerun).await.as_deref(),
+        Some(fresh.as_str())
+    );
     Ok(())
 }

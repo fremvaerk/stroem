@@ -10,7 +10,7 @@ use stroem_common::git_ref::{check_rendered_ref, classify_ref, rendered_ref_valu
 use stroem_common::models::job::{JobStatus, StepStatus};
 use stroem_common::models::workflow::{InputFieldDef, TaskDef, WorkspaceConfig};
 use stroem_common::template::{
-    merge_action_defaults, render_input_map, render_input_typed, render_ref_projection,
+    merge_action_defaults, render_input_map, render_input_typed_with_files, render_ref_projection,
     render_ref_template, resolve_task_input_by_provenance_roles, RoleConfig, RoleScope,
 };
 use stroem_db::{JobRepo, JobRow, JobStepRepo};
@@ -689,7 +689,12 @@ async fn handle_task_steps_pass(
                         .collect();
                     // Bucket C lands in task T's input: T's schema decides
                     // which fields are `json` (spec 2026-10-06-json-input-type D6).
-                    match render_input_typed(&map, Some(&resolved.task.input), context_value) {
+                    match render_input_typed_with_files(
+                        &map,
+                        Some(&resolved.task.input),
+                        context_value,
+                        &snapshots.files,
+                    ) {
                         Ok(rendered) => rendered,
                         Err(e) => {
                             let err = format!(

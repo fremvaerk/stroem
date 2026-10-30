@@ -1732,7 +1732,14 @@ pub async fn agent_task_tool(
         job.git_ref.as_deref(),
     )
     .await
-    .context("create child job for task tool")?;
+    .map_err(|e| {
+        // A file value the tool call may not use (A2 is not granted to an
+        // agent tool child) is a value-free author mistake: 400.
+        if let Some(f) = e.downcast_ref::<stroem_common::file_field::FileInputError>() {
+            return AppError::BadRequest(f.to_string());
+        }
+        AppError::Internal(e.context("create child job for task tool"))
+    })?;
 
     // A child that is already terminal the moment it is created (every root step
     // skipped by `when`, a server-dispatched root step that failed, or a nested
