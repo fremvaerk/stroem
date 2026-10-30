@@ -70,11 +70,11 @@ Every client works in two calls: **upload** the file (you get a file ID), then *
 
 ### UI
 
-The Run form shows a file picker for a `file` field. The browser uploads the file when you select it, with a progress bar. The form shows the file name and size, and offers **Remove** and **Replace**. **Run** is disabled while an upload runs or after it fails.
+The Run form shows a file picker for a `file` field. The browser uploads the file when you select it, with a progress bar. The form shows the file name and size, and offers **Remove** and **Replace**. **Run** is disabled while an upload runs or after it fails. A failed upload offers **Remove**. **Cancel** of a **Replace**, and **Remove** after a failed **Replace**, return to the file the field had before.
 
 On the job page, the **Input files** card lists the files of the job with a download link.
 
-On [Re-run](/guides/rerun-and-restart/#files), the field shows the file of the source job. Keep it, or choose **Replace** to upload another file.
+On [Re-run](/guides/rerun-and-restart/#files), the field shows the file of the source job. Keep it, or choose **Replace** to upload another file. If you cancel the **Replace**, or remove a failed replacement, the field shows the file of the source job again.
 
 ### REST API
 
@@ -106,7 +106,7 @@ stroem-api trigger import-report --file data_file=./report.csv
 
 `--file FIELD=PATH` can be repeated. The CLI uploads each file, then executes the task with the IDs. A key that you give in both `--input` and `--file` is an error.
 
-`stroem run` runs a task locally without a server. The value of a `file` field is a local path. The CLI checks that it is a regular file and copies it read-only to `{temp}/stroem-run-inputs-{uuid}/{file_id}/{safe_name}`, so the path in the script has the same shape as on the server. The directory is removed when the run ends:
+`stroem run` runs a task locally without a server. The value of a `file` field is a local path. The CLI checks that it is a regular file and copies it read-only to `{temp}/stroem-run-inputs-{uuid}/{file_id}/{safe_name}`, so the path in the script has the same shape as on the server. Only your user can open `stroem-run-inputs-{uuid}` (mode `0700`), so other users of the host cannot read the copy. The directory is removed when the run ends:
 
 ```sh
 stroem run import-report --input '{"data_file": "./report.csv"}'
@@ -209,7 +209,7 @@ A file lives as long as a job uses it. When job retention deletes a job, the lin
 | `Source job not found` (`404`) | An upload with `source_job_id`: the job does not exist, or you may not view it |
 | `could not load the job's input files` | The server could not read the job's files when a worker claimed the step (a database error). Step `retry:` applies |
 | `file is larger than N bytes` (`413`) | The file is over `input_files.max_file_bytes` |
-| `file storage is not configured` (`503`) | The server has no archive for blobs. See [Storage](/operations/storage/#input-files) |
+| `file storage is not configured` (`503`) | The server has no archive for blobs. It refuses uploads, and every run with a file value, also a Re-run or Restart of a job with a file. A step of a job that already has files fails when a worker claims it. See [Storage](/operations/storage/#input-files) |
 | `this step has file inputs, which the worker does not support; upgrade the worker` | An old worker claimed a step of a job that has files. Upgrade the workers. Step `retry:` applies |
 | `Input field 'f': inline content is larger than N bytes` | An MCP inline file is over the inline limit. Use `create_upload_url` |
 | `upload URLs need auth.base_url; …` | Set `auth.base_url`, or send the file inline |
