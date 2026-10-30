@@ -118,9 +118,58 @@ async fn attach_lineage_requires_attachment_on_source() {
     let f = make_file(&pool, "ws", "t", Some(u)).await;
     let rule = [AttachRule::Lineage { job_id: source }];
 
+    // The source holds a DIFFERENT file: the lineage rule must bind file_id.
+    let g = make_file(&pool, "ws", "t", Some(u)).await;
+    assert!(attach(&pool, source, "g", &g, &[own("ws", "t", Some(u), 3600)]).await);
     assert!(!attach(&pool, newjob, "a", &f, &rule).await);
     assert!(attach(&pool, source, "a", &f, &[own("ws", "t", Some(u), 3600)]).await);
     assert!(attach(&pool, newjob, "a", &f, &rule).await);
+
+    // Several rules: any match wins, in either order (Re-run shape).
+    let u2 = make_user(&pool).await;
+    let j2 = create_job(&pool, "ws", "t").await;
+    let j3 = create_job(&pool, "ws", "t").await;
+    let no_own = own("ws", "t", Some(u2), 3600);
+    assert!(
+        attach(
+            &pool,
+            j2,
+            "a",
+            &f,
+            &[no_own, AttachRule::Lineage { job_id: source }]
+        )
+        .await
+    );
+    // A job holding no attachment: a non-matching lineage source.
+    let empty = create_job(&pool, "ws", "t").await;
+    assert!(
+        attach(
+            &pool,
+            j3,
+            "a",
+            &f,
+            &[
+                AttachRule::Lineage { job_id: empty },
+                own("ws", "t", Some(u), 3600)
+            ]
+        )
+        .await
+    );
+    // None matching -> false.
+    let j4 = create_job(&pool, "ws", "t").await;
+    assert!(
+        !attach(
+            &pool,
+            j4,
+            "a",
+            &f,
+            &[
+                AttachRule::Lineage { job_id: empty },
+                own("ws", "t", Some(u2), 3600)
+            ]
+        )
+        .await
+    );
     let got = JobInputFileRepo::get_attached(&pool, newjob, &f)
         .await
         .unwrap();
