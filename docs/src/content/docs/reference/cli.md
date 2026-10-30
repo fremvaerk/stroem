@@ -30,7 +30,12 @@ stroem run my-task --path /path/to/workspace
 
 # Run with input
 stroem run deploy --input '{"env": "staging"}'
+
+# A file input field takes a local path
+stroem run import-report --input '{"data_file": "./report.csv"}'
 ```
+
+For a [`file` input field](/guides/file-inputs/) the value is a local path. The CLI checks that it is a regular file and copies it to a read-only temporary directory, so the path in the script has the same shape as on a server.
 
 Supports:
 - DAG dependency ordering
@@ -131,7 +136,12 @@ stroem-api trigger hello-world --input '{"name": "CLI"}'
 
 # Trigger in a specific workspace
 stroem-api trigger etl-pipeline --workspace data-team --input '{"date": "2025-01-01"}'
+
+# Give a file to a file input field (repeatable)
+stroem-api trigger import-report --file data_file=./report.csv
 ```
+
+`--file FIELD=PATH` uploads the file (streamed), then executes the task with the file ID as the value of `FIELD`. A key that appears in both `--input` and `--file` is an error. See [File Inputs](/guides/file-inputs/).
 
 ### `status`
 

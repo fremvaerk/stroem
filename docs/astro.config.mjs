@@ -62,6 +62,7 @@ export default defineConfig({
             { label: "Git Refs", slug: "guides/git-refs" },
             { label: "Task State", slug: "guides/task-state" },
             { label: "Artifacts", slug: "guides/artifacts" },
+            { label: "File Inputs", slug: "guides/file-inputs" },
             { label: "Event Sources", slug: "guides/event-sources" },
             { label: "Multi-Workspace", slug: "guides/multi-workspace" },
             { label: "MCP Integration", slug: "guides/mcp" },
@@ -103,6 +104,10 @@ export default defineConfig({
             {
               label: "Migration 053 — Trigger Run Indexes",
               slug: "operations/migration-053",
+            },
+            {
+              label: "Migration 054 — Input Files",
+              slug: "operations/migration-054",
             },
             {
               label: "Upgrading to 0.18.1 — JSON Inputs",

@@ -32,6 +32,8 @@ the worker token.
 | `stroem_http_requests_total` | `method`, `route`, `status` | Requests served on `/api/*`. `route` uses the matched Axum pattern (e.g. `/api/jobs/{id}`), not raw URIs. |
 | `stroem_jobs_created_total` | `source_type` | Jobs created. `source_type` is one of `api`, `user`, `scheduler`, `webhook`, `event_source`, `hook`, `task`, `retry`, `rerun`, `restart`. |
 | `stroem_jobs_completed_total` | `status` | Jobs reaching terminal state. `status` is `completed`, `failed`, `cancelled`, or `skipped`. |
+| `stroem_input_file_uploads_total` | `origin`, `result` | Input file uploads. `origin` is `api`, `mcp_inline` or `mcp_url`. `result` is `ok`, `too_large`, `invalid_name` or `error`. See [File Inputs](/guides/file-inputs/). |
+| `stroem_input_file_bytes_total` | `origin` | Bytes of input files stored. |
 
 ### Histogram
 

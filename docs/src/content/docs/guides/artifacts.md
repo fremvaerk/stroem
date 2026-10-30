@@ -56,7 +56,7 @@ On unsupported runners, `$ARTIFACTS_DIR` is unset; scripts that try `> "$ARTIFAC
 
 ## Viewing & downloading
 
-UI: a new **Artifacts** section appears near the top of the Job Detail page. Safe MIME types (PNG, JPEG, GIF, WebP, PDF, plain text, Markdown) open inline in a new tab. Everything else — including HTML and SVG (for XSS hardening) — downloads.
+UI: a new **Artifacts** section appears near the top of the Job Detail page. Safe MIME types (PNG, JPEG, GIF, WebP, plain text) open inline in a new tab. Everything else — including HTML and SVG (for XSS hardening) — downloads.
 
 CLI:
 
@@ -77,6 +77,10 @@ on_success:
 ```
 
 MCP: `list_artifacts(job_id)` and `get_artifact(job_id, name)`. `get_artifact` returns text/JSON/YAML/XML as inline text, `image/*` as image blocks the agent can view, and other binary (PDF, archives, …) as a base64 blob resource — all capped at 1 MiB. Larger artifacts must be fetched via the HTTP artifact URL from `list_artifacts` rather than embedded in the agent's context.
+
+:::note
+Artifacts are files that steps produce. To give a file *to* a task, see [File Inputs](/guides/file-inputs/).
+:::
 
 ## Retention
 

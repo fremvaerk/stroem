@@ -130,6 +130,8 @@ const sections: Section[] = [
     desc: "ref: on actions, type: task and triggers — branch/tag/SHA, templated refs, pinned jobs, per-ref state", group: "Guides" },
   { file: "guides/artifacts.md", title: "Artifacts", slug: "artifacts",
     desc: "Per-job files via /artifacts/: limits, MIME sniffing, UI/CLI/MCP download", group: "Guides" },
+  { file: "guides/file-inputs.md", title: "File Inputs", slug: "file-inputs",
+    desc: "type: file input fields: upload via UI/REST/CLI/MCP, paths in steps, limits", group: "Guides" },
   { file: "guides/mcp.md", title: "MCP Integration", slug: "mcp",
     desc: "Model Context Protocol server for exposing Strøm to AI agents", group: "Guides" },
   { file: "reference/workflow-yaml.md", title: "Workflow YAML Reference", slug: "workflow-yaml",

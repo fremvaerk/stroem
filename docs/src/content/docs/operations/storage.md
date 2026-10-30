@@ -73,6 +73,37 @@ artifact_storage:
 
 Artifacts have no independent TTL. They live exactly as long as the `job` row does and are deleted by the existing [`retention.job_days` sweep](/operations/retention/). Deletion is two-phase: the sweep first removes blobs via `BlobArchive::delete_prefix`, then deletes the row (the FK is `RESTRICT`, so the order is enforced).
 
+## Input files
+
+Files that people and programs upload for [`file` input fields](/guides/file-inputs/) use the same `BlobArchive` backends. Configure them with the `input_files` block:
+
+```yaml
+input_files:
+  max_file_bytes: 104857600      # 100 MiB, default
+  upload_ttl_secs: 86400         # unused uploads, 24 h
+  upload_url_ttl_secs: 900       # MCP upload URLs, 15 min
+  mcp_inline_max_bytes: 1048576  # decoded, 1 MiB
+  prefix: "inputs/"
+  # archive: { … }               # optional, same shape as log_storage.archive
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `max_file_bytes` | 100 MiB | Largest accepted upload. A larger body gets `413` |
+| `upload_ttl_secs` | `86400` | Age after which an upload that no job uses is deleted |
+| `upload_url_ttl_secs` | `900` | Lifetime of an MCP upload URL (single use) |
+| `mcp_inline_max_bytes` | `1048576` | Largest inline MCP file, decoded. Must not be more than 1468006 (1.4 MiB), so the base64 form fits the `/mcp` body limit |
+| `prefix` | `"inputs/"` | Key prefix for input file blobs |
+| `archive` | — | Dedicated backend. Omit to inherit |
+
+All values must be positive. Environment variables use the `STROEM__INPUT_FILES__…` form, for example `STROEM__INPUT_FILES__MAX_FILE_BYTES`.
+
+**Backend fallback:** `input_files.archive` if set, else the artifact archive, else the log archive. With no archive configured, the upload route answers `503 file storage is not configured`, jobs with `file` fields cannot be created, and the server logs one warning at startup.
+
+**Key layout:** `{archive_prefix}{prefix}{workspace}/{file_id}`. A blob is shared by every job that uses the file.
+
+Uploads and downloads stream: the server does not hold a whole file in memory.
+
 ## Credentials
 
 S3 credentials use the standard AWS credential chain: environment variables, IAM role, or `~/.aws/credentials`. No artifact-specific credential settings are needed.

@@ -25,9 +25,12 @@ Registers a worker and returns a unique worker ID. Called once on worker startup
 {
   "name": "worker-1",
   "capabilities": ["script", "docker"],
-  "tags": []
+  "tags": [],
+  "inputs_dir": "/tmp/stroem-inputs-3f9c…"
 }
 ```
+
+`inputs_dir` is optional: an absolute path that the worker will create for this claim. It tells the server that the worker supports [file inputs](/guides/file-inputs/), and it is the root of the file paths for `runner: local` steps. A relative path gives `400`. If the step has input files and the request has no `inputs_dir`, the step fails with `this step has file inputs, which the worker does not support; upgrade the worker`.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -99,6 +102,16 @@ A step is claimed only when BOTH:
   "input": { "name": "World" }
 }
 ```
+
+A step of a job with [file inputs](/guides/file-inputs/) also carries `input_files`, one entry for each distinct file the step's templates expose (every runner step of the job gets every file of the job; agent steps get none). The server has already rendered the paths, so the worker must place each file at exactly `{root}/{file_id}/{safe_name}`:
+
+```json
+"input_files": [
+  { "file_id": "file_7f3a…", "safe_name": "report.csv", "size_bytes": 1234, "sha256": "9f86d081…" }
+]
+```
+
+The field is absent when the step has no files.
 
 The `action_spec` contains the fully resolved action definition with templates already rendered. The `runner` field indicates how to execute: `local`, `docker`, `pod`, or `none` (for `type: docker`/`type: pod` actions).
 
@@ -264,6 +277,24 @@ How a requested `revision` is served:
 | `304` | Not Modified (workspace unchanged) |
 | `404` | Workspace not found, the commit does not exist in the git repository, or a folder workspace's revision is no longer available |
 | `503` | The commit exists but cannot be fetched right now (the git server is unreachable from this replica). Carries `Retry-After: 5`. The worker tries again every 5 seconds, up to 12 attempts in all (about a minute), then fails the step |
+
+## Download Input File
+
+```
+GET /worker/jobs/{job_id}/input-files/{file_id}
+```
+
+Streams one input file of a job. Used by the worker for `local` and `docker` steps, and by the pod init container `stroem-inputs-init`. The file must be attached to that job, else `404`.
+
+**Response headers:** `Content-Type: application/octet-stream`, `Content-Length`.
+
+| Status | Description |
+|--------|-------------|
+| `200` | The file |
+| `404` | The file is not attached to the job, or the blob is missing |
+| `503` | No blob storage is configured, or the blob cannot be read right now. Carries `Retry-After: 5`. The worker tries again every 5 seconds, up to 12 attempts in all |
+
+The worker checks the size and SHA-256 from the claim. A mismatch fails the step before the runner starts.
 
 ## Download State Snapshot
 

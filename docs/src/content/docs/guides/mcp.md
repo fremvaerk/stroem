@@ -58,7 +58,7 @@ mcp:
 
 ## Available Tools
 
-The MCP server provides ten tools for interacting with Strøm:
+The MCP server provides eleven tools for interacting with Strøm:
 
 | Tool | Description | Parameters |
 |------|-------------|------------|
@@ -72,6 +72,7 @@ The MCP server provides ten tools for interacting with Strøm:
 | `cancel_job` | Cancel a running or pending job | `job_id` |
 | `list_artifacts` | List a job's artifacts (name, content type, size, download URL) | `job_id` |
 | `get_artifact` | Fetch one artifact's content | `job_id`, `name` |
+| `create_upload_url` | Get a single-use URL to upload a file for a `file` input field | `workspace`, `task_name`, `file_name` |
 
 When the log is longer than the tail, the result ends with `[truncated: showing the last 256.0 KiB of up to 83.3 MiB — earlier lines omitted]`.
 
@@ -80,6 +81,34 @@ When the log is longer than the tail, the result ends with `[truncated: showing 
 blocks the agent can view, and any other binary (PDF, archives, …) as a base64
 blob resource. Artifacts larger than 1 MiB are not inlined — download them via
 the HTTP artifact API (the URL is in `list_artifacts`) instead.
+
+### Sending files
+
+A task can have [`file` input fields](/guides/file-inputs/). `get_task` shows them as `type: file`. There are two ways to give such a field a file with `execute_task`.
+
+**Inline**, for small files. Put an object in `input` instead of a value. The decoded content must not be more than 1 MiB (`input_files.mcp_inline_max_bytes`):
+
+```
+Call: execute_task(
+  workspace="default",
+  task_name="import-report",
+  input={ "data_file": { "name": "report.csv", "content": "id,total\n1,10\n" } }
+)
+```
+
+Use `content_base64` instead of `content` for binary data. A file over the limit gives an error that names the field and the limit.
+
+**Upload URL**, for larger files and for agents that have a shell:
+
+```
+Call: create_upload_url(workspace="default", task_name="import-report", file_name="report.csv")
+Returns: { "upload_url": "https://strom.example.com/api/uploads/…", "method": "POST",
+           "max_bytes": 104857600, "expires_at": "2026-10-30T12:15:00Z" }
+```
+
+Then `POST` the raw bytes to `upload_url` with no `Authorization` header (`curl --data-binary @report.csv "$upload_url"`). The URL token is the credential. The URL works once and expires after 15 minutes (`input_files.upload_url_ttl_secs`). The answer holds the `file_id`. Pass it as the field value in `execute_task`.
+
+`create_upload_url` needs `auth.base_url` in the server config. Without it the tool answers `upload URLs need auth.base_url; send the file inline or use the REST upload`. It needs the Run permission on the task.
 
 ## Authentication
 
