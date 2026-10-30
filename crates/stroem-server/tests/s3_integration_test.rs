@@ -666,3 +666,102 @@ async fn s3_put_stream_dropped_aborts_multipart() -> Result<()> {
     assert!(archive.get_stream("inputs/ws/file_drop").await?.is_none());
     Ok(())
 }
+
+/// One request: `"METHOD uri"` and the names of its checksum headers.
+type SeenRequest = (String, Vec<String>);
+
+/// Records, per request other than GET/HEAD, the names of its checksum
+/// headers (`x-amz-checksum-*`, `x-amz-sdk-checksum-algorithm`, …).
+#[derive(Debug, Clone, Default)]
+struct ChecksumHeaders(std::sync::Arc<std::sync::Mutex<Vec<SeenRequest>>>);
+
+impl aws_sdk_s3::config::Intercept for ChecksumHeaders {
+    fn name(&self) -> &'static str {
+        "ChecksumHeaders"
+    }
+
+    fn read_before_transmit(
+        &self,
+        context: &aws_sdk_s3::config::interceptors::BeforeTransmitInterceptorContextRef<'_>,
+        _runtime_components: &aws_sdk_s3::config::RuntimeComponents,
+        _cfg: &mut aws_sdk_s3::config::ConfigBag,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let request = context.request();
+        if matches!(request.method(), "GET" | "HEAD") {
+            return Ok(());
+        }
+        let names: Vec<String> = request
+            .headers()
+            .iter()
+            .map(|(name, _)| name.to_ascii_lowercase())
+            .filter(|name| name.contains("checksum"))
+            .collect();
+        let what = format!("{} {}", request.method(), request.uri());
+        self.0.lock().unwrap().push((what, names));
+        Ok(())
+    }
+}
+
+/// Under `request_checksum_calculation = WhenRequired` (AWS's advice for
+/// third-party S3-compatible stores) a multipart upload names no checksum
+/// algorithm anywhere; under the default it uses CRC32 throughout. Both
+/// round-trip.
+#[tokio::test]
+async fn s3_put_stream_multipart_follows_the_client_checksum_setting() -> Result<()> {
+    use aws_sdk_s3::config::RequestChecksumCalculation;
+
+    let (_container, endpoint) = minio::start().await?;
+    let bucket = format!("test-{}", Uuid::new_v4());
+    let base = minio::s3_client(&endpoint);
+    create_bucket(&base, &bucket).await?;
+    let data = pattern(S3_PART_BYTES + 3 * MIB);
+
+    for (setting, key) in [
+        (None, "inputs/ws/file_default"),
+        (
+            Some(RequestChecksumCalculation::WhenRequired),
+            "inputs/ws/file_when_required",
+        ),
+    ] {
+        let seen = ChecksumHeaders::default();
+        let mut config = base.config().to_builder().interceptor(seen.clone());
+        if let Some(setting) = setting {
+            config = config.request_checksum_calculation(setting);
+        }
+        let client = aws_sdk_s3::Client::from_conf(config.build());
+        let archive = S3BlobArchive::from_client(client, bucket.clone());
+
+        archive
+            .put_stream(key, "text/plain", body_of(pieces(&data, 64 * 1024)))
+            .await?;
+        let tag = etag(&base, &bucket, key).await?;
+        assert!(
+            tag.trim_matches('"').ends_with("-2"),
+            "multipart, ETag {tag}"
+        );
+        assert!(
+            read_back(&archive, key).await?.1 == data,
+            "{key}: content differs"
+        );
+
+        let requests = seen.0.lock().unwrap().clone();
+        assert_eq!(
+            requests.len(),
+            4,
+            "create, 2 parts, complete: {requests:#?}"
+        );
+        if setting.is_some() {
+            assert!(
+                requests.iter().all(|(_, names)| names.is_empty()),
+                "WhenRequired must name no checksum: {requests:#?}"
+            );
+        } else {
+            assert!(
+                requests[..3].iter().all(|(_, names)| !names.is_empty()),
+                "the default declares CRC32 on create and every part: {requests:#?}"
+            );
+        }
+    }
+    assert_eq!(open_uploads(&base, &bucket).await?, 0);
+    Ok(())
+}

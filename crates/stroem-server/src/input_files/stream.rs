@@ -55,6 +55,11 @@ pub struct Stored {
 /// `max_bytes` the stream errors, the backend discards the partial object,
 /// and the result is `Err(TooLarge)`. Never buffers more than one backend
 /// part.
+///
+/// Nothing is kept on any error: after a storage error `key` is deleted
+/// (best effort), since the backend may have stored the object before it
+/// failed. So `key` must be a fresh key the caller owns (input-file keys
+/// end in a new `file_<uuid>`), never one holding a blob worth keeping.
 pub async fn put_counted(
     archive: &dyn BlobArchive,
     key: &str,
@@ -97,7 +102,14 @@ pub async fn put_counted(
             _ => PutError::TooLarge { max: max_bytes },
         });
     }
-    result.map_err(PutError::Storage)?;
+    if let Err(e) = result {
+        // The object may exist anyway: the local `.ct` rename failing after
+        // the data rename, an S3 completion whose response was lost.
+        if let Err(del) = archive.delete(key).await {
+            tracing::warn!(key, "discarding a failed upload failed: {del:#}");
+        }
+        return Err(PutError::Storage(e));
+    }
     Ok(Stored {
         size_bytes,
         sha256: hex::encode(hasher.finalize()),
@@ -326,6 +338,51 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, PutError::Storage(_)), "unexpected: {err:?}");
+    }
+
+    /// A backend that stores the object and then fails anyway (the local
+    /// `.ct` rename failing after the data rename; an S3 completion whose
+    /// response is lost).
+    struct StoresThenFails(LocalBlobArchive);
+
+    #[async_trait]
+    impl BlobArchive for StoresThenFails {
+        async fn put(&self, key: &str, content_type: &str, data: Bytes) -> Result<()> {
+            self.0.put(key, content_type, data).await
+        }
+        async fn get(&self, key: &str) -> Result<Option<Blob>> {
+            self.0.get(key).await
+        }
+        async fn delete(&self, key: &str) -> Result<()> {
+            self.0.delete(key).await
+        }
+        async fn delete_prefix(&self, prefix: &str) -> Result<()> {
+            self.0.delete_prefix(prefix).await
+        }
+        async fn put_stream(
+            &self,
+            key: &str,
+            content_type: &str,
+            body: BoxStream<'static, Result<Bytes>>,
+        ) -> Result<()> {
+            self.0.put_stream(key, content_type, body).await?;
+            anyhow::bail!("response lost after the object was stored")
+        }
+    }
+
+    #[tokio::test]
+    async fn put_counted_storage_error_keeps_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = StoresThenFails(LocalBlobArchive::new(tmp.path().to_path_buf()));
+        let body = chunks(vec![Ok(Bytes::from_static(b"abc"))]);
+        let err = put_counted(&archive, "inputs/ws/file_lost", "text/plain", body, 1024)
+            .await
+            .unwrap_err();
+        let PutError::Storage(e) = err else {
+            panic!("expected Storage, got {err:?}");
+        };
+        assert_eq!(e.to_string(), "response lost after the object was stored");
+        assert!(archive.get("inputs/ws/file_lost").await.unwrap().is_none());
     }
 
     /// A backend that swallows a stream error and stores what it got: the

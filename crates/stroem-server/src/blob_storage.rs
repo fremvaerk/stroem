@@ -431,6 +431,7 @@ mod s3_blob_archive {
     use super::*;
     use crate::config::ArchiveConfig;
     use crate::input_files::stream::S3_PART_BYTES;
+    use aws_sdk_s3::config::RequestChecksumCalculation;
     use aws_sdk_s3::error::DisplayErrorContext;
     use aws_sdk_s3::operation::get_object::GetObjectError;
     use aws_sdk_s3::operation::head_object::HeadObjectError;
@@ -502,14 +503,33 @@ mod s3_blob_archive {
             Self { client, bucket }
         }
 
-        async fn create_upload(&self, key: &str, content_type: &str) -> Result<OpenUpload> {
+        /// Whether a multipart upload declares CRC32: unless the client is
+        /// set to `request_checksum_calculation = WhenRequired` (env
+        /// `AWS_REQUEST_CHECKSUM_CALCULATION`, profile setting; AWS's advice
+        /// for third-party S3-compatible stores). Under `WhenRequired` the
+        /// SDK computes no `UploadPart` checksum, but still sends the
+        /// algorithm header when one is set, so an upload declaring CRC32
+        /// would then fail on its parts.
+        fn multipart_crc32(&self) -> bool {
+            !matches!(
+                self.client.config().request_checksum_calculation(),
+                Some(RequestChecksumCalculation::WhenRequired)
+            )
+        }
+
+        async fn create_upload(
+            &self,
+            key: &str,
+            content_type: &str,
+            crc32: bool,
+        ) -> Result<OpenUpload> {
             let out = self
                 .client
                 .create_multipart_upload()
                 .bucket(&self.bucket)
                 .key(key)
                 .content_type(content_type)
-                .checksum_algorithm(ChecksumAlgorithm::Crc32)
+                .set_checksum_algorithm(crc32.then_some(ChecksumAlgorithm::Crc32))
                 .send()
                 .await
                 .with_context(|| format!("S3 create multipart upload {key}"))?;
@@ -522,6 +542,7 @@ mod s3_blob_archive {
                 bucket: self.bucket.clone(),
                 key: key.to_string(),
                 upload_id,
+                crc32,
                 parts: Vec::new(),
                 armed: true,
             })
@@ -533,6 +554,7 @@ mod s3_blob_archive {
             key: &str,
             content_type: &str,
             mut body: BoxStream<'static, Result<Bytes>>,
+            crc32: bool,
             upload: &mut Option<OpenUpload>,
         ) -> Result<()> {
             use futures_util::StreamExt;
@@ -546,7 +568,9 @@ mod s3_blob_archive {
                         let full = Bytes::from(std::mem::take(&mut part));
                         let open = match upload {
                             Some(open) => open,
-                            None => upload.insert(self.create_upload(key, content_type).await?),
+                            None => {
+                                upload.insert(self.create_upload(key, content_type, crc32).await?)
+                            }
                         };
                         open.send_part(full).await?;
                         part = Vec::with_capacity(S3_PART_BYTES);
@@ -601,6 +625,9 @@ mod s3_blob_archive {
         bucket: String,
         key: String,
         upload_id: String,
+        /// Declared CRC32 at creation: every part and the completion
+        /// carry it too (see `S3BlobArchive::multipart_crc32`).
+        crc32: bool,
         parts: Vec<CompletedPart>,
         armed: bool,
     }
@@ -616,18 +643,23 @@ mod s3_blob_archive {
                 .key(&self.key)
                 .upload_id(&self.upload_id)
                 .part_number(number)
-                .checksum_algorithm(ChecksumAlgorithm::Crc32)
+                .set_checksum_algorithm(self.crc32.then_some(ChecksumAlgorithm::Crc32))
                 .body(ByteStream::from(data))
                 .send()
                 .await
                 .with_context(|| format!("S3 upload part {number} of {}", self.key))?;
-            // The upload was created with CRC32, so completing it needs each
-            // part's checksum as well as its ETag.
+            // An upload created with CRC32 needs each part's checksum as
+            // well as its ETag to complete; one created without names none.
+            let checksum = if self.crc32 {
+                out.checksum_crc32().map(str::to_string)
+            } else {
+                None
+            };
             self.parts.push(
                 CompletedPart::builder()
                     .part_number(number)
                     .set_e_tag(out.e_tag().map(str::to_string))
-                    .set_checksum_crc32(out.checksum_crc32().map(str::to_string))
+                    .set_checksum_crc32(checksum)
                     .build(),
             );
             Ok(())
@@ -651,10 +683,12 @@ mod s3_blob_archive {
         }
 
         /// Best effort: a failure is logged, never returned (the caller
-        /// already has the error that made it abort).
+        /// already has the error that made it abort). Disarmed only after
+        /// the request: if this future is dropped mid-abort, `Drop` still
+        /// aborts (a second abort only logs `NoSuchUpload`).
         async fn abort(mut self) {
-            self.armed = false;
             abort_upload(&self.client, &self.bucket, &self.key, &self.upload_id).await;
+            self.armed = false;
         }
     }
 
@@ -752,8 +786,11 @@ mod s3_blob_archive {
             content_type: &str,
             body: BoxStream<'static, Result<Bytes>>,
         ) -> Result<()> {
+            let crc32 = self.multipart_crc32();
             let mut upload = None;
-            let result = self.put_parts(key, content_type, body, &mut upload).await;
+            let result = self
+                .put_parts(key, content_type, body, crc32, &mut upload)
+                .await;
             if result.is_err() {
                 if let Some(open) = upload.take() {
                     open.abort().await;
