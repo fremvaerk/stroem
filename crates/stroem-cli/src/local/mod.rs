@@ -17,7 +17,9 @@ pub enum Commands {
     Run {
         /// Task name
         task: String,
-        /// Input as JSON string
+        /// Input as JSON string. A `file` field takes the path of a local
+        /// file: `--input '{"data_file": "./report.csv"}'`. The file is copied
+        /// read-only into a temp directory for the run.
         #[arg(long)]
         input: Option<String>,
     },

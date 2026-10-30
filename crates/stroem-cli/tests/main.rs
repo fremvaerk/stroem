@@ -4,3 +4,4 @@
 mod cli_error_report;
 mod json_input;
 mod run_exit_code;
+mod run_file_inputs;

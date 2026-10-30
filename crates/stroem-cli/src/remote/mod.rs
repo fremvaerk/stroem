@@ -24,6 +24,10 @@ pub enum Commands {
         /// Input as JSON string
         #[arg(long)]
         input: Option<String>,
+        /// Upload a local file for a `file` input field (repeatable). The
+        /// file is sent to the server first, then the task runs with its id.
+        #[arg(long = "file", value_name = "FIELD=PATH")]
+        files: Vec<String>,
     },
     /// Get job status
     Status {
@@ -141,8 +145,17 @@ pub async fn dispatch(command: Commands, server: &str, token: Option<&str>) -> R
             task,
             workspace,
             input,
+            files,
         } => {
-            trigger::cmd_trigger(&http_client, server, &workspace, &task, input.as_deref()).await?;
+            trigger::cmd_trigger(
+                &http_client,
+                server,
+                &workspace,
+                &task,
+                input.as_deref(),
+                &files,
+            )
+            .await?;
         }
         Commands::Status { job_id } => {
             status::cmd_status(&http_client, server, &job_id).await?;
@@ -278,6 +291,7 @@ mod tests {
                 task,
                 workspace,
                 input,
+                ..
             } => {
                 assert_eq!(task, "my-task");
                 assert_eq!(workspace, "default");
@@ -304,6 +318,7 @@ mod tests {
                 task,
                 workspace,
                 input,
+                ..
             } => {
                 assert_eq!(task, "deploy");
                 assert_eq!(workspace, "prod");
@@ -397,6 +412,7 @@ mod tests {
                 task,
                 workspace,
                 input,
+                ..
             } => {
                 assert_eq!(task, "deploy");
                 assert_eq!(workspace, "prod");
