@@ -89,14 +89,14 @@ input_files:
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `max_file_bytes` | 100 MiB | Largest accepted upload. A larger body gets `413` |
-| `upload_ttl_secs` | `86400` | Age after which an upload that no job uses is deleted |
-| `upload_url_ttl_secs` | `900` | Lifetime of an MCP upload URL (single use) |
+| `max_file_bytes` | 100 MiB | Largest accepted upload. A larger body gets `413`. Must not be more than 83886080000 (10 000 S3 multipart parts of 8 MiB) |
+| `upload_ttl_secs` | `86400` | Age after which an upload that no job uses is deleted. Must not be more than 2592000 (30 days) |
+| `upload_url_ttl_secs` | `900` | Lifetime of an MCP upload URL (single use). Must not be more than 86400 (24 hours) |
 | `mcp_inline_max_bytes` | `1048576` | Largest inline MCP file, decoded. Must not be more than 1468006 (1.4 MiB), so the base64 form fits the `/mcp` body limit |
 | `prefix` | `"inputs/"` | Key prefix for input file blobs |
 | `archive` | — | Dedicated backend. Omit to inherit |
 
-All values must be positive. Environment variables use the `STROEM__INPUT_FILES__…` form, for example `STROEM__INPUT_FILES__MAX_FILE_BYTES`.
+All values must be positive. The server does not start when a value is more than its maximum; the error names the key and the maximum. Environment variables use the `STROEM__INPUT_FILES__…` form, for example `STROEM__INPUT_FILES__MAX_FILE_BYTES`.
 
 **Backend fallback:** `input_files.archive` if set, else the artifact archive, else the log archive. With no archive configured, every upload fails with `file storage is not configured` (`503` on the REST and upload-URL routes, a tool error for an MCP inline file) and the worker download route answers `503`, so no job can get a file; a task whose `file` fields are all optional still runs without one. The server logs `input_files: no archive configured; file uploads answer 503` once at startup, and the [orphan sweep](/operations/retention/#input-files) skips files.
 

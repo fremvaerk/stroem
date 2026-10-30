@@ -218,6 +218,22 @@ impl Default for ArtifactStorageConfig {
 /// decoded size must fit the 2 MiB `/mcp` body limit.
 pub const MAX_MCP_INLINE_BYTES: u64 = 1_468_006;
 
+/// Upper bound for `input_files.upload_ttl_secs` (30 days). Larger values
+/// overflow the expiry arithmetic (`chrono::Duration::seconds` panics) and the
+/// sweep's signed age.
+pub const MAX_UPLOAD_TTL_SECS: u64 = 2_592_000;
+
+/// Upper bound for `input_files.upload_url_ttl_secs` (24 hours).
+pub const MAX_UPLOAD_URL_TTL_SECS: u64 = 86_400;
+
+/// Most parts in one S3 multipart upload.
+pub const S3_MAX_PARTS: u64 = 10_000;
+
+/// Upper bound for `input_files.max_file_bytes`: an S3 multipart upload has at
+/// most [`S3_MAX_PARTS`] parts of `S3_PART_BYTES` each.
+pub const MAX_INPUT_FILE_BYTES: u64 =
+    S3_MAX_PARTS * crate::input_files::stream::S3_PART_BYTES as u64;
+
 /// Input file (`type: file`) storage and upload limits.
 ///
 /// All fields optional; absent section = defaults. The blob backend falls back
@@ -1041,6 +1057,25 @@ impl ServerConfig {
                 anyhow::bail!(
                     "input_files.mcp_inline_max_bytes must be at most {MAX_MCP_INLINE_BYTES} (the base64 form must fit the 2 MiB /mcp body limit), got {}",
                     f.mcp_inline_max_bytes
+                );
+            }
+            if f.upload_ttl_secs > MAX_UPLOAD_TTL_SECS {
+                anyhow::bail!(
+                    "input_files.upload_ttl_secs must be at most {MAX_UPLOAD_TTL_SECS} (30 days), got {}",
+                    f.upload_ttl_secs
+                );
+            }
+            if f.upload_url_ttl_secs > MAX_UPLOAD_URL_TTL_SECS {
+                anyhow::bail!(
+                    "input_files.upload_url_ttl_secs must be at most {MAX_UPLOAD_URL_TTL_SECS} (24 hours), got {}",
+                    f.upload_url_ttl_secs
+                );
+            }
+            if f.max_file_bytes > MAX_INPUT_FILE_BYTES {
+                anyhow::bail!(
+                    "input_files.max_file_bytes must be at most {MAX_INPUT_FILE_BYTES} ({S3_MAX_PARTS} S3 parts of {} bytes), got {}",
+                    crate::input_files::stream::S3_PART_BYTES,
+                    f.max_file_bytes
                 );
             }
         }
@@ -3456,6 +3491,46 @@ worker_token: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             err,
             "input_files.mcp_inline_max_bytes must be at most 1468006 (the base64 form must fit the 2 MiB /mcp body limit), got 1468007"
         );
+    }
+
+    #[test]
+    fn validate_caps_input_file_ttls_and_size() {
+        type Setter = fn(&mut InputFilesConfig);
+        let at_cap: [Setter; 3] = [
+            |i| i.upload_ttl_secs = 2_592_000,
+            |i| i.upload_url_ttl_secs = 86_400,
+            |i| i.max_file_bytes = 83_886_080_000,
+        ];
+        for set in at_cap {
+            input_files_cfg(set).validate().unwrap();
+        }
+        let over: [(Setter, &str); 3] = [
+            (
+                |i| i.upload_ttl_secs = 2_592_001,
+                "input_files.upload_ttl_secs must be at most 2592000 (30 days), got 2592001",
+            ),
+            (
+                |i| i.upload_url_ttl_secs = 86_401,
+                "input_files.upload_url_ttl_secs must be at most 86400 (24 hours), got 86401",
+            ),
+            (
+                |i| i.max_file_bytes = 83_886_080_001,
+                "input_files.max_file_bytes must be at most 83886080000 (10000 S3 parts of 8388608 bytes), got 83886080001",
+            ),
+        ];
+        for (set, msg) in over {
+            let err = input_files_cfg(set).validate().unwrap_err().to_string();
+            assert_eq!(err, msg);
+        }
+        // u64::MAX would overflow `chrono::Duration::seconds` and wrap the
+        // sweep's `as i64` cast negative.
+        for set in [
+            (|i| i.upload_ttl_secs = u64::MAX) as Setter,
+            |i| i.upload_url_ttl_secs = u64::MAX,
+            |i| i.max_file_bytes = u64::MAX,
+        ] {
+            assert!(input_files_cfg(set).validate().is_err());
+        }
     }
 
     #[test]
