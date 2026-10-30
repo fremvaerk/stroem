@@ -6,6 +6,7 @@ pub mod cascade;
 pub mod config;
 pub mod event_source;
 pub mod events;
+pub mod input_files;
 pub mod job_completion;
 pub mod job_creator;
 pub mod leader;

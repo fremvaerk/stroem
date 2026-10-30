@@ -8,15 +8,22 @@
 //! formulas do not model (allocator rounding, the transient copy inside a
 //! `realloc`). `STROEM_PEAK_ALLOC_LARGE=1` grows the incident-shaped fixture
 //! from 8 MiB to 100 MiB (release checklist).
+//!
+//! It also bounds input-file uploads and downloads (file-inputs spec § 9):
+//! a 50 MiB file streamed from disk through `put_counted` and back out
+//! through `download_body`, local and S3.
 
+use bytes::Bytes;
+use futures_core::stream::BoxStream;
 use futures_util::StreamExt;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 use std::sync::Arc;
 use stroem_server::blob_storage::{BlobArchive, LocalBlobArchive};
 use stroem_server::config::LogReadConfig;
+use stroem_server::input_files::stream::{download_body, put_counted};
 use stroem_server::log_read::{tail_body, LogSource, StepFilter};
 use stroem_server::log_storage::{archive_key, JobLogMeta, LogStorage};
 use tempfile::TempDir;
@@ -133,6 +140,98 @@ fn full_archive(l: usize, filtered: bool) -> usize {
 }
 fn full_merged(c: usize, n: usize) -> usize {
     3 * c + 96 * n + R + H + D + K
+}
+
+// File-inputs spec § 9: two 64 KiB stream buffers (the request's chunk and
+// the file's own buffer) plus fixed overhead; for S3, two part buffers
+// (one filling, one in flight) plus the SDK's.
+fn input_local() -> usize {
+    2 * K + MIB
+}
+#[cfg(feature = "s3")]
+fn input_s3() -> usize {
+    2 * stroem_server::input_files::stream::S3_PART_BYTES + 2 * MIB
+}
+
+const INPUT_FILE: usize = 50 * MIB;
+
+/// A 50 MiB file on disk, written 1 MiB at a time: the measured upload
+/// streams it from disk, so only the upload itself allocates.
+async fn input_fixture(dir: &Path) -> PathBuf {
+    use tokio::io::AsyncWriteExt;
+    let path = dir.join("input.bin");
+    let mut file = tokio::fs::File::create(&path).await.unwrap();
+    let mut piece = vec![0u8; MIB];
+    for n in 0..INPUT_FILE / MIB {
+        for (i, b) in piece.iter_mut().enumerate() {
+            *b = (i.wrapping_mul(31) + n) as u8;
+        }
+        file.write_all(&piece).await.unwrap();
+    }
+    file.flush().await.unwrap();
+    path
+}
+
+/// The fixture as a request body: `ReaderStream` over the open file.
+async fn input_body(path: &Path) -> BoxStream<'static, anyhow::Result<Bytes>> {
+    let file = tokio::fs::File::open(path).await.unwrap();
+    Box::pin(
+        tokio_util::io::ReaderStream::with_capacity(file, 64 * KIB)
+            .map(|r| r.map_err(anyhow::Error::from)),
+    )
+}
+
+/// Upload `fixture` with `put_counted`, then drain `download_body` frame by
+/// frame; one warm-up round trip of a small file first (blocking pool,
+/// lazy statics, SDK caches).
+async fn input_cases(
+    report: &mut Report,
+    label: &str,
+    archive: &dyn BlobArchive,
+    fixture: &Path,
+    formula: usize,
+) {
+    let limit = 100 * MIB as u64;
+    let warm = "inputs/ws/file_warmup";
+    let body: BoxStream<'static, anyhow::Result<Bytes>> =
+        Box::pin(futures_util::stream::iter([Ok(Bytes::from_static(
+            b"warm",
+        ))]));
+    put_counted(archive, warm, "application/octet-stream", body, limit)
+        .await
+        .unwrap();
+    drain_body(download_body(archive, warm).await.unwrap().unwrap()).await;
+
+    let key = format!("inputs/ws/file_{}", Uuid::new_v4().simple());
+    let (stored, p) = peak_of(async {
+        let body = input_body(fixture).await;
+        put_counted(archive, &key, "application/octet-stream", body, limit)
+            .await
+            .unwrap()
+    })
+    .await;
+    assert_eq!(stored.size_bytes, INPUT_FILE as u64);
+    report.check(&format!("input upload, {label}"), p, formula);
+
+    let (n, p) = peak_of(async {
+        let body = download_body(archive, &key).await.unwrap().unwrap();
+        drain_body(body).await
+    })
+    .await;
+    assert_eq!(n, INPUT_FILE);
+    report.check(&format!("input download, {label}"), p, formula);
+}
+
+/// Read a response body frame by frame, dropping each; the byte count.
+async fn drain_body(body: axum::body::Body) -> usize {
+    let mut frames = body.into_data_stream();
+    let mut n = 0;
+    while let Some(frame) = frames.next().await {
+        let frame = frame.unwrap();
+        n += frame.len();
+        drop(frame);
+    }
+    n
 }
 
 /// `N'` for a merged read: the complete lines a tail read of `bytes` would
@@ -533,8 +632,18 @@ async fn run(large: bool) {
         );
     }
 
+    // (f) Input files: a 50 MiB upload and download through the local
+    // archive.
+    let inputs = TempDir::new().unwrap();
+    let fixture = input_fixture(inputs.path()).await;
+    {
+        let arch = TempDir::new().unwrap();
+        let archive = LocalBlobArchive::new(arch.path().to_path_buf());
+        input_cases(&mut report, "local", &archive, &fixture, input_local()).await;
+    }
+
     #[cfg(feature = "s3")]
-    s3_cases(&mut report, cfg).await;
+    s3_cases(&mut report, cfg, &fixture).await;
 
     assert!(
         report.over.is_empty(),
@@ -544,7 +653,7 @@ async fn run(large: bool) {
 }
 
 #[cfg(feature = "s3")]
-async fn s3_cases(report: &mut Report, cfg: LogReadConfig) {
+async fn s3_cases(report: &mut Report, cfg: LogReadConfig, fixture: &Path) {
     use stroem_server::blob_storage::S3BlobArchive;
 
     let (_container, endpoint) = minio::start().await.unwrap();
@@ -610,4 +719,6 @@ async fn s3_cases(report: &mut Report, cfg: LogReadConfig) {
         p,
         full_archive(l, false),
     );
+
+    input_cases(report, "s3", archive.as_ref(), fixture, input_s3()).await;
 }

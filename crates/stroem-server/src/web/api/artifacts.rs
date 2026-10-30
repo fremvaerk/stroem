@@ -167,9 +167,8 @@ pub async fn download_artifact(
         .clone()
         .ok_or_else(|| AppError::Internal(anyhow::anyhow!("artifact storage not configured")))?;
     // Stream the blob through to the client rather than buffering up to 100 MiB
-    // per concurrent download. The default `get_stream` impl on `BlobArchive`
-    // wraps the buffered backend, so this works for both `LocalBlobArchive`
-    // and `S3BlobArchive` without further trait changes.
+    // per concurrent download: `LocalBlobArchive` and `S3BlobArchive` both
+    // override `get_stream` to yield the blob chunk by chunk.
     let (_stored_ct, stream) = blob_archive
         .get_stream(&rec.storage_key)
         .await
