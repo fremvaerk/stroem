@@ -19,12 +19,17 @@ const LOG_PUSH_MAX_BYTES: usize = 1024 * 1024;
 pub(crate) const INPUT_503_ATTEMPTS: u32 = 12;
 pub(crate) const INPUT_503_DELAY: Duration = Duration::from_secs(5);
 
-/// A fresh, absolute inputs directory for one claim request (spec § 5.2).
-/// Nothing is created here: the poller creates it only when the claim
-/// returns files to place.
+/// Last component of every announced inputs directory: `{wrapper}/in`.
+pub(crate) const INPUTS_SUBDIR: &str = "in";
+
+/// A fresh, absolute inputs directory for one claim request (spec § 5.2):
+/// `{temp}/stroem-inputs-{uuid}/in`. The poller creates the wrapper with
+/// mode `0700` (other host users cannot reach the files) and `in` inside it,
+/// only when the claim returns files to place. Nothing is created here.
 fn fresh_inputs_dir() -> String {
     std::env::temp_dir()
         .join(format!("stroem-inputs-{}", Uuid::new_v4().simple()))
+        .join(INPUTS_SUBDIR)
         .to_string_lossy()
         .into_owned()
 }
@@ -119,9 +124,9 @@ pub struct ClaimedStep {
     /// steps and on an older server.
     #[serde(default)]
     pub input_files: Vec<ClaimedInputFile>,
-    /// The absolute inputs directory the claim request announced. The server
-    /// rendered local paths under it; the worker creates it only when it
-    /// places files (local and Docker steps).
+    /// The absolute inputs directory the claim request announced
+    /// (`{wrapper}/in`). The server rendered local paths under it; the worker
+    /// creates it only when it places files (local and Docker steps).
     #[serde(default)]
     pub inputs_dir: Option<String>,
 }
@@ -1731,14 +1736,25 @@ mod tests {
         for dir in &dirs {
             let p = std::path::Path::new(dir);
             assert!(p.is_absolute(), "inputs_dir must be absolute: {dir}");
+            assert_eq!(
+                p.file_name().unwrap(),
+                "in",
+                "the announced dir is `{{wrapper}}/in`: {dir}"
+            );
+            let wrapper = p.parent().unwrap();
             assert!(
-                p.file_name()
+                wrapper
+                    .file_name()
                     .unwrap()
                     .to_string_lossy()
                     .starts_with("stroem-inputs-"),
-                "unexpected inputs_dir name: {dir}"
+                "unexpected wrapper name: {dir}"
             );
-            assert!(!p.exists(), "nothing is created before files are claimed");
+            assert_eq!(wrapper.parent().unwrap(), std::env::temp_dir());
+            assert!(
+                !wrapper.exists(),
+                "nothing is created before files are claimed"
+            );
         }
         assert_ne!(dirs[0], dirs[1], "each claim request needs a fresh dir");
     }
@@ -1781,7 +1797,8 @@ mod tests {
             Some(sent_dir),
             "the step keeps the dir its claim request announced"
         );
-        assert!(!std::path::Path::new(sent_dir).exists());
+        assert!(sent_dir.ends_with("/in"), "{sent_dir}");
+        assert!(!std::path::Path::new(sent_dir).parent().unwrap().exists());
 
         // An older server sends no `input_files`; an older serialized step has neither field.
         let resp: ClaimResponse = serde_json::from_value(serde_json::json!({

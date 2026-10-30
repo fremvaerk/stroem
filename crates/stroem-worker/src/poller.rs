@@ -184,10 +184,12 @@ async fn upload_with_retry(
     Err(last_err.expect("loop exited without success and without recording an error"))
 }
 
-/// The step's inputs directory (spec 2026-10-29-file-inputs § 6.2).
-/// Dropping it removes the whole tree. The read-only modes are lifted first
-/// (dirs `0755`, files `0644`), because a `0555` dir refuses to unlink its
-/// entries. Best effort: a failure is logged, never a panic.
+/// The step's private inputs wrapper (spec 2026-10-29-file-inputs § 6.2),
+/// the parent of the announced `{wrapper}/in`. Dropping it removes the whole
+/// tree. The read-only modes are lifted first, because a `0555` dir refuses
+/// to unlink its entries; they become owner-only (dirs `0700`, files `0600`),
+/// so the tree is never reachable by other host users while it is removed.
+/// Best effort: a failure is logged, never a panic.
 pub(crate) struct InputsDirGuard(PathBuf);
 
 impl InputsDirGuard {
@@ -211,9 +213,9 @@ impl Drop for InputsDirGuard {
             for entry in walk.into_iter().flatten() {
                 let ft = entry.file_type();
                 let mode = if ft.is_dir() {
-                    0o755
+                    0o700
                 } else if ft.is_file() {
-                    0o644
+                    0o600
                 } else {
                     continue;
                 };
@@ -242,10 +244,23 @@ pub(crate) fn needs_worker_download(step: &crate::client::ClaimedStep) -> bool {
         )
 }
 
+/// Create `path` (never an existing one, never its parents) with mode `0700`
+/// in one step, so it is private from the moment it exists.
+async fn create_private_dir(path: &std::path::Path) -> std::io::Result<()> {
+    let mut builder = tokio::fs::DirBuilder::new();
+    #[cfg(unix)]
+    builder.mode(0o700);
+    builder.create(path).await
+}
+
 /// Download every claimed input file to `{inputs_dir}/{file_id}/{safe_name}`
-/// (spec § 6.1, § 6.2): files `0444`, then each `{file_id}` dir `0555`. The
-/// returned guard owns the dir; on an error the partial tree is already
-/// removed. Errors name a file id, never a file name.
+/// (spec § 6.1, § 6.2). `inputs_dir` is `{wrapper}/in`: the wrapper is
+/// created `0700` (other host users cannot reach the files), the visible
+/// tree is read-only for every user — files `0444`, then each `{file_id}`
+/// dir and `in` itself `0555` — so a Docker step running as another uid can
+/// still read its bind mount. The returned guard owns the wrapper; on an
+/// error the partial tree is already removed. Errors name a file id, never a
+/// file name.
 pub(crate) async fn place_input_files(
     client: &ServerClient,
     step: &crate::client::ClaimedStep,
@@ -262,10 +277,17 @@ pub(crate) async fn place_input_files(
         dir.is_absolute(),
         "the inputs directory is not an absolute path"
     );
+    let wrapper = match (dir.file_name(), dir.parent()) {
+        (Some(name), Some(parent)) if name == crate::client::INPUTS_SUBDIR => parent.to_path_buf(),
+        _ => anyhow::bail!("the inputs directory is not inside a private wrapper"),
+    };
+    create_private_dir(&wrapper)
+        .await
+        .context("cannot create the private inputs directory")?;
+    let guard = InputsDirGuard::new(wrapper);
     tokio::fs::create_dir(&dir)
         .await
         .context("cannot create the inputs directory")?;
-    let guard = InputsDirGuard::new(dir.clone());
 
     let mut placed: Vec<&str> = Vec::new();
     for file in &step.input_files {
@@ -296,11 +318,16 @@ pub(crate) async fn place_input_files(
     }
 
     #[cfg(unix)]
-    for id in &placed {
+    {
         use std::os::unix::fs::PermissionsExt;
-        tokio::fs::set_permissions(dir.join(id), std::fs::Permissions::from_mode(0o555))
+        for id in &placed {
+            tokio::fs::set_permissions(dir.join(id), std::fs::Permissions::from_mode(0o555))
+                .await
+                .with_context(|| format!("input file {id}: cannot make its directory read-only"))?;
+        }
+        tokio::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555))
             .await
-            .with_context(|| format!("input file {id}: cannot make its directory read-only"))?;
+            .context("cannot make the inputs directory read-only")?;
     }
     Ok(guard)
 }
@@ -2438,8 +2465,10 @@ mod tests {
         #[test]
         fn inputs_dir_guard_removes_read_only_tree() {
             let tmp = tempfile::tempdir().unwrap();
+            // The layout `place_input_files` makes: {wrapper 0700}/in 0555/{file_id} 0555/file 0444.
             let root = tmp.path().join("stroem-inputs-test");
-            let file_dir = root.join(stroem_common::file_field::new_file_id());
+            let in_dir = root.join("in");
+            let file_dir = in_dir.join(stroem_common::file_field::new_file_id());
             std::fs::create_dir_all(&file_dir).unwrap();
             let file = file_dir.join("data.csv");
             std::fs::write(&file, b"x").unwrap();
@@ -2449,6 +2478,8 @@ mod tests {
                 std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o444)).unwrap();
                 std::fs::set_permissions(&file_dir, std::fs::Permissions::from_mode(0o555))
                     .unwrap();
+                std::fs::set_permissions(&in_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+                std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
                 // Precondition: a plain removal cannot unlink a file in a 0555 dir
                 // (unless the test runs as root, which ignores permissions).
                 let is_root = std::process::Command::new("id")
@@ -2484,7 +2515,8 @@ mod tests {
             }
             let client = ServerClient::new(&mock_server.uri(), "t", Some(5), Some(30));
             let tmp = tempfile::tempdir().unwrap();
-            let root = tmp.path().join("stroem-inputs-place");
+            let wrapper = tmp.path().join("stroem-inputs-place");
+            let root = wrapper.join("in");
             let mut step = make_step(job_id, "true");
             step.input_files = vec![a.clone(), b.clone()];
             step.inputs_dir = Some(root.to_string_lossy().into_owned());
@@ -2506,35 +2538,53 @@ mod tests {
                 let mode = |p: &std::path::Path| {
                     std::fs::metadata(p).unwrap().permissions().mode() & 0o777
                 };
+                assert_eq!(
+                    mode(&wrapper),
+                    0o700,
+                    "other host users cannot traverse the wrapper"
+                );
+                assert_eq!(mode(&root), 0o555);
                 for f in [&a, &b] {
                     assert_eq!(mode(&root.join(&f.file_id)), 0o555);
                     assert_eq!(mode(&root.join(&f.file_id).join(&f.safe_name)), 0o444);
                 }
             }
             drop(guard);
-            assert!(!root.exists(), "the guard removes the placed tree");
+            assert!(!wrapper.exists(), "the guard removes the whole wrapper");
         }
 
         #[tokio::test]
-        async fn place_input_files_rejects_a_relative_or_missing_dir() {
+        async fn place_input_files_rejects_a_bad_or_existing_dir() {
             let client = ServerClient::new("http://127.0.0.1:9", "t", Some(5), Some(30));
             let mut step = make_step(Uuid::new_v4(), "true");
             step.input_files = vec![input_file("a.txt", b"a")];
+            let place = |step: ClaimedStep| {
+                let client = client.clone();
+                async move { place_input_files(&client, &step, 1, Duration::from_millis(1)).await }
+            };
 
             step.inputs_dir = None;
-            assert!(
-                place_input_files(&client, &step, 1, Duration::from_millis(1))
-                    .await
-                    .is_err()
-            );
+            assert!(place(step.clone()).await.is_err());
 
-            step.inputs_dir = Some("relative/stroem-inputs-x".to_string());
-            assert!(
-                place_input_files(&client, &step, 1, Duration::from_millis(1))
-                    .await
-                    .is_err()
-            );
+            step.inputs_dir = Some("relative/stroem-inputs-x/in".to_string());
+            assert!(place(step.clone()).await.is_err());
             assert!(!std::path::Path::new("relative").exists());
+
+            // Not `{wrapper}/in`: refused before anything is created.
+            let tmp = tempfile::tempdir().unwrap();
+            let odd = tmp.path().join("stroem-inputs-odd").join("other");
+            step.inputs_dir = Some(odd.to_string_lossy().into_owned());
+            assert!(place(step.clone()).await.is_err());
+            assert!(!tmp.path().join("stroem-inputs-odd").exists());
+
+            // An existing wrapper is never adopted, and never removed.
+            let existing = tmp.path().join("stroem-inputs-existing");
+            std::fs::create_dir(&existing).unwrap();
+            std::fs::write(existing.join("keep"), b"k").unwrap();
+            step.inputs_dir = Some(existing.join("in").to_string_lossy().into_owned());
+            assert!(place(step.clone()).await.is_err());
+            assert!(existing.join("keep").exists());
+            assert!(!existing.join("in").exists());
         }
 
         /// A failed input download fails the step with exit -1 BEFORE it is
@@ -2584,7 +2634,8 @@ mod tests {
                 temp_dir.path().join("ws").to_str().unwrap(),
                 None,
             ));
-            let inputs_dir = temp_dir.path().join("stroem-inputs-fail");
+            let wrapper = temp_dir.path().join("stroem-inputs-fail");
+            let inputs_dir = wrapper.join("in");
             let mut step = make_step(job_id, "echo must-not-run");
             step.input_files = vec![ok, missing.clone()];
             step.inputs_dir = Some(inputs_dir.to_string_lossy().into_owned());
@@ -2600,7 +2651,7 @@ mod tests {
             )
             .await;
 
-            assert!(!inputs_dir.exists(), "the partial inputs dir is removed");
+            assert!(!wrapper.exists(), "the partial inputs tree is removed");
             let completes = complete_bodies(&mock_server).await;
             assert_eq!(completes.len(), 1);
             assert_eq!(completes[0]["exit_code"], -1);
@@ -2701,7 +2752,8 @@ mod tests {
                 temp_dir.path().join("ws").to_str().unwrap(),
                 None,
             ));
-            let inputs_dir = temp_dir.path().join("stroem-inputs-ok");
+            let wrapper = temp_dir.path().join("stroem-inputs-ok");
+            let inputs_dir = wrapper.join("in");
             let placed = inputs_dir.join(&file.file_id).join(&file.safe_name);
             let mut step = make_step(job_id, &format!("cat '{}'", placed.display()));
             step.input_files = vec![file];
@@ -2726,8 +2778,8 @@ mod tests {
                 .iter()
                 .any(|l| l.contains("input-file-content-42")));
             assert!(
-                !inputs_dir.exists(),
-                "the inputs dir is removed after the step"
+                !wrapper.exists(),
+                "the private wrapper is removed after the step"
             );
         }
     }
