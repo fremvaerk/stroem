@@ -12,6 +12,7 @@ use axum::Json;
 use futures_util::TryStreamExt;
 use serde::Deserialize;
 use stroem_db::{JobInputFileRepo, JobRepo};
+use uuid::Uuid;
 
 use crate::acl::TaskPermission;
 use crate::input_files::stream::download_body;
@@ -20,7 +21,8 @@ use crate::state::AppState;
 use crate::web::api::artifacts::{disposition_for, sanitize_filename};
 use crate::web::api::jobs::check_job_acl;
 use crate::web::api::middleware::AuthUser;
-use crate::web::api::tasks::require_task_run;
+use crate::web::api::pinned_source::resolve_source_pin;
+use crate::web::api::tasks::{check_rerun_source, require_task_run, source_job_not_found};
 use crate::web::api::{get_workspace_or_error, parse_uuid_param};
 use crate::web::error::AppError;
 
@@ -30,6 +32,7 @@ const MAX_CONTENT_TYPE_BYTES: usize = 255;
 #[derive(Debug, Deserialize)]
 pub struct UploadQuery {
     name: Option<String>,
+    source_job_id: Option<String>,
 }
 
 impl From<UploadError> for AppError {
@@ -54,6 +57,63 @@ fn request_content_type(headers: &HeaderMap) -> String {
         .to_string()
 }
 
+/// Authorisation of an upload with `source_job_id` (a replacement file for a
+/// Re-run), in the fixed order of spec § 4.2. Nothing about `{ws}` / `{task}`
+/// or the source is checked before a missing or denied source has answered
+/// the one `Source job not found`.
+async fn authorise_rerun_upload(
+    state: &Arc<AppState>,
+    auth_user: &Option<AuthUser>,
+    ws: &str,
+    name: &str,
+    source_job_id: &str,
+) -> Result<(), AppError> {
+    // 1 + 2: a bad ID, a missing source and a denied source all answer alike.
+    let source_id = Uuid::parse_str(source_job_id).map_err(|_| source_job_not_found())?;
+    let source = JobRepo::get(&state.pool, source_id)
+        .await
+        .context("get source job")?
+        .ok_or_else(source_job_not_found)?;
+    let permission = check_job_acl(state, auth_user, &source).await?;
+    if matches!(permission, TaskPermission::Deny) {
+        return Err(source_job_not_found());
+    }
+    // 3: a pinned source is View-only before anything is validated or resolved.
+    if source.git_ref.is_some() && matches!(permission, TaskPermission::View) {
+        return Err(AppError::Forbidden("View-only access".into()));
+    }
+    // 4
+    check_rerun_source(&source, ws)?;
+    if source.task_name != name {
+        return Err(AppError::BadRequest(format!(
+            "Source job {} is a run of task '{}', not '{}'",
+            source.job_id, source.task_name, name
+        )));
+    }
+    // 5 + 6
+    match resolve_source_pin(state, &source).await? {
+        Some(pin) => {
+            let task = pin.task(name)?;
+            require_task_run(state, auth_user, ws, name, task.folder.as_deref()).await?;
+            if !task_has_file_field(task) {
+                return Err(AppError::BadRequest("task has no file input".into()));
+            }
+        }
+        None => {
+            let config = get_workspace_or_error(state, ws).await?;
+            let task = config
+                .tasks
+                .get(name)
+                .ok_or_else(|| AppError::not_found("Task"))?;
+            require_task_run(state, auth_user, ws, name, task.folder.as_deref()).await?;
+            if !task_has_file_field(task) {
+                return Err(AppError::BadRequest("task has no file input".into()));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// POST /api/workspaces/{ws}/tasks/{name}/files?name= — upload a file for a
 /// `type: file` field of a live task.
 #[tracing::instrument(skip(state, auth_user, headers, body))]
@@ -68,14 +128,19 @@ pub async fn upload_task_file(
     if state.config.auth.is_some() && auth_user.is_none() {
         return Err(AppError::Unauthorized("Authentication required".into()));
     }
-    let config = get_workspace_or_error(&state, &ws).await?;
-    let task = config
-        .tasks
-        .get(&name)
-        .ok_or_else(|| AppError::not_found("Task"))?;
-    require_task_run(&state, &auth_user, &ws, &name, task.folder.as_deref()).await?;
-    if !task_has_file_field(task) {
-        return Err(AppError::BadRequest("task has no file input".into()));
+    match q.source_job_id.as_deref() {
+        Some(source) => authorise_rerun_upload(&state, &auth_user, &ws, &name, source).await?,
+        None => {
+            let config = get_workspace_or_error(&state, &ws).await?;
+            let task = config
+                .tasks
+                .get(&name)
+                .ok_or_else(|| AppError::not_found("Task"))?;
+            require_task_run(&state, &auth_user, &ws, &name, task.folder.as_deref()).await?;
+            if !task_has_file_field(task) {
+                return Err(AppError::BadRequest("task has no file input".into()));
+            }
+        }
     }
     let original_name = q
         .name

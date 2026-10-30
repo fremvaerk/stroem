@@ -520,3 +520,274 @@ async fn download_run_permission_and_unsafe_names() -> Result<()> {
     assert!(!ext.contains('"') && !ext.contains(';'), "{d}");
     Ok(())
 }
+
+// ─── Upload for a Re-run (`source_job_id`, spec § 4.2 order) ───────────────
+
+fn upload_for(ws: &str, task: &str, source: &str, key: Option<&str>, body: Body) -> Request<Body> {
+    let mut b = Request::builder()
+        .method("POST")
+        .uri(format!(
+            "/api/workspaces/{ws}/tasks/{task}/files?name=a.csv&source_job_id={source}"
+        ))
+        .header("content-type", "text/csv");
+    if let Some(k) = key {
+        b = b.header("authorization", format!("Bearer {k}"));
+    }
+    b.body(body).unwrap()
+}
+
+/// A top-level (or child, when `parent` is set) job row for `task`.
+async fn source_job(
+    pool: &PgPool,
+    task: &str,
+    raw_input: Option<serde_json::Value>,
+    parent: Option<Uuid>,
+) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO job (job_id, workspace, task_name, status, source_type, raw_input, \
+         parent_job_id, created_at) \
+         VALUES ($1, 'default', $2, 'completed', $3, $4, $5, NOW())",
+    )
+    .bind(id)
+    .bind(task)
+    .bind(if parent.is_some() { "task" } else { "api" })
+    .bind(raw_input)
+    .bind(parent)
+    .execute(pool)
+    .await
+    .unwrap();
+    id
+}
+
+#[tokio::test]
+async fn upload_for_rerun_unpinned_ok() -> Result<()> {
+    let app = build_app(Opts {
+        acl: true,
+        ..Default::default()
+    })
+    .await?;
+    let (_, run_key) = user(&app.pool, "runners").await;
+    let src = source_job(&app.pool, "run-files", Some(serde_json::json!({})), None).await;
+    let (s, _, b) = send(
+        &app,
+        upload_for(
+            "default",
+            "run-files",
+            &src.to_string(),
+            Some(&run_key),
+            Body::from("x"),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "{}", String::from_utf8_lossy(&b));
+    let row = InputFileRepo::get(&app.pool, json(&b)["file_id"].as_str().unwrap())
+        .await?
+        .unwrap();
+    assert_eq!(
+        (row.workspace.as_str(), row.task_name.as_str()),
+        ("default", "run-files")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn upload_for_rerun_denied_source_matches_missing() -> Result<()> {
+    let app = build_app(Opts {
+        acl: true,
+        ..Default::default()
+    })
+    .await?;
+    let (_, run_key) = user(&app.pool, "runners").await;
+    // The caller has no access to `hidden/`: every job below is denied.
+    let denied = source_job(&app.pool, "deny-files", Some(serde_json::json!({})), None).await;
+    let parent = source_job(&app.pool, "deny-files", Some(serde_json::json!({})), None).await;
+    let child = source_job(
+        &app.pool,
+        "deny-files",
+        Some(serde_json::json!({})),
+        Some(parent),
+    )
+    .await;
+    let no_raw = source_job(&app.pool, "deny-files", None, None).await;
+
+    let (ms, _, mb) = send(
+        &app,
+        upload_for(
+            "default",
+            "run-files",
+            &Uuid::new_v4().to_string(),
+            Some(&run_key),
+            Body::from("x"),
+        ),
+    )
+    .await;
+    assert_eq!(ms, StatusCode::NOT_FOUND);
+    assert!(String::from_utf8_lossy(&mb).contains("Source job not found"));
+
+    let cases = [
+        ("default", "run-files", denied.to_string()),
+        ("other-ws", "run-files", denied.to_string()),
+        ("default", "no-such-task", denied.to_string()),
+        ("default", "run-files", child.to_string()),
+        ("default", "run-files", no_raw.to_string()),
+        ("default", "run-files", "not-a-uuid".to_string()),
+    ];
+    for (ws, task, src) in cases {
+        let (s, _, b) = send(
+            &app,
+            upload_for(ws, task, &src, Some(&run_key), Body::from("x")),
+        )
+        .await;
+        assert_eq!((s, &b), (ms, &mb), "{ws}/{task} source {src}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn upload_for_rerun_unpinned_view_is_403() -> Result<()> {
+    let app = build_app(Opts {
+        acl: true,
+        ..Default::default()
+    })
+    .await?;
+    let (_, view_key) = user(&app.pool, "viewers").await;
+    let src = source_job(&app.pool, "view-files", Some(serde_json::json!({})), None).await;
+    let (s, _, _) = send(
+        &app,
+        upload_for(
+            "default",
+            "view-files",
+            &src.to_string(),
+            Some(&view_key),
+            Body::from("x"),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    Ok(())
+}
+
+#[tokio::test]
+async fn upload_for_rerun_task_mismatch_is_400() -> Result<()> {
+    let app = build_app(Opts::default()).await?;
+    let src = source_job(&app.pool, "files", Some(serde_json::json!({})), None).await;
+    let (s, _, _) = send(
+        &app,
+        upload_for("default", "plain", &src.to_string(), None, Body::from("x")),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert_eq!(input_file_count(&app.pool).await, 0);
+    Ok(())
+}
+
+const PIN_MAIN: &str = r#"
+triggers:
+  nightly:
+    type: scheduler
+    cron: "0 0 1 1 *"
+    task: only-on-release
+    ref: release/2.3
+"#;
+
+const PIN_RELEASE: &str = r#"
+actions:
+  a: { type: script, script: "echo a" }
+tasks:
+  only-on-release:
+    folder: rel
+    input: { data_file: { type: file } }
+    flow: { a: { action: a } }
+"#;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn upload_for_rerun_pinned_task_only_at_ref() -> Result<()> {
+    use crate::common::pinned::*;
+    bounded(async {
+        let fx = pinned_workspace_fixture(PinnedFixtureOpts {
+            etl_main: Some(PIN_MAIN.to_string()),
+            etl_release: Some(PIN_RELEASE.to_string()),
+            input_blob: true,
+            ..Default::default()
+        })
+        .await?;
+        let source = fire_etl_trigger(&fx, "nightly").await?;
+        let uri = format!(
+            "/api/workspaces/etl/tasks/only-on-release/files?name=a.csv&source_job_id={source}"
+        );
+        let resp = fx
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .body(Body::from("x"))
+                    .unwrap(),
+            )
+            .await?;
+        let st = resp.status();
+        let body = json_body(resp).await;
+        assert_eq!(st, StatusCode::CREATED, "{body}");
+        let row = InputFileRepo::get(&fx.pool, body["file_id"].as_str().unwrap())
+            .await?
+            .unwrap();
+        assert_eq!(
+            (row.workspace.as_str(), row.task_name.as_str()),
+            ("etl", "only-on-release")
+        );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn upload_for_rerun_pinned_view_only_is_403_even_when_ref_broken() -> Result<()> {
+    use crate::common::pinned::*;
+    const VIEWER: &str = "viewer@test.local";
+    bounded(async {
+        let fx = pinned_workspace_fixture(PinnedFixtureOpts {
+            etl_main: Some(PIN_MAIN.to_string()),
+            etl_release: Some(PIN_RELEASE.to_string()),
+            input_blob: true,
+            acl: Some(stroem_server::config::AclConfig {
+                default: AclAction::Deny,
+                rules: vec![AclRule {
+                    workspace: "*".into(),
+                    tasks: vec!["rel/*".into()],
+                    action: AclAction::View,
+                    groups: vec![],
+                    users: vec![VIEWER.into()],
+                }],
+            }),
+            users: vec![FixtureUser {
+                email: VIEWER,
+                groups: vec![],
+                admin: false,
+            }],
+            ..Default::default()
+        })
+        .await?;
+        let source = fire_etl_trigger(&fx, "nightly").await?;
+        let key = fx.api_key(VIEWER, false).await;
+        // The ref cannot be resolved any more; the answer is still 403, not 400.
+        fx.etl.break_remote();
+        // A task-name mismatch would be a 400 too: step 3 runs before step 4.
+        for task in ["only-on-release", "other"] {
+            let (st, body) = api_req(
+                &fx.router,
+                "POST",
+                &format!(
+                    "/api/workspaces/etl/tasks/{task}/files?name=a.csv&source_job_id={source}"
+                ),
+                Some(&key),
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::FORBIDDEN, "{task}: {body}");
+        }
+        Ok(())
+    })
+    .await
+}

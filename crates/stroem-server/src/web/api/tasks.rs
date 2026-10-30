@@ -622,13 +622,13 @@ pub(crate) async fn require_task_run(
 /// The one answer for a re-run source that does not exist AND for one the
 /// caller may not read (pinned or not): same status, same body, so neither
 /// existence nor pinned status is observable.
-fn source_job_not_found() -> AppError {
+pub(crate) fn source_job_not_found() -> AppError {
     AppError::NotFound("Source job not found".into())
 }
 
 /// The source checks every re-run makes, pinned or not: same workspace, a
 /// top-level job, and a `raw_input` to replay.
-fn check_rerun_source(source_job: &stroem_db::JobRow, ws: &str) -> Result<(), AppError> {
+pub(crate) fn check_rerun_source(source_job: &stroem_db::JobRow, ws: &str) -> Result<(), AppError> {
     if source_job.workspace != ws {
         return Err(AppError::BadRequest(
             "Source job belongs to a different workspace".into(),

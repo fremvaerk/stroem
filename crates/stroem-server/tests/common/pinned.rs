@@ -314,6 +314,8 @@ pub struct PinnedFixtureOpts {
     /// `pin_store.claim_load_budget_secs` (every replica). Default: the
     /// server's (20 s).
     pub claim_load_budget_secs: Option<u64>,
+    /// A local input-file blob archive under the fixture's TempDir.
+    pub input_blob: bool,
 }
 
 // ─── Repos ─────────────────────────────────────────────────────────────────
@@ -614,6 +616,9 @@ pub async fn pinned_workspace_fixture(opts: PinnedFixtureOpts) -> Result<PinnedF
     let mgr = build_manager(root.path(), keep_recent, &etl.url, &billing.url).await?;
     let state_storage = opts.state_storage.then(|| state_storage_at(root.path()));
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
+    let input_blob: Option<Arc<dyn BlobArchive>> = opts.input_blob.then(|| {
+        Arc::new(LocalBlobArchive::new(root.path().join("inputs"))) as Arc<dyn BlobArchive>
+    });
     let state = AppState::new(
         pool.clone(),
         mgr,
@@ -621,7 +626,8 @@ pub async fn pinned_workspace_fixture(opts: PinnedFixtureOpts) -> Result<PinnedF
         log_storage,
         HashMap::new(),
         state_storage,
-    );
+    )
+    .with_input_blob(input_blob);
     let router = build_router(state.clone(), CancellationToken::new());
 
     Ok(PinnedFixture {
