@@ -49,10 +49,22 @@ async fn upload_file(
         .await
         .context("Failed to connect to server")?;
     let status = resp.status();
-    let body: Value = resp
-        .json()
+    let text = resp
+        .text()
         .await
-        .with_context(|| format!("--file {field}: failed to parse upload response"))?;
+        .with_context(|| format!("--file {field}: failed to read upload response"))?;
+    let body: Value = match serde_json::from_str(&text) {
+        Ok(body) => body,
+        // A proxy's error page: the status is all there is to say.
+        Err(_) if !status.is_success() => {
+            bail!("--file {field}: upload failed: Server returned {status} (the response is not JSON)")
+        }
+        Err(e) => {
+            return Err(e).with_context(|| {
+                format!("--file {field}: failed to parse upload response (HTTP {status})")
+            })
+        }
+    };
     check_response(&status, &body).with_context(|| format!("--file {field}: upload failed"))?;
     body.get("file_id")
         .and_then(Value::as_str)
@@ -70,11 +82,15 @@ pub async fn cmd_trigger(
 ) -> Result<()> {
     let mut body: Value = build_trigger_body(input)?;
 
-    // Parse every argument and check for key clashes before any upload.
+    // Parse every argument and check the input shape and key clashes
+    // before any upload.
     let parsed = files
         .iter()
         .map(|f| parse_file_arg(f))
         .collect::<Result<Vec<_>>>()?;
+    if !parsed.is_empty() && !body["input"].is_object() {
+        bail!("--input must be a JSON object when --file is used");
+    }
     let mut seen = std::collections::HashSet::new();
     for (field, _) in &parsed {
         if body["input"].get(field).is_some() {
@@ -226,6 +242,63 @@ mod tests {
         .unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("--file d") && msg.contains("too big"), "{msg}");
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    /// A non-object `--input` with `--file` fails before any upload (it
+    /// used to pass the clash check and fail after uploading).
+    #[tokio::test]
+    async fn trigger_non_object_input_with_file_fails_before_upload() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("r.csv");
+        std::fs::write(&file, "x").unwrap();
+        let server = MockServer::start().await;
+        let client = reqwest::Client::new();
+        for input in [r#"[1, 2]"#, r#""text""#, "3", "null"] {
+            let err = cmd_trigger(
+                &client,
+                &server.uri(),
+                "default",
+                "t",
+                Some(input),
+                &[format!("d={}", file.display())],
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                "--input must be a JSON object when --file is used",
+                "{input}"
+            );
+        }
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    /// A non-JSON error body (a proxy page) still names the HTTP status.
+    #[tokio::test]
+    async fn trigger_upload_non_json_error_names_the_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("r.csv");
+        std::fs::write(&file, "x").unwrap();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/workspaces/default/tasks/t/files"))
+            .respond_with(ResponseTemplate::new(502).set_body_string("<html>Bad Gateway</html>"))
+            .mount(&server)
+            .await;
+        let client = reqwest::Client::new();
+        let err = cmd_trigger(
+            &client,
+            &server.uri(),
+            "default",
+            "t",
+            None,
+            &[format!("d={}", file.display())],
+        )
+        .await
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("--file d") && msg.contains("502"), "{msg}");
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
 }
