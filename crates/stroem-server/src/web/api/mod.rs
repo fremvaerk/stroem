@@ -1,6 +1,7 @@
 pub mod api_keys;
 pub mod artifacts;
 pub mod auth;
+pub mod input_files;
 pub mod jobs;
 pub mod logs;
 pub mod middleware;
@@ -312,6 +313,16 @@ pub fn build_api_routes(state: Arc<AppState>) -> Router {
             "/workspaces/{ws}/state",
             post(state_upload::upload_global_state)
                 .layer(axum::extract::DefaultBodyLimit::max(50 * 1024 * 1024)),
+        )
+        .route(
+            "/workspaces/{ws}/tasks/{name}/files",
+            post(input_files::upload_task_file).layer(axum::extract::DefaultBodyLimit::max(
+                usize::try_from(state.input_files_config.max_file_bytes).unwrap_or(usize::MAX),
+            )),
+        )
+        .route(
+            "/jobs/{id}/input-files/{field}",
+            get(input_files::download_input_file),
         )
         .route("/users", get(users::list_users).post(users::create_user))
         .route("/users/{id}", get(users::get_user))

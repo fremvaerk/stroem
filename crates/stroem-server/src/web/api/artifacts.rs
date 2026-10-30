@@ -54,7 +54,7 @@ pub struct ArtifactListItem {
 /// execution CVEs via embedded JS. Markdown is excluded because no major
 /// browser renders it natively and some intermediaries (proxies, viewers)
 /// will render it as HTML, reintroducing the XSS surface we close above.
-const SAFE_INLINE: &[&str] = &[
+pub(crate) const SAFE_INLINE: &[&str] = &[
     "image/png",
     "image/jpeg",
     "image/gif",
@@ -62,7 +62,7 @@ const SAFE_INLINE: &[&str] = &[
     "text/plain",
 ];
 
-fn disposition_for(content_type: &str, name: &str) -> String {
+pub(crate) fn disposition_for(content_type: &str, name: &str) -> String {
     let ct = content_type
         .split(';')
         .next()
@@ -82,7 +82,7 @@ fn disposition_for(content_type: &str, name: &str) -> String {
 /// path separator (`\`), or smuggle a control character (anything matching
 /// `char::is_control`). Replaced with `_` so the result is always a non-empty
 /// safe string.
-fn sanitize_filename(name: &str) -> String {
+pub(crate) fn sanitize_filename(name: &str) -> String {
     name.chars()
         .map(|c| {
             if c == '"' || c == ';' || c == '\\' || c.is_control() {
@@ -94,7 +94,7 @@ fn sanitize_filename(name: &str) -> String {
         .collect()
 }
 
-fn url_encode(s: &str) -> String {
+pub(crate) fn url_encode(s: &str) -> String {
     url::form_urlencoded::byte_serialize(s.as_bytes()).collect::<String>()
 }
 
