@@ -124,7 +124,7 @@ The path is `{root}/{file_id}/{safe_name}`. The path depends on the file only, n
 | `runner: docker`, `type: docker` | `/inputs` (read-only bind mount) |
 | `runner: pod`, `type: pod` | `/inputs` (read-only volume) |
 
-In a context that no worker renders (an agent prompt, a `when` or `for_each` expression, a `type: task` step input, an approval message, a [templated ref](/guides/git-refs/)), the path uses `/inputs`. `when: "{{ input.data_file }}"` is true when a file was given to an optional field.
+In a context that no worker renders (an agent prompt, a `when` or `for_each` expression, a `type: task` step input, an approval message, a [templated ref](/guides/git-refs/)), the path uses `/inputs`. To test whether a file was given to an optional field, write `when: "{{ input.data_file | default(value='') }}"`: an absent field is a missing key, and a missing key is a template error that fails the step. A `for_each` item that holds a file path gets the step's own root at claim, so `{{ each.item }}` is a valid path on every runner.
 
 On a pod, a separate init container `stroem-inputs-init` downloads each file from the server to an `emptyDir` volume `stroem-inputs`, then checks the size and the SHA-256. The main container mounts the volume read-only at `/inputs`. The init container uses the same image and retry policy as `workspace-init`, and is added only when the step has files. If a download or a check fails, the pod does not start the main container and the step fails. A pod manifest override can rewrite both names, as for `workspace-init`; Strøm does not validate that. For the other runners, the worker downloads the file, streams it to disk, and checks the size and SHA-256 before the runner starts.
 

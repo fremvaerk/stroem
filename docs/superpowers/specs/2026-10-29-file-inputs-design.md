@@ -1,6 +1,6 @@
 # File inputs (`type: file`)
 
-Status: approved (Codex MERGE-READY on revision 6), revision 7 (2026-10-30).
+Status: approved (Codex MERGE-READY on revision 6), revision 8 (2026-10-30).
 Branch `feat/file-inputs-impl`.
 
 ## Revision history
@@ -61,6 +61,17 @@ Branch `feat/file-inputs-impl`.
   no Docker daemon, so the E2E section covers the local step only; the Docker
   step is covered by an `#[ignore]` DockerRunner test run on a machine with a
   daemon.
+- **Revision 8** (2026-10-30) — two spec facts corrected during
+  implementation. (1) § 5.3 row S5: Tera 2 raises an error for a missing key,
+  so `when: "{{ input.data_file }}"` FAILS the step when the optional field
+  is absent; the decision (an absent optional field stays absent) is
+  unchanged, the idiom is `when: "{{ input.data_file | default(value='') }}"`
+  (`default` covers a missing last path segment). (2) § 5.1: a `for_each`
+  item is rendered once, in the S5 context (root `/inputs`), and stored on
+  the instance row; at claim `build_entries` rebases every string in
+  `each.item` that is the canonical path of a file attached to the job to
+  the render root, so "one file has one path in every context of a step"
+  also holds for loop items on `runner: local`.
 
 ## 1. Goal
 
@@ -458,6 +469,11 @@ field, the template form (the path `{claim root}/{file_id}/{safe_name}`),
 so a script never receives a bare file ID. The path is then in the step's
 prepared input like any other string.
 
+A `for_each` item is rendered once in the S5 context (root `/inputs`) and
+stored on the instance row. At claim, `render_context::build` rebases every
+string in `each.item` that equals `/inputs/{file_id}/{safe_name}` of a file
+attached to the job to the render root (revision 8).
+
 The ID → path mapping happens in `render_context::build` (F14), driven by:
 the job's `job_input_file` rows for `input` of the job (not the live task
 schema, which may have changed since creation); the step's persisted
@@ -486,7 +502,7 @@ inputs" (§ 12).
 | S1 step `input:` at claim | `StepInput` | `{claim root}/{file_id}/{name}` |
 | S2/S3 action body + image at claim | `ActionBody` | `{claim root}/{file_id}/{name}` |
 | S4 agent prompt | `AgentPrompt` | `/inputs/{file_id}/{name}` (the agent has no file access; informational) |
-| S5 `when` / `for_each` | `Condition` | `/inputs/{file_id}/{name}`; absent optional field → absent as today (`when: "{{ input.data_file }}"` = "a file was given") |
+| S5 `when` / `for_each` | `Condition` | `/inputs/{file_id}/{name}`; absent optional field → absent as today (a missing key is a Tera error: write `when: "{{ input.data_file \| default(value='') }}"` for "a file was given"); a `for_each` item that holds such a path is rebased to the claim root at claim (§ 5.1, revision 8) |
 | S6 `type: task` step input | `ChildTaskInput` | `/inputs/{file_id}/{name}` → looked up by ID for the child task's `file` field (§ 5.1) |
 | S6 approval message | `ApprovalMessage` | `/inputs/{file_id}/{name}` |
 | Templated refs | `StepRef`, `TaskActionRef` | `/inputs/{file_id}/{name}` |
