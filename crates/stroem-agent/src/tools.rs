@@ -70,6 +70,10 @@ pub fn input_schema_to_json_schema(input: &HashMap<String, InputFieldDef>) -> se
     let mut required = Vec::new();
 
     for (name, field) in input {
+        // A file cannot be supplied by an agent; left out (spec 2026-10-29 § 7.6).
+        if field.field_type == stroem_common::file_field::FILE_TYPE {
+            continue;
+        }
         let mut prop = serde_json::Map::new();
 
         let (json_type, format) = map_field_type(&field.field_type);
@@ -200,6 +204,33 @@ mod tests {
         assert!(props["environment"]["description"] == "Target environment");
         let required = td.parameters["required"].as_array().unwrap();
         assert!(required.contains(&serde_json::json!("environment")));
+    }
+
+    #[test]
+    fn input_schema_skips_file_fields() {
+        let mut input = HashMap::new();
+        for (name, field_type, required) in [("upload", "file", false), ("env", "string", true)] {
+            input.insert(
+                name.to_string(),
+                InputFieldDef {
+                    field_type: field_type.to_string(),
+                    name: None,
+                    description: None,
+                    required,
+                    secret: false,
+                    default: None,
+                    options: None,
+                    allow_custom: false,
+                    multiple: false,
+                    order: None,
+                },
+            );
+        }
+        let schema = input_schema_to_json_schema(&input);
+        assert!(schema["properties"].get("upload").is_none());
+        assert!(schema["properties"].get("env").is_some());
+        let required = schema["required"].as_array().unwrap();
+        assert!(!required.contains(&serde_json::json!("upload")));
     }
 
     #[test]
