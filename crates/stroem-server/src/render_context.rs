@@ -59,6 +59,8 @@ pub struct Snapshots {
 
 /// Resolve the latest task and global snapshots. Pool only — no archive.
 /// Best-effort: a lookup error is logged and yields `None` for that side.
+/// `files` is always empty here: callers must set `.files` (the job's
+/// attachments under the entry's root) before building any context.
 ///
 /// `entry` labels the `stroem_snapshot_resolve_seconds` histogram (spec
 /// §3.4) with which entry point resolved this snapshot — `"claim"`,
@@ -399,10 +401,17 @@ fn build_entries(
 
     if !matches!(scope, Scope::Condition) {
         if let Some(slot) = loop_slot {
+            // The item was rendered once, under the canonical root, and
+            // stored; a file path in it moves to this entry's root (spec
+            // 2026-10-29 § 5.1, revision 8).
             upsert(
                 &mut ctx,
                 "each",
-                json!({ "item": slot.item, "index": slot.index, "total": slot.total }),
+                json!({
+                    "item": files.rebase_canonical(slot.item),
+                    "index": slot.index,
+                    "total": slot.total,
+                }),
             );
         }
     }
@@ -1487,6 +1496,47 @@ mod tests {
         let bare = json!({"data_file": FILE_A});
         let ctx = build(&job, &[], None, Scope::TaskActionRef { ref_input: &bare });
         assert_eq!(render_in(&ctx, "{{ input.data_file }}"), CANONICAL_PATH_A);
+    }
+
+    /// Spec revision 8: a `for_each` item is rendered once, under the
+    /// canonical root, and stored on the instance row; every scope that
+    /// carries `each` sees it under the entry's root.
+    #[test]
+    fn each_item_is_rebased_to_the_render_root() {
+        let input = json!({"data_file": FILE_A});
+        let item = json!({"src": CANONICAL_PATH_A, "list": [CANONICAL_PATH_A, "x"]});
+        let inst = instance("run[0]", "run", 0, item.clone());
+        let slot = LoopSlot::of(&inst);
+        let sec = secrets(&[]);
+        let prepared = json!({});
+
+        let claim = file_snaps("/w/in", &[("data_file", FILE_A, "report.csv")]);
+        let job = file_job(&input, &claim, &sec);
+        let mut scopes = all_scopes(&prepared);
+        scopes.push(Scope::StepRef);
+        for scope in scopes {
+            let ctx = build(&job, &[], slot, scope);
+            let Some(each) = ctx.as_value().get("each") else {
+                assert!(matches!(scope, Scope::Condition), "{scope:?}");
+                continue;
+            };
+            assert_eq!(each["item"]["src"], CLAIM_PATH_A, "{scope:?}");
+            assert_eq!(
+                each["item"]["list"],
+                json!([CLAIM_PATH_A, "x"]),
+                "{scope:?}"
+            );
+            assert_eq!(render_in(&ctx, "{{ each.item.src }}"), CLAIM_PATH_A);
+        }
+
+        // Under the canonical root the item is the stored one.
+        let canonical = file_snaps(
+            CANONICAL_INPUTS_ROOT,
+            &[("data_file", FILE_A, "report.csv")],
+        );
+        let job = file_job(&input, &canonical, &sec);
+        let ctx = build(&job, &[], slot, Scope::StepInput);
+        assert_eq!(ctx.as_value()["each"]["item"], item);
     }
 
     /// Spec revision 4: two uploads with the same name in task fields `a` and

@@ -1,8 +1,9 @@
 use anyhow::{Context, Result};
 use std::collections::HashMap;
+use stroem_common::file_field::{JobFiles, CANONICAL_INPUTS_ROOT, FILE_TYPE};
 use stroem_common::models::workflow::{InputFieldDef, WorkspaceConfig};
 use stroem_common::template::{
-    prepare_action_input_roles, render_env_map, render_input_typed, render_json_strings,
+    prepare_action_input_roles, render_env_map, render_input_typed_with_files, render_json_strings,
     render_string_opt, ProvenanceBucket, ProvenanceError, RoleConfig, RoleScope,
 };
 use stroem_db::JobStepRow;
@@ -32,6 +33,33 @@ pub struct PrepareContext<'a> {
     /// which fields are `json`, which defaults merge and which fields are
     /// connection-typed. `None` = no schema.
     pub input_schema: Option<&'a HashMap<String, InputFieldDef>>,
+    /// The job's attached files under the claim root (spec 2026-10-29
+    /// § 5.1): a `file` target resolves against these, and a task-level
+    /// file merged into an unset action field is copied by target type.
+    pub files: &'a JobFiles,
+}
+
+/// Claim failure for a runner step of a job with files when the worker sent
+/// no `inputs_dir` (spec 2026-10-29 § 6.5): such a worker cannot place them.
+pub const OLD_WORKER_INPUTS: &str =
+    "this step has file inputs, which the worker does not support; upgrade the worker";
+
+/// The inputs root a claimed step renders under (spec 2026-10-29 § 5.2):
+/// `/inputs` for a container (`type: docker` / `type: pod`, `runner: docker`
+/// / `runner: pod`), else the worker's `inputs_dir` (`None` when it sent
+/// none). Agent steps never come here: they render under `/inputs`.
+pub fn inputs_root(
+    action_type: &str,
+    runner: Option<&str>,
+    inputs_dir: Option<&str>,
+) -> Option<String> {
+    let container =
+        matches!(action_type, "docker" | "pod") || matches!(runner, Some("docker" | "pod"));
+    if container {
+        Some(CANONICAL_INPUTS_ROOT.to_string())
+    } else {
+        inputs_dir.map(str::to_string)
+    }
 }
 
 /// Result of rendering: rendered input, rendered action_spec, rendered image.
@@ -113,8 +141,13 @@ pub fn render_step_input(
         return Ok(prep.step.input.clone());
     }
 
-    let rendered = render_input_typed(&flow_step.input, prep.input_schema, ctx.as_value())
-        .context("Failed to render step input template")?;
+    let rendered = render_input_typed_with_files(
+        &flow_step.input,
+        prep.input_schema,
+        ctx.as_value(),
+        prep.files,
+    )
+    .context("Failed to render step input template")?;
     Ok(Some(rendered))
 }
 
@@ -156,7 +189,7 @@ pub fn prepare_step_action_input(
     // Merge missing fields from job input that match the action's input schema.
     // This handles the case where a flow step doesn't explicitly map a field
     // (e.g. a connection input), but the job-level input has it resolved.
-    merge_missing_action_fields(&mut input_val, ctx.job_input, schema.keys());
+    merge_missing_action_fields(&mut input_val, ctx.job_input, schema, ctx.files);
 
     // Role-scoped (git-refs spec § 7.4): the caller is the job's own config,
     // the action owner the step's owner config (pinned or live) — never two
@@ -308,10 +341,16 @@ pub fn render_image(
 /// Merge missing fields from job-level input into step input for fields declared
 /// in the action's input schema. Step-level values always take precedence.
 /// Null values in job input are skipped to avoid breaking downstream resolution.
-pub fn merge_missing_action_fields<'a>(
+///
+/// A task-level file (the job value is the id attached to that task field)
+/// is copied by the action field's TYPE (spec 2026-10-29 § 5.1): a `file`
+/// field gets the id, any other field the path under `files`' root, so a
+/// script never receives a bare file id.
+pub fn merge_missing_action_fields(
     input_val: &mut serde_json::Value,
     job_input: Option<&serde_json::Value>,
-    action_field_names: impl Iterator<Item = &'a String>,
+    action_schema: &HashMap<String, InputFieldDef>,
+    files: &JobFiles,
 ) {
     let (Some(job_input), Some(input_obj)) = (job_input, input_val.as_object_mut()) else {
         return;
@@ -319,14 +358,27 @@ pub fn merge_missing_action_fields<'a>(
     let Some(job_map) = job_input.as_object() else {
         return;
     };
-    for field_name in action_field_names {
-        if !input_obj.contains_key(field_name) {
-            if let Some(val) = job_map.get(field_name) {
-                if !val.is_null() {
-                    input_obj.insert(field_name.clone(), val.clone());
-                }
-            }
+    for (field_name, def) in action_schema {
+        if input_obj.contains_key(field_name) {
+            continue;
         }
+        let Some(val) = job_map.get(field_name) else {
+            continue;
+        };
+        if val.is_null() {
+            continue;
+        }
+        let attached = files
+            .field_file(field_name)
+            .filter(|f| val.as_str() == Some(f.file_id.as_str()));
+        let merged = match attached {
+            Some(f) if def.field_type != FILE_TYPE => files
+                .path_of(&f.file_id)
+                .map(serde_json::Value::String)
+                .unwrap_or_else(|| val.clone()),
+            _ => val.clone(),
+        };
+        input_obj.insert(field_name.clone(), merged);
     }
 }
 
@@ -335,13 +387,25 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::collections::HashMap;
+    use stroem_common::file_field::FileRef;
     use stroem_common::models::workflow::{
         ActionDef, FlowStep, InputFieldDef, TaskDef, WorkspaceConfig,
     };
     use stroem_db::JobStepRow;
 
-    fn field_names(names: &[&str]) -> Vec<String> {
-        names.iter().map(|s| s.to_string()).collect()
+    /// An action schema of `string` fields.
+    fn string_schema(names: &[&str]) -> HashMap<String, InputFieldDef> {
+        names
+            .iter()
+            .map(|s| (s.to_string(), make_input_field("string")))
+            .collect()
+    }
+
+    fn schema_of(fields: &[(&str, &str)]) -> HashMap<String, InputFieldDef> {
+        fields
+            .iter()
+            .map(|(name, ty)| (name.to_string(), make_input_field(ty)))
+            .collect()
     }
 
     fn make_input_field(field_type: &str) -> InputFieldDef {
@@ -527,6 +591,7 @@ mod tests {
         let workspace = WorkspaceConfig::default();
         let step = make_step_row("step1", Some(json!({"key": "value"})));
         let prep = PrepareContext {
+            files: &JobFiles::empty(),
             input_schema: None,
             workspace: &workspace,
             task_name: "nonexistent-task",
@@ -581,6 +646,7 @@ mod tests {
 
         let step = make_step_row("missing-step", Some(json!({"original": true})));
         let prep = PrepareContext {
+            files: &JobFiles::empty(),
             input_schema: None,
             workspace: &workspace,
             task_name: "my-task",
@@ -637,6 +703,7 @@ mod tests {
 
         let step = make_step_row("step1", Some(json!({"stored": "value"})));
         let prep = PrepareContext {
+            files: &JobFiles::empty(),
             input_schema: None,
             workspace: &workspace,
             task_name: "my-task",
@@ -691,6 +758,7 @@ mod tests {
         let step = make_step_row("step1", None);
         let job_input = json!({"name": "World"});
         let prep = PrepareContext {
+            files: &JobFiles::empty(),
             input_schema: None,
             workspace: &workspace,
             task_name: "my-task",
@@ -746,6 +814,7 @@ mod tests {
         let step = make_step_row("step1", None);
         let rows = vec![completed_row("step-a", json!({"result": "computed-value"}))];
         let prep = PrepareContext {
+            files: &JobFiles::empty(),
             input_schema: None,
             workspace: &workspace,
             task_name: "my-task",
@@ -1328,6 +1397,7 @@ mod tests {
         let step = make_step_row("step1", None);
         let job_input = json!({"name": "Alice"});
         let prep = PrepareContext {
+            files: &JobFiles::empty(),
             input_schema: None,
             workspace: &workspace,
             task_name: "nonexistent",
@@ -1371,6 +1441,7 @@ mod tests {
 
         let step = make_step_row("step1", None);
         let prep = PrepareContext {
+            files: &JobFiles::empty(),
             input_schema: None,
             workspace: &workspace,
             task_name: "my-task",
@@ -1428,6 +1499,7 @@ mod tests {
         // job_input has "extra" which should be merged for action schema fields
         let job_input = json!({"sql": "SELECT 1", "extra": "from-job"});
         let prep = PrepareContext {
+            files: &JobFiles::empty(),
             input_schema: workspace.actions.get("run-query").map(|a| &a.input),
             workspace: &workspace,
             task_name: "my-task",
@@ -1512,6 +1584,7 @@ mod tests {
         );
         let step = make_step_row("s", None);
         let prep = PrepareContext {
+            files: &JobFiles::empty(),
             input_schema: owner.actions.get("remote").map(|a| &a.input),
             workspace: &caller,
             task_name: "t",
@@ -1549,6 +1622,7 @@ mod tests {
             vec![],
         );
         let prep_unshared = PrepareContext {
+            files: &JobFiles::empty(),
             input_schema: owner_unshared.actions.get("remote").map(|a| &a.input),
             workspace: &caller,
             task_name: "t",
@@ -1619,6 +1693,7 @@ mod tests {
         let set = WorkspaceSet::from_parts("A", Some(&caller), vec![], vec!["B".to_string()]);
         let step = make_step_row("s", None);
         let prep = PrepareContext {
+            files: &JobFiles::empty(),
             input_schema: caller.actions.get("query").map(|a| &a.input),
             workspace: &caller,
             task_name: "t",
@@ -1691,6 +1766,7 @@ mod tests {
         );
         let step = make_step_row("s", None);
         let prep = PrepareContext {
+            files: &JobFiles::empty(),
             input_schema: owner.actions.get("remote").map(|a| &a.input),
             workspace: &caller,
             task_name: "t",
@@ -1786,6 +1862,7 @@ mod tests {
         );
         let step = make_step_row("s", None);
         let prep = PrepareContext {
+            files: &JobFiles::empty(),
             input_schema: owner.actions.get("remote").map(|a| &a.input),
             workspace: &caller,
             task_name: "t",
@@ -1864,6 +1941,7 @@ mod tests {
 
         let step = make_step_row("s", None);
         let prep = PrepareContext {
+            files: &JobFiles::empty(),
             input_schema: workspace.actions.get("common.pg-query").map(|a| &a.input),
             workspace: &workspace,
             task_name: "t",
@@ -1897,9 +1975,9 @@ mod tests {
                 "database": "analytics"
             }
         });
-        let names = field_names(&["sql", "clickhouse"]);
+        let names = string_schema(&["sql", "clickhouse"]);
 
-        merge_missing_action_fields(&mut input_val, Some(&job_input), names.iter());
+        merge_missing_action_fields(&mut input_val, Some(&job_input), &names, &JobFiles::empty());
 
         assert_eq!(input_val["sql"], "SELECT 1");
         assert_eq!(input_val["clickhouse"]["host"], "ch.example.com");
@@ -1914,9 +1992,9 @@ mod tests {
             "sql": "SELECT 1",
             "clickhouse": {"host": "ch.example.com"}
         });
-        let names = field_names(&["sql", "clickhouse"]);
+        let names = string_schema(&["sql", "clickhouse"]);
 
-        merge_missing_action_fields(&mut input_val, Some(&job_input), names.iter());
+        merge_missing_action_fields(&mut input_val, Some(&job_input), &names, &JobFiles::empty());
 
         assert_eq!(input_val["sql"], "SELECT 2");
         assert_eq!(input_val["clickhouse"], "step-override");
@@ -1925,9 +2003,9 @@ mod tests {
     #[test]
     fn test_merge_skipped_when_job_input_is_none() {
         let mut input_val = json!({"sql": "SELECT 1"});
-        let names = field_names(&["sql", "clickhouse"]);
+        let names = string_schema(&["sql", "clickhouse"]);
 
-        merge_missing_action_fields(&mut input_val, None, names.iter());
+        merge_missing_action_fields(&mut input_val, None, &names, &JobFiles::empty());
 
         assert_eq!(input_val["sql"], "SELECT 1");
         assert!(input_val.get("clickhouse").is_none());
@@ -1937,9 +2015,9 @@ mod tests {
     fn test_merge_skipped_when_job_input_is_not_object() {
         let mut input_val = json!({"sql": "SELECT 1"});
         let job_input = json!("some raw string");
-        let names = field_names(&["sql", "clickhouse"]);
+        let names = string_schema(&["sql", "clickhouse"]);
 
-        merge_missing_action_fields(&mut input_val, Some(&job_input), names.iter());
+        merge_missing_action_fields(&mut input_val, Some(&job_input), &names, &JobFiles::empty());
 
         assert_eq!(input_val["sql"], "SELECT 1");
         assert!(input_val.get("clickhouse").is_none());
@@ -1949,9 +2027,9 @@ mod tests {
     fn test_merge_skipped_when_input_val_is_not_object() {
         let mut input_val = json!("raw");
         let job_input = json!({"clickhouse": {"host": "h"}});
-        let names = field_names(&["clickhouse"]);
+        let names = string_schema(&["clickhouse"]);
 
-        merge_missing_action_fields(&mut input_val, Some(&job_input), names.iter());
+        merge_missing_action_fields(&mut input_val, Some(&job_input), &names, &JobFiles::empty());
 
         assert_eq!(input_val, json!("raw"));
     }
@@ -1960,9 +2038,9 @@ mod tests {
     fn test_merge_skips_fields_not_in_job_input() {
         let mut input_val = json!({"sql": "SELECT 1"});
         let job_input = json!({"sql": "SELECT 1"});
-        let names = field_names(&["sql", "clickhouse"]);
+        let names = string_schema(&["sql", "clickhouse"]);
 
-        merge_missing_action_fields(&mut input_val, Some(&job_input), names.iter());
+        merge_missing_action_fields(&mut input_val, Some(&job_input), &names, &JobFiles::empty());
 
         assert_eq!(input_val["sql"], "SELECT 1");
         assert!(input_val.get("clickhouse").is_none());
@@ -1972,9 +2050,9 @@ mod tests {
     fn test_merge_skips_null_job_input_fields() {
         let mut input_val = json!({"sql": "SELECT 1"});
         let job_input = json!({"sql": "SELECT 1", "clickhouse": null});
-        let names = field_names(&["sql", "clickhouse"]);
+        let names = string_schema(&["sql", "clickhouse"]);
 
-        merge_missing_action_fields(&mut input_val, Some(&job_input), names.iter());
+        merge_missing_action_fields(&mut input_val, Some(&job_input), &names, &JobFiles::empty());
 
         assert_eq!(input_val["sql"], "SELECT 1");
         assert!(input_val.get("clickhouse").is_none());
@@ -1989,9 +2067,9 @@ mod tests {
             "s3_bucket": "my-bucket",
             "redis": {"url": "redis://localhost"}
         });
-        let names = field_names(&["sql", "clickhouse", "s3_bucket", "redis"]);
+        let names = string_schema(&["sql", "clickhouse", "s3_bucket", "redis"]);
 
-        merge_missing_action_fields(&mut input_val, Some(&job_input), names.iter());
+        merge_missing_action_fields(&mut input_val, Some(&job_input), &names, &JobFiles::empty());
 
         assert_eq!(input_val["sql"], "SELECT 1");
         assert_eq!(input_val["clickhouse"]["host"], "ch.example.com");
@@ -2007,13 +2085,180 @@ mod tests {
             "clickhouse": {"host": "ch.example.com"},
             "extra_field": "should not appear"
         });
-        let names = field_names(&["sql", "clickhouse"]);
+        let names = string_schema(&["sql", "clickhouse"]);
 
-        merge_missing_action_fields(&mut input_val, Some(&job_input), names.iter());
+        merge_missing_action_fields(&mut input_val, Some(&job_input), &names, &JobFiles::empty());
 
         assert_eq!(input_val["sql"], "SELECT 1");
         assert_eq!(input_val["clickhouse"]["host"], "ch.example.com");
         assert!(input_val.get("extra_field").is_none());
+    }
+
+    const FILE_X: &str = "file_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const PATH_X: &str = "/w/in/file_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/r.csv";
+
+    fn files_x() -> JobFiles {
+        JobFiles::new(
+            "/w/in",
+            [(
+                "data_file".to_string(),
+                FileRef {
+                    file_id: FILE_X.to_string(),
+                    safe_name: "r.csv".to_string(),
+                },
+            )],
+        )
+    }
+
+    /// Spec 2026-10-29 § 5.1: a task-level file is copied by TARGET type —
+    /// the id into a `file` action field, the path into any other.
+    #[test]
+    fn test_merge_task_file_field_by_target_type() {
+        let files = files_x();
+        let job_input = json!({"data_file": FILE_X});
+
+        let mut v = json!({});
+        let schema = schema_of(&[("data_file", "file")]);
+        merge_missing_action_fields(&mut v, Some(&job_input), &schema, &files);
+        assert_eq!(v, json!({"data_file": FILE_X}));
+
+        for ty in ["string", "text", "json"] {
+            let mut v = json!({});
+            let schema = schema_of(&[("data_file", ty)]);
+            merge_missing_action_fields(&mut v, Some(&job_input), &schema, &files);
+            assert_eq!(v, json!({"data_file": PATH_X}), "{ty}");
+        }
+
+        // A field the step already set is left alone.
+        let mut v = json!({"data_file": "mine"});
+        let schema = schema_of(&[("data_file", "string")]);
+        merge_missing_action_fields(&mut v, Some(&job_input), &schema, &files);
+        assert_eq!(v, json!({"data_file": "mine"}));
+    }
+
+    #[test]
+    fn test_merge_copies_as_today_when_the_value_is_not_the_attached_file() {
+        let files = files_x();
+        let schema = schema_of(&[("data_file", "string"), ("other", "string")]);
+        // The task field holds another value than its attached id.
+        let mut v = json!({});
+        let job_input = json!({"data_file": "file_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"});
+        merge_missing_action_fields(&mut v, Some(&job_input), &schema, &files);
+        assert_eq!(v["data_file"], "file_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        // A field with no attachment that holds an attached id.
+        let mut v = json!({});
+        let job_input = json!({"other": FILE_X});
+        merge_missing_action_fields(&mut v, Some(&job_input), &schema, &files);
+        assert_eq!(v["other"], FILE_X);
+        // No files at all.
+        let mut v = json!({});
+        let job_input = json!({"data_file": FILE_X});
+        merge_missing_action_fields(&mut v, Some(&job_input), &schema, &JobFiles::empty());
+        assert_eq!(v["data_file"], FILE_X);
+    }
+
+    #[test]
+    fn test_inputs_root_per_runner() {
+        // Local scripts use the worker's directory, or nothing without one.
+        assert_eq!(
+            inputs_root("script", Some("local"), Some("/w/in")).as_deref(),
+            Some("/w/in")
+        );
+        assert_eq!(
+            inputs_root("script", None, Some("/w/in")).as_deref(),
+            Some("/w/in")
+        );
+        assert_eq!(inputs_root("script", Some("local"), None), None);
+        // Containers always use `/inputs`.
+        for (action_type, runner) in [
+            ("script", Some("docker")),
+            ("script", Some("pod")),
+            ("docker", Some("none")),
+            ("pod", Some("none")),
+            ("docker", None),
+            ("pod", None),
+        ] {
+            for dir in [Some("/w/in"), None] {
+                assert_eq!(
+                    inputs_root(action_type, runner, dir).as_deref(),
+                    Some("/inputs"),
+                    "{action_type} {runner:?} {dir:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_old_worker_text_is_fixed() {
+        assert_eq!(
+            OLD_WORKER_INPUTS,
+            "this step has file inputs, which the worker does not support; upgrade the worker"
+        );
+    }
+
+    /// The S1 render resolves a `file` target against the claim's files: a
+    /// path under the claim root becomes the id; anything else is the
+    /// value-free `FileInputError`.
+    #[test]
+    fn test_render_step_input_resolves_file_target_against_claim_files() {
+        let workspace = make_workspace_with_step(HashMap::from([(
+            "data".to_string(),
+            json!("{{ input.data_file }}"),
+        )]));
+        let step = make_step_row("step1", None);
+        let schema = schema_of(&[("data", "file")]);
+        let files = files_x();
+        let job_input = json!({"data_file": FILE_X});
+        let lookup = stroem_common::template::SingleWorkspace {
+            name: "default",
+            config: &workspace,
+        };
+        let prep = PrepareContext {
+            input_schema: Some(&schema),
+            workspace: &workspace,
+            task_name: "my-task",
+            step: &step,
+            job_input: Some(&job_input),
+            action_workspace: None,
+            action_workspace_name: None,
+            lookup: &lookup,
+            files: &files,
+        };
+        let snaps = crate::render_context::Snapshots {
+            files: files.clone(),
+            ..Default::default()
+        };
+        let secrets = HashMap::new();
+        let job = crate::render_context::JobContext {
+            job_id: uuid::Uuid::nil(),
+            job_input: Some(&job_input),
+            caller_secrets: &secrets,
+            owner_secrets: &secrets,
+            snapshots: &snaps,
+            job_revision: None,
+            job_ref: None,
+        };
+        let ctx =
+            crate::render_context::build(&job, &[], None, crate::render_context::Scope::StepInput);
+        let out = render_step_input(&ctx, &prep).unwrap().unwrap();
+        assert_eq!(out, json!({"data": FILE_X}));
+
+        // The same files under another root: the rendered path is foreign.
+        let other_root = files.with_root("/elsewhere");
+        let prep = PrepareContext {
+            files: &other_root,
+            ..prep
+        };
+        let err = render_step_input(&ctx, &prep).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Input field 'data': the file cannot be used"),
+            "{msg}"
+        );
+        assert!(!msg.contains(FILE_X) && !msg.contains("r.csv"), "{msg}");
+        assert!(err
+            .downcast_ref::<stroem_common::file_field::FileInputError>()
+            .is_some());
     }
 
     #[test]
@@ -2130,6 +2375,7 @@ mod tests {
         let workspace = make_workspace_with_step(flow_input);
         let step = make_step_row("step1", None);
         let prep = PrepareContext {
+            files: &JobFiles::empty(),
             input_schema: None,
             workspace: &workspace,
             task_name: "my-task",

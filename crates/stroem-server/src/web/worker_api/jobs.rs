@@ -62,6 +62,11 @@ pub struct ClaimRequest {
     /// worker-row lookup.
     #[serde(default)]
     pub exclusive: bool,
+    /// Absolute directory where this worker places a local step's input
+    /// files (spec 2026-10-29 § 5.2). Its presence means the worker supports
+    /// file inputs (§ 6.5); a relative path is a 400.
+    #[serde(default)]
+    pub inputs_dir: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -169,6 +174,13 @@ pub struct ClaimResponse {
     /// in Tera templates.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub global_state_has_json: Option<bool>,
+
+    // ── Input files ────────────────────────────────────────────────
+    /// Every distinct file of the job (spec 2026-10-29 § 5.4), which the
+    /// worker places at `{root}/{file_id}/{safe_name}` before the step
+    /// runs. Empty for agent steps and jobs without files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_files: Vec<stroem_common::file_field::ClaimedInputFile>,
 }
 
 impl ClaimResponse {
@@ -199,6 +211,7 @@ impl ClaimResponse {
             state_has_json: None,
             global_state_storage_key: None,
             global_state_has_json: None,
+            input_files: Vec::new(),
         }
     }
 }
@@ -401,6 +414,11 @@ pub async fn heartbeat(
 pub(crate) const MAX_PIN_RELEASES: i32 = 30;
 /// Delay before a released step may be claimed again.
 pub(crate) const PIN_RELEASE_RETRY_SECS: i64 = 10;
+
+/// Fixed claim failure when the job's `job_input_file` rows cannot be read
+/// (spec 2026-10-29 § 5.1): rendering without them would show a `file`
+/// value as its id. The cause goes to the server log only.
+const INPUT_FILES_UNREADABLE: &str = "could not load the job's input files";
 
 /// What `fail_claimed_step` needs besides the message (spec § 7.2, § 7.4).
 struct ClaimFailure<'a> {
@@ -859,6 +877,18 @@ pub async fn claim_job(
         )));
     }
 
+    // Spec 2026-10-29 § 5.2: where the worker places a local step's input
+    // files. Rejected before any step is claimed, so none is left running.
+    if req
+        .inputs_dir
+        .as_deref()
+        .is_some_and(|dir| !std::path::Path::new(dir).is_absolute())
+    {
+        return Err(AppError::BadRequest(
+            "inputs_dir must be an absolute path".to_string(),
+        ));
+    }
+
     let step = match JobStepRepo::claim_ready_step(
         &state.pool,
         &capabilities,
@@ -970,6 +1000,70 @@ pub async fn claim_job(
         .await);
     }
 
+    // ── Input files (spec 2026-10-29 § 5.2 – § 5.4, § 6.5) ──────────────────
+    // Loaded before any rendering: without them a `file` value would render
+    // as its id. Every runner step gets every file of its job (U9) under its
+    // runner's root; an agent step gets none and renders under `/inputs`.
+    let is_agent = step.action_type == "agent";
+    let attachments = match crate::input_files::load_attachments(&state.pool, step.job_id).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::error!(
+                job_id = %step.job_id,
+                step_name = %step.step_name,
+                "Failed to load the job's input files at claim: {:#}",
+                e
+            );
+            return Ok(fail_claimed_step(
+                &state,
+                step.job_id,
+                &step.step_name,
+                INPUT_FILES_UNREADABLE,
+                &ws_set,
+                &ClaimFailure {
+                    claim,
+                    pin_secrets: &pin_secrets,
+                    withheld: None,
+                },
+            )
+            .await);
+        }
+    };
+    // `inputs_dir` in the request is the worker's "I place input files"
+    // signal, whatever the step's root: an older worker would run the step
+    // without them. An ordinary claim failure — no release, which would loop
+    // on a fleet of old workers.
+    if !is_agent && !attachments.is_empty() && req.inputs_dir.is_none() {
+        return Ok(fail_claimed_step(
+            &state,
+            step.job_id,
+            &step.step_name,
+            rendering::OLD_WORKER_INPUTS,
+            &ws_set,
+            &ClaimFailure {
+                claim,
+                pin_secrets: &pin_secrets,
+                withheld: None,
+            },
+        )
+        .await);
+    }
+    let inputs_root = if is_agent {
+        None
+    } else {
+        rendering::inputs_root(
+            &step.action_type,
+            Some(step.runner.as_str()),
+            req.inputs_dir.as_deref(),
+        )
+    }
+    .unwrap_or_else(|| stroem_common::file_field::CANONICAL_INPUTS_ROOT.to_string());
+    let input_files = if is_agent {
+        Vec::new()
+    } else {
+        crate::input_files::claimed_files(&attachments)
+    };
+
     // Fetch all steps once — reused for both the template context and agent rendering.
     let all_steps_for_job = JobStepRepo::get_steps_for_job(&state.pool, step.job_id)
         .await
@@ -1004,6 +1098,7 @@ pub async fn claim_job(
             }
         }
     }
+    snapshots.files = crate::input_files::job_files(&attachments, &inputs_root);
     // The worker only needs these to download the archive blob, which is
     // impossible without configured storage; rendering from the persisted
     // sidecar (above) is correct either way, so resolution stays unconditional.
@@ -1086,6 +1181,7 @@ pub async fn claim_job(
             },
             lookup: &ws_set,
             input_schema: input_schema.as_ref(),
+            files: &snapshots.files,
         };
 
         let input_ctx = crate::render_context::build(
@@ -1393,6 +1489,7 @@ pub async fn claim_job(
         state_has_json,
         global_state_storage_key,
         global_state_has_json,
+        input_files,
     })
     .into_response())
 }
@@ -1865,6 +1962,7 @@ mod tests {
             state_has_json: None,
             global_state_storage_key: None,
             global_state_has_json: None,
+            input_files: Vec::new(),
         };
         let dbg = format!("{resp:?}");
         assert!(!dbg.contains(SENTINEL), "ClaimResponse Debug leaked: {dbg}");
@@ -1953,6 +2051,7 @@ mod tests {
             state_has_json: None,
             global_state_storage_key: None,
             global_state_has_json: None,
+            input_files: Vec::new(),
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["task_name"], "deploy-api");
@@ -2113,6 +2212,7 @@ mod tests {
             state_has_json: None,
             global_state_storage_key: None,
             global_state_has_json: None,
+            input_files: Vec::new(),
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert!(json["task_name"].is_null());
@@ -2145,6 +2245,7 @@ mod tests {
             state_has_json: None,
             global_state_storage_key: None,
             global_state_has_json: None,
+            input_files: Vec::new(),
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["revision"], "abc123");
@@ -2177,6 +2278,7 @@ mod tests {
             state_has_json: None,
             global_state_storage_key: None,
             global_state_has_json: None,
+            input_files: Vec::new(),
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert!(
@@ -2212,6 +2314,7 @@ mod tests {
             state_has_json: None,
             global_state_storage_key: None,
             global_state_has_json: None,
+            input_files: Vec::new(),
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert!(
@@ -2260,6 +2363,7 @@ mod tests {
             state_has_json: None,
             global_state_storage_key: None,
             global_state_has_json: None,
+            input_files: Vec::new(),
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["event_source_config"]["target_task"], "process-event");

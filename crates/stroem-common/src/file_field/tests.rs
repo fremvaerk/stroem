@@ -164,3 +164,59 @@ fn connection_resolution_leaves_file_fields_alone() {
     let out = resolve_connection_inputs(&input, &schema, &lookup).unwrap();
     assert_eq!(out, input);
 }
+
+#[test]
+fn rebase_canonical_moves_attached_canonical_paths_to_the_root() {
+    let files = JobFiles::new(
+        "/w/in",
+        [
+            attach("a", "file_X", "r.csv"),
+            attach("b", "file_Y", "s.csv"),
+        ],
+    );
+    let item = json!({
+        "x": "/inputs/file_X/r.csv",
+        "list": ["/inputs/file_Y/s.csv", "/inputs/file_Y/other.csv", 3, null, true],
+        "nested": {"deep": [{"p": "/inputs/file_X/r.csv"}]},
+        "/inputs/file_X/r.csv": "key",
+        "unattached": "/inputs/file_Z/r.csv",
+        "padded": " /inputs/file_X/r.csv",
+        "longer": "/inputs/file_X/r.csv/x",
+        "id": "file_X",
+        "other_root": "/o/file_X/r.csv",
+        "claim_root": "/w/in/file_X/r.csv",
+    });
+    let out = files.rebase_canonical(&item);
+    assert_eq!(
+        out,
+        json!({
+            "x": "/w/in/file_X/r.csv",
+            "list": ["/w/in/file_Y/s.csv", "/inputs/file_Y/other.csv", 3, null, true],
+            "nested": {"deep": [{"p": "/w/in/file_X/r.csv"}]},
+            "/inputs/file_X/r.csv": "key",
+            "unattached": "/inputs/file_Z/r.csv",
+            "padded": " /inputs/file_X/r.csv",
+            "longer": "/inputs/file_X/r.csv/x",
+            "id": "file_X",
+            "other_root": "/o/file_X/r.csv",
+            "claim_root": "/w/in/file_X/r.csv",
+        })
+    );
+    // A bare string and a scalar.
+    assert_eq!(
+        files.rebase_canonical(&json!("/inputs/file_Y/s.csv")),
+        json!("/w/in/file_Y/s.csv")
+    );
+    assert_eq!(files.rebase_canonical(&json!(7)), json!(7));
+}
+
+#[test]
+fn rebase_canonical_is_identity_under_the_canonical_root_or_without_files() {
+    let item = json!(["/inputs/file_X/r.csv", {"k": "/inputs/file_X/r.csv"}]);
+    let canonical = JobFiles::new(CANONICAL_INPUTS_ROOT, [attach("a", "file_X", "r.csv")]);
+    assert_eq!(canonical.rebase_canonical(&item), item);
+    assert_eq!(
+        JobFiles::empty().with_root("/w/in").rebase_canonical(&item),
+        item
+    );
+}

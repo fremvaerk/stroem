@@ -193,6 +193,42 @@ impl JobFiles {
         Value::Object(out)
     }
 
+    /// `value` with every string that is exactly the canonical path
+    /// `/inputs/{id}/{safe name}` of an attached file moved to this root,
+    /// at any depth of arrays and objects (object keys stay). A `for_each`
+    /// item is rendered once under the canonical root and stored; this puts
+    /// it under the render root (spec § 5.1, revision 8).
+    pub fn rebase_canonical(&self, value: &Value) -> Value {
+        if self.root == CANONICAL_INPUTS_ROOT || self.files.is_empty() {
+            return value.clone();
+        }
+        match value {
+            Value::String(s) => match self.canonical_file(s) {
+                Some(f) => Value::String(file_path(&self.root, &f.file_id, &f.safe_name)),
+                None => value.clone(),
+            },
+            Value::Array(items) => {
+                Value::Array(items.iter().map(|v| self.rebase_canonical(v)).collect())
+            }
+            Value::Object(map) => Value::Object(
+                map.iter()
+                    .map(|(k, v)| (k.clone(), self.rebase_canonical(v)))
+                    .collect(),
+            ),
+            _ => value.clone(),
+        }
+    }
+
+    /// The attached file whose canonical path is exactly `value`.
+    fn canonical_file(&self, value: &str) -> Option<&FileRef> {
+        let rest = value
+            .strip_prefix(CANONICAL_INPUTS_ROOT)?
+            .strip_prefix('/')?;
+        let (id, _) = rest.split_once('/')?;
+        let f = self.files.get(id)?;
+        (file_path(CANONICAL_INPUTS_ROOT, &f.file_id, &f.safe_name) == value).then_some(f)
+    }
+
     /// The attached file a `file` target value names: its id, or exactly
     /// `{root}/{id}/{its safe name}`.
     pub fn resolve_target(&self, value: &str) -> Option<&FileRef> {
