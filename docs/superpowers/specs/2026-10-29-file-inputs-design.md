@@ -1,6 +1,6 @@
 # File inputs (`type: file`)
 
-Status: approved (Codex MERGE-READY on revision 6), revision 10 (2026-10-30).
+Status: approved (Codex MERGE-READY on revision 6), revision 11 (2026-10-30).
 Branch `feat/file-inputs-impl`.
 
 ## Revision history
@@ -86,6 +86,9 @@ Branch `feat/file-inputs-impl`.
   without files). (d) § 10: upper caps on `upload_ttl_secs`,
   `upload_url_ttl_secs` and `max_file_bytes`. Also § 7.5: no upload URL is
   minted without file storage.
+- **Revision 11** (2026-10-30) — push-time security review: the token
+  route re-checks the user's `Run` and the task's file field at upload
+  time (§ 7.5).
 - **Revision 10** (2026-10-30) — Codex implementation review round 1 (two
   findings). (a) § 7.4: the `stroem run` staging root is private — created
   atomically with mode `0700`, never an existing directory, like the
@@ -764,6 +767,10 @@ Two calls: upload (§ 4.2), then execute with `{"input": {"data_file":
   with the raw body and **no** Bearer header (the agent's shell does not have
   the MCP token); the token is the capability. The response is the § 4.2
   response; `uploaded_by_user_id` = the token's user, `origin = mcp_url`.
+  At upload time (revision 11) the route re-checks that the token's user
+  still exists, still has `Run` on the task and that the task still has a
+  `file` field; otherwise the same `404 Upload URL not found` (the token is
+  used up either way).
   Then the agent calls `execute_task` with the `file_id` (A1).
 - `get_task` shows `type: file`; the tool descriptions say how to send files.
 

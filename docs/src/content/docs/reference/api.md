@@ -265,7 +265,7 @@ Without `source_job_id` the call needs the Run permission on the task as it is n
 POST /api/uploads/{token}
 ```
 
-Uploads a file through a single-use URL that the MCP tool `create_upload_url` returned. Send **no** `Authorization` header: the token is the credential. The body and the response are the same as for [Upload Input File](#upload-input-file). The token is used up when the upload starts, so a failed upload needs a new URL. An unknown, used or expired token gives `404 Upload URL not found`.
+Uploads a file through a single-use URL that the MCP tool `create_upload_url` returned. Send **no** `Authorization` header: the token is the credential. The body and the response are the same as for [Upload Input File](#upload-input-file). The token is used up when the upload starts, so a failed upload needs a new URL. An unknown, used or expired token gives `404 Upload URL not found`. The upload re-checks that the URL's user may still run the task and that the task still has a `file` field; otherwise the answer is the same `404 Upload URL not found`.
 
 ## Download Input File
 
