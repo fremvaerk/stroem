@@ -60,7 +60,7 @@ A flow step gives the file on with a template:
 
 An action `file` field also accepts a file ID, or a path of a file that belongs to the same job. Any other value fails the step with `Input field 'data': the file cannot be used`.
 
-A `type: task` step passes the file to the child job's `file` field in the same way, in the same or in another workspace. A job input file field with the same name as an unset action field is copied by the target type: the file ID into a `file` action field, the path into any other field.
+A `type: task` step passes the file to the child job's `file` field in the same way, in the same or in another workspace. Only a child `file` field attaches the file to the child job: a child field of another type that gets `{{ input.data_file }}` receives the path `/inputs/{file_id}/{name}` as text, and the child's steps cannot read that path. A job input file field with the same name as an unset action field is copied by the target type: the file ID into a `file` action field, the path into any other field.
 
 Re-run, Restart and [task retry](/guides/retry/) keep the file of the source job. Hook jobs and agent task-tool children do not get it. The tool schema that an agent sees for a task leaves out the task's `file` fields; a tool call for a task with a `required` file field fails with `Input field '…': a file is required`.
 
