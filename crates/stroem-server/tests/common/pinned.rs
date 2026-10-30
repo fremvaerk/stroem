@@ -772,6 +772,7 @@ impl PinnedFixture {
             CreationMode::Normal,
             None,
             JobDefaults::default(),
+            stroem_server::input_files::FileGrant::Indirect,
         )
         .await
         .map(|c| c.job_id)

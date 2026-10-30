@@ -946,6 +946,8 @@ async fn handle_task_steps_pass(
             None,                 // agents_config not available; orchestrator will dispatch
             defaults,
             child_git_ref.as_deref(),
+            // A2 against the parent job (spec 2026-10-29 § 4.6).
+            crate::input_files::FileGrant::TaskChild,
         )
         .await
         {

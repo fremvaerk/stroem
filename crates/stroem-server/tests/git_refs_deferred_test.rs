@@ -326,6 +326,7 @@ pub(crate) async fn df_create(
         None,
         None,
         JobDefaults::default(),
+        stroem_server::input_files::FileGrant::Indirect,
     )
     .await
     .map(|c| c.job_id)

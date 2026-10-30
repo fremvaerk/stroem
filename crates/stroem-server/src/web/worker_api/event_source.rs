@@ -105,6 +105,8 @@ pub async fn emit_event(
         None,
         state.config.agents.as_ref(),
         crate::config::JobDefaults::from(state.config.as_ref()),
+        // An event source cannot hold an upload (spec 2026-10-29 § 4.4).
+        crate::input_files::FileGrant::Indirect,
     )
     .await
     .with_context(|| {

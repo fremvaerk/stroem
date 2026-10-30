@@ -820,6 +820,8 @@ pub async fn restart_job(
         Some(sp) => Some(sp.pin.commit.clone()),
         None => state.workspaces.get_revision(&source.workspace),
     };
+    let files =
+        crate::input_files::FileGrant::direct(&state, super::tasks::caller_user_id(&auth_user)?);
     let created = crate::job_creator::create_restart_job(
         &state.workspaces,
         &state.pool,
@@ -832,6 +834,7 @@ pub async fn restart_job(
         revision.as_deref(),
         crate::config::JobDefaults::from(state.config.as_ref()),
         source_pin.as_ref().map(|sp| sp.pin.git_ref.as_str()),
+        files,
     )
     .await
     .map_err(super::classify_execute_error)?;

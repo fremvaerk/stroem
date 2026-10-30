@@ -86,6 +86,7 @@ async fn create_job_for_task(
         source_job_id,
         agents_config,
         defaults,
+        stroem_server::input_files::FileGrant::Indirect,
     )
     .await
     .map(|c| c.job_id)
@@ -893,6 +894,56 @@ async fn test_mcp_execute_with_non_object_input_errors() -> Result<()> {
         "non-object input must produce a JSON-RPC error, got: {resp}"
     );
 
+    Ok(())
+}
+
+/// A `file` input value that is not the caller's own upload is a value-free
+/// invalid-params error (spec 2026-10-29-file-inputs § 8), not an internal one.
+#[tokio::test]
+async fn mcp_execute_with_unknown_file_id_is_invalid_params() -> Result<()> {
+    let ws: WorkspaceConfig = serde_yaml::from_str(
+        r#"
+actions:
+  noop: { type: script, script: "true" }
+tasks:
+  files:
+    input: { data_file: { type: file } }
+    flow: { run: { action: noop } }
+"#,
+    )?;
+    let (router, pool, _tmp) =
+        setup_with_mcp_using(WorkspaceManager::from_config("default", ws)).await?;
+    let (router, session_id) = mcp_initialize(router).await;
+
+    let unknown = stroem_common::file_field::new_file_id();
+    let exec_body = json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "id": 2,
+        "params": {
+            "name": "execute_task",
+            "arguments": {
+                "workspace": "default",
+                "task_name": "files",
+                "input": {"data_file": unknown}
+            }
+        }
+    });
+    let response = router
+        .oneshot(mcp_request(session_id.as_deref(), exec_body))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let resp = body_json(response).await;
+    assert_eq!(resp["error"]["code"], json!(-32602), "{resp}");
+    assert_eq!(
+        resp["error"]["message"],
+        json!("Input field 'data_file': the file cannot be used"),
+        "{resp}"
+    );
+    let created: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM job WHERE task_name = 'files'")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(created, 0);
     Ok(())
 }
 

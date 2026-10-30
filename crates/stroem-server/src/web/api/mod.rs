@@ -431,9 +431,15 @@ pub fn build_api_routes(state: Arc<AppState>) -> Router {
 ///
 /// Typed [`PinError`](crate::workspace::pins::PinError) /
 /// [`RefResolveError`](crate::refs::RefResolveError) / `GitRefError` are
-/// classified first, by their own permanence (git-refs spec § 8).
+/// classified first, by their own permanence (git-refs spec § 8). Before
+/// them all, a `FileInputError` (file inputs spec § 8) is always a 400.
 pub(crate) fn classify_execute_error(e: anyhow::Error) -> AppError {
     use crate::workspace::pins::{PinError, PinLoadWithheld};
+    // File inputs (spec 2026-10-29 § 8): a value-free author mistake, checked
+    // before everything else — in particular before "is not available" (500).
+    if let Some(f) = e.downcast_ref::<stroem_common::file_field::FileInputError>() {
+        return AppError::BadRequest(f.to_string());
+    }
     // Templated refs (spec 2026-10-15 § 5.5): one value-free typed error,
     // checked first. Its kind decides: transient → 500, else → 400.
     if let Some(r) = e.downcast_ref::<crate::templated_ref::RenderedRefError>() {
@@ -501,6 +507,34 @@ pub(crate) fn classify_execute_error(e: anyhow::Error) -> AppError {
 #[cfg(test)]
 mod classify_execute_error_tests {
     use super::*;
+
+    /// A file input error is an author mistake: 400 with its own fixed text,
+    /// even under a context layer that says "is not available" (which would
+    /// otherwise force a 500) — spec 2026-10-29-file-inputs § 8.
+    #[test]
+    fn classify_file_input_error_is_400_before_is_not_available() {
+        use stroem_common::file_field::{FileInputError, FileInputErrorKind};
+        for (kind, text) in [
+            (
+                FileInputErrorKind::CannotUse,
+                "Input field 'data_file': the file cannot be used",
+            ),
+            (
+                FileInputErrorKind::Required,
+                "Input field 'data_file': a file is required",
+            ),
+        ] {
+            let err = anyhow::Error::new(FileInputError {
+                field: "data_file".into(),
+                kind,
+            })
+            .context("workspace 'x' is not available");
+            match classify_execute_error(err) {
+                AppError::BadRequest(msg) => assert_eq!(msg, text),
+                other => panic!("expected BadRequest, got {other:?}"),
+            }
+        }
+    }
 
     #[test]
     fn rendered_ref_errors_answer_by_kind_with_their_fixed_sentence() {

@@ -32,6 +32,7 @@ async fn cr_create_etl(fx: &PinnedFixture, task: &str) -> Result<Uuid> {
         None,
         None,
         JobDefaults::default(),
+        stroem_server::input_files::FileGrant::Indirect,
     )
     .await
     .map(|c| c.job_id)
@@ -1331,6 +1332,7 @@ async fn same_ref_twice_in_one_creation_resolves_one_commit() -> Result<()> {
                     None,
                     None,
                     JobDefaults::default(),
+                    stroem_server::input_files::FileGrant::Indirect,
                 )
                 .await
                 .map(|c| c.job_id)

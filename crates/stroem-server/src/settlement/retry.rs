@@ -167,6 +167,8 @@ pub(super) async fn create_retry_job(
                 mode,
                 None,
                 s.defaults,
+                // A2 against the failed job only (spec 2026-10-29 § 4.6).
+                crate::input_files::FileGrant::Indirect,
             )
             .await
         }
@@ -192,6 +194,7 @@ pub(super) async fn create_retry_job(
                 None,
                 s.defaults,
                 None,
+                crate::input_files::FileGrant::Indirect,
             )
             .await
         }

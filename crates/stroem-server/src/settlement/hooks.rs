@@ -712,6 +712,8 @@ async fn fire_single_hook(
             None, // agents_config not available in hook context; orchestrator dispatches agents
             defaults,
             source_git_ref,
+            // A hook cannot hold an upload (spec 2026-10-29 § 4.4, § 4.6).
+            crate::input_files::FileGrant::Indirect,
         )
         .await
         .context("Failed to create hook task job")?;

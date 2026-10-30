@@ -530,6 +530,15 @@ impl StromMcpHandler {
 
         let source_id = source_id_for_audit(&self.auth);
         let revision = self.state.workspaces.get_revision(&params.workspace);
+        // A1 (spec 2026-10-29 § 4.4): an API key and an OAuth token both
+        // carry the user's id; no user when auth is off.
+        let user_id = self
+            .auth
+            .as_ref()
+            .map(|a| a.claims.sub.parse::<uuid::Uuid>())
+            .transpose()
+            .map_err(|_| internal_err("Invalid user ID in token"))?;
+        let files = crate::input_files::FileGrant::direct(&self.state, user_id);
         let created = crate::job_creator::create_job_for_task_detailed(
             &self.state.workspaces,
             &self.state.pool,
@@ -543,9 +552,15 @@ impl StromMcpHandler {
             None,
             self.state.config.agents.as_ref(),
             crate::config::JobDefaults::from(self.state.config.as_ref()),
+            files,
         )
         .await
-        .map_err(|e| internal_err(format!("Failed to create job: {e}")))?;
+        .map_err(|e| {
+            match e.downcast_ref::<stroem_common::file_field::FileInputError>() {
+                Some(f) => rmcp::ErrorData::invalid_params(f.to_string(), None),
+                None => internal_err(format!("Failed to create job: {e}")),
+            }
+        })?;
         let job_id = created.job_id;
 
         // Fire on_suspended hooks for any root-level approval steps that were

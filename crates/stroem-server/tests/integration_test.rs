@@ -111,6 +111,7 @@ async fn create_job_for_task(
         source_job_id,
         agents_config,
         defaults,
+        stroem_server::input_files::FileGrant::Indirect,
     )
     .await
     .map(|c| c.job_id)
@@ -28441,6 +28442,7 @@ async fn test_create_job_detailed_reports_terminal_at_creation() -> Result<()> {
         None,
         None,
         JobDefaults::default(),
+        stroem_server::input_files::FileGrant::Indirect,
     )
     .await?;
     assert!(created.terminal_at_creation());
@@ -28462,6 +28464,7 @@ async fn test_create_job_detailed_reports_terminal_at_creation() -> Result<()> {
         None,
         None,
         JobDefaults::default(),
+        stroem_server::input_files::FileGrant::Indirect,
     )
     .await?;
     assert!(!created.terminal_at_creation());
@@ -29096,6 +29099,7 @@ async fn test_propagate_defers_agent_tool_child_before_registration() -> Result<
         None,
         None,
         JobDefaults::default(),
+        stroem_server::input_files::FileGrant::Indirect,
     )
     .await?;
     let job_id = created.job_id;
@@ -29542,6 +29546,7 @@ async fn test_reconcile_settled_children_is_idempotent() -> Result<()> {
         None,
         None,
         JobDefaults::default(),
+        stroem_server::input_files::FileGrant::Indirect,
     )
     .await?;
     let job_id = created.job_id;
@@ -29906,6 +29911,7 @@ async fn test_approval_dispatch_failure_compensates_the_job() -> Result<()> {
         None,
         None,
         JobDefaults::default(),
+        stroem_server::input_files::FileGrant::Indirect,
     )
     .await?;
 
@@ -30025,6 +30031,7 @@ async fn test_indirect_hook_cycle_is_bounded() -> Result<()> {
         None,
         None,
         JobDefaults::default(),
+        stroem_server::input_files::FileGrant::Indirect,
     )
     .await?;
     let job_id = created.job_id;

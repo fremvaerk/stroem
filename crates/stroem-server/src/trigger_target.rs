@@ -212,6 +212,8 @@ pub(crate) async fn create_target_job(
                 crate::job_creator::CreationMode::Normal,
                 agents,
                 defaults,
+                // A trigger cannot hold an upload (spec 2026-10-29 § 4.4).
+                crate::input_files::FileGrant::Indirect,
             )
             .await
         }
@@ -230,6 +232,7 @@ pub(crate) async fn create_target_job(
                 None,
                 agents,
                 defaults,
+                crate::input_files::FileGrant::Indirect,
             )
             .await
         }
