@@ -304,7 +304,7 @@ input:
     order: 99
 ```
 
-A `file` field (task or action level) takes an uploaded file; `{{ input.<field> }}` renders to a read-only path. It cannot have `default`, `options`, `multiple` or `secret`. See [File Inputs](/guides/file-inputs/).
+A `file` field (task or action level) takes an uploaded file; `{{ input.<field> }}` renders to a read-only path. It cannot have `default`, `options`, `allow_custom`, `multiple` or `secret`. `file` is a reserved name: a connection type cannot be called `file`. See [File Inputs](/guides/file-inputs/).
 
 When `type` is not a primitive, it references a [connection type](#connection-types). The input value (a connection name) is resolved to the full connection object at execution time.
 

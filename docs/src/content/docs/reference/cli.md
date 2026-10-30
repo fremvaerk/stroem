@@ -35,7 +35,7 @@ stroem run deploy --input '{"env": "staging"}'
 stroem run import-report --input '{"data_file": "./report.csv"}'
 ```
 
-For a [`file` input field](/guides/file-inputs/) the value is a local path. The CLI checks that it is a regular file and copies it to a read-only temporary directory, so the path in the script has the same shape as on a server.
+For a [`file` input field](/guides/file-inputs/) the value in `--input` is a local path. The CLI checks that it is a regular file and copies it read-only to `{temp}/stroem-run-inputs-{uuid}/{file_id}/{safe_name}`, so the path in the script has the same shape as on a server. The directory is removed when the run ends. A required `file` field with no value fails with `Input field '…': a file is required`.
 
 Supports:
 - DAG dependency ordering

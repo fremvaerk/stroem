@@ -25,12 +25,9 @@ Registers a worker and returns a unique worker ID. Called once on worker startup
 {
   "name": "worker-1",
   "capabilities": ["script", "docker"],
-  "tags": [],
-  "inputs_dir": "/tmp/stroem-inputs-3f9c…"
+  "tags": []
 }
 ```
-
-`inputs_dir` is optional: an absolute path that the worker will create for this claim. It tells the server that the worker supports [file inputs](/guides/file-inputs/), and it is the root of the file paths for `runner: local` steps. A relative path gives `400`. If the step has input files and the request has no `inputs_dir`, the step fails with `this step has file inputs, which the worker does not support; upgrade the worker`.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -76,9 +73,12 @@ Claims the next ready step matching the worker on both routing dimensions. Uses 
 {
   "worker_id": "w1w2w3w4-...",
   "capabilities": ["script", "docker"],
-  "tags": []
+  "tags": [],
+  "inputs_dir": "/tmp/stroem-inputs-3f9c…/in"
 }
 ```
+
+`inputs_dir` is optional: an absolute path, new for each claim request, that the worker creates only if the claimed step has input files. It tells the server that the worker supports [file inputs](/guides/file-inputs/), and it is the root of the file paths for `runner: local` steps. The current worker sends `{temp}/stroem-inputs-{uuid}/in` and creates the parent `stroem-inputs-{uuid}` with mode `0700`. A relative path gives `400 inputs_dir must be an absolute path`. If a runner step of a job with input files is claimed by a request without `inputs_dir`, the step fails with `this step has file inputs, which the worker does not support; upgrade the worker` (step `retry:` applies).
 
 A step is claimed only when BOTH:
 1. The step's `required_ability` is present in the worker's `capabilities`, AND
@@ -103,7 +103,7 @@ A step is claimed only when BOTH:
 }
 ```
 
-A step of a job with [file inputs](/guides/file-inputs/) also carries `input_files`, one entry for each distinct file the step's templates expose (every runner step of the job gets every file of the job; agent steps get none). The server has already rendered the paths, so the worker must place each file at exactly `{root}/{file_id}/{safe_name}`:
+A runner step of a job with [file inputs](/guides/file-inputs/) also carries `input_files`: every file of the job, one entry for each distinct file ID (every runner step of the job gets every file of the job; agent steps get none). The server has already rendered the paths, so the worker must place each file at exactly `{root}/{file_id}/{safe_name}`, where `root` is `/inputs` for `docker` and `pod` steps and the request's `inputs_dir` for `local` steps:
 
 ```json
 "input_files": [
@@ -291,10 +291,10 @@ Streams one input file of a job. Used by the worker for `local` and `docker` ste
 | Status | Description |
 |--------|-------------|
 | `200` | The file |
-| `404` | The file is not attached to the job, or the blob is missing |
-| `503` | No blob storage is configured, or the blob cannot be read right now. Carries `Retry-After: 5`. The worker tries again every 5 seconds, up to 12 attempts in all |
+| `404` | `Input file not found`: the job ID is not valid, the file is not attached to the job, or its blob is missing |
+| `503` | `file storage is not configured`, or `file storage is unavailable; retry` when the blob cannot be read right now. Carries `Retry-After: 5`. The worker tries again every 5 seconds, up to 12 attempts in all; the pod init container uses `curl --retry 11 --retry-delay 5` |
 
-The worker checks the size and SHA-256 from the claim. A mismatch fails the step before the runner starts.
+The worker streams the file to disk and checks the size and SHA-256 from the claim; the pod init container checks them with `wc -c` and `sha256sum`. A mismatch or a failed download fails the step before the step's own process starts.
 
 ## Download State Snapshot
 

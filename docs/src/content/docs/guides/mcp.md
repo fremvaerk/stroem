@@ -96,7 +96,7 @@ Call: execute_task(
 )
 ```
 
-Use `content_base64` instead of `content` for binary data. A file over the limit gives an error that names the field and the limit.
+Use `content_base64` instead of `content` for binary data. The object must have exactly the two keys `name` and `content` (or `content_base64`); another shape or invalid base64 gives `Input field '…': the file cannot be used`. A file over the limit gives `Input field '…': inline content is larger than N bytes`. The server stores the file as your upload (content type `application/octet-stream`) and then creates the job.
 
 **Upload URL**, for larger files and for agents that have a shell:
 
@@ -106,9 +106,9 @@ Returns: { "upload_url": "https://strom.example.com/api/uploads/…", "method": 
            "max_bytes": 104857600, "expires_at": "2026-10-30T12:15:00Z" }
 ```
 
-Then `POST` the raw bytes to `upload_url` with no `Authorization` header (`curl --data-binary @report.csv "$upload_url"`). The URL token is the credential. The URL works once and expires after 15 minutes (`input_files.upload_url_ttl_secs`). The answer holds the `file_id`. Pass it as the field value in `execute_task`.
+Then `POST` the raw bytes to `upload_url` with no `Authorization` header (`curl --data-binary @report.csv "$upload_url"`). The URL token is the credential. The URL works once and expires after 15 minutes (`input_files.upload_url_ttl_secs`). The token is used up when the request arrives, before the body is read: if the upload fails, ask for a new URL. A used, expired or unknown URL answers `404 Upload URL not found`. The answer holds the `file_id`. Pass it as the field value in `execute_task`.
 
-`create_upload_url` needs `auth.base_url` in the server config. Without it the tool answers `upload URLs need auth.base_url; send the file inline or use the REST upload`. It needs the Run permission on the task.
+`create_upload_url` needs `auth.base_url` in the server config. Without it the tool answers `upload URLs need auth.base_url; send the file inline or use the REST upload`. It needs the Run permission on the task (View only gives `Insufficient permissions: execute requires Run access`), a task with a `file` field (else `task has no file input`) and a usable `file_name` (else `invalid file name`).
 
 ## Authentication
 

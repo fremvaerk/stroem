@@ -64,7 +64,7 @@ artifact_storage:
 
 ## Caps, defaults, retries
 
-- **Per-file cap** rejects oversized uploads before they hit the backend. Increase only if you trust the workload — large blobs are expensive to read into memory on download.
+- **Per-file cap** rejects oversized uploads before they hit the backend. Increase only if you trust the workload — the server holds each artifact upload in memory as a whole before it stores it. Downloads stream from the S3 and local backends.
 - **Per-job cap** is checked at every upload using `SUM(size_bytes) WHERE job_id = ?`, accounting for replacements (uploading the same `name` twice subtracts the old size from the projection).
 - **Upload retry**: workers retry each artifact 3× with exponential backoff (250ms → 500ms → 1000ms, capped at 4s) before failing the step.
 - **Cleanup on failure**: if the third attempt still fails, the worker calls `DELETE /worker/jobs/{id}/steps/{step}/artifacts` to drop already-uploaded blobs for that step, and the step is demoted to `failed`.
@@ -98,11 +98,11 @@ input_files:
 
 All values must be positive. Environment variables use the `STROEM__INPUT_FILES__…` form, for example `STROEM__INPUT_FILES__MAX_FILE_BYTES`.
 
-**Backend fallback:** `input_files.archive` if set, else the artifact archive, else the log archive. With no archive configured, the upload route answers `503 file storage is not configured`, jobs with `file` fields cannot be created, and the server logs one warning at startup.
+**Backend fallback:** `input_files.archive` if set, else the artifact archive, else the log archive. With no archive configured, every upload fails with `file storage is not configured` (`503` on the REST and upload-URL routes, a tool error for an MCP inline file) and the worker download route answers `503`, so no job can get a file; a task whose `file` fields are all optional still runs without one. The server logs `input_files: no archive configured; file uploads answer 503` once at startup, and the [orphan sweep](/operations/retention/#input-files) skips files.
 
 **Key layout:** `{archive_prefix}{prefix}{workspace}/{file_id}`. A blob is shared by every job that uses the file.
 
-Uploads and downloads stream: the server does not hold a whole file in memory.
+Uploads and downloads stream: the server does not hold a whole file in memory. On S3, a file larger than one 8 MiB part is sent as a multipart upload, with at most one part in memory. A multipart upload declares a CRC32 checksum unless the AWS SDK is set to `request_checksum_calculation = when_required` (for example `AWS_REQUEST_CHECKSUM_CALCULATION=when_required`, which some S3-compatible stores need); then it declares none.
 
 ## Credentials
 

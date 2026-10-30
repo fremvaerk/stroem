@@ -247,15 +247,15 @@ Uploads a file for a [`file` input field](/guides/file-inputs/). Send the raw by
 
 Execute the task with `{"input": {"data_file": "file_7f3a…"}}`. An unused upload expires after `input_files.upload_ttl_secs` (24 hours by default). An upload belongs to the user who made it and to this task.
 
-Without `source_job_id` the call needs the Run permission on the task, and the task must declare a `file` field. With `source_job_id` it follows the rules of a Re-run: a missing source job and a source job that you may not view give the same `404`.
+Without `source_job_id` the call needs the Run permission on the task as it is now, and the task must declare a `file` field. With `source_job_id` it follows the rules of a Re-run, in this order: a source job that does not exist or that you may not view gives `404 Source job not found` before anything else is checked; a [pinned](/guides/git-refs/) source job on which you have only View gives `403`; then the source is checked (same workspace, a top-level job with a recorded input, the same task); then the task is taken at the source job's ref (pinned) or as it is now, and it needs Run and a `file` field.
 
 | Status | Description |
 |--------|-------------|
 | `201` | Stored |
-| `400` | `invalid file name`; the task has no `file` field; or the source job cannot be re-run for this task |
-| `401` | Authentication is on and the caller is not signed in |
-| `403` | View-only permission on the task |
-| `404` | Task not found, no permission to see it, or `Source job not found` |
+| `400` | `invalid file name` (the `name` query is missing, empty, `.` or `..`); `task has no file input`; or the source job cannot be re-run with this task, for example `Source job … is a run of task 'a', not 'b'` |
+| `401` | `Authentication required` (no token), `Invalid or expired token`, or `Invalid API key` / `API key expired` |
+| `403` | `View-only access`: View permission on the task, or on a pinned source job |
+| `404` | `Workspace '{ws}' not found`, `Task not found` (also when you have no permission on the task), or `Source job not found` |
 | `413` | `file is larger than {max} bytes` (`input_files.max_file_bytes`). Nothing is kept |
 | `503` | `file storage is not configured` |
 
@@ -273,9 +273,15 @@ Uploads a file through a single-use URL that the MCP tool `create_upload_url` re
 GET /api/jobs/{id}/input-files/{field}
 ```
 
-Streams the file that a job received for the task-level input field `field`. Requires `View` permission on the job's task. The response headers are the same as for [Download Job Artifact](#download-job-artifact): the stored `Content-Type`, `Content-Length`, `X-Content-Type-Options: nosniff` and a `Content-Disposition` that is `inline` only for safe types.
+Streams the file that a job received for the task-level input field `field`. Requires `View` permission on the job, checked on the job's own task (a pinned job: the task folder at its ref). The response headers are like those of [Download Job Artifact](#download-job-artifact): the stored `Content-Type`, `Content-Length`, `X-Content-Type-Options: nosniff`, `Cache-Control: private, max-age=0, must-revalidate`, and a `Content-Disposition` that is `inline` only for the same safe types as artifacts, with the original name in `filename*=UTF-8''…` (and an ASCII-only `filename=` fallback).
 
-`404` when the job does not exist or you may not view it, or the job has no file for `field`.
+| Status | Description |
+|--------|-------------|
+| `200` | The file |
+| `400` | The job ID is not a valid UUID |
+| `401` | Authentication is on and the request has no valid token |
+| `404` | `Job not found` (also when you may not view the job), or `Input file not found` (the job has no file for `field`) |
+| `503` | `file storage is not configured` |
 
 ## List Triggers
 

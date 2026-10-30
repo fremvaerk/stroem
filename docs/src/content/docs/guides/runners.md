@@ -19,7 +19,7 @@ When a job has [file inputs](/guides/file-inputs/), every runner step receives e
 
 | Runner | Root |
 |--------|------|
-| `local` | A temporary directory of the worker, removed after the step |
+| `local` | `{temp}/stroem-inputs-{uuid}/in`, new for each claim and removed after the step. Its parent `stroem-inputs-{uuid}` has mode `0700`; the files are `0444` and their directories `0555` |
 | `docker`, `type: docker` | `/inputs`, bind-mounted read-only (`/inputs:ro`) in both workspace and no-workspace modes |
 | `pod`, `type: pod` | `/inputs`, an `emptyDir` volume `stroem-inputs` mounted read-only. The init container `stroem-inputs-init` downloads the files and checks size and SHA-256 before the main container starts |
 
