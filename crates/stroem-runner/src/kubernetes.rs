@@ -3290,8 +3290,8 @@ mod tests {
         let mut rest = text;
         while let Some(at) = rest.find("$(") {
             let after = &rest[at + 2..];
-            if after.starts_with('(') {
-                rest = &after[1..];
+            if let Some(arith) = after.strip_prefix('(') {
+                rest = arith;
                 continue;
             }
             let end = after.find(')').unwrap_or(after.len());
