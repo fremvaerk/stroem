@@ -114,11 +114,12 @@ struct InputsRoot {
 
 impl Drop for InputsRoot {
     fn drop(&mut self) {
-        // The `{id}` dirs are read-only: make everything writable first.
+        // The `{id}` dirs are read-only: make each dir owner-writable first
+        // (`0700`, never wider, so removal opens no window to other users).
         #[cfg(unix)]
         fn relax(dir: &Path) {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755));
+            let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
             if let Ok(entries) = std::fs::read_dir(dir) {
                 for e in entries.flatten() {
                     let p = e.path();
@@ -132,6 +133,19 @@ impl Drop for InputsRoot {
         relax(&self.path);
         let _ = std::fs::remove_dir_all(&self.path);
     }
+}
+
+/// Create `path` (never an existing one) as `0700` on unix, like the
+/// worker's inputs wrapper: the tree below it is world-readable (`0555` dirs,
+/// `0444` files), so the root alone keeps other host users out.
+fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(path)
 }
 
 #[cfg(unix)]
@@ -199,7 +213,7 @@ fn stage_file_inputs(
                     "stroem-run-inputs-{}",
                     uuid::Uuid::new_v4().simple()
                 ));
-                std::fs::create_dir_all(&p)
+                create_private_dir(&p)
                     .context("Failed to create the temp directory for file inputs")?;
                 guard = Some(InputsRoot { path: p.clone() });
                 p
@@ -2155,6 +2169,35 @@ tasks:
         );
         assert_eq!(summary.failed, 3, "all three iterations should fail");
         assert_eq!(summary.skipped, 0);
+    }
+
+    /// Codex implementation review round 1: the staging root is private
+    /// (`0700`, like the worker's wrapper), so another host user cannot
+    /// reach a copied file through the world-readable `0555`/`0444` tree
+    /// below it — even a source file that was `0600`. The guard removes it.
+    #[cfg(unix)]
+    #[test]
+    fn staged_inputs_root_is_private_and_removed() {
+        use std::os::unix::fs::PermissionsExt;
+        let schema: HashMap<String, stroem_common::models::workflow::InputFieldDef> =
+            serde_yaml::from_str("data_file: { type: file }").unwrap();
+        let src_dir = tempfile::tempdir().unwrap();
+        let src = src_dir.path().join("secret.csv");
+        std::fs::write(&src, "s").unwrap();
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let mut input = json!({ "data_file": src.to_str().unwrap() });
+
+        let (guard, _files) = stage_file_inputs(&schema, &mut input).unwrap();
+        let guard = guard.expect("a file was staged");
+        let root = guard.path.clone();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&root), 0o700, "staging root {root:?}");
+        let id = input["data_file"].as_str().unwrap().to_string();
+        assert_eq!(mode(&root.join(&id)), 0o555);
+        assert_eq!(mode(&root.join(&id).join("secret.csv")), 0o444);
+
+        drop(guard);
+        assert!(!root.exists(), "{root:?} was not removed");
     }
 
     #[test]
