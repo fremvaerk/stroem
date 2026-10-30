@@ -17,7 +17,8 @@ test.describe("File inputs", () => {
       mimeType: "text/csv",
       buffer: Buffer.from(CONTENT),
     });
-    await expect(page.getByRole("button", { name: "Remove" })).toBeVisible();
+    // "Replace" shows only once the upload is ready ("Remove" also shows after a failure).
+    await expect(page.getByRole("button", { name: "Replace" })).toBeVisible();
     await expect(page.getByText("report.csv")).toBeVisible();
 
     await page.getByRole("button", { name: "Run Task" }).click();
