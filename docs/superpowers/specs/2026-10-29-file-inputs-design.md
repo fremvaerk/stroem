@@ -1,6 +1,7 @@
 # File inputs (`type: file`)
 
-Status: draft, revision 6 (2026-10-30). Branch `feat/file-inputs`.
+Status: approved (Codex MERGE-READY on revision 6), revision 7 (2026-10-30).
+Branch `feat/file-inputs-impl`.
 
 ## Revision history
 
@@ -47,6 +48,19 @@ Status: draft, revision 6 (2026-10-30). Branch `feat/file-inputs`.
   then 403 for a pinned source with only View, then source validation, ref
   resolution and the destination `Run` + schema check (§ 4.2); two tests
   added (§ 13).
+- **Revision 7** (2026-10-30) — implementation start (plan
+  `docs/superpowers/plans/2026-10-30-file-inputs.md`). (1) The § 6.3
+  pre-implementation check is done: the Helm `dind` sidecar shares no volume
+  with the worker, and `DockerRunner` uses `HostConfig.binds`, so the daemon
+  creates a missing bind source as an empty directory on its own file system —
+  a `runner: docker` step in a Helm DinD deployment sees an empty `/inputs`
+  (and `/workspace`, `/state`). Reproduced locally with `docker:27-dind` and a
+  client container that shares only its network namespace; recorded in
+  `docs/internal/TODO.md`, documented in the guide, chart fix out of scope as
+  planned. (2) § 13 E2E: the compose worker has `capabilities: [script]` and
+  no Docker daemon, so the E2E section covers the local step only; the Docker
+  step is covered by an `#[ignore]` DockerRunner test run on a machine with a
+  daemon.
 
 ## 1. Goal
 
@@ -535,6 +549,8 @@ F10 in a Helm DinD deployment. If the sidecar cannot see the worker's `/tmp`,
 are all affected. A chart fix (a shared volume mounted at the same path in the
 worker and the sidecar) is **out of scope**; record the result in TODO.md and
 document the limitation in the file-inputs guide if confirmed.
+**Result (revision 7):** confirmed — see the revision history and
+`docs/internal/TODO.md` § File Inputs.
 
 ### 6.4 Pods (`runner: pod`, `type: pod`)
 
@@ -828,8 +844,10 @@ Per CLAUDE.md § Mandatory Test Coverage, at least:
 - allocation: § 9;
 - UI: Vitest for the field widget state and Re-run prefill; Playwright upload
   → run → download;
-- E2E (`tests/e2e.sh`): a new section — upload, execute, a local step and a
-  docker step that read the file and print its SHA-256, Re-run without upload.
+- E2E (`tests/e2e.sh`): a new section — upload, execute, a local step that
+  reads the file and prints its SHA-256, download, Re-run without upload. The
+  Docker step is an `#[ignore]` DockerRunner test (revision 7: the compose
+  worker has no Docker daemon).
 
 ## 14. Documentation
 

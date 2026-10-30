@@ -1883,6 +1883,16 @@ Job detail lists a job's Restarts and Re-runs (`derived_jobs[]`, "Later runs" ca
 - [ ] "+N more" is plain text: the Jobs page has no `source_job_id` filter to link to.
 - [ ] MCP `get_job_status` does not report the derived runs (it builds its own response).
 
+## File Inputs (2026-10-30)
+
+Spec `docs/superpowers/specs/2026-10-29-file-inputs-design.md`, plan `docs/superpowers/plans/2026-10-30-file-inputs.md`.
+
+- [ ] **Helm DinD: every `runner: docker` bind mount is empty** (spec § 6.3 pre-implementation check, done 2026-10-30). The `dind` sidecar (`helm/stroem/templates/worker-deployment.yaml`) mounts only `dind-storage`, `dind-certs` and `runner-startup`; the worker's temp dirs and `workspace-cache` are not shared with it. `DockerRunner` uses `HostConfig.binds` (the `-v` form), and the Docker daemon resolves a bind source on ITS file system and creates a missing source as an empty directory, without an error. So in a Helm DinD deployment a `runner: docker` / `type: docker` step sees an empty `/workspace`, `/state`, `/global-state`, `/inputs`, and writes to `/artifacts` and `/state-out` are lost. Reproduced locally: a `docker:27-dind` daemon plus a client container that shares only its network namespace (the pod topology); the client created `/tmp/stroem-inputs-x/file_abc/r.csv` and `docker run -v /tmp/stroem-inputs-x:/inputs:ro alpine` listed an empty `/inputs` (`cat` exit 1). Not verified in a real cluster. Fix (out of scope of file inputs): one shared `emptyDir` mounted at the SAME path in the worker and the sidecar, with the worker's temp root (`TMPDIR`) and `workspace_cache_dir` on it. Documented as a limitation in the file-inputs guide.
+- [ ] Pod `/state` and `/global-state` volumes are always empty `emptyDir`s that nothing fills (`kubernetes.rs:179-208`, comment `:195-199`), although `guides/task-state.md:124-127` says otherwise (spec U7, separate task). The file-inputs init container (`stroem-inputs-init`) is a reusable shape for the repair.
+- [ ] A pod init-container failure (`workspace-init` or `stroem-inputs-init`: download, size or digest mismatch) surfaces as exit 1 with no reason text: `classify_pod_status` reads only the `step` container, and logs stream only from `step`. Reading `init_container_statuses[*].state.terminated` (and the init container's log tail) would explain it.
+- [ ] Non-goals of v1 (spec § 15): files from webhooks (multipart), scheduler triggers, event sources, hooks and agent task tools; more than one file per field; file name / size / content type in templates; an artifact of one job as the file input of another; secret masking of file content; Kube artifacts (existing).
+- [ ] The worker token is a plain env value in both pod init containers (existing exposure, not widened).
+
 ## Review: Architecture / Deepening Review (2026-09-11)
 
 Architecture review at v0.16.3 (`e02a089`) scoped to the hot spots of the last 200 commits, using the deep-module vocabulary (module / interface / depth / seam / adapter / leverage / locality). Four parallel explore agents (creation, claim-and-execute, orchestration, model+validation), then merged with the 2026-09-08 architecture review (11 candidates: 3 shipped, 5 independently re-derived, 3 carried forward) and reconciled against `codebase-review-2026-03-01.md`. Every claim below was verified by direct file read at 0.16.3.
