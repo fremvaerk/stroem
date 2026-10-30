@@ -7,7 +7,7 @@ vi.mock("@/lib/upload", () => ({ uploadInputFile: vi.fn() }));
 import { uploadInputFile } from "@/lib/upload";
 import { FileInputField } from "./file-input-field";
 import { InputFieldRow } from "./input-field-row";
-import { initialFileFieldState, type FileFieldState } from "@/lib/file-field";
+import { fileFieldBlocksRun, initialFileFieldState, type FileFieldState } from "@/lib/file-field";
 
 const mockUpload = vi.mocked(uploadInputFile);
 
@@ -152,6 +152,70 @@ describe("FileInputField", () => {
     );
     await waitFor(() => expect(screen.getByText("new.csv")).toBeTruthy());
     expect(screen.queryByText("From the previous run")).toBeNull();
+  });
+
+  it("a failed upload offers Remove, which empties the field and unblocks Run", async () => {
+    const spy = vi.fn();
+    mockUpload.mockRejectedValue(new Error("file is larger than 10 bytes"));
+    render(<Stateful spy={spy} />);
+    pick(new File(["abc"], "big.bin"));
+    await screen.findByRole("alert");
+    expect(fileFieldBlocksRun(spy.mock.lastCall?.[0])).toBe(true);
+    expect(screen.getByRole("button", { name: "Choose file" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+    expect(spy).toHaveBeenLastCalledWith({ kind: "file", mode: "empty" });
+    expect(fileFieldBlocksRun(spy.mock.lastCall?.[0])).toBe(false);
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByText("big.bin")).toBeNull();
+  });
+
+  const SOURCE = initialFileFieldState({
+    field: "data_file",
+    file_id: "file_old",
+    name: "old.csv",
+    size_bytes: 10,
+    content_type: "text/csv",
+  });
+
+  it("Cancel of a Replace upload restores the source file", async () => {
+    const spy = vi.fn();
+    mockUpload.mockImplementation(() => new Promise(() => {}));
+    render(<Stateful sourceJobId="job-9" initial={SOURCE} spy={spy} />);
+    pick(new File(["new"], "new.csv"));
+    expect(screen.getByRole("progressbar")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(spy).toHaveBeenLastCalledWith(SOURCE);
+    expect(screen.getByText("old.csv")).toBeTruthy();
+    expect(screen.getByText("From the previous run")).toBeTruthy();
+    expect(fileFieldBlocksRun(spy.mock.lastCall?.[0])).toBe(false);
+  });
+
+  it("Remove after a failed Replace restores the source file, also after a second failure", async () => {
+    const spy = vi.fn();
+    mockUpload.mockRejectedValue(new Error("file is larger than 10 bytes"));
+    render(<Stateful sourceJobId="job-9" initial={SOURCE} spy={spy} />);
+    pick(new File(["new"], "new.csv"));
+    await screen.findByRole("alert");
+    // A second attempt from the failed state still replaces the source.
+    pick(new File(["newer"], "newer.csv"));
+    await waitFor(() => expect(screen.getByText("newer.csv")).toBeTruthy());
+    await screen.findByRole("alert");
+    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+    expect(spy).toHaveBeenLastCalledWith(SOURCE);
+    expect(screen.getByText("old.csv")).toBeTruthy();
+    expect(screen.getByText("From the previous run")).toBeTruthy();
+  });
+
+  it("after Remove of the source file, a cancelled upload ends empty", async () => {
+    const spy = vi.fn();
+    mockUpload.mockImplementation(() => new Promise(() => {}));
+    render(<Stateful sourceJobId="job-9" initial={SOURCE} spy={spy} />);
+    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+    pick(new File(["new"], "new.csv"));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(spy).toHaveBeenLastCalledWith({ kind: "file", mode: "empty" });
+    expect(screen.queryByText("old.csv")).toBeNull();
+    expect(screen.getByRole("button", { name: "Choose file" })).toBeTruthy();
   });
 
   it("InputFieldRow routes type file to the file widget, ignoring secret and options", () => {

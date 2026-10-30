@@ -2,7 +2,12 @@ import { useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { humanSize } from "@/components/artifact-helpers";
-import type { FileFieldState } from "@/lib/file-field";
+import {
+  afterAbandonedUpload,
+  replacedByUpload,
+  type FileFieldState,
+  type ReadyFileFieldState,
+} from "@/lib/file-field";
 import type { InputField } from "@/lib/types";
 import { uploadInputFile } from "@/lib/upload";
 
@@ -24,10 +29,13 @@ export function FileInputField({ id, fieldKey, field, value, onChange, workspace
   const label = field.name ?? fieldKey;
   const inputRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  /** The file a running or failed upload replaces (spec § 7.1, § 7.2). */
+  const replacedRef = useRef<ReadyFileFieldState | null>(null);
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
   async function start(file: File) {
+    replacedRef.current = replacedByUpload(value, replacedRef.current);
     abortRef.current?.abort();
     const ac = new AbortController();
     abortRef.current = ac;
@@ -64,7 +72,16 @@ export function FileInputField({ id, fieldKey, field, value, onChange, workspace
 
   function remove() {
     abortRef.current?.abort();
+    replacedRef.current = null;
     onChange({ kind: "file", mode: "empty" });
+  }
+
+  /** Cancel an upload, or drop a failed one: back to the file it replaced. */
+  function abandon() {
+    abortRef.current?.abort();
+    const replaced = replacedRef.current;
+    replacedRef.current = null;
+    onChange(afterAbandonedUpload(replaced));
   }
 
   const choose = () => inputRef.current?.click();
@@ -110,7 +127,7 @@ export function FileInputField({ id, fieldKey, field, value, onChange, workspace
           >
             <div className="h-full bg-primary" style={{ width: `${Math.round(value.progress * 100)}%` }} />
           </div>
-          <Button type="button" variant="outline" size="sm" onClick={remove}>
+          <Button type="button" variant="outline" size="sm" onClick={abandon}>
             Cancel
           </Button>
         </div>
@@ -124,9 +141,14 @@ export function FileInputField({ id, fieldKey, field, value, onChange, workspace
           <p role="alert" className="text-xs text-destructive">
             {value.error}
           </p>
-          <Button type="button" variant="outline" size="sm" onClick={choose}>
-            Choose file
-          </Button>
+          <div className="flex gap-2">
+            <Button type="button" variant="outline" size="sm" onClick={choose}>
+              Choose file
+            </Button>
+            <Button type="button" variant="outline" size="sm" onClick={abandon}>
+              Remove
+            </Button>
+          </div>
         </div>
       )}
 

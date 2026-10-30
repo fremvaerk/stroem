@@ -1,5 +1,13 @@
 import { describe, it, expect } from "vitest";
-import { fileFieldBlocksRun, initialFileFieldState, isFileFieldState } from "../file-field";
+import {
+  afterAbandonedUpload,
+  fileFieldBlocksRun,
+  initialFileFieldState,
+  isFileFieldState,
+  replacedByUpload,
+  type FileFieldState,
+  type ReadyFileFieldState,
+} from "../file-field";
 
 describe("file-field", () => {
   it("recognises only file states", () => {
@@ -28,5 +36,25 @@ describe("file-field", () => {
     ).toBe(false);
     expect(fileFieldBlocksRun("")).toBe(false);
     expect(fileFieldBlocksRun(undefined)).toBe(false);
+  });
+
+  const EMPTY: FileFieldState = { kind: "file", mode: "empty" };
+  const SOURCE: ReadyFileFieldState = { kind: "file", mode: "ready", fileId: "file_a", name: "a", size: 1, fromSource: true };
+  const OWN: ReadyFileFieldState = { kind: "file", mode: "ready", fileId: "file_b", name: "b", size: 1, fromSource: false };
+  const FAILED: FileFieldState = { kind: "file", mode: "failed", name: "c", error: "x" };
+
+  it("an upload replaces the ready file it starts from; a retry after a failure keeps it", () => {
+    expect(replacedByUpload(SOURCE, null)).toEqual(SOURCE);
+    expect(replacedByUpload(OWN, SOURCE)).toEqual(OWN);
+    expect(replacedByUpload(EMPTY, SOURCE)).toBeNull();
+    expect(replacedByUpload(FAILED, SOURCE)).toEqual(SOURCE);
+    expect(replacedByUpload(FAILED, null)).toBeNull();
+  });
+
+  it("an abandoned upload returns to the file it replaced, else to empty", () => {
+    expect(afterAbandonedUpload(SOURCE)).toEqual(SOURCE);
+    expect(afterAbandonedUpload(OWN)).toEqual(OWN);
+    expect(afterAbandonedUpload(null)).toEqual(EMPTY);
+    expect(fileFieldBlocksRun(afterAbandonedUpload(null))).toBe(false);
   });
 });
