@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::Semaphore;
@@ -183,6 +184,127 @@ async fn upload_with_retry(
     Err(last_err.expect("loop exited without success and without recording an error"))
 }
 
+/// The step's inputs directory (spec 2026-10-29-file-inputs § 6.2).
+/// Dropping it removes the whole tree. The read-only modes are lifted first
+/// (dirs `0755`, files `0644`), because a `0555` dir refuses to unlink its
+/// entries. Best effort: a failure is logged, never a panic.
+pub(crate) struct InputsDirGuard(PathBuf);
+
+impl InputsDirGuard {
+    pub(crate) fn new(dir: PathBuf) -> Self {
+        Self(dir)
+    }
+}
+
+impl Drop for InputsDirGuard {
+    fn drop(&mut self) {
+        let dir = &self.0;
+        if std::fs::symlink_metadata(dir).is_err() {
+            return; // already gone
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // Symlinks (the root included) are never followed or chmod-ed:
+            // `set_permissions` would act on their targets.
+            let walk = walkdir::WalkDir::new(dir).follow_root_links(false);
+            for entry in walk.into_iter().flatten() {
+                let ft = entry.file_type();
+                let mode = if ft.is_dir() {
+                    0o755
+                } else if ft.is_file() {
+                    0o644
+                } else {
+                    continue;
+                };
+                let _ =
+                    std::fs::set_permissions(entry.path(), std::fs::Permissions::from_mode(mode));
+            }
+        }
+        if let Err(e) = std::fs::remove_dir_all(dir) {
+            tracing::warn!(
+                dir = %dir.display(),
+                "Failed to remove the step's inputs directory: {e}"
+            );
+        }
+    }
+}
+
+/// True when the worker itself must place the step's input files: the step
+/// has some and runs locally or in Docker. A pod's init container fetches
+/// its own copy (spec § 6.4); agent steps have no runner.
+pub(crate) fn needs_worker_download(step: &crate::client::ClaimedStep) -> bool {
+    use crate::executor::{runner_kind, RunnerKind};
+    !step.input_files.is_empty()
+        && matches!(
+            runner_kind(step),
+            Some(RunnerKind::Shell | RunnerKind::Docker)
+        )
+}
+
+/// Download every claimed input file to `{inputs_dir}/{file_id}/{safe_name}`
+/// (spec § 6.1, § 6.2): files `0444`, then each `{file_id}` dir `0555`. The
+/// returned guard owns the dir; on an error the partial tree is already
+/// removed. Errors name a file id, never a file name.
+pub(crate) async fn place_input_files(
+    client: &ServerClient,
+    step: &crate::client::ClaimedStep,
+    attempts: u32,
+    delay: Duration,
+) -> Result<InputsDirGuard> {
+    use stroem_common::file_field::{is_file_id, safe_name};
+
+    let dir = step.inputs_dir.as_deref().context(
+        "the claim lists input files, but its claim request announced no inputs directory",
+    )?;
+    let dir = PathBuf::from(dir);
+    anyhow::ensure!(
+        dir.is_absolute(),
+        "the inputs directory is not an absolute path"
+    );
+    tokio::fs::create_dir(&dir)
+        .await
+        .context("cannot create the inputs directory")?;
+    let guard = InputsDirGuard::new(dir.clone());
+
+    let mut placed: Vec<&str> = Vec::new();
+    for file in &step.input_files {
+        let id = file.file_id.as_str();
+        // The server sends safe values; never join anything else into a path.
+        anyhow::ensure!(is_file_id(id), "the claim lists an invalid input file id");
+        anyhow::ensure!(
+            safe_name(&file.safe_name).as_deref() == Some(file.safe_name.as_str()),
+            "input file {id}: the claimed name is not a safe name"
+        );
+        if placed.contains(&id) {
+            continue; // one file is one entry and one path (spec § 5.4)
+        }
+        let file_dir = dir.join(id);
+        tokio::fs::create_dir(&file_dir)
+            .await
+            .with_context(|| format!("input file {id}: cannot create its directory"))?;
+        crate::client::download_input_file_with_retry(
+            client,
+            step.job_id,
+            file,
+            &file_dir.join(&file.safe_name),
+            attempts,
+            delay,
+        )
+        .await?;
+        placed.push(id);
+    }
+
+    #[cfg(unix)]
+    for id in &placed {
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(dir.join(id), std::fs::Permissions::from_mode(0o555))
+            .await
+            .with_context(|| format!("input file {id}: cannot make its directory read-only"))?;
+    }
+    Ok(guard)
+}
+
 /// Execute a claimed step: download workspace, report start, run with log buffering, report result.
 ///
 /// This function owns the claimed step and drives the full execution lifecycle. It is spawned as
@@ -269,6 +391,33 @@ pub(crate) async fn execute_claimed_step(
         }
     };
     let ws_dir_str = ws_guard.path().to_string_lossy().to_string();
+
+    // File inputs: placed before the step is reported started, like the
+    // workspace (spec § 6.1–6.3). The guard removes the dir when this
+    // function returns, i.e. after the step has finished.
+    let _inputs_guard = if needs_worker_download(&step) {
+        match place_input_files(
+            &client,
+            &step,
+            crate::client::INPUT_503_ATTEMPTS,
+            crate::client::INPUT_503_DELAY,
+        )
+        .await
+        {
+            Ok(guard) => Some(guard),
+            Err(e) => {
+                let err_msg = format!("Failed to download input files: {:#}", e);
+                tracing::error!(job_id = %step.job_id, step = %step.step_name, "{}", err_msg);
+                push_error_log(&client, step.job_id, &step.step_name, &err_msg).await;
+                let _ = client
+                    .report_step_complete(step.job_id, &step.step_name, -1, None, Some(err_msg))
+                    .await;
+                return;
+            }
+        }
+    } else {
+        None
+    };
 
     // Report step start
     if let Err(e) = client
@@ -1583,6 +1732,8 @@ mod tests {
                 state_has_json: None,
                 global_state_storage_key: None,
                 global_state_has_json: None,
+                input_files: Vec::new(),
+                inputs_dir: None,
             }
         }
 
@@ -2173,6 +2324,411 @@ mod tests {
             .await;
 
             // wiremock verifies the ?revision= query param was sent (via expect(1))
+        }
+
+        // --- file inputs (spec 2026-10-29-file-inputs § 5.4, § 6.1, § 6.2) ---
+
+        use stroem_common::file_field::ClaimedInputFile;
+
+        fn input_file(name: &str, body: &[u8]) -> ClaimedInputFile {
+            use sha2::{Digest, Sha256};
+            ClaimedInputFile {
+                file_id: stroem_common::file_field::new_file_id(),
+                safe_name: name.to_string(),
+                size_bytes: body.len() as u64,
+                sha256: hex::encode(Sha256::digest(body)),
+            }
+        }
+
+        async fn mount_input_file(
+            mock_server: &MockServer,
+            job_id: Uuid,
+            file: &ClaimedInputFile,
+            response: ResponseTemplate,
+        ) {
+            Mock::given(method("GET"))
+                .and(path(format!(
+                    "/worker/jobs/{job_id}/input-files/{}",
+                    file.file_id
+                )))
+                .respond_with(response)
+                .mount(mock_server)
+                .await;
+        }
+
+        async fn mount_workspace(mock_server: &MockServer) {
+            Mock::given(method("GET"))
+                .and(path("/worker/workspace/default.tar.gz"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_bytes(create_test_tarball())
+                        .insert_header("X-Revision", "test-rev-1"),
+                )
+                .mount(mock_server)
+                .await;
+        }
+
+        /// Bodies of every `/steps/{step}/complete` request.
+        async fn complete_bodies(mock_server: &MockServer) -> Vec<serde_json::Value> {
+            mock_server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|r| r.method.as_str() == "POST" && r.url.path().ends_with("/complete"))
+                .map(|r| serde_json::from_slice(&r.body).unwrap())
+                .collect()
+        }
+
+        /// Every pushed log line, in order.
+        async fn pushed_lines(mock_server: &MockServer) -> Vec<String> {
+            let mut lines = Vec::new();
+            for r in mock_server.received_requests().await.unwrap() {
+                if r.method.as_str() == "POST" && r.url.path().ends_with("/logs") {
+                    let body: serde_json::Value = serde_json::from_slice(&r.body).unwrap();
+                    for l in body["lines"].as_array().unwrap() {
+                        lines.push(l["line"].as_str().unwrap().to_string());
+                    }
+                }
+            }
+            lines
+        }
+
+        fn step_kind(action_type: &str, runner: Option<&str>, files: bool) -> ClaimedStep {
+            let mut step = make_step(Uuid::new_v4(), "true");
+            step.action_type = action_type.to_string();
+            step.runner = runner.map(str::to_string);
+            if files {
+                step.input_files = vec![input_file("a.txt", b"a")];
+            }
+            step
+        }
+
+        #[test]
+        fn needs_worker_download_cases() {
+            for (action_type, runner) in [
+                ("script", Some("local")),
+                ("script", None),
+                ("script", Some("docker")),
+                ("docker", None),
+                ("docker", Some("docker")),
+            ] {
+                assert!(
+                    needs_worker_download(&step_kind(action_type, runner, true)),
+                    "{action_type}/{runner:?} downloads on the worker"
+                );
+                assert!(
+                    !needs_worker_download(&step_kind(action_type, runner, false)),
+                    "{action_type}/{runner:?} without files downloads nothing"
+                );
+            }
+            for (action_type, runner) in [
+                ("script", Some("pod")),
+                ("pod", None),
+                ("pod", Some("pod")),
+                ("agent", None),
+            ] {
+                assert!(
+                    !needs_worker_download(&step_kind(action_type, runner, true)),
+                    "{action_type}/{runner:?} never downloads on the worker"
+                );
+            }
+        }
+
+        #[test]
+        fn inputs_dir_guard_removes_read_only_tree() {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path().join("stroem-inputs-test");
+            let file_dir = root.join(stroem_common::file_field::new_file_id());
+            std::fs::create_dir_all(&file_dir).unwrap();
+            let file = file_dir.join("data.csv");
+            std::fs::write(&file, b"x").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o444)).unwrap();
+                std::fs::set_permissions(&file_dir, std::fs::Permissions::from_mode(0o555))
+                    .unwrap();
+                // Precondition: a plain removal cannot unlink a file in a 0555 dir
+                // (unless the test runs as root, which ignores permissions).
+                let is_root = std::process::Command::new("id")
+                    .arg("-u")
+                    .output()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
+                    .unwrap_or(false);
+                if !is_root {
+                    assert!(std::fs::remove_file(&file).is_err());
+                }
+            }
+
+            drop(InputsDirGuard::new(root.clone()));
+            assert!(!root.exists(), "the guard removes the whole read-only tree");
+            // A second drop on a missing dir must not panic.
+            drop(InputsDirGuard::new(root.clone()));
+        }
+
+        #[tokio::test]
+        async fn place_input_files_makes_a_read_only_tree() {
+            let mock_server = MockServer::start().await;
+            let job_id = Uuid::new_v4();
+            let a = input_file("a.csv", b"first");
+            let b = input_file("b.json", b"{\"second\":true}");
+            for (f, body) in [(&a, &b"first"[..]), (&b, &b"{\"second\":true}"[..])] {
+                mount_input_file(
+                    &mock_server,
+                    job_id,
+                    f,
+                    ResponseTemplate::new(200).set_body_bytes(body.to_vec()),
+                )
+                .await;
+            }
+            let client = ServerClient::new(&mock_server.uri(), "t", Some(5), Some(30));
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path().join("stroem-inputs-place");
+            let mut step = make_step(job_id, "true");
+            step.input_files = vec![a.clone(), b.clone()];
+            step.inputs_dir = Some(root.to_string_lossy().into_owned());
+
+            let guard = place_input_files(&client, &step, 3, Duration::from_millis(1))
+                .await
+                .expect("files are placed");
+            assert_eq!(
+                std::fs::read(root.join(&a.file_id).join(&a.safe_name)).unwrap(),
+                b"first"
+            );
+            assert_eq!(
+                std::fs::read(root.join(&b.file_id).join(&b.safe_name)).unwrap(),
+                b"{\"second\":true}"
+            );
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = |p: &std::path::Path| {
+                    std::fs::metadata(p).unwrap().permissions().mode() & 0o777
+                };
+                for f in [&a, &b] {
+                    assert_eq!(mode(&root.join(&f.file_id)), 0o555);
+                    assert_eq!(mode(&root.join(&f.file_id).join(&f.safe_name)), 0o444);
+                }
+            }
+            drop(guard);
+            assert!(!root.exists(), "the guard removes the placed tree");
+        }
+
+        #[tokio::test]
+        async fn place_input_files_rejects_a_relative_or_missing_dir() {
+            let client = ServerClient::new("http://127.0.0.1:9", "t", Some(5), Some(30));
+            let mut step = make_step(Uuid::new_v4(), "true");
+            step.input_files = vec![input_file("a.txt", b"a")];
+
+            step.inputs_dir = None;
+            assert!(
+                place_input_files(&client, &step, 1, Duration::from_millis(1))
+                    .await
+                    .is_err()
+            );
+
+            step.inputs_dir = Some("relative/stroem-inputs-x".to_string());
+            assert!(
+                place_input_files(&client, &step, 1, Duration::from_millis(1))
+                    .await
+                    .is_err()
+            );
+            assert!(!std::path::Path::new("relative").exists());
+        }
+
+        /// A failed input download fails the step with exit -1 BEFORE it is
+        /// reported started, never names the file, and leaves no dir behind.
+        #[tokio::test]
+        async fn poller_input_download_failure_fails_step_before_start() {
+            let mock_server = MockServer::start().await;
+            mount_workspace(&mock_server).await;
+            Mock::given(method("POST"))
+                .and(path_regex(r"/worker/jobs/.+/steps/.+/start"))
+                .respond_with(ResponseTemplate::new(200))
+                .expect(0)
+                .mount(&mock_server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path_regex(r"/worker/jobs/.+/logs"))
+                .respond_with(ResponseTemplate::new(200))
+                .mount(&mock_server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path_regex(r"/worker/jobs/.+/steps/.+/complete"))
+                .respond_with(ResponseTemplate::new(200))
+                .expect(1)
+                .mount(&mock_server)
+                .await;
+
+            let job_id = Uuid::new_v4();
+            let ok = input_file("good.csv", b"fine");
+            let missing = input_file("secret-plan.csv", b"gone");
+            mount_input_file(
+                &mock_server,
+                job_id,
+                &ok,
+                ResponseTemplate::new(200).set_body_bytes(b"fine".to_vec()),
+            )
+            .await;
+            mount_input_file(&mock_server, job_id, &missing, ResponseTemplate::new(404)).await;
+
+            let client = Arc::new(ServerClient::new(
+                &mock_server.uri(),
+                "test-token",
+                Some(5),
+                Some(30),
+            ));
+            let temp_dir = tempfile::tempdir().unwrap();
+            let ws_cache = Arc::new(WorkspaceCache::new(
+                temp_dir.path().join("ws").to_str().unwrap(),
+                None,
+            ));
+            let inputs_dir = temp_dir.path().join("stroem-inputs-fail");
+            let mut step = make_step(job_id, "echo must-not-run");
+            step.input_files = vec![ok, missing.clone()];
+            step.inputs_dir = Some(inputs_dir.to_string_lossy().into_owned());
+
+            execute_claimed_step(
+                client,
+                Arc::new(StepExecutor::new()),
+                ws_cache,
+                step,
+                Uuid::new_v4(),
+                #[cfg(feature = "agent")]
+                None,
+            )
+            .await;
+
+            assert!(!inputs_dir.exists(), "the partial inputs dir is removed");
+            let completes = complete_bodies(&mock_server).await;
+            assert_eq!(completes.len(), 1);
+            assert_eq!(completes[0]["exit_code"], -1);
+            let error = completes[0]["error"].as_str().unwrap();
+            assert!(
+                error.starts_with("Failed to download input files: "),
+                "{error}"
+            );
+            assert!(error.contains(&missing.file_id), "names the id: {error}");
+            assert!(!error.contains("secret-plan"), "never the name: {error}");
+            assert!(!pushed_lines(&mock_server)
+                .await
+                .iter()
+                .any(|l| l.contains("must-not-run")));
+            // wiremock verifies start was never called (expect(0)).
+        }
+
+        #[tokio::test]
+        async fn poller_missing_inputs_dir_fails_step_before_start() {
+            let mock_server = MockServer::start().await;
+            mount_workspace(&mock_server).await;
+            Mock::given(method("POST"))
+                .and(path_regex(r"/worker/jobs/.+/steps/.+/start"))
+                .respond_with(ResponseTemplate::new(200))
+                .expect(0)
+                .mount(&mock_server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path_regex(r"/worker/jobs/.+/logs"))
+                .respond_with(ResponseTemplate::new(200))
+                .mount(&mock_server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path_regex(r"/worker/jobs/.+/steps/.+/complete"))
+                .respond_with(ResponseTemplate::new(200))
+                .expect(1)
+                .mount(&mock_server)
+                .await;
+
+            let client = Arc::new(ServerClient::new(
+                &mock_server.uri(),
+                "test-token",
+                Some(5),
+                Some(30),
+            ));
+            let temp_dir = tempfile::tempdir().unwrap();
+            let ws_cache = Arc::new(WorkspaceCache::new(temp_dir.path().to_str().unwrap(), None));
+            let mut step = make_step(Uuid::new_v4(), "echo must-not-run");
+            step.input_files = vec![input_file("a.txt", b"a")];
+            step.inputs_dir = None;
+
+            execute_claimed_step(
+                client,
+                Arc::new(StepExecutor::new()),
+                ws_cache,
+                step,
+                Uuid::new_v4(),
+                #[cfg(feature = "agent")]
+                None,
+            )
+            .await;
+
+            let completes = complete_bodies(&mock_server).await;
+            assert_eq!(completes[0]["exit_code"], -1);
+            assert!(completes[0]["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("Failed to download input files: "));
+        }
+
+        /// A local step reads its file at `{inputs_dir}/{file_id}/{safe_name}`;
+        /// the dir is gone once the step has finished.
+        #[tokio::test]
+        async fn poller_places_input_files_for_a_local_step() {
+            let mock_server = MockServer::start().await;
+            mount_workspace(&mock_server).await;
+            mount_common_mocks(&mock_server).await;
+
+            let job_id = Uuid::new_v4();
+            let body = b"input-file-content-42";
+            let file = input_file("data.txt", body);
+            mount_input_file(
+                &mock_server,
+                job_id,
+                &file,
+                ResponseTemplate::new(200).set_body_bytes(body.to_vec()),
+            )
+            .await;
+
+            let client = Arc::new(ServerClient::new(
+                &mock_server.uri(),
+                "test-token",
+                Some(5),
+                Some(30),
+            ));
+            let temp_dir = tempfile::tempdir().unwrap();
+            let ws_cache = Arc::new(WorkspaceCache::new(
+                temp_dir.path().join("ws").to_str().unwrap(),
+                None,
+            ));
+            let inputs_dir = temp_dir.path().join("stroem-inputs-ok");
+            let placed = inputs_dir.join(&file.file_id).join(&file.safe_name);
+            let mut step = make_step(job_id, &format!("cat '{}'", placed.display()));
+            step.input_files = vec![file];
+            step.inputs_dir = Some(inputs_dir.to_string_lossy().into_owned());
+
+            execute_claimed_step(
+                client,
+                Arc::new(StepExecutor::new()),
+                ws_cache,
+                step,
+                Uuid::new_v4(),
+                #[cfg(feature = "agent")]
+                None,
+            )
+            .await;
+
+            let completes = complete_bodies(&mock_server).await;
+            assert_eq!(completes.len(), 1);
+            assert_eq!(completes[0]["exit_code"], 0, "{:?}", completes[0]);
+            assert!(pushed_lines(&mock_server)
+                .await
+                .iter()
+                .any(|l| l.contains("input-file-content-42")));
+            assert!(
+                !inputs_dir.exists(),
+                "the inputs dir is removed after the step"
+            );
         }
     }
 }

@@ -475,6 +475,8 @@ mod tests {
             state_has_json: None,
             global_state_storage_key: None,
             global_state_has_json: None,
+            input_files: Vec::new(),
+            inputs_dir: None,
         }
     }
 

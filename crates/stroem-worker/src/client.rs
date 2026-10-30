@@ -1,13 +1,33 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
+use stroem_common::file_field::ClaimedInputFile;
 use stroem_common::secret::Secret;
+use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
 /// `/worker/jobs/{id}/logs` keeps axum's default 2 MiB request body limit; keep every push
 /// comfortably under it so a fast step's buffered lines are never rejected with 413 and lost.
 const LOG_PUSH_MAX_BYTES: usize = 1024 * 1024;
+
+/// An input file answered 503 (storage not configured or transiently
+/// unavailable) is retried every `INPUT_503_DELAY`, up to `INPUT_503_ATTEMPTS`
+/// requests — the pinned-tarball policy (spec 2026-10-29-file-inputs § 6.1).
+pub(crate) const INPUT_503_ATTEMPTS: u32 = 12;
+pub(crate) const INPUT_503_DELAY: Duration = Duration::from_secs(5);
+
+/// A fresh, absolute inputs directory for one claim request (spec § 5.2).
+/// Nothing is created here: the poller creates it only when the claim
+/// returns files to place.
+fn fresh_inputs_dir() -> String {
+    std::env::temp_dir()
+        .join(format!("stroem-inputs-{}", Uuid::new_v4().simple()))
+        .to_string_lossy()
+        .into_owned()
+}
 
 /// HTTP client for communicating with the Strøm server
 #[derive(Clone)]
@@ -95,6 +115,15 @@ pub struct ClaimedStep {
     /// Whether the previous global state snapshot contains a structured state.json file.
     #[serde(default)]
     pub global_state_has_json: Option<bool>,
+    /// Input files of the job this step exposes (spec § 5.4); empty for agent
+    /// steps and on an older server.
+    #[serde(default)]
+    pub input_files: Vec<ClaimedInputFile>,
+    /// The absolute inputs directory the claim request announced. The server
+    /// rendered local paths under it; the worker creates it only when it
+    /// places files (local and Docker steps).
+    #[serde(default)]
+    pub inputs_dir: Option<String>,
 }
 
 /// Raw claim response from server (job_id is Option since it's null when no work)
@@ -125,6 +154,8 @@ struct ClaimResponse {
     pub state_has_json: Option<bool>,
     pub global_state_storage_key: Option<String>,
     pub global_state_has_json: Option<bool>,
+    #[serde(default)]
+    pub input_files: Vec<ClaimedInputFile>,
 }
 
 #[derive(Debug, Serialize)]
@@ -154,6 +185,9 @@ struct ClaimRequest {
     tags: Vec<String>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     exclusive: bool,
+    /// Present = this worker supports file inputs (spec § 5.2, § 6.5).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inputs_dir: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -176,6 +210,54 @@ impl std::fmt::Display for TarballUnavailable {
 }
 
 impl std::error::Error for TarballUnavailable {}
+
+/// The server answered 503 for an input file (file storage not configured,
+/// or transiently unavailable). `download_input_file_with_retry` retries it.
+#[derive(Debug)]
+pub struct InputUnavailable {
+    pub file_id: String,
+}
+
+impl std::fmt::Display for InputUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "input file {} temporarily unavailable (503)",
+            self.file_id
+        )
+    }
+}
+
+impl std::error::Error for InputUnavailable {}
+
+/// Download one input file, retrying ONLY a 503 (`InputUnavailable`) every
+/// `delay`, up to `attempts` requests. Any other result (success, 404, a
+/// size or digest mismatch, a transport error) is returned at once.
+pub(crate) async fn download_input_file_with_retry(
+    client: &ServerClient,
+    job_id: Uuid,
+    file: &ClaimedInputFile,
+    dest: &Path,
+    attempts: u32,
+    delay: Duration,
+) -> Result<()> {
+    let mut attempt = 1;
+    loop {
+        match client.download_input_file(job_id, file, dest).await {
+            Err(e) if attempt < attempts && e.downcast_ref::<InputUnavailable>().is_some() => {
+                tracing::warn!(
+                    %job_id,
+                    file_id = %file.file_id,
+                    attempt,
+                    "Input file unavailable on the server (503), retrying"
+                );
+                tokio::time::sleep(delay).await;
+                attempt += 1;
+            }
+            other => return other,
+        }
+    }
+}
 
 impl ServerClient {
     pub fn new(
@@ -279,11 +361,13 @@ impl ServerClient {
         exclusive: bool,
     ) -> Result<Option<ClaimedStep>> {
         let url = format!("{}/worker/jobs/claim", self.base_url);
+        let inputs_dir = fresh_inputs_dir();
         let req = ClaimRequest {
             worker_id,
             capabilities: capabilities.to_vec(),
             tags: tags.to_vec(),
             exclusive,
+            inputs_dir: Some(inputs_dir.clone()),
         };
 
         let response = self
@@ -340,6 +424,8 @@ impl ServerClient {
             state_has_json: resp.state_has_json,
             global_state_storage_key: resp.global_state_storage_key,
             global_state_has_json: resp.global_state_has_json,
+            input_files: resp.input_files,
+            inputs_dir: Some(inputs_dir),
         };
 
         Ok(Some(step))
@@ -467,6 +553,121 @@ impl ServerClient {
             .context("Failed to read workspace tarball bytes")?;
 
         Ok(Some((bytes.to_vec(), revision)))
+    }
+
+    /// Download one input file of `job_id` to `dest`
+    /// (`{inputs_dir}/{file_id}/{safe_name}`, spec § 6.1): the body is
+    /// streamed to a temp file in `dest`'s directory, checked against the
+    /// claimed size and SHA-256, made read-only (`0444`) and renamed into
+    /// place. On any error no file is left behind. A 503 is an
+    /// [`InputUnavailable`] error. Errors name the file id, never its name.
+    #[tracing::instrument(skip(self, file, dest), fields(file_id = %file.file_id))]
+    pub async fn download_input_file(
+        &self,
+        job_id: Uuid,
+        file: &ClaimedInputFile,
+        dest: &Path,
+    ) -> Result<()> {
+        let id = &file.file_id;
+        let dir = dest
+            .parent()
+            .with_context(|| format!("input file {id}: the destination has no directory"))?;
+        let part = dir.join(format!(".part-{}", Uuid::new_v4().simple()));
+        let mut result = self.fetch_input_file(job_id, file, &part).await;
+        if result.is_ok() {
+            result = tokio::fs::rename(&part, dest)
+                .await
+                .with_context(|| format!("input file {id}: cannot move it into place"));
+        }
+        if result.is_err() {
+            // Best effort: the part file may not exist (failed before creation).
+            let _ = tokio::fs::remove_file(&part).await;
+        }
+        result
+    }
+
+    /// Stream one input file into `part` and verify it (see `download_input_file`).
+    async fn fetch_input_file(
+        &self,
+        job_id: Uuid,
+        file: &ClaimedInputFile,
+        part: &Path,
+    ) -> Result<()> {
+        let id = &file.file_id;
+        let url = format!(
+            "{}/worker/jobs/{}/input-files/{}",
+            self.base_url, job_id, id
+        );
+        let mut response = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", self.token))
+            // Input files can be large (100 MiB by default), like tarballs.
+            .timeout(self.download_timeout)
+            .send()
+            .await
+            .with_context(|| format!("input file {id}: request failed"))?;
+
+        let status = response.status();
+        if status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+            return Err(anyhow::Error::new(InputUnavailable {
+                file_id: id.clone(),
+            }));
+        }
+        if !status.is_success() {
+            anyhow::bail!("input file {id}: download failed with status {status}");
+        }
+
+        let mut out = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(part)
+            .await
+            .with_context(|| format!("input file {id}: cannot create the download file"))?;
+        let mut hasher = Sha256::new();
+        let mut written: u64 = 0;
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .with_context(|| format!("input file {id}: reading the download failed"))?
+        {
+            written += chunk.len() as u64;
+            // Stop at once: a body longer than claimed must not fill the disk.
+            if written > file.size_bytes {
+                anyhow::bail!(
+                    "input file {id}: size mismatch (more than the expected {} bytes)",
+                    file.size_bytes
+                );
+            }
+            hasher.update(&chunk);
+            out.write_all(&chunk)
+                .await
+                .with_context(|| format!("input file {id}: writing the download failed"))?;
+        }
+        out.flush()
+            .await
+            .with_context(|| format!("input file {id}: writing the download failed"))?;
+        drop(out);
+
+        if written != file.size_bytes {
+            anyhow::bail!(
+                "input file {id}: size mismatch (expected {} bytes, got {written})",
+                file.size_bytes
+            );
+        }
+        let digest = hex::encode(hasher.finalize());
+        if !digest.eq_ignore_ascii_case(&file.sha256) {
+            anyhow::bail!("input file {id}: SHA-256 mismatch");
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            tokio::fs::set_permissions(part, std::fs::Permissions::from_mode(0o444))
+                .await
+                .with_context(|| format!("input file {id}: cannot make it read-only"))?;
+        }
+        Ok(())
     }
 
     /// Check if a job has been cancelled on the server
@@ -1063,6 +1264,8 @@ mod tests {
             state_has_json: None,
             global_state_storage_key: None,
             global_state_has_json: None,
+            input_files: Vec::new(),
+            inputs_dir: None,
         };
 
         let dbg = format!("{step:?}");
@@ -1103,6 +1306,8 @@ mod tests {
             state_has_json: None,
             global_state_storage_key: None,
             global_state_has_json: None,
+            input_files: Vec::new(),
+            inputs_dir: None,
         };
         let json = serde_json::to_value(&step_with_revision).unwrap();
         assert_eq!(json["revision"], "deadbeef");
@@ -1459,5 +1664,320 @@ mod tests {
             .unwrap();
         let reqs = mock.received_requests().await.unwrap();
         assert_eq!(reqs[0].url.query(), None);
+    }
+
+    // --- file inputs (spec 2026-10-29-file-inputs § 5.2, § 5.4, § 6.1) ---
+
+    fn input_file(name: &str, body: &[u8]) -> ClaimedInputFile {
+        use sha2::{Digest, Sha256};
+        ClaimedInputFile {
+            file_id: stroem_common::file_field::new_file_id(),
+            safe_name: name.to_string(),
+            size_bytes: body.len() as u64,
+            sha256: hex::encode(Sha256::digest(body)),
+        }
+    }
+
+    fn input_file_url_path(job_id: Uuid, file_id: &str) -> String {
+        format!("/worker/jobs/{job_id}/input-files/{file_id}")
+    }
+
+    fn dir_entries(dir: &std::path::Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// Every claim request announces a fresh absolute `inputs_dir`; the
+    /// worker creates nothing until a claim returns files to place.
+    #[tokio::test]
+    async fn claim_request_sends_absolute_inputs_dir() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/worker/jobs/claim"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "job_id": null
+            })))
+            .expect(2)
+            .mount(&mock)
+            .await;
+
+        let client = ServerClient::new(&mock.uri(), "t", Some(5), Some(30));
+        let caps = vec!["script".to_string()];
+        for _ in 0..2 {
+            let claimed = client
+                .claim_step(Uuid::new_v4(), &caps, &[], false)
+                .await
+                .unwrap();
+            assert!(claimed.is_none());
+        }
+
+        let reqs = mock.received_requests().await.unwrap();
+        let dirs: Vec<String> = reqs
+            .iter()
+            .map(|r| {
+                let body: serde_json::Value = serde_json::from_slice(&r.body).unwrap();
+                body["inputs_dir"]
+                    .as_str()
+                    .expect("every claim request must carry inputs_dir")
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(dirs.len(), 2);
+        for dir in &dirs {
+            let p = std::path::Path::new(dir);
+            assert!(p.is_absolute(), "inputs_dir must be absolute: {dir}");
+            assert!(
+                p.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("stroem-inputs-"),
+                "unexpected inputs_dir name: {dir}"
+            );
+            assert!(!p.exists(), "nothing is created before files are claimed");
+        }
+        assert_ne!(dirs[0], dirs[1], "each claim request needs a fresh dir");
+    }
+
+    #[tokio::test]
+    async fn claimed_step_parses_input_files() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let file = input_file("data.csv", b"a,b\n1,2\n");
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/worker/jobs/claim"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "job_id": Uuid::new_v4().to_string(),
+                "workspace": "default",
+                "task_name": "import",
+                "step_name": "load",
+                "action_name": "load",
+                "action_type": "script",
+                "runner": "local",
+                "input_files": [file],
+            })))
+            .mount(&mock)
+            .await;
+
+        let client = ServerClient::new(&mock.uri(), "t", Some(5), Some(30));
+        let step = client
+            .claim_step(Uuid::new_v4(), &["script".to_string()], &[], false)
+            .await
+            .unwrap()
+            .expect("a step is claimed");
+        assert_eq!(step.input_files, vec![file]);
+
+        let reqs = mock.received_requests().await.unwrap();
+        let sent: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        let sent_dir = sent["inputs_dir"].as_str().unwrap();
+        assert_eq!(
+            step.inputs_dir.as_deref(),
+            Some(sent_dir),
+            "the step keeps the dir its claim request announced"
+        );
+        assert!(!std::path::Path::new(sent_dir).exists());
+
+        // An older server sends no `input_files`; an older serialized step has neither field.
+        let resp: ClaimResponse = serde_json::from_value(serde_json::json!({
+            "job_id": "abc-123",
+            "workspace": "default",
+            "step_name": "build",
+            "action_name": "run",
+            "action_type": "script"
+        }))
+        .unwrap();
+        assert!(resp.input_files.is_empty());
+        let mut json = serde_json::to_value(&step).unwrap();
+        json.as_object_mut().unwrap().remove("input_files");
+        json.as_object_mut().unwrap().remove("inputs_dir");
+        let old: ClaimedStep = serde_json::from_value(json).unwrap();
+        assert!(old.input_files.is_empty());
+        assert!(old.inputs_dir.is_none());
+    }
+
+    #[tokio::test]
+    async fn download_input_file_verifies_size_and_sha() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock = MockServer::start().await;
+        let job_id = Uuid::new_v4();
+        let body = b"hello";
+        let good = input_file("report.csv", body);
+        // The claim promises 6 bytes; the server sends 5.
+        let short = ClaimedInputFile {
+            size_bytes: 6,
+            ..input_file("report.csv", body)
+        };
+        // The claim promises 3 bytes; the server sends 5 (stopped while streaming).
+        let long = ClaimedInputFile {
+            size_bytes: 3,
+            ..input_file("report.csv", body)
+        };
+        let wrong_digest = ClaimedInputFile {
+            sha256: input_file("x", b"world").sha256,
+            ..input_file("report.csv", body)
+        };
+        for f in [&good, &short, &long, &wrong_digest] {
+            Mock::given(method("GET"))
+                .and(path(input_file_url_path(job_id, &f.file_id)))
+                .and(header("Authorization", "Bearer t"))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(body.to_vec()))
+                .expect(1)
+                .mount(&mock)
+                .await;
+        }
+        let client = ServerClient::new(&mock.uri(), "t", Some(5), Some(30));
+        let tmp = tempfile::tempdir().unwrap();
+
+        let dir = tmp.path().join(&good.file_id);
+        std::fs::create_dir(&dir).unwrap();
+        let dest = dir.join(&good.safe_name);
+        client
+            .download_input_file(job_id, &good, &dest)
+            .await
+            .expect("a verified download succeeds");
+        assert_eq!(std::fs::read(&dest).unwrap(), body);
+        assert_eq!(dir_entries(&dir), vec![good.safe_name.clone()]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&dest).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o444, "a placed file is read-only");
+        }
+
+        for (f, what) in [
+            (&short, "size"),
+            (&long, "size"),
+            (&wrong_digest, "SHA-256"),
+        ] {
+            let dir = tmp.path().join(&f.file_id);
+            std::fs::create_dir(&dir).unwrap();
+            let err = client
+                .download_input_file(job_id, f, &dir.join(&f.safe_name))
+                .await
+                .expect_err("a mismatch fails the download");
+            let msg = format!("{err:#}");
+            assert!(msg.contains(&f.file_id), "error names the file id: {msg}");
+            assert!(msg.contains(what), "error says what mismatched: {msg}");
+            assert!(
+                !msg.contains("report.csv"),
+                "error never names the file: {msg}"
+            );
+            assert!(
+                dir_entries(&dir).is_empty(),
+                "no file (not even a temp file) is left after a mismatch"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn download_input_file_404_is_not_retried() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock = MockServer::start().await;
+        let job_id = Uuid::new_v4();
+        let file = input_file("in.bin", b"abc");
+        Mock::given(method("GET"))
+            .and(path(input_file_url_path(job_id, &file.file_id)))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        let client = ServerClient::new(&mock.uri(), "t", Some(5), Some(30));
+        let tmp = tempfile::tempdir().unwrap();
+
+        let err = download_input_file_with_retry(
+            &client,
+            job_id,
+            &file,
+            &tmp.path().join(&file.safe_name),
+            3,
+            Duration::from_millis(1),
+        )
+        .await
+        .expect_err("404 fails at once");
+        assert!(err.downcast_ref::<InputUnavailable>().is_none());
+        let msg = format!("{err:#}");
+        assert!(msg.contains(&file.file_id) && msg.contains("404"), "{msg}");
+        assert!(dir_entries(tmp.path()).is_empty());
+    }
+
+    #[tokio::test]
+    async fn download_input_file_retries_503_then_ok() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock = MockServer::start().await;
+        let job_id = Uuid::new_v4();
+        let body = b"payload";
+        let file = input_file("in.bin", body);
+        Mock::given(method("GET"))
+            .and(path(input_file_url_path(job_id, &file.file_id)))
+            .respond_with(ResponseTemplate::new(503).insert_header("Retry-After", "5"))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(input_file_url_path(job_id, &file.file_id)))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body.to_vec()))
+            .with_priority(2)
+            .mount(&mock)
+            .await;
+        let client = ServerClient::new(&mock.uri(), "t", Some(5), Some(30));
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join(&file.safe_name);
+
+        download_input_file_with_retry(&client, job_id, &file, &dest, 3, Duration::from_millis(1))
+            .await
+            .expect("a 503 is retried");
+        assert_eq!(std::fs::read(&dest).unwrap(), body);
+        assert_eq!(mock.received_requests().await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn download_input_file_gives_up_after_attempts() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock = MockServer::start().await;
+        let job_id = Uuid::new_v4();
+        let file = input_file("in.bin", b"abc");
+        Mock::given(method("GET"))
+            .and(path(input_file_url_path(job_id, &file.file_id)))
+            .respond_with(ResponseTemplate::new(503).insert_header("Retry-After", "5"))
+            .expect(2)
+            .mount(&mock)
+            .await;
+        let client = ServerClient::new(&mock.uri(), "t", Some(5), Some(30));
+        let tmp = tempfile::tempdir().unwrap();
+
+        let err = download_input_file_with_retry(
+            &client,
+            job_id,
+            &file,
+            &tmp.path().join(&file.safe_name),
+            2,
+            Duration::from_millis(1),
+        )
+        .await
+        .expect_err("still 503 after the last attempt");
+        assert!(err.downcast_ref::<InputUnavailable>().is_some());
+        assert!(format!("{err:#}").contains(&file.file_id));
+        assert!(dir_entries(tmp.path()).is_empty());
+    }
+
+    #[test]
+    fn input_503_retry_matches_pinned_tarballs() {
+        assert_eq!(INPUT_503_ATTEMPTS, 12);
+        assert_eq!(INPUT_503_DELAY, Duration::from_secs(5));
     }
 }
