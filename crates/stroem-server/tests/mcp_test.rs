@@ -461,6 +461,17 @@ async fn setup_with_auth_and_mcp_ws(
     acl: Option<AclConfig>,
     base_url: Option<String>,
 ) -> Result<(Router, PgPool, TempDir)> {
+    setup_with_auth_and_mcp_ws_blob(workspace, acl, base_url, true).await
+}
+
+/// `setup_with_auth_and_mcp_ws`; `with_blob: false` leaves the server with
+/// no input-file archive (`file storage is not configured`).
+async fn setup_with_auth_and_mcp_ws_blob(
+    workspace: WorkspaceConfig,
+    acl: Option<AclConfig>,
+    base_url: Option<String>,
+    with_blob: bool,
+) -> Result<(Router, PgPool, TempDir)> {
     let test_db = stroem_test_support::test_db().await;
     let pool = test_db.pool.clone();
     let url = test_db.url;
@@ -533,10 +544,12 @@ async fn setup_with_auth_and_mcp_ws(
 
     let mgr = WorkspaceManager::from_config("default", workspace);
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
-    let archive: Arc<dyn BlobArchive> =
-        Arc::new(LocalBlobArchive::new(temp_dir.path().join("input-archive")));
+    let archive: Option<Arc<dyn BlobArchive>> = with_blob.then(|| {
+        Arc::new(LocalBlobArchive::new(temp_dir.path().join("input-archive")))
+            as Arc<dyn BlobArchive>
+    });
     let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None)
-        .with_input_blob(Some(archive));
+        .with_input_blob(archive);
     let router = build_router(state, CancellationToken::new());
 
     Ok((router, pool, temp_dir))
@@ -2010,8 +2023,13 @@ tasks:
 const FILES_BASE_URL: &str = "http://stroem.test";
 
 async fn files_app() -> Result<(Router, PgPool, TempDir, String)> {
+    files_app_with(true).await
+}
+
+/// `files_app`; `with_blob: false` = no input-file archive configured.
+async fn files_app_with(with_blob: bool) -> Result<(Router, PgPool, TempDir, String)> {
     let ws: WorkspaceConfig = serde_yaml::from_str(FILES_YAML)?;
-    let (router, pool, tmp) = setup_with_auth_and_mcp_ws(
+    let (router, pool, tmp) = setup_with_auth_and_mcp_ws_blob(
         ws,
         Some(AclConfig {
             default: AclAction::Run,
@@ -2024,6 +2042,7 @@ async fn files_app() -> Result<(Router, PgPool, TempDir, String)> {
             }],
         }),
         Some(FILES_BASE_URL.to_string()),
+        with_blob,
     )
     .await?;
     let user = UserRepo::get_by_email(&pool, AUTH_USER_EMAIL)
@@ -2320,6 +2339,57 @@ async fn mcp_create_upload_url_view_only_is_denied() -> Result<()> {
     )
     .await;
     assert_eq!(resp["error"]["code"], json!(-32602), "{resp}");
+    Ok(())
+}
+
+/// Without an input-file archive, no upload URL is minted: its first POST
+/// would consume the token and answer 503.
+#[tokio::test]
+async fn mcp_create_upload_url_without_file_storage_is_tool_error() -> Result<()> {
+    let (router, pool, _tmp, key) = files_app_with(false).await?;
+    let resp = call_tool_authed(
+        &router,
+        &key,
+        "create_upload_url",
+        json!({"workspace": "default", "task_name": "files", "file_name": "d.csv"}),
+    )
+    .await;
+    assert!(resp.get("result").is_none(), "{resp}");
+    assert_eq!(
+        resp["error"]["message"],
+        json!("file storage is not configured"),
+        "{resp}"
+    );
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM input_file_upload_token")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(n, 0);
+    Ok(())
+}
+
+/// Inline content is stored only after the Run check: a View-only task
+/// answers the ACL error and stores nothing.
+#[tokio::test]
+async fn mcp_execute_inline_on_view_only_task_stores_nothing() -> Result<()> {
+    let (router, pool, _tmp, key) = files_app().await?;
+    let resp = call_tool_authed(
+        &router,
+        &key,
+        "execute_task",
+        json!({"workspace": "default", "task_name": "view-files",
+               "input": {"data_file": {"name": "a.txt", "content": "hello"}}}),
+    )
+    .await;
+    assert!(
+        resp["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("Insufficient permissions")),
+        "{resp}"
+    );
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM input_file")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(n, 0);
     Ok(())
 }
 

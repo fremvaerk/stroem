@@ -252,7 +252,12 @@ fn upload_err(e: crate::input_files::upload::UploadError) -> rmcp::ErrorData {
         UploadError::InvalidName | UploadError::TooLarge { .. } => {
             rmcp::ErrorData::invalid_params(e.to_string(), None)
         }
-        UploadError::NotConfigured | UploadError::Internal(_) => internal_err(e.to_string()),
+        UploadError::Internal(ref inner) => {
+            // The tool error is the fixed text; the cause goes to the log only.
+            tracing::error!("MCP: storing an inline input file failed: {inner:#}");
+            internal_err(e.to_string())
+        }
+        UploadError::NotConfigured => internal_err(e.to_string()),
     }
 }
 
@@ -785,6 +790,13 @@ impl StromMcpHandler {
             .sub
             .parse::<uuid::Uuid>()
             .map_err(|_| internal_err("Invalid user ID in token"))?;
+        // Without file storage the first POST would consume the token and
+        // answer 503: refuse before minting one.
+        if self.state.input_blob.is_none() {
+            return Err(internal_err(
+                crate::input_files::upload::UploadError::NotConfigured.to_string(),
+            ));
+        }
 
         let token = hex::encode(crate::auth::os_random_bytes::<32>());
         let cfg = &self.state.input_files_config;
@@ -800,7 +812,10 @@ impl StromMcpHandler {
             expires_at,
         )
         .await
-        .map_err(|e| internal_err(format!("Failed to create upload URL: {e}")))?;
+        .map_err(|e| {
+            tracing::error!("MCP: storing an upload URL token failed: {e:#}");
+            internal_err("Failed to create upload URL")
+        })?;
 
         Ok(json_result(&serde_json::json!({
             "upload_url": format!("{base_url}/api/uploads/{token}"),
