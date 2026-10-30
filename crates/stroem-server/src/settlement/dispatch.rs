@@ -1360,9 +1360,10 @@ pub async fn init(
     defaults: JobDefaults,
 ) -> Result<Option<JobStatus>> {
     // One sample per entry (spec §3.4): the creation-time cascade, the
-    // `type: task` input and the approval messages all see the same snapshot.
+    // `type: task` input and the approval messages all see the same snapshot
+    // and the same input files.
     // The job's own state partition (spec § 7.6). Best-effort: job creation
-    // must never fail on this lookup.
+    // must never fail on this lookup, nor on the state lookup below.
     let git_ref = match JobRepo::get(pool, job_id).await {
         Ok(job) => job.and_then(|j| j.git_ref),
         Err(e) => {
@@ -1370,7 +1371,7 @@ pub async fn init(
             None
         }
     };
-    let snapshots = render_context::latest_snapshots(
+    let mut snapshots = render_context::latest_snapshots(
         pool,
         workspace_name,
         task_name,
@@ -1378,6 +1379,13 @@ pub async fn init(
         "init",
     )
     .await;
+    // The input files are NOT best-effort: without them a `file` value would
+    // render as its id. A failure takes the `[creation] initialisation
+    // failed` path like any other init error.
+    snapshots.files = crate::input_files::job_files(
+        &crate::input_files::load_attachments(pool, job_id).await?,
+        stroem_common::file_field::CANONICAL_INPUTS_ROOT,
+    );
 
     crate::cascade::execute(pool, job_id, task, Some(workspace_config), &snapshots)
         .await

@@ -1156,6 +1156,7 @@ pub async fn claim_job(
         loop_slot,
         crate::render_context::Scope::ActionBody {
             prepared_input: rendered_input.as_ref(),
+            action_schema: input_schema.as_ref(),
         },
     );
     collision_lines.extend(body_ctx.log_lines());

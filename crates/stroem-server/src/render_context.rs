@@ -11,7 +11,9 @@ use std::collections::HashMap;
 
 use serde_json::{json, Map, Value};
 use sqlx::PgPool;
+use stroem_common::file_field::JobFiles;
 use stroem_common::models::job::StepStatus;
+use stroem_common::models::workflow::InputFieldDef;
 use stroem_common::secret::Secret;
 use stroem_db::{JobStepRow, TaskStateRepo, WorkspaceStateRepo};
 use uuid::Uuid;
@@ -41,12 +43,18 @@ pub struct Snapshot {
     pub json: Option<Value>,
 }
 
-/// The task + global snapshots for one `(workspace, task)`, resolved once
-/// per entry (advance / init / claim) and threaded down by reference.
+/// What every render of one entry (advance / init / claim) samples once and
+/// threads down by reference, for one job: the task + global snapshots of
+/// its `(workspace, task)` and its attached input files.
 #[derive(Debug, Clone, Default)]
 pub struct Snapshots {
     pub task: Option<Snapshot>,
     pub global: Option<Snapshot>,
+    /// The job's `job_input_file` rows under the entry's inputs root (spec
+    /// 2026-10-29 § 5.2): canonical `/inputs` for advance and init, the
+    /// claim root at claim. [`build`] maps a `file` value to its path from
+    /// these and nowhere else. Default: no files.
+    pub files: JobFiles,
 }
 
 /// Resolve the latest task and global snapshots. Pool only — no archive.
@@ -101,7 +109,11 @@ pub async fn latest_snapshots(
     };
     metrics::histogram!(crate::metrics::STROEM_SNAPSHOT_RESOLVE_SECONDS, "entry" => entry)
         .record(started.elapsed().as_secs_f64());
-    Snapshots { task, global }
+    Snapshots {
+        task,
+        global,
+        files: JobFiles::empty(),
+    }
 }
 
 /// The fields the context needs from a step row.
@@ -182,8 +194,13 @@ pub enum Scope<'a> {
     /// Flow step `input:` (S1). `input` = job input, caller secrets.
     StepInput,
     /// Action `env`/`cmd`/`script`/`source`/`manifest`/`args`/`image` (S2+S3).
-    /// `input` = the prepared step input, OWNER secrets.
-    ActionBody { prepared_input: Option<&'a Value> },
+    /// `input` = the prepared step input, OWNER secrets. `action_schema` is
+    /// the step's persisted `action_spec.input`: its `file` fields render as
+    /// paths; `None` leaves the prepared input as it is.
+    ActionBody {
+        prepared_input: Option<&'a Value>,
+        action_schema: Option<&'a HashMap<String, InputFieldDef>>,
+    },
     /// Agent `prompt`/`system_prompt` (S4). Job input, caller secrets.
     AgentPrompt,
     /// `when:` / `for_each:` (S5). Job input, caller secrets, never `each`.
@@ -272,29 +289,44 @@ fn build_entries(
 ) -> (Vec<(String, Value)>, Vec<Collision>) {
     let mut ctx: Vec<(String, Value)> = Vec::new();
     let mut collisions = Vec::new();
+    // The ONLY place a `file` value becomes its path (spec 2026-10-29 § 5.1):
+    // the stored value is the file id, the template value
+    // `{root}/{file_id}/{safe_name}` under the entry's root.
+    let files = &job.snapshots.files;
 
     // § 4.1: a task action's ref sees its projection and `job`, nothing else.
     if let Scope::TaskActionRef { ref_input } = scope {
-        upsert(&mut ctx, "input", ref_input.clone());
+        upsert(&mut ctx, "input", files.template_input(ref_input));
         upsert(&mut ctx, "job", job_context(job.job_revision, job.job_ref));
         return (ctx, collisions);
     }
 
     // The two real axes (spec §3.2). The ref scopes carry no `secret`
-    // (spec 2026-10-15 D10).
-    let (input, secrets): (Option<&Value>, Option<&HashMap<String, Value>>) = match scope {
-        Scope::ActionBody { prepared_input } => (prepared_input, Some(job.owner_secrets)),
+    // (spec 2026-10-15 D10). The job input maps the job's attached fields;
+    // the prepared action input maps the `file` fields of the action schema.
+    let job_input = || job.job_input.map(|v| files.template_input(v));
+    let (input, secrets): (Option<Value>, Option<&HashMap<String, Value>>) = match scope {
+        Scope::ActionBody {
+            prepared_input,
+            action_schema,
+        } => (
+            prepared_input.map(|v| match action_schema {
+                Some(schema) => files.template_prepared(v, schema),
+                None => v.clone(),
+            }),
+            Some(job.owner_secrets),
+        ),
         // TaskActionRef returned above.
-        Scope::StepRef | Scope::TaskActionRef { .. } => (job.job_input, None),
+        Scope::StepRef | Scope::TaskActionRef { .. } => (job_input(), None),
         Scope::StepInput
         | Scope::AgentPrompt
         | Scope::Condition
         | Scope::ChildTaskInput
-        | Scope::ApprovalMessage { .. } => (job.job_input, Some(job.caller_secrets)),
+        | Scope::ApprovalMessage { .. } => (job_input(), Some(job.caller_secrets)),
     };
 
     if let Some(v) = input {
-        upsert(&mut ctx, "input", v.clone());
+        upsert(&mut ctx, "input", v);
     }
     if let Some(secrets) = secrets {
         upsert(
@@ -492,6 +524,7 @@ mod tests {
         Snapshots {
             task: mk(task),
             global: mk(global),
+            ..Default::default()
         }
     }
     /// Every scope, in one place, so a new variant cannot be forgotten.
@@ -500,6 +533,7 @@ mod tests {
             Scope::StepInput,
             Scope::ActionBody {
                 prepared_input: Some(prepared),
+                action_schema: None,
             },
             Scope::AgentPrompt,
             Scope::Condition,
@@ -741,6 +775,7 @@ mod tests {
             None,
             Scope::ActionBody {
                 prepared_input: Some(&prepared),
+                action_schema: None,
             },
         );
         assert_eq!(body.as_value()["input"]["from"], "prepared");
@@ -1173,5 +1208,328 @@ mod tests {
         let v = build(&job, &[], None, Scope::StepInput);
         let dbg = format!("{v:?}");
         assert!(!dbg.contains("SUPER-SECRET-7f3a"), "leaked: {dbg}");
+    }
+
+    // ── File inputs (spec 2026-10-29 § 5.1, § 5.3): a `file` value renders
+    // as `{root}/{file_id}/{safe_name}` in every scope; the root is the one
+    // the entry sampled into `Snapshots.files`. ──
+
+    use stroem_common::file_field::{FileRef, CANONICAL_INPUTS_ROOT};
+
+    const FILE_A: &str = "file_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const FILE_B: &str = "file_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const CLAIM_PATH_A: &str = "/w/in/file_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/report.csv";
+    const CLAIM_PATH_B: &str = "/w/in/file_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/report.csv";
+    const CANONICAL_PATH_A: &str = "/inputs/file_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/report.csv";
+
+    /// `attached` = `(task field, file id, safe name)`.
+    fn file_snaps(root: &str, attached: &[(&str, &str, &str)]) -> Snapshots {
+        Snapshots {
+            files: JobFiles::new(
+                root,
+                attached.iter().map(|(field, id, name)| {
+                    (
+                        field.to_string(),
+                        FileRef {
+                            file_id: id.to_string(),
+                            safe_name: name.to_string(),
+                        },
+                    )
+                }),
+            ),
+            ..Default::default()
+        }
+    }
+    fn file_job<'a>(
+        input: &'a serde_json::Value,
+        sn: &'a Snapshots,
+        secrets: &'a HashMap<String, serde_json::Value>,
+    ) -> JobContext<'a> {
+        JobContext {
+            job_id: uuid::Uuid::nil(),
+            job_input: Some(input),
+            caller_secrets: secrets,
+            owner_secrets: secrets,
+            snapshots: sn,
+            job_revision: None,
+            job_ref: None,
+        }
+    }
+    fn render_in(ctx: &RenderContext, template: &str) -> String {
+        stroem_common::template::render_template(template, ctx.as_value()).unwrap()
+    }
+    fn schema_of(fields: &[(&str, &str)]) -> HashMap<String, InputFieldDef> {
+        fields
+            .iter()
+            .map(|(name, ty)| {
+                (
+                    name.to_string(),
+                    InputFieldDef {
+                        field_type: ty.to_string(),
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect()
+    }
+    fn map_of(pairs: &[(&str, &str)]) -> HashMap<String, serde_json::Value> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), json!(v)))
+            .collect()
+    }
+
+    #[test]
+    fn step_input_scope_renders_path() {
+        let input = json!({"data_file": FILE_A, "name": "n"});
+        let sn = file_snaps("/w/in", &[("data_file", FILE_A, "report.csv")]);
+        let sec = secrets(&[]);
+        let job = file_job(&input, &sn, &sec);
+        let ctx = build(&job, &[], None, Scope::StepInput);
+        assert_eq!(render_in(&ctx, "{{ input.data_file }}"), CLAIM_PATH_A);
+        assert_eq!(render_in(&ctx, "{{ input.name }}"), "n");
+        // The stored job input keeps the id.
+        assert_eq!(input["data_file"], FILE_A);
+    }
+
+    #[test]
+    fn action_body_scope_renders_path_for_file_fields_only() {
+        let input = json!({"data_file": FILE_A});
+        let sn = file_snaps("/w/in", &[("data_file", FILE_A, "report.csv")]);
+        let sec = secrets(&[]);
+        let job = file_job(&input, &sn, &sec);
+        // `data` is a `file` field; `data_file` and `label` are strings that
+        // happen to hold the id (not field-keyed: the ACTION schema decides);
+        // `stray` is a `file` field naming a file the job does not have.
+        let prepared = json!({
+            "data": FILE_A,
+            "data_file": FILE_A,
+            "label": FILE_A,
+            "stray": FILE_B,
+            "other": "x",
+        });
+        let schema = schema_of(&[
+            ("data", "file"),
+            ("data_file", "string"),
+            ("label", "string"),
+            ("stray", "file"),
+        ]);
+        let ctx = build(
+            &job,
+            &[],
+            None,
+            Scope::ActionBody {
+                prepared_input: Some(&prepared),
+                action_schema: Some(&schema),
+            },
+        );
+        let v = &ctx.as_value()["input"];
+        assert_eq!(v["data"], CLAIM_PATH_A);
+        assert_eq!(v["data_file"], FILE_A);
+        assert_eq!(v["label"], FILE_A);
+        assert_eq!(v["stray"], FILE_B);
+        assert_eq!(v["other"], "x");
+
+        // Without the action schema the prepared input is used as it is.
+        let ctx = build(
+            &job,
+            &[],
+            None,
+            Scope::ActionBody {
+                prepared_input: Some(&prepared),
+                action_schema: None,
+            },
+        );
+        assert_eq!(ctx.as_value()["input"], prepared);
+    }
+
+    #[test]
+    fn agent_prompt_scope_renders_canonical_path() {
+        let input = json!({"data_file": FILE_A});
+        let sn = file_snaps(
+            CANONICAL_INPUTS_ROOT,
+            &[("data_file", FILE_A, "report.csv")],
+        );
+        let sec = secrets(&[]);
+        let job = file_job(&input, &sn, &sec);
+        let ctx = build(&job, &[], None, Scope::AgentPrompt);
+        assert_eq!(
+            render_in(&ctx, "Read {{ input.data_file }}"),
+            format!("Read {CANONICAL_PATH_A}")
+        );
+    }
+
+    #[test]
+    fn condition_scope_absent_optional_field_stays_absent() {
+        use stroem_common::template::evaluate_condition;
+        let sec = secrets(&[]);
+
+        // A file was given: the condition sees its canonical path.
+        let given = json!({"data_file": FILE_A});
+        let sn = file_snaps(
+            CANONICAL_INPUTS_ROOT,
+            &[("data_file", FILE_A, "report.csv")],
+        );
+        let ctx = build(&file_job(&given, &sn, &sec), &[], None, Scope::Condition);
+        assert_eq!(render_in(&ctx, "{{ input.data_file }}"), CANONICAL_PATH_A);
+        assert!(evaluate_condition("{{ input.data_file }}", ctx.as_value()).unwrap());
+
+        // No file, no attachment row: absent stays absent — no key is added.
+        let none = Snapshots::default();
+        let absent = json!({"name": "n"});
+        let ctx = build(&file_job(&absent, &none, &sec), &[], None, Scope::Condition);
+        assert!(ctx.as_value()["input"].get("data_file").is_none());
+        assert_eq!(render_in(&ctx, "{{ input.data_file is defined }}"), "false");
+
+        // `null` and `""` ("no file" at creation) stay as they are: falsy.
+        for empty in [json!({"data_file": null}), json!({"data_file": ""})] {
+            let ctx = build(&file_job(&empty, &none, &sec), &[], None, Scope::Condition);
+            assert_eq!(ctx.as_value()["input"]["data_file"], empty["data_file"]);
+            assert!(!evaluate_condition("{{ input.data_file }}", ctx.as_value()).unwrap());
+        }
+    }
+
+    #[test]
+    fn child_task_input_scope_renders_path() {
+        use stroem_common::template::render_input_typed_with_files;
+        let input = json!({"data_file": FILE_A});
+        let sn = file_snaps(
+            CANONICAL_INPUTS_ROOT,
+            &[("data_file", FILE_A, "report.csv")],
+        );
+        let sec = secrets(&[]);
+        let job = file_job(&input, &sn, &sec);
+        let ctx = build(&job, &[], None, Scope::ChildTaskInput);
+        assert_eq!(render_in(&ctx, "{{ input.data_file }}"), CANONICAL_PATH_A);
+
+        // The child task's `file` field looks the path up by id and stores
+        // the id; a `string` field keeps the path.
+        let step_input = map_of(&[
+            ("data", "{{ input.data_file }}"),
+            ("where", "{{ input.data_file }}"),
+        ]);
+        let child_schema = schema_of(&[("data", "file"), ("where", "string")]);
+        let child = render_input_typed_with_files(
+            &step_input,
+            Some(&child_schema),
+            ctx.as_value(),
+            &sn.files,
+        )
+        .unwrap();
+        assert_eq!(child["data"], FILE_A);
+        assert_eq!(child["where"], CANONICAL_PATH_A);
+    }
+
+    #[test]
+    fn approval_message_scope_renders_path_and_keeps_the_rendered_input() {
+        let input = json!({"data_file": FILE_A});
+        let sn = file_snaps(
+            CANONICAL_INPUTS_ROOT,
+            &[("data_file", FILE_A, "report.csv")],
+        );
+        let sec = secrets(&[]);
+        let job = file_job(&input, &sn, &sec);
+        let ctx = build(
+            &job,
+            &[],
+            None,
+            Scope::ApprovalMessage {
+                rendered_input: None,
+            },
+        );
+        assert_eq!(render_in(&ctx, "{{ input.data_file }}"), CANONICAL_PATH_A);
+        // The rendered step input replaces `input` unchanged.
+        let rendered = json!({"data_file": FILE_A});
+        let ctx = build(
+            &job,
+            &[],
+            None,
+            Scope::ApprovalMessage {
+                rendered_input: Some(&rendered),
+            },
+        );
+        assert_eq!(ctx.as_value()["input"], rendered);
+    }
+
+    #[test]
+    fn step_ref_and_task_action_ref_scope_render_path() {
+        use stroem_common::template::render_ref_projection;
+        let input = json!({"data_file": FILE_A});
+        let sn = file_snaps(
+            CANONICAL_INPUTS_ROOT,
+            &[("data_file", FILE_A, "report.csv")],
+        );
+        let sec = secrets(&[]);
+        let job = file_job(&input, &sn, &sec);
+
+        let ctx = build(&job, &[], None, Scope::StepRef);
+        assert_eq!(render_in(&ctx, "{{ input.data_file }}"), CANONICAL_PATH_A);
+
+        // A task action's ref input is the projection of the step input,
+        // rendered in the step-input context: it already holds the path.
+        let child_ctx = build(&job, &[], None, Scope::ChildTaskInput);
+        let ref_input = render_ref_projection(
+            &map_of(&[("src", "{{ input.data_file }}")]),
+            child_ctx.as_value(),
+        )
+        .unwrap();
+        let ctx = build(
+            &job,
+            &[],
+            None,
+            Scope::TaskActionRef {
+                ref_input: &ref_input,
+            },
+        );
+        assert_eq!(render_in(&ctx, "{{ input.src }}"), CANONICAL_PATH_A);
+        // A projection key named like the task field that still holds that
+        // field's bare id renders the path too.
+        let bare = json!({"data_file": FILE_A});
+        let ctx = build(&job, &[], None, Scope::TaskActionRef { ref_input: &bare });
+        assert_eq!(render_in(&ctx, "{{ input.data_file }}"), CANONICAL_PATH_A);
+    }
+
+    /// Spec revision 4: two uploads with the same name in task fields `a` and
+    /// `b`; action field `a` (`file`) is given `{{ input.b }}`. One file has
+    /// one path in every context of the step, and two files never share one.
+    #[test]
+    fn collision_case_two_files_same_name() {
+        use stroem_common::template::render_input_typed_with_files;
+        let input = json!({"a": FILE_A, "b": FILE_B});
+        let sn = file_snaps(
+            "/w/in",
+            &[("a", FILE_A, "report.csv"), ("b", FILE_B, "report.csv")],
+        );
+        let sec = secrets(&[]);
+        let job = file_job(&input, &sn, &sec);
+
+        // S1: the job input.
+        let s1 = build(&job, &[], None, Scope::StepInput);
+        assert_eq!(render_in(&s1, "{{ input.b }}"), CLAIM_PATH_B);
+        assert_eq!(render_in(&s1, "{{ input.a }}"), CLAIM_PATH_A);
+
+        // A3: action field `a` resolves the path of B by id.
+        let schema = schema_of(&[("a", "file")]);
+        let prepared = render_input_typed_with_files(
+            &map_of(&[("a", "{{ input.b }}")]),
+            Some(&schema),
+            s1.as_value(),
+            &sn.files,
+        )
+        .unwrap();
+        assert_eq!(prepared["a"], FILE_B);
+
+        // S2/S3: the action's `a` is B's path, not A's.
+        let s2 = build(
+            &job,
+            &[],
+            None,
+            Scope::ActionBody {
+                prepared_input: Some(&prepared),
+                action_schema: Some(&schema),
+            },
+        );
+        assert_eq!(render_in(&s2, "{{ input.a }}"), CLAIM_PATH_B);
+        assert_ne!(CLAIM_PATH_A, CLAIM_PATH_B);
     }
 }

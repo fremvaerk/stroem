@@ -85,6 +85,19 @@ tasks:
       - action: needs-file
   consumer:
     flow: { run: { action: noop } }
+  files-when:
+    input: { data_file: { type: file } }
+    flow: { run: { action: noop, when: "{{ input.data_file }}" } }
+  files-when-path:
+    input: { data_file: { type: file } }
+    flow:
+      at_init:
+        action: noop
+        when: "{{ input.data_file is starting_with(pat='/inputs/file_') }}"
+      at_advance:
+        action: noop
+        depends_on: [at_init]
+        when: "{{ input.data_file is starting_with(pat='/inputs/file_') }}"
 triggers:
   nightly-required-skip:
     { type: scheduler, cron: "0 2 * * *", task: files-required, concurrency: skip }
@@ -940,5 +953,71 @@ async fn task_hook_required_file_fails_and_logs_to_source_job() -> Result<()> {
     let log = job_log_text(&app.pool, &app.state, source).await;
     assert!(log.contains(REQUIRED), "{log}");
     assert!(jobs_of_task(&app.pool, "files-required").await.is_empty());
+    Ok(())
+}
+
+async fn step_status(pool: &PgPool, job_id: Uuid, step: &str) -> String {
+    JobStepRepo::get_steps_for_job(pool, job_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|s| s.step_name == step)
+        .unwrap_or_else(|| panic!("no step {step} in job {job_id}"))
+        .status
+}
+
+/// Spec § 5.3 row S5: a `when` sees the canonical path of a given file, so
+/// `when: "{{ input.data_file }}"` means "a file was given". `at_init` is
+/// decided by the creation-time cascade (`dispatch::init`), `at_advance` by
+/// `Settlement::advance`.
+#[tokio::test]
+async fn when_condition_sees_file_given() -> Result<()> {
+    let app = build_app(Opts::default()).await?;
+
+    let id = upload(&app.state, "default", "files-when", None, b"a,b\n").await;
+    let (status, body) = execute(
+        &app,
+        "files-when",
+        None,
+        json!({"input": {"data_file": id}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        step_status(&app.pool, job_id_of(&body), "run").await,
+        "ready"
+    );
+
+    // No file (`null` or `""`): the condition is false, the step is skipped.
+    for none in [Value::Null, json!("")] {
+        let (status, body) = execute(
+            &app,
+            "files-when",
+            None,
+            json!({"input": {"data_file": none}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let job_id = job_id_of(&body);
+        assert_eq!(step_status(&app.pool, job_id, "run").await, "skipped");
+        let job = JobRepo::get(&app.pool, job_id).await?.unwrap();
+        assert_eq!(job.status, "completed");
+    }
+
+    // The value is the path under `/inputs`, at creation and on advance.
+    let id = upload(&app.state, "default", "files-when-path", None, b"x").await;
+    let (status, body) = execute(
+        &app,
+        "files-when-path",
+        None,
+        json!({"input": {"data_file": id}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let job_id = job_id_of(&body);
+    assert_eq!(step_status(&app.pool, job_id, "at_init").await, "ready");
+    JobStepRepo::mark_completed(&app.pool, job_id, "at_init", None).await?;
+    app.state.settlement().advance(job_id).await?;
+    assert_eq!(step_status(&app.pool, job_id, "at_advance").await, "ready");
     Ok(())
 }

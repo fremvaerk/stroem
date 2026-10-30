@@ -490,6 +490,7 @@ mod tests {
         let snapshots = Snapshots {
             task: mk(state),
             global: mk(global),
+            ..Default::default()
         };
         let job = JobContext {
             job_id: uuid::Uuid::nil(),
@@ -511,7 +512,10 @@ mod tests {
         crate::render_context::Scope::StepInput
     }
     fn action_body_scope(p: Option<&serde_json::Value>) -> crate::render_context::Scope<'_> {
-        crate::render_context::Scope::ActionBody { prepared_input: p }
+        crate::render_context::Scope::ActionBody {
+            prepared_input: p,
+            action_schema: None,
+        }
     }
 
     // -------------------------------------------------------------------------
