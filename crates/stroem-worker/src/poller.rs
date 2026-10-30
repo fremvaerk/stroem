@@ -2587,6 +2587,106 @@ mod tests {
             assert!(!existing.join("in").exists());
         }
 
+        /// The claim's ID and name are joined into a path: a bad file ID or a
+        /// name that is not its own safe name is refused before any directory
+        /// for it or any download, and the partial tree is removed.
+        #[tokio::test]
+        async fn place_input_files_refuses_a_bad_id_or_unsafe_name_before_any_download() {
+            let mock_server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(b"x".to_vec()))
+                .expect(0)
+                .mount(&mock_server)
+                .await;
+            let client = ServerClient::new(&mock_server.uri(), "t", Some(5), Some(30));
+            let tmp = tempfile::tempdir().unwrap();
+
+            let mut bad_ids = Vec::new();
+            for id in ["../../escape", "file_XYZ", "", "file_0123"] {
+                let mut f = input_file("a.txt", b"x");
+                f.file_id = id.to_string();
+                bad_ids.push(f);
+            }
+            let mut bad_names = Vec::new();
+            for name in [
+                "../../../escape.txt",
+                "a/b.txt",
+                ".env",
+                "-x",
+                "a b.txt",
+                "",
+            ] {
+                let mut f = input_file("a.txt", b"x");
+                f.safe_name = name.to_string();
+                bad_names.push(f);
+            }
+
+            for (n, file) in bad_ids.iter().chain(&bad_names).enumerate() {
+                let wrapper = tmp.path().join(format!("stroem-inputs-{n}"));
+                let mut step = make_step(Uuid::new_v4(), "true");
+                step.input_files = vec![file.clone()];
+                step.inputs_dir = Some(wrapper.join("in").to_string_lossy().into_owned());
+                let Err(err) = place_input_files(&client, &step, 1, Duration::from_millis(1)).await
+                else {
+                    panic!("an unsafe claim entry is refused: {file:?}");
+                };
+                let msg = format!("{err:#}");
+                if n < bad_ids.len() {
+                    assert_eq!(msg, "the claim lists an invalid input file id", "{file:?}");
+                } else {
+                    assert_eq!(
+                        msg,
+                        format!(
+                            "input file {}: the claimed name is not a safe name",
+                            file.file_id
+                        ),
+                        "{file:?}"
+                    );
+                }
+                assert!(!wrapper.exists(), "the partial tree is removed: {file:?}");
+            }
+            assert!(!tmp.path().join("escape").exists());
+            assert!(!tmp.path().join("escape.txt").exists());
+            mock_server.verify().await;
+        }
+
+        /// One file listed twice (two fields holding one upload) is one
+        /// entry and one path: downloaded once, the second entry skipped.
+        #[tokio::test]
+        async fn place_input_files_downloads_a_repeated_file_once() {
+            let mock_server = MockServer::start().await;
+            let job_id = Uuid::new_v4();
+            let a = input_file("a.csv", b"first");
+            Mock::given(method("GET"))
+                .and(path(format!(
+                    "/worker/jobs/{job_id}/input-files/{}",
+                    a.file_id
+                )))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(b"first".to_vec()))
+                .expect(1)
+                .mount(&mock_server)
+                .await;
+            let client = ServerClient::new(&mock_server.uri(), "t", Some(5), Some(30));
+            let tmp = tempfile::tempdir().unwrap();
+            let wrapper = tmp.path().join("stroem-inputs-dup");
+            let root = wrapper.join("in");
+            let mut step = make_step(job_id, "true");
+            step.input_files = vec![a.clone(), a.clone()];
+            step.inputs_dir = Some(root.to_string_lossy().into_owned());
+
+            let guard = place_input_files(&client, &step, 1, Duration::from_millis(1))
+                .await
+                .expect("a repeated file is placed once");
+            assert_eq!(
+                std::fs::read(root.join(&a.file_id).join(&a.safe_name)).unwrap(),
+                b"first"
+            );
+            assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+            mock_server.verify().await;
+            drop(guard);
+            assert!(!wrapper.exists());
+        }
+
         /// A failed input download fails the step with exit -1 BEFORE it is
         /// reported started, never names the file, and leaves no dir behind.
         #[tokio::test]
