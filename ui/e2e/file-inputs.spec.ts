@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import { test, expect } from "@playwright/test";
 import { login } from "./helpers";
 
@@ -29,12 +30,13 @@ test.describe("File inputs", () => {
     await expect(page.getByRole("heading", { name: "Input files" })).toBeVisible();
     await expect(page.getByText("report.csv")).toBeVisible();
 
-    // Download returns the file bytes.
-    const [response] = await Promise.all([
-      page.waitForResponse((r) => r.url().includes("/input-files/data_file") && r.status() === 200),
+    // Download returns the file bytes (the UI fetches with the Bearer token, then clicks an <a download>).
+    const [download] = await Promise.all([
+      page.waitForEvent("download"),
       page.getByRole("button", { name: "Download report.csv" }).click(),
     ]);
-    expect((await response.body()).toString()).toBe(CONTENT);
+    expect(download.suggestedFilename()).toBe("report.csv");
+    expect(fs.readFileSync(await download.path(), "utf8")).toBe(CONTENT);
 
     // Re-run: the field shows the source file; running it again works.
     await page.getByRole("link", { name: "Re-run" }).click();
