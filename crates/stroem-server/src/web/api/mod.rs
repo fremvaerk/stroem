@@ -389,6 +389,14 @@ pub fn build_api_routes(state: Arc<AppState>) -> Router {
     let public = Router::new()
         .route("/config", get(get_config))
         .route("/jobs/{id}/logs/stream", get(ws::job_log_stream))
+        // Single-use upload URL from the MCP `create_upload_url` tool: the
+        // token in the path is the credential, so no `require_auth`.
+        .route(
+            "/uploads/{token}",
+            post(input_files::upload_by_token).layer(axum::extract::DefaultBodyLimit::max(
+                usize::try_from(state.input_files_config.max_file_bytes).unwrap_or(usize::MAX),
+            )),
+        )
         .merge(login_routes)
         .merge(refresh_routes)
         .merge(general_auth_routes);

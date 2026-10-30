@@ -11,7 +11,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use futures_util::TryStreamExt;
 use serde::Deserialize;
-use stroem_db::{JobInputFileRepo, JobRepo};
+use stroem_db::{JobInputFileRepo, JobRepo, UploadTokenRepo};
 use uuid::Uuid;
 
 use crate::acl::TaskPermission;
@@ -168,6 +168,46 @@ pub async fn upload_task_file(
             content_type: &content_type,
             user_id,
             origin: "api",
+        },
+        Box::pin(stream),
+        content_length,
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(resp)).into_response())
+}
+
+/// POST /api/uploads/{token} — the single-use upload URL made by the MCP
+/// `create_upload_url` tool (spec § 7.5). No Bearer header: the token is the
+/// credential. It is consumed before the body is read, so a failed upload
+/// needs a new URL.
+#[tracing::instrument(skip_all)]
+pub async fn upload_by_token(
+    State(state): State<Arc<AppState>>,
+    Path(token): Path<String>,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<Response, AppError> {
+    let row = UploadTokenRepo::consume(&state.pool, &crate::auth::hash_token(&token))
+        .await
+        .context("consume upload token")?
+        .ok_or_else(|| AppError::NotFound("Upload URL not found".into()))?;
+    let content_length = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok());
+    let content_type = request_content_type(&headers);
+    let stream = body
+        .into_data_stream()
+        .map_err(|e| anyhow::Error::new(e).context("read upload body"));
+    let resp = store_upload(
+        &state,
+        UploadTarget {
+            workspace: &row.workspace,
+            task_name: &row.task_name,
+            original_name: &row.original_name,
+            content_type: &content_type,
+            user_id: Some(row.user_id),
+            origin: "mcp_url",
         },
         Box::pin(stream),
         content_length,

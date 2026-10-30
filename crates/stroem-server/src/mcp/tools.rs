@@ -53,9 +53,24 @@ pub struct ExecuteTaskParams {
     pub workspace: String,
     /// Task name to execute
     pub task_name: String,
-    /// Input parameters for the task (optional)
+    /// Input parameters for the task (optional). For a `type: file` field
+    /// (see `get_task`) pass one of: `{"name": "report.csv", "content": "<text>"}`
+    /// or `{"name": "image.png", "content_base64": "<base64>"}` for a small file
+    /// (decoded size at most `input_files.mcp_inline_max_bytes`, 1 MiB by
+    /// default), or the `file_id` of a file uploaded through the URL from
+    /// `create_upload_url`.
     #[serde(default)]
     pub input: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct CreateUploadUrlParams {
+    /// Workspace name
+    pub workspace: String,
+    /// Task name; the task must have a `type: file` input field
+    pub task_name: String,
+    /// Name of the file that will be uploaded (basename, for example `data.csv`)
+    pub file_name: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -179,6 +194,125 @@ fn not_found(entity: &str) -> rmcp::ErrorData {
 
 fn acl_err(msg: impl Into<String>) -> rmcp::ErrorData {
     rmcp::ErrorData::internal_error(msg.into(), None)
+}
+
+/// Why an inline file value cannot be used (spec § 7.5, § 8).
+pub(crate) type InlineError = stroem_common::file_field::FileInputErrorKind;
+
+/// Decode an inline `file` value: `{"name", "content"}` or
+/// `{"name", "content_base64"}`. `Ok(None)` when `value` is not an object
+/// (a file ID string is left for the normal attach path). Any other shape,
+/// both or neither content key, or bad base64 is `CannotUse`; a decoded size
+/// over `cap` is `InlineTooLarge`.
+pub(crate) fn decode_inline(
+    _field: &str,
+    value: &serde_json::Value,
+    cap: u64,
+) -> Result<Option<(String, Vec<u8>)>, InlineError> {
+    use base64::Engine;
+    let Some(obj) = value.as_object() else {
+        return Ok(None);
+    };
+    let cannot = InlineError::CannotUse;
+    let name = obj
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| cannot.clone())?;
+    let too_large = InlineError::InlineTooLarge { cap };
+    let bytes = match (obj.get("content"), obj.get("content_base64"), obj.len()) {
+        (Some(c), None, 2) => {
+            let text = c.as_str().ok_or_else(|| cannot.clone())?;
+            if text.len() as u64 > cap {
+                return Err(too_large);
+            }
+            text.as_bytes().to_vec()
+        }
+        (None, Some(b), 2) => {
+            let text = b.as_str().ok_or_else(|| cannot.clone())?;
+            // Bound the decode: 4 base64 characters carry at most 3 bytes.
+            if (text.len() as u64) / 4 * 3 > cap.saturating_add(3) {
+                return Err(too_large);
+            }
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(text)
+                .map_err(|_| cannot.clone())?;
+            if decoded.len() as u64 > cap {
+                return Err(too_large);
+            }
+            decoded
+        }
+        _ => return Err(cannot),
+    };
+    Ok(Some((name.to_string(), bytes)))
+}
+
+fn upload_err(e: crate::input_files::upload::UploadError) -> rmcp::ErrorData {
+    use crate::input_files::upload::UploadError;
+    match e {
+        UploadError::InvalidName | UploadError::TooLarge { .. } => {
+            rmcp::ErrorData::invalid_params(e.to_string(), None)
+        }
+        UploadError::NotConfigured | UploadError::Internal(_) => internal_err(e.to_string()),
+    }
+}
+
+/// Store every inline `file` value of `input` and replace it with the new file ID.
+async fn store_inline_files(
+    handler: &StromMcpHandler,
+    workspace: &str,
+    task_name: &str,
+    task: &stroem_common::models::workflow::TaskDef,
+    input: &mut serde_json::Value,
+    user_id: Option<uuid::Uuid>,
+) -> Result<(), rmcp::ErrorData> {
+    use stroem_common::file_field::{FileInputError, FILE_TYPE};
+    let cap = handler.state.input_files_config.mcp_inline_max_bytes;
+    let Some(map) = input.as_object_mut() else {
+        return Ok(());
+    };
+    for (field, def) in &task.input {
+        if def.field_type != FILE_TYPE {
+            continue;
+        }
+        let Some(value) = map.get(field) else {
+            continue;
+        };
+        let decoded = decode_inline(field, value, cap).map_err(|kind| {
+            rmcp::ErrorData::invalid_params(
+                FileInputError {
+                    field: field.clone(),
+                    kind,
+                }
+                .to_string(),
+                None,
+            )
+        })?;
+        let Some((name, bytes)) = decoded else {
+            continue;
+        };
+        let len = bytes.len() as u64;
+        let body: futures_core::stream::BoxStream<'static, anyhow::Result<bytes::Bytes>> =
+            Box::pin(futures_util::stream::once(async move {
+                Ok(bytes::Bytes::from(bytes))
+            }));
+        let stored = crate::input_files::upload::store_upload(
+            &handler.state,
+            crate::input_files::upload::UploadTarget {
+                workspace,
+                task_name,
+                original_name: &name,
+                content_type: "application/octet-stream",
+                user_id,
+                origin: "mcp_inline",
+            },
+            body,
+            Some(len),
+        )
+        .await
+        .map_err(upload_err)?;
+        map.insert(field.clone(), serde_json::Value::String(stored.file_id));
+    }
+    Ok(())
 }
 
 /// Coerce the MCP `execute_task` `input` argument into a JSON object.
@@ -417,7 +551,7 @@ impl StromMcpHandler {
 
     /// Get detailed information about a specific task including its input schema and flow steps.
     #[tool(
-        description = "Get detailed information about a specific task including its input schema and flow steps."
+        description = "Get detailed information about a specific task including its input schema and flow steps. An input field with type `file` takes a file: see `execute_task`."
     )]
     async fn get_task(
         &self,
@@ -489,7 +623,9 @@ impl StromMcpHandler {
     }
 
     /// Execute a task in a workspace. Returns the created job ID.
-    #[tool(description = "Execute a task in a workspace. Returns the created job ID.")]
+    #[tool(
+        description = "Execute a task in a workspace. Returns the created job ID. For an input field of type `file`, send the file in one of two ways. Small file: pass an object in `input`, either {\"name\": \"a.csv\", \"content\": \"<text>\"} or {\"name\": \"a.bin\", \"content_base64\": \"<base64>\"} (decoded size is limited, 1 MiB by default). Large file: call `create_upload_url`, POST the file bytes to the returned URL (no Authorization header), and pass the returned `file_id` string as the field value."
+    )]
     async fn execute_task(
         &self,
         params: Parameters<ExecuteTaskParams>,
@@ -526,7 +662,7 @@ impl StromMcpHandler {
             TaskPermission::Run => {}
         }
 
-        let input = normalize_task_input(params.input)?;
+        let mut input = normalize_task_input(params.input)?;
 
         let source_id = source_id_for_audit(&self.auth);
         let revision = self.state.workspaces.get_revision(&params.workspace);
@@ -538,6 +674,16 @@ impl StromMcpHandler {
             .map(|a| a.claims.sub.parse::<uuid::Uuid>())
             .transpose()
             .map_err(|_| internal_err("Invalid user ID in token"))?;
+        // Inline files are stored only after the Run check above.
+        store_inline_files(
+            self,
+            &params.workspace,
+            &params.task_name,
+            task,
+            &mut input,
+            user_id,
+        )
+        .await?;
         let files = crate::input_files::FileGrant::direct(&self.state, user_id);
         let created = crate::job_creator::create_job_for_task_detailed(
             &self.state.workspaces,
@@ -571,6 +717,97 @@ impl StromMcpHandler {
         Ok(json_result(
             &serde_json::json!({ "job_id": job_id.to_string() }),
         ))
+    }
+
+    /// Create a single-use URL to upload one file for a task's `file` input.
+    #[tool(
+        description = "Create a single-use upload URL for a task's `file` input field. POST the raw file bytes to the returned `upload_url` (for example `curl --data-binary @file URL`, no Authorization header). The response holds a `file_id`: pass it as the field value in `execute_task`. The URL works once and expires after `expires_at`; a failed upload needs a new URL. Use this for files too large to send inline."
+    )]
+    async fn create_upload_url(
+        &self,
+        params: Parameters<CreateUploadUrlParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let Parameters(params) = params;
+        tracing::info!(workspace = %params.workspace, task = %params.task_name, "MCP: create_upload_url");
+        let ws_config = self
+            .state
+            .workspaces
+            .get_config(&params.workspace)
+            .await
+            .ok_or_else(|| not_found("Workspace"))?;
+        let task = ws_config
+            .tasks
+            .get(&params.task_name)
+            .ok_or_else(|| not_found("Task"))?;
+        match check_task_permission(
+            self,
+            &params.workspace,
+            &params.task_name,
+            task.folder.as_deref(),
+        )
+        .await?
+        {
+            TaskPermission::Deny => return Err(not_found("Task")),
+            TaskPermission::View => {
+                return Err(acl_err(
+                    "Insufficient permissions: execute requires Run access",
+                ))
+            }
+            TaskPermission::Run => {}
+        }
+        if !crate::input_files::upload::task_has_file_field(task) {
+            return Err(rmcp::ErrorData::invalid_params(
+                "task has no file input",
+                None,
+            ));
+        }
+        if stroem_common::file_field::safe_name(&params.file_name).is_none() {
+            return Err(rmcp::ErrorData::invalid_params("invalid file name", None));
+        }
+        let base_url = self
+            .state
+            .config
+            .auth
+            .as_ref()
+            .and_then(|a| a.base_url.as_deref())
+            .map(|b| b.trim_end_matches('/').to_string())
+            .ok_or_else(|| {
+                rmcp::ErrorData::invalid_params(
+                    "upload URLs need auth.base_url; send the file inline or use the REST upload",
+                    None,
+                )
+            })?;
+        let user_id = self
+            .auth
+            .as_ref()
+            .ok_or_else(|| acl_err("Authentication required to create an upload URL"))?
+            .claims
+            .sub
+            .parse::<uuid::Uuid>()
+            .map_err(|_| internal_err("Invalid user ID in token"))?;
+
+        let token = hex::encode(crate::auth::os_random_bytes::<32>());
+        let cfg = &self.state.input_files_config;
+        let ttl = i64::try_from(cfg.upload_url_ttl_secs).unwrap_or(i64::MAX / 1000);
+        let expires_at = chrono::Utc::now() + chrono::Duration::seconds(ttl);
+        stroem_db::UploadTokenRepo::insert(
+            &self.state.pool,
+            &crate::auth::hash_token(&token),
+            user_id,
+            &params.workspace,
+            &params.task_name,
+            &params.file_name,
+            expires_at,
+        )
+        .await
+        .map_err(|e| internal_err(format!("Failed to create upload URL: {e}")))?;
+
+        Ok(json_result(&serde_json::json!({
+            "upload_url": format!("{base_url}/api/uploads/{token}"),
+            "method": "POST",
+            "max_bytes": cfg.max_file_bytes,
+            "expires_at": expires_at.to_rfc3339(),
+        })))
     }
 
     /// Get the status of a job including its step details.
@@ -1144,6 +1381,52 @@ fn truncation_trailer(tail: &crate::log_read::Tail) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn decode_inline_accepts_text_and_base64() {
+        let t = decode_inline("f", &json!({"name": "a.txt", "content": "hi"}), 10).unwrap();
+        assert_eq!(t, Some(("a.txt".to_string(), b"hi".to_vec())));
+        let b = decode_inline("f", &json!({"name": "a", "content_base64": "AAEC"}), 10).unwrap();
+        assert_eq!(b, Some(("a".to_string(), vec![0, 1, 2])));
+    }
+
+    #[test]
+    fn decode_inline_leaves_non_objects_alone() {
+        assert_eq!(decode_inline("f", &json!("file_x"), 10).unwrap(), None);
+    }
+
+    #[test]
+    fn decode_inline_rejects_bad_shapes() {
+        for v in [
+            json!({"name": "a"}),
+            json!({"content": "x"}),
+            json!({"name": "a", "content": "x", "content_base64": "eA=="}),
+            json!({"name": "a", "content": 1}),
+            json!({"name": "a", "content_base64": "***"}),
+            json!({"name": "a", "content": "x", "extra": true}),
+        ] {
+            assert_eq!(
+                decode_inline("f", &v, 10),
+                Err(InlineError::CannotUse),
+                "{v}"
+            );
+        }
+    }
+
+    #[test]
+    fn decode_inline_enforces_the_decoded_cap() {
+        let over = InlineError::InlineTooLarge { cap: 3 };
+        assert_eq!(
+            decode_inline("f", &json!({"name": "a", "content": "abcd"}), 3),
+            Err(over.clone())
+        );
+        assert_eq!(
+            decode_inline("f", &json!({"name": "a", "content_base64": "AAECAw=="}), 3),
+            Err(over)
+        );
+        assert!(decode_inline("f", &json!({"name": "a", "content_base64": "AAEC"}), 3).is_ok());
+    }
 
     #[test]
     fn test_format_logs_jsonl() {
