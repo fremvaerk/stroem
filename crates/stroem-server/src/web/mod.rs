@@ -125,7 +125,44 @@ pub fn build_router(state: AppState, cancel_token: CancellationToken) -> Router 
     router
         .fallback(static_handler)
         .layer(cors)
-        .layer(TraceLayer::new_for_http())
+        .layer(TraceLayer::new_for_http().make_span_with(make_request_span))
+}
+
+/// The request span: `DefaultMakeSpan`'s fields and level, with the URI
+/// through [`span_uri`].
+fn make_request_span(req: &Request<Body>) -> tracing::Span {
+    tracing::debug_span!(
+        "request",
+        method = %req.method(),
+        uri = %span_uri(req.uri()),
+        version = ?req.version(),
+    )
+}
+
+/// The request URI as the request span records it. The segment after
+/// `/api/uploads/` is an upload URL's single-use token, a credential
+/// (CLAUDE.md § Secrets in logs): it is recorded as `{token}`. Every other
+/// URI is recorded as is.
+pub(crate) fn span_uri(uri: &axum::http::Uri) -> String {
+    const UPLOADS: &str = "/api/uploads/";
+    let Some(rest) = uri.path().strip_prefix(UPLOADS) else {
+        return uri.to_string();
+    };
+    let after_token = &rest[rest.find('/').unwrap_or(rest.len())..];
+    let mut out = String::new();
+    if let (Some(scheme), Some(authority)) = (uri.scheme_str(), uri.authority()) {
+        out.push_str(scheme);
+        out.push_str("://");
+        out.push_str(authority.as_str());
+    }
+    out.push_str(UPLOADS);
+    out.push_str("{token}");
+    out.push_str(after_token);
+    if let Some(query) = uri.query() {
+        out.push('?');
+        out.push_str(query);
+    }
+    out
 }
 
 async fn static_handler(req: Request<Body>) -> Response {
@@ -153,3 +190,6 @@ async fn static_handler(req: Request<Body>) -> Response {
         None => (StatusCode::NOT_FOUND, "Not found").into_response(),
     }
 }
+
+#[cfg(test)]
+mod tests;
