@@ -291,6 +291,17 @@ async fn async_main(worker_threads: usize) -> Result<()> {
             blob_archive.clone()
         };
 
+    // Input-file blob backend: `input_files.archive`, else the artifact
+    // backend, else the log archive.
+    let input_blob: Option<Arc<dyn stroem_server::blob_storage::BlobArchive>> =
+        match config.input_files.as_ref().and_then(|f| f.archive.as_ref()) {
+            Some(archive_config) => Some(build_blob_archive(archive_config).await?),
+            None => artifact_blob.clone().or_else(|| blob_archive.clone()),
+        };
+    if input_blob.is_none() {
+        tracing::warn!("input_files: no archive configured; file uploads answer 503");
+    }
+
     // Build application state. The HA primitives (LeaderElection and
     // EventBus) are created next; AppState starts with no-op defaults so we
     // can spawn the leader/listener tasks below, then swap them in.
@@ -318,6 +329,7 @@ async fn async_main(worker_threads: usize) -> Result<()> {
     )
     .with_blob_archive(blob_archive)
     .with_artifact_blob(artifact_blob)
+    .with_input_blob(input_blob)
     .with_leader(leader)
     .with_event_bus(event_bus);
 

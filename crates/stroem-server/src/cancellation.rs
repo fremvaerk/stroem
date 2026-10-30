@@ -63,6 +63,7 @@ mod tests {
             agents: None,
             state_storage: None,
             artifact_storage: None,
+            input_files: None,
             default_step_timeout: None,
             default_job_timeout: None,
             workspace_reload: Default::default(),

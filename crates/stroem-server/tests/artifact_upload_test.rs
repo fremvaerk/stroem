@@ -97,6 +97,7 @@ async fn build_test_app_inner(
         agents: None,
         state_storage: None,
         artifact_storage: Some(artifact_cfg),
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
