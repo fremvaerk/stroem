@@ -415,9 +415,10 @@ pub(crate) const MAX_PIN_RELEASES: i32 = 30;
 /// Delay before a released step may be claimed again.
 pub(crate) const PIN_RELEASE_RETRY_SECS: i64 = 10;
 
-/// Fixed claim failure when the job's `job_input_file` rows cannot be read
-/// (spec 2026-10-29 § 5.1): rendering without them would show a `file`
-/// value as its id. The cause goes to the server log only.
+/// Fixed text when the job's `job_input_file` rows cannot be read (spec
+/// 2026-10-29 § 5.4): rendering without them would show a `file` value as its
+/// id, so the claim is released (`release_or_fail_claim`) and fails with this
+/// text only at the release cap. The cause goes to the server log only.
 const INPUT_FILES_UNREADABLE: &str = "could not load the job's input files";
 
 /// What `fail_claimed_step` needs besides the message (spec § 7.2, § 7.4).
@@ -555,52 +556,88 @@ async fn pin_failure(
     let secrets = claim_redaction_values(&ws_set, failure.pin_secrets);
     let detail = crate::workspace_set::redact_secrets_in_str(&format!("{err:#}"), &secrets);
 
-    let outcome = JobStepRepo::release_claim(
-        &state.pool,
+    release_or_fail_claim(
+        state,
         job.job_id,
         &step.step_name,
+        &ws_set,
+        failure,
+        ReleaseTexts {
+            what: "pin failure",
+            retrying: format!("[pin] {label} not available yet on this server, retrying: {detail}"),
+            cancelled: format!(
+                "[pin] {label} not available and the job was cancelled; step '{}' cancelled",
+                step.step_name
+            ),
+            cap_reached: format!(
+                "[pin] {label} still unavailable after {MAX_PIN_RELEASES} attempts: {detail}"
+            ),
+        },
+    )
+    .await
+}
+
+/// The job-log lines of a released claim (`release_or_fail_claim`).
+struct ReleaseTexts {
+    /// What failed, for the release's own DB-error context.
+    what: &'static str,
+    /// Logged when the step is back in `ready`.
+    retrying: String,
+    /// Logged when the job was cancelled meanwhile.
+    cancelled: String,
+    /// The step's failure message once `MAX_PIN_RELEASES` is reached.
+    cap_reached: String,
+}
+
+/// A TRANSIENT claim-time failure (spec 2026-10-02 § 7.2; spec 2026-10-29
+/// § 5.4): release the claim back to `ready` after `PIN_RELEASE_RETRY_SECS`
+/// without consuming a retry attempt (`JobStepRepo::release_claim`). A job
+/// cancelled meanwhile cancels the step; past `MAX_PIN_RELEASES` the step
+/// fails like any claim-time failure. Every text must already be
+/// value-free or scrubbed.
+async fn release_or_fail_claim(
+    state: &Arc<AppState>,
+    job_id: Uuid,
+    step_name: &str,
+    ws_set: &crate::workspace_set::WorkspaceSet<'_>,
+    failure: &ClaimFailure<'_>,
+    texts: ReleaseTexts,
+) -> Result<Response, AppError> {
+    let outcome = JobStepRepo::release_claim(
+        &state.pool,
+        job_id,
+        step_name,
         failure.claim,
         chrono::Duration::seconds(PIN_RELEASE_RETRY_SECS),
         MAX_PIN_RELEASES,
     )
     .await
-    .context("release claim after pin failure")?;
+    .with_context(|| format!("release claim after {}", texts.what))?;
 
     match outcome {
         ReleaseOutcome::Released => {
-            let line =
-                format!("[pin] {label} not available yet on this server, retrying: {detail}");
-            tracing::warn!(job_id = %job.job_id, step_name = %step.step_name, "{line}");
-            state.append_server_log(job.job_id, &line).await;
+            tracing::warn!(job_id = %job_id, step_name = %step_name, "{}", texts.retrying);
+            state.append_server_log(job_id, &texts.retrying).await;
             Ok(Json(ClaimResponse::no_work()).into_response())
         }
         ReleaseOutcome::Cancelled => {
-            state
-                .append_server_log(
-                    job.job_id,
-                    &format!(
-                        "[pin] {label} not available and the job was cancelled; step '{}' cancelled",
-                        step.step_name
-                    ),
-                )
-                .await;
+            state.append_server_log(job_id, &texts.cancelled).await;
             // The step (and its unclaimed siblings) are terminal now: let the
             // drain gate see it and run terminal handling.
-            if let Err(e) = state
-                .settlement()
-                .step_settled(job.job_id, &step.step_name)
-                .await
-            {
-                tracing::error!(job_id = %job.job_id, "settle after cancelled release: {:#}", e);
+            if let Err(e) = state.settlement().step_settled(job_id, step_name).await {
+                tracing::error!(job_id = %job_id, "settle after cancelled release: {:#}", e);
             }
             Ok(Json(ClaimResponse::no_work()).into_response())
         }
-        ReleaseOutcome::CapReached => {
-            let msg = format!(
-                "[pin] {label} still unavailable after {MAX_PIN_RELEASES} attempts: {detail}"
-            );
-            Ok(fail_claimed_step(state, job.job_id, &step.step_name, &msg, &ws_set, failure).await)
-        }
+        ReleaseOutcome::CapReached => Ok(fail_claimed_step(
+            state,
+            job_id,
+            step_name,
+            &texts.cap_reached,
+            ws_set,
+            failure,
+        )
+        .await),
         ReleaseOutcome::NotApplied => Ok(Json(ClaimResponse::no_work()).into_response()),
     }
 }
@@ -1005,6 +1042,9 @@ pub async fn claim_job(
     // as its id. Every runner step gets every file of its job (U9) under its
     // runner's root; an agent step gets none and renders under `/inputs`.
     let is_agent = step.action_type == "agent";
+    // A read error is transient (a DB blip) and hits every job, file fields
+    // or not (spec § 12): release the claim like an unavailable pin, never
+    // fail the step on the first error.
     let attachments = match crate::input_files::load_attachments(&state.pool, step.job_id).await {
         Ok(rows) => rows,
         Err(e) => {
@@ -1014,19 +1054,29 @@ pub async fn claim_job(
                 "Failed to load the job's input files at claim: {:#}",
                 e
             );
-            return Ok(fail_claimed_step(
+            return release_or_fail_claim(
                 &state,
                 step.job_id,
                 &step.step_name,
-                INPUT_FILES_UNREADABLE,
                 &ws_set,
                 &ClaimFailure {
                     claim,
                     pin_secrets: &pin_secrets,
                     withheld: None,
                 },
+                ReleaseTexts {
+                    what: "an input-file read failure",
+                    retrying: format!("[files] {INPUT_FILES_UNREADABLE}, retrying"),
+                    cancelled: format!(
+                        "[files] {INPUT_FILES_UNREADABLE} and the job was cancelled; step '{}' cancelled",
+                        step.step_name
+                    ),
+                    cap_reached: format!(
+                        "{INPUT_FILES_UNREADABLE} after {MAX_PIN_RELEASES} attempts"
+                    ),
+                },
             )
-            .await);
+            .await;
         }
     };
     // `inputs_dir` in the request is the worker's "I place input files"

@@ -353,6 +353,77 @@ fn path_under(root: &str, file_id: &str, name: &str) -> String {
 
 // ─── claim: render root and input_files ─────────────────────────────────
 
+/// Spec § 5.4 (revision 9): a claim that cannot read the job's
+/// `job_input_file` rows (a transient DB error) releases the step back to
+/// `ready` like a transient pin failure — no retry attempt, no failed step,
+/// nothing value-bearing in the job log — and the next claim runs it.
+#[tokio::test(flavor = "multi_thread")]
+async fn unreadable_input_files_release_the_claim() -> Result<()> {
+    let app = build_app().await?;
+    let up = upload(&app, "local", "report.csv", b"x").await;
+    let job_id = execute(&app, "local", json!({"data_file": up.file_id})).await;
+    // `test_pool` gives this test its own database: no other test sees it.
+    sqlx::query("ALTER TABLE job_input_file RENAME TO job_input_file_away")
+        .execute(&app.pool)
+        .await?;
+
+    let (status, body) = claim(&app, &["script"], Some(INPUTS_DIR)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["job_id"].is_null(), "released, no work: {body}");
+    let row = step_row(&app.pool, job_id, "run").await;
+    assert_eq!(row.status, "ready");
+    assert_eq!(row.retry_attempt, 0);
+    assert_eq!(row.pin_releases, 1);
+    assert!(row.retry_at.is_some());
+    assert!(row.worker_id.is_none());
+    assert!(row.error_message.is_none());
+    let log = crate::common::pinned::job_log_text(&app.pool, &app.state, job_id).await;
+    assert!(
+        log.contains("could not load the job's input files"),
+        "{log}"
+    );
+    assert!(!log.contains(&up.file_id) && !log.contains("job_input_file"), "{log}");
+
+    // Readable again: the next claim after the delay runs the step.
+    sqlx::query("ALTER TABLE job_input_file_away RENAME TO job_input_file")
+        .execute(&app.pool)
+        .await?;
+    sqlx::query("UPDATE job_step SET retry_at = NOW() WHERE job_id = $1")
+        .bind(job_id)
+        .execute(&app.pool)
+        .await?;
+    let body = claim_local(&app).await;
+    assert_eq!(body["job_id"], json!(job_id.to_string()));
+    assert_eq!(body["input_files"][0]["file_id"], json!(up.file_id));
+    Ok(())
+}
+
+/// The release cap applies (`MAX_PIN_RELEASES`): past it, the claim fails
+/// the step with the fixed message.
+#[tokio::test(flavor = "multi_thread")]
+async fn unreadable_input_files_fail_the_step_at_the_release_cap() -> Result<()> {
+    let app = build_app().await?;
+    let up = upload(&app, "local", "report.csv", b"x").await;
+    let job_id = execute(&app, "local", json!({"data_file": up.file_id})).await;
+    sqlx::query("UPDATE job_step SET pin_releases = 30 WHERE job_id = $1")
+        .bind(job_id)
+        .execute(&app.pool)
+        .await?;
+    sqlx::query("ALTER TABLE job_input_file RENAME TO job_input_file_away")
+        .execute(&app.pool)
+        .await?;
+
+    let (status, body) = claim(&app, &["script"], Some(INPUTS_DIR)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(
+        body["error"],
+        json!("could not load the job's input files after 30 attempts")
+    );
+    let row = step_row(&app.pool, job_id, "run").await;
+    assert_eq!(row.status, "failed");
+    Ok(())
+}
+
 #[tokio::test]
 async fn local_step_renders_worker_root() -> Result<()> {
     let app = build_app().await?;
