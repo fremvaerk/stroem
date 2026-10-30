@@ -622,6 +622,30 @@ pub(crate) async fn require_task_run(
     }
 }
 
+/// The ACL permission of a stored user (no `AuthUser` extractor) on a task.
+/// `Run` everywhere when no ACL is configured.
+pub(crate) async fn task_permission_for_user(
+    state: &AppState,
+    user: &stroem_db::UserRow,
+    ws: &str,
+    name: &str,
+    folder: Option<&str>,
+) -> anyhow::Result<TaskPermission> {
+    if !state.acl.is_configured() {
+        return Ok(TaskPermission::Run);
+    }
+    let (is_admin, groups) = load_user_acl_context(&state.pool, user.user_id, user.is_admin)
+        .await
+        .context("load ACL context")?;
+    Ok(state.acl.evaluate(
+        ws,
+        &make_task_path(folder, name),
+        &user.email,
+        &groups,
+        is_admin,
+    ))
+}
+
 /// The one answer for a re-run source that does not exist AND for one the
 /// caller may not read (pinned or not): same status, same body, so neither
 /// existence nor pinned status is observable.

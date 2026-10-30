@@ -22,7 +22,9 @@ use crate::web::api::artifacts::{disposition_for, sanitize_filename};
 use crate::web::api::jobs::check_job_acl;
 use crate::web::api::middleware::AuthUser;
 use crate::web::api::pinned_source::resolve_source_pin;
-use crate::web::api::tasks::{check_rerun_source, require_task_run, source_job_not_found};
+use crate::web::api::tasks::{
+    check_rerun_source, require_task_run, source_job_not_found, task_permission_for_user,
+};
 use crate::web::api::{get_workspace_or_error, parse_uuid_param};
 use crate::web::error::AppError;
 
@@ -176,6 +178,10 @@ pub async fn upload_task_file(
     Ok((StatusCode::CREATED, Json(resp)).into_response())
 }
 
+fn upload_url_not_found() -> AppError {
+    AppError::NotFound("Upload URL not found".into())
+}
+
 /// POST /api/uploads/{token} — the single-use upload URL made by the MCP
 /// `create_upload_url` tool (spec § 7.5). No Bearer header: the token is the
 /// credential. It is consumed before the body is read, so a failed upload
@@ -190,7 +196,34 @@ pub async fn upload_by_token(
     let row = UploadTokenRepo::consume(&state.pool, &crate::auth::hash_token(&token))
         .await
         .context("consume upload token")?
-        .ok_or_else(|| AppError::NotFound("Upload URL not found".into()))?;
+        .ok_or_else(upload_url_not_found)?;
+    // The token is spent either way. Re-check, with one identical answer,
+    // that the URL's user may still run a task that still takes a file.
+    let user = stroem_db::UserRepo::get_by_id(&state.pool, row.user_id)
+        .await
+        .context("load upload token user")?
+        .ok_or_else(upload_url_not_found)?;
+    let config = state
+        .workspaces
+        .get_config(&row.workspace)
+        .await
+        .ok_or_else(upload_url_not_found)?;
+    let task = config
+        .tasks
+        .get(&row.task_name)
+        .filter(|t| task_has_file_field(t))
+        .ok_or_else(upload_url_not_found)?;
+    let permission = task_permission_for_user(
+        &state,
+        &user,
+        &row.workspace,
+        &row.task_name,
+        task.folder.as_deref(),
+    )
+    .await?;
+    if permission != TaskPermission::Run {
+        return Err(upload_url_not_found());
+    }
     let content_length = headers
         .get(header::CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok())

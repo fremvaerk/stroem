@@ -2028,10 +2028,9 @@ async fn files_app() -> Result<(Router, PgPool, TempDir, String)> {
 
 /// `files_app`; `with_blob: false` = no input-file archive configured.
 async fn files_app_with(with_blob: bool) -> Result<(Router, PgPool, TempDir, String)> {
-    let ws: WorkspaceConfig = serde_yaml::from_str(FILES_YAML)?;
-    let (router, pool, tmp) = setup_with_auth_and_mcp_ws_blob(
-        ws,
-        Some(AclConfig {
+    files_app_acl(
+        with_blob,
+        AclConfig {
             default: AclAction::Run,
             rules: vec![AclRule {
                 workspace: "default".to_string(),
@@ -2040,11 +2039,19 @@ async fn files_app_with(with_blob: bool) -> Result<(Router, PgPool, TempDir, Str
                 groups: vec![],
                 users: vec![AUTH_USER_EMAIL.to_string()],
             }],
-        }),
-        Some(FILES_BASE_URL.to_string()),
-        with_blob,
+        },
     )
-    .await?;
+    .await
+}
+
+async fn files_app_acl(
+    with_blob: bool,
+    acl: AclConfig,
+) -> Result<(Router, PgPool, TempDir, String)> {
+    let ws: WorkspaceConfig = serde_yaml::from_str(FILES_YAML)?;
+    let (router, pool, tmp) =
+        setup_with_auth_and_mcp_ws_blob(ws, Some(acl), Some(FILES_BASE_URL.to_string()), with_blob)
+            .await?;
     let user = UserRepo::get_by_email(&pool, AUTH_USER_EMAIL)
         .await?
         .expect("seeded user exists");
@@ -2258,6 +2265,90 @@ async fn mcp_create_upload_url_and_upload_once() -> Result<()> {
     let job_id = tool_payload(&resp)["job_id"].as_str().unwrap().to_string();
     let (origin, _) = file_origin_and_attachment(&pool, &job_id).await?;
     assert_eq!(origin, "mcp_url");
+    Ok(())
+}
+
+async fn input_file_count(pool: &PgPool) -> Result<i64> {
+    Ok(sqlx::query_scalar("SELECT COUNT(*) FROM input_file")
+        .fetch_one(pool)
+        .await?)
+}
+
+#[tokio::test]
+async fn mcp_upload_url_refused_when_run_permission_was_removed() -> Result<()> {
+    // Run comes from the "ops" group only; default is deny.
+    let (router, pool, _tmp, key) = files_app_acl(
+        true,
+        AclConfig {
+            default: AclAction::Deny,
+            rules: vec![AclRule {
+                workspace: "default".to_string(),
+                tasks: vec!["*".to_string()],
+                action: AclAction::Run,
+                groups: vec!["ops".to_string()],
+                users: vec![],
+            }],
+        },
+    )
+    .await?;
+    let user = UserRepo::get_by_email(&pool, AUTH_USER_EMAIL)
+        .await?
+        .expect("seeded user exists");
+    stroem_db::UserGroupRepo::add(&pool, user.user_id, "ops").await?;
+    let resp = call_tool_authed(
+        &router,
+        &key,
+        "create_upload_url",
+        json!({"workspace": "default", "task_name": "files", "file_name": "data.csv"}),
+    )
+    .await;
+    let url = tool_payload(&resp)["upload_url"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    stroem_db::UserGroupRepo::remove(&pool, user.user_id, "ops").await?;
+
+    for _ in 0..2 {
+        let r = router
+            .clone()
+            .oneshot(upload_url_request(&url, "a,b\n"))
+            .await?;
+        assert_eq!(r.status(), StatusCode::NOT_FOUND);
+        assert_eq!(body_json(r).await["error"], json!("Upload URL not found"));
+    }
+    assert_eq!(input_file_count(&pool).await?, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_upload_url_refused_when_task_has_no_file_field_or_is_gone() -> Result<()> {
+    let (router, pool, _tmp, _key) = files_app().await?;
+    let user = UserRepo::get_by_email(&pool, AUTH_USER_EMAIL)
+        .await?
+        .expect("seeded user exists");
+    for (n, task) in ["plain", "no-such-task"].into_iter().enumerate() {
+        let token = format!("refused-token-{n}");
+        stroem_db::UploadTokenRepo::insert(
+            &pool,
+            &stroem_server::auth::hash_token(&token),
+            user.user_id,
+            "default",
+            task,
+            "d.csv",
+            chrono::Utc::now() + chrono::Duration::seconds(900),
+        )
+        .await?;
+        let r = router
+            .clone()
+            .oneshot(upload_url_request(
+                &format!("{FILES_BASE_URL}/api/uploads/{token}"),
+                "x",
+            ))
+            .await?;
+        assert_eq!(r.status(), StatusCode::NOT_FOUND, "{task}");
+        assert_eq!(body_json(r).await["error"], json!("Upload URL not found"));
+    }
+    assert_eq!(input_file_count(&pool).await?, 0);
     Ok(())
 }
 
