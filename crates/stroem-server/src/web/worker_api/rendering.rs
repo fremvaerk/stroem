@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use std::collections::HashMap;
-use stroem_common::file_field::{JobFiles, CANONICAL_INPUTS_ROOT, FILE_TYPE};
+use stroem_common::file_field::{
+    FileInputError, FileInputErrorKind, JobFiles, CANONICAL_INPUTS_ROOT, FILE_TYPE,
+};
 use stroem_common::models::workflow::{InputFieldDef, WorkspaceConfig};
 use stroem_common::template::{
     prepare_action_input_roles, render_env_map, render_input_typed_with_files, render_json_strings,
@@ -165,18 +167,22 @@ pub fn prepare_step_action_input(
         Some(t) => t,
         None => return Ok(rendered_input),
     };
-    // For loop instance steps, fall back to looking up by loop_source. The
-    // flow step is only a guard here: when rendering passed the stored input
-    // through (task / flow step gone, F13), preparation does too.
-    let has_flow_step = task.flow.contains_key(&ctx.step.step_name)
-        || ctx
-            .step
+    // For loop instance steps, fall back to looking up by loop_source (the
+    // same lookup as `render_step_input`). When rendering passed the stored
+    // input through (task / flow step gone, F13), preparation does too.
+    let flow_step = task.flow.get(&ctx.step.step_name).or_else(|| {
+        ctx.step
             .loop_source
             .as_ref()
-            .is_some_and(|src| task.flow.contains_key(src));
-    if !has_flow_step {
+            .and_then(|src| task.flow.get(src))
+    });
+    let Some(flow_step) = flow_step else {
         return Ok(rendered_input);
-    }
+    };
+    // A flow step without `input:` renders nothing: `render_step_input`
+    // passed the persisted step input through — on a re-claim, the earlier
+    // claim's prepared input.
+    let persisted = flow_step.input.is_empty();
     // The schema is the PERSISTED one (spec D10); the live action is not
     // looked up. Connection VALUES still resolve against the owner's config.
     let schema = match ctx.input_schema {
@@ -189,7 +195,9 @@ pub fn prepare_step_action_input(
     // Merge missing fields from job input that match the action's input schema.
     // This handles the case where a flow step doesn't explicitly map a field
     // (e.g. a connection input), but the job-level input has it resolved.
-    merge_missing_action_fields(&mut input_val, ctx.job_input, schema, ctx.files);
+    // A `file` value that fails A3 is the caller's own input: not withheld.
+    merge_missing_action_fields(&mut input_val, ctx.job_input, schema, ctx.files, persisted)
+        .context("Failed to prepare action input")?;
 
     // Role-scoped (git-refs spec § 7.4): the caller is the job's own config,
     // the action owner the step's owner config (pinned or live) — never two
@@ -342,41 +350,48 @@ pub fn render_image(
 /// in the action's input schema. Step-level values always take precedence.
 /// Null values in job input are skipped to avoid breaking downstream resolution.
 ///
-/// A task-level file (the job value is the id attached to that task field)
-/// is copied by the action field's TYPE (spec 2026-10-29 § 5.1): a `file`
-/// field gets the id, any other field the path under `files`' root, so a
-/// script never receives a bare file id.
+/// Files (spec 2026-10-29 § 5.1):
+/// - a `file` action field takes only a file attached to this job (A3): the
+///   job value is its id or its path under `files`' root and becomes the id;
+///   `""` leaves the field unset; anything else is a value-free
+///   [`FileInputError`] naming the field;
+/// - any other action field, when the job value is the id attached to that
+///   task field, gets the file's path under `files`' root, so a script never
+///   receives a bare file id.
 ///
-/// Such a non-`file` field that already holds the SAME file's path under
-/// another root is refreshed to the current root: it is this merge's output
-/// from an earlier claim of the step, persisted with the step input and
-/// passed through again when the flow step has no `input:` — and a retried
-/// `runner: local` step is claimed under a fresh `inputs_dir` (§ 5.2).
+/// `persisted`: the input is the persisted step input passed through (the
+/// flow step has no `input:`). Then a non-`file` field that holds the SAME
+/// file's path under another root is refreshed to the current root: it is
+/// this merge's output from an earlier claim, and a retried `runner: local`
+/// step is claimed under a fresh `inputs_dir` (§ 5.2). A value this claim
+/// rendered is the author's and is never refreshed.
 pub fn merge_missing_action_fields(
     input_val: &mut serde_json::Value,
     job_input: Option<&serde_json::Value>,
     action_schema: &HashMap<String, InputFieldDef>,
     files: &JobFiles,
-) {
+    persisted: bool,
+) -> std::result::Result<(), FileInputError> {
     let (Some(job_input), Some(input_obj)) = (job_input, input_val.as_object_mut()) else {
-        return;
+        return Ok(());
     };
     let Some(job_map) = job_input.as_object() else {
-        return;
+        return Ok(());
     };
     for (field_name, def) in action_schema {
         let Some(val) = job_map.get(field_name).filter(|v| !v.is_null()) else {
             continue;
         };
+        let is_file = def.field_type == FILE_TYPE;
         // The current path, when the job value is this field's attached
         // file and the action field is not `file`-typed.
         let as_path = files
             .field_file(field_name)
-            .filter(|f| val.as_str() == Some(f.file_id.as_str()) && def.field_type != FILE_TYPE)
+            .filter(|f| !is_file && val.as_str() == Some(f.file_id.as_str()))
             .and_then(|f| files.path_of(&f.file_id).map(|path| (f, path)));
         if let Some(existing) = input_obj.get(field_name) {
             let stale = match (&as_path, existing.as_str()) {
-                (Some((f, path)), Some(s)) => {
+                (Some((f, path)), Some(s)) if persisted => {
                     s != path
                         && s.starts_with('/')
                         && s.ends_with(&format!("/{}/{}", f.file_id, f.safe_name))
@@ -387,12 +402,43 @@ pub fn merge_missing_action_fields(
                 continue;
             }
         }
-        let merged = match as_path {
-            Some((_, path)) => serde_json::Value::String(path),
-            None => val.clone(),
+        let merged = if is_file {
+            match file_target(field_name, val, files)? {
+                Some(file_id) => serde_json::Value::String(file_id),
+                None => continue,
+            }
+        } else {
+            match as_path {
+                Some((_, path)) => serde_json::Value::String(path),
+                None => val.clone(),
+            }
         };
         input_obj.insert(field_name.clone(), merged);
     }
+    Ok(())
+}
+
+/// A3 for a job value merged into a `file` action field: the id of the
+/// attached file it names (its id, or its path under `files`' root), `None`
+/// for a blank string, else `CannotUse` — the same rule as a `file` field in
+/// the flow step's `input:` (`render_input_typed_with_files`).
+fn file_target(
+    field: &str,
+    val: &serde_json::Value,
+    files: &JobFiles,
+) -> std::result::Result<Option<String>, FileInputError> {
+    let cannot_use = || FileInputError {
+        field: field.to_string(),
+        kind: FileInputErrorKind::CannotUse,
+    };
+    let text = val.as_str().ok_or_else(cannot_use)?.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    files
+        .resolve_target(text)
+        .map(|f| Some(f.file_id.clone()))
+        .ok_or_else(cannot_use)
 }
 
 #[cfg(test)]
@@ -1990,7 +2036,14 @@ mod tests {
         });
         let names = string_schema(&["sql", "clickhouse"]);
 
-        merge_missing_action_fields(&mut input_val, Some(&job_input), &names, &JobFiles::empty());
+        merge_missing_action_fields(
+            &mut input_val,
+            Some(&job_input),
+            &names,
+            &JobFiles::empty(),
+            false,
+        )
+        .unwrap();
 
         assert_eq!(input_val["sql"], "SELECT 1");
         assert_eq!(input_val["clickhouse"]["host"], "ch.example.com");
@@ -2007,7 +2060,14 @@ mod tests {
         });
         let names = string_schema(&["sql", "clickhouse"]);
 
-        merge_missing_action_fields(&mut input_val, Some(&job_input), &names, &JobFiles::empty());
+        merge_missing_action_fields(
+            &mut input_val,
+            Some(&job_input),
+            &names,
+            &JobFiles::empty(),
+            false,
+        )
+        .unwrap();
 
         assert_eq!(input_val["sql"], "SELECT 2");
         assert_eq!(input_val["clickhouse"], "step-override");
@@ -2018,7 +2078,8 @@ mod tests {
         let mut input_val = json!({"sql": "SELECT 1"});
         let names = string_schema(&["sql", "clickhouse"]);
 
-        merge_missing_action_fields(&mut input_val, None, &names, &JobFiles::empty());
+        merge_missing_action_fields(&mut input_val, None, &names, &JobFiles::empty(), false)
+            .unwrap();
 
         assert_eq!(input_val["sql"], "SELECT 1");
         assert!(input_val.get("clickhouse").is_none());
@@ -2030,7 +2091,14 @@ mod tests {
         let job_input = json!("some raw string");
         let names = string_schema(&["sql", "clickhouse"]);
 
-        merge_missing_action_fields(&mut input_val, Some(&job_input), &names, &JobFiles::empty());
+        merge_missing_action_fields(
+            &mut input_val,
+            Some(&job_input),
+            &names,
+            &JobFiles::empty(),
+            false,
+        )
+        .unwrap();
 
         assert_eq!(input_val["sql"], "SELECT 1");
         assert!(input_val.get("clickhouse").is_none());
@@ -2042,7 +2110,14 @@ mod tests {
         let job_input = json!({"clickhouse": {"host": "h"}});
         let names = string_schema(&["clickhouse"]);
 
-        merge_missing_action_fields(&mut input_val, Some(&job_input), &names, &JobFiles::empty());
+        merge_missing_action_fields(
+            &mut input_val,
+            Some(&job_input),
+            &names,
+            &JobFiles::empty(),
+            false,
+        )
+        .unwrap();
 
         assert_eq!(input_val, json!("raw"));
     }
@@ -2053,7 +2128,14 @@ mod tests {
         let job_input = json!({"sql": "SELECT 1"});
         let names = string_schema(&["sql", "clickhouse"]);
 
-        merge_missing_action_fields(&mut input_val, Some(&job_input), &names, &JobFiles::empty());
+        merge_missing_action_fields(
+            &mut input_val,
+            Some(&job_input),
+            &names,
+            &JobFiles::empty(),
+            false,
+        )
+        .unwrap();
 
         assert_eq!(input_val["sql"], "SELECT 1");
         assert!(input_val.get("clickhouse").is_none());
@@ -2065,7 +2147,14 @@ mod tests {
         let job_input = json!({"sql": "SELECT 1", "clickhouse": null});
         let names = string_schema(&["sql", "clickhouse"]);
 
-        merge_missing_action_fields(&mut input_val, Some(&job_input), &names, &JobFiles::empty());
+        merge_missing_action_fields(
+            &mut input_val,
+            Some(&job_input),
+            &names,
+            &JobFiles::empty(),
+            false,
+        )
+        .unwrap();
 
         assert_eq!(input_val["sql"], "SELECT 1");
         assert!(input_val.get("clickhouse").is_none());
@@ -2082,7 +2171,14 @@ mod tests {
         });
         let names = string_schema(&["sql", "clickhouse", "s3_bucket", "redis"]);
 
-        merge_missing_action_fields(&mut input_val, Some(&job_input), &names, &JobFiles::empty());
+        merge_missing_action_fields(
+            &mut input_val,
+            Some(&job_input),
+            &names,
+            &JobFiles::empty(),
+            false,
+        )
+        .unwrap();
 
         assert_eq!(input_val["sql"], "SELECT 1");
         assert_eq!(input_val["clickhouse"]["host"], "ch.example.com");
@@ -2100,7 +2196,14 @@ mod tests {
         });
         let names = string_schema(&["sql", "clickhouse"]);
 
-        merge_missing_action_fields(&mut input_val, Some(&job_input), &names, &JobFiles::empty());
+        merge_missing_action_fields(
+            &mut input_val,
+            Some(&job_input),
+            &names,
+            &JobFiles::empty(),
+            false,
+        )
+        .unwrap();
 
         assert_eq!(input_val["sql"], "SELECT 1");
         assert_eq!(input_val["clickhouse"]["host"], "ch.example.com");
@@ -2132,20 +2235,20 @@ mod tests {
 
         let mut v = json!({});
         let schema = schema_of(&[("data_file", "file")]);
-        merge_missing_action_fields(&mut v, Some(&job_input), &schema, &files);
+        merge_missing_action_fields(&mut v, Some(&job_input), &schema, &files, false).unwrap();
         assert_eq!(v, json!({"data_file": FILE_X}));
 
         for ty in ["string", "text", "json"] {
             let mut v = json!({});
             let schema = schema_of(&[("data_file", ty)]);
-            merge_missing_action_fields(&mut v, Some(&job_input), &schema, &files);
+            merge_missing_action_fields(&mut v, Some(&job_input), &schema, &files, false).unwrap();
             assert_eq!(v, json!({"data_file": PATH_X}), "{ty}");
         }
 
         // A field the step already set is left alone.
         let mut v = json!({"data_file": "mine"});
         let schema = schema_of(&[("data_file", "string")]);
-        merge_missing_action_fields(&mut v, Some(&job_input), &schema, &files);
+        merge_missing_action_fields(&mut v, Some(&job_input), &schema, &files, false).unwrap();
         assert_eq!(v, json!({"data_file": "mine"}));
     }
 
@@ -2156,17 +2259,18 @@ mod tests {
         // The task field holds another value than its attached id.
         let mut v = json!({});
         let job_input = json!({"data_file": "file_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"});
-        merge_missing_action_fields(&mut v, Some(&job_input), &schema, &files);
+        merge_missing_action_fields(&mut v, Some(&job_input), &schema, &files, false).unwrap();
         assert_eq!(v["data_file"], "file_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
         // A field with no attachment that holds an attached id.
         let mut v = json!({});
         let job_input = json!({"other": FILE_X});
-        merge_missing_action_fields(&mut v, Some(&job_input), &schema, &files);
+        merge_missing_action_fields(&mut v, Some(&job_input), &schema, &files, false).unwrap();
         assert_eq!(v["other"], FILE_X);
         // No files at all.
         let mut v = json!({});
         let job_input = json!({"data_file": FILE_X});
-        merge_missing_action_fields(&mut v, Some(&job_input), &schema, &JobFiles::empty());
+        merge_missing_action_fields(&mut v, Some(&job_input), &schema, &JobFiles::empty(), false)
+            .unwrap();
         assert_eq!(v["data_file"], FILE_X);
     }
 
@@ -2181,7 +2285,7 @@ mod tests {
         let earlier = "/tmp/stroem-inputs-1/in/file_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/r.csv";
 
         let mut v = json!({"data_file": earlier});
-        merge_missing_action_fields(&mut v, Some(&job_input), &schema, &files);
+        merge_missing_action_fields(&mut v, Some(&job_input), &schema, &files, true).unwrap();
         assert_eq!(v, json!({"data_file": PATH_X}));
 
         // Anything else the step holds stays: another value, another file,
@@ -2194,21 +2298,112 @@ mod tests {
             PATH_X,
         ] {
             let mut v = json!({"data_file": kept});
-            merge_missing_action_fields(&mut v, Some(&job_input), &schema, &files);
+            merge_missing_action_fields(&mut v, Some(&job_input), &schema, &files, true).unwrap();
             assert_eq!(v, json!({"data_file": kept}), "{kept}");
         }
 
         // A `file` field is never rewritten (its stored form is the id).
         let mut v = json!({"data_file": earlier});
         let file_schema = schema_of(&[("data_file", "file")]);
-        merge_missing_action_fields(&mut v, Some(&job_input), &file_schema, &files);
+        merge_missing_action_fields(&mut v, Some(&job_input), &file_schema, &files, true).unwrap();
         assert_eq!(v, json!({"data_file": earlier}));
 
         // Only when the job value is the field's attached file.
         let mut v = json!({"data_file": earlier});
         let other = json!({"data_file": "something else"});
-        merge_missing_action_fields(&mut v, Some(&other), &schema, &files);
+        merge_missing_action_fields(&mut v, Some(&other), &schema, &files, true).unwrap();
         assert_eq!(v, json!({"data_file": earlier}));
+    }
+
+    /// A value the flow step's `input:` rendered on THIS claim is the
+    /// author's: never refreshed, even when it ends in this file's path
+    /// (a re-rooting template). Only a persisted pass-through is.
+    #[test]
+    fn test_merge_refresh_only_for_a_persisted_input() {
+        let files = files_x();
+        let job_input = json!({"data_file": FILE_X});
+        let schema = schema_of(&[("data_file", "string")]);
+        for kept in [
+            "/mnt/host/w/in/file_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/r.csv",
+            "/mnt/host/inputs/file_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/r.csv",
+            "/tmp/stroem-inputs-1/in/file_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/r.csv",
+        ] {
+            let mut v = json!({"data_file": kept});
+            merge_missing_action_fields(&mut v, Some(&job_input), &schema, &files, false).unwrap();
+            assert_eq!(v, json!({"data_file": kept}), "{kept}");
+        }
+    }
+
+    /// Spec § 5.1 (A3, controller ruling M3): a value merged into a `file`
+    /// action field must name a file attached to this job, whatever task
+    /// field it comes from.
+    #[test]
+    fn test_merge_into_file_field_applies_a3() {
+        let files = files_x();
+        let schema = schema_of(&[("other", "file")]);
+        let merge = |job_input: serde_json::Value| {
+            let mut v = json!({});
+            merge_missing_action_fields(&mut v, Some(&job_input), &schema, &files, false)
+                .map(|()| v)
+        };
+
+        // An attached file's id or its path under the root → the id.
+        for value in [
+            FILE_X,
+            PATH_X,
+            " /w/in/file_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/r.csv ",
+        ] {
+            assert_eq!(
+                merge(json!({ "other": value })).unwrap(),
+                json!({"other": FILE_X}),
+                "{value}"
+            );
+        }
+        // `null`, `""` and blank → the field stays unset.
+        for value in [json!(null), json!(""), json!("   ")] {
+            assert_eq!(merge(json!({ "other": value })).unwrap(), json!({}));
+        }
+        // Anything else is the value-free `CannotUse` naming the field.
+        for value in [
+            json!("file_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+            json!("/inputs/file_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/r.csv"),
+            json!("/w/in/file_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/other.csv"),
+            json!("/etc/passwd"),
+            json!(7),
+            json!(true),
+            json!(["file_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]),
+            json!({"id": "file_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}),
+        ] {
+            let err = merge(json!({ "other": value })).unwrap_err();
+            assert_eq!(
+                err,
+                stroem_common::file_field::FileInputError {
+                    field: "other".to_string(),
+                    kind: stroem_common::file_field::FileInputErrorKind::CannotUse,
+                },
+                "{value}"
+            );
+            assert_eq!(
+                err.to_string(),
+                "Input field 'other': the file cannot be used"
+            );
+        }
+        // A field the step already set is not checked here (S1 owns it).
+        let mut v = json!({"other": "set by the step"});
+        let job_input = json!({"other": "/etc/passwd"});
+        merge_missing_action_fields(&mut v, Some(&job_input), &schema, &files, false).unwrap();
+        assert_eq!(v, json!({"other": "set by the step"}));
+        // Without files every non-empty value is refused.
+        let mut v = json!({});
+        let job_input = json!({"other": FILE_X});
+        assert!(merge_missing_action_fields(
+            &mut v,
+            Some(&job_input),
+            &schema,
+            &JobFiles::empty(),
+            false
+        )
+        .is_err());
     }
 
     #[test]

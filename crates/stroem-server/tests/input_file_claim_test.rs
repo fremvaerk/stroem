@@ -113,6 +113,15 @@ tasks:
   merge-to-string:
     input: { data_file: { type: file } }
     flow: { run: { action: merge-string } }
+  re-root:
+    input: { data_file: { type: file } }
+    flow:
+      run:
+        action: merge-string
+        input: { data_file: "/mnt/host{{ input.data_file }}" }
+  string-to-file:
+    input: { data_file: { type: string } }
+    flow: { run: { action: cat-file } }
   merge-retry:
     input: { data_file: { type: file } }
     flow:
@@ -513,6 +522,71 @@ async fn reclaim_after_retry_renders_the_new_worker_root() -> Result<()> {
     );
     let row = step_row(&app.pool, job_id, "run").await;
     assert_eq!(row.input.unwrap()["data_file"], json!(second));
+    Ok(())
+}
+
+/// A value the flow step's `input:` renders is the author's, also when it
+/// ends in this file's path (a re-rooting template): the first claim keeps it.
+#[tokio::test]
+async fn first_claim_keeps_a_re_rooted_value() -> Result<()> {
+    let app = build_app().await?;
+    let up = upload(&app, "re-root", "report.csv", b"x").await;
+    let job_id = execute(&app, "re-root", json!({"data_file": up.file_id})).await;
+
+    let body = claim_local(&app).await;
+    let value = format!(
+        "/mnt/host{}",
+        path_under(INPUTS_DIR, &up.file_id, "report.csv")
+    );
+    assert_eq!(body["input"]["data_file"], json!(value));
+    assert_eq!(
+        body["action_spec"]["script"].as_str().unwrap(),
+        format!("cat \"{value}\"")
+    );
+    let row = step_row(&app.pool, job_id, "run").await;
+    assert_eq!(row.input.unwrap()["data_file"], json!(value));
+    Ok(())
+}
+
+/// Spec § 5.1 (A3): a job value merged into an unset `file` action field
+/// must name a file attached to this job, even from a `string` task field.
+#[tokio::test]
+async fn foreign_value_merged_into_file_field_fails_claim() -> Result<()> {
+    let app = build_app().await?;
+    let theirs = upload(&app, "local", "theirs.csv", b"y").await;
+    execute(&app, "local", json!({"data_file": theirs.file_id})).await;
+    // The other job's step is claimed first, so the next claim is ours.
+    claim_local(&app).await;
+
+    for value in [
+        "/etc/passwd".to_string(),
+        theirs.file_id.clone(),
+        path_under(INPUTS_DIR, &theirs.file_id, "theirs.csv"),
+    ] {
+        let job_id = execute(&app, "string-to-file", json!({"data_file": value})).await;
+        let (status, body) = claim(&app, &["script"], Some(INPUTS_DIR)).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{value}: {body}");
+        let row = step_row(&app.pool, job_id, "run").await;
+        assert_eq!(row.status, "failed");
+        let msg = row.error_message.unwrap_or_default();
+        assert!(
+            msg.contains("Input field 'data_file': the file cannot be used"),
+            "{msg}"
+        );
+        assert!(!msg.contains("withheld"), "{msg}");
+        for leak in [
+            theirs.file_id.as_str(),
+            "theirs.csv",
+            "/etc/passwd",
+            INPUTS_DIR,
+        ] {
+            assert!(!msg.contains(leak), "error names {leak:?}: {msg}");
+            assert!(
+                !body["error"].as_str().unwrap_or_default().contains(leak),
+                "response names {leak:?}: {body}"
+            );
+        }
+    }
     Ok(())
 }
 
