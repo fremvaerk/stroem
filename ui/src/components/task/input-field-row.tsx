@@ -8,6 +8,8 @@ import { DateInput, DateTimeInput } from "@/components/task/date-input";
 import type { InputField } from "@/lib/types";
 import { PRIMITIVE_TYPES, REDACTED_SENTINEL } from "@/components/task/constants";
 import { JsonInputField } from "@/components/task/json-input-field";
+import { FileInputField } from "@/components/task/file-input-field";
+import { initialFileFieldState, isFileFieldState } from "@/lib/file-field";
 import { type JsonFieldState, type ReplaySource } from "@/lib/json-field";
 
 export interface InputFieldRowProps {
@@ -17,6 +19,11 @@ export interface InputFieldRowProps {
   onChange: (v: unknown) => void;
   connections?: Record<string, string[]>;
   replaySource?: ReplaySource;
+  /** Needed by `file` fields to upload. */
+  workspace?: string;
+  taskId?: string;
+  /** Re-run source job id, named by a `file` field's Replace upload. */
+  sourceJobId?: string;
 }
 
 export function InputFieldRow({
@@ -26,10 +33,29 @@ export function InputFieldRow({
   onChange,
   connections,
   replaySource,
+  workspace,
+  taskId,
+  sourceJobId,
 }: InputFieldRowProps) {
   const id = `input-${fieldKey}`;
 
   const displayLabel = field.name ?? fieldKey;
+
+  // First, so `options` / `secret` / `multiple` / `default` never capture it.
+  if (field.type === "file") {
+    return (
+      <FileInputField
+        id={id}
+        fieldKey={fieldKey}
+        field={field}
+        value={isFileFieldState(value) ? value : initialFileFieldState()}
+        onChange={onChange}
+        workspace={workspace ?? ""}
+        taskId={taskId ?? ""}
+        sourceJobId={sourceJobId}
+      />
+    );
+  }
 
   if (field.type === "json") {
     return (

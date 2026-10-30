@@ -1,0 +1,22 @@
+actions:
+  show-file:
+    type: script
+    script: |
+      sha256sum "{{ input.data_file }}" && cat "{{ input.data_file }}"
+    input:
+      data_file: { type: file, required: true }
+
+tasks:
+  file-demo:
+    mode: distributed
+    description: Demonstrates the file input type.
+    input:
+      data_file:
+        type: file
+        required: true
+        description: Any file
+    flow:
+      show:
+        action: show-file
+        input:
+          data_file: "{{ input.data_file }}"

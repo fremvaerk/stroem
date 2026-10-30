@@ -213,6 +213,15 @@ export interface JobStep {
   child_jobs?: ChildJobRef[];
 }
 
+/** An input file of a job (`input_files[]` in the job detail). */
+export interface InputFileRef {
+  field: string;
+  file_id: string;
+  name: string;
+  size_bytes: number;
+  content_type: string;
+}
+
 export interface JobDetail {
   job_id: string;
   workspace: string;
@@ -241,6 +250,8 @@ export interface JobDetail {
   steps: JobStep[];
   /** Restarts and Re-runs created from this job, newest first. Optional: older servers omit it. */
   derived_jobs?: DerivedJobRef[];
+  /** Files supplied to `file` input fields. Optional: older servers omit it. */
+  input_files?: InputFileRef[];
 }
 
 export interface PaginatedResponse<T> {

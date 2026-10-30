@@ -1,4 +1,5 @@
 import { SECRET_SENTINEL } from "@/components/task/constants";
+import { isFileFieldState } from "./file-field";
 import { isJsonFieldState, parseJsonText } from "./json-field";
 import type { InputField } from "./types";
 
@@ -39,6 +40,16 @@ export function buildExecutePayload(
   const replayFields: string[] = [];
   for (const [key, val] of Object.entries(values)) {
     const field = fields[key];
+    if (isFileFieldState(val)) {
+      if (val.mode === "ready") {
+        input[key] = val.fileId;
+      } else if (val.mode === "empty") {
+        if (field?.required) throw new ExecuteFormError(key, "a file is required");
+      } else {
+        throw new ExecuteFormError(key, "the file is not uploaded yet");
+      }
+      continue;
+    }
     if (isJsonFieldState(val)) {
       if (val.mode === "default") continue;
       if (val.mode === "replay") {
