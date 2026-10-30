@@ -20,6 +20,7 @@ mod git_refs_scheduler_test;
 mod ha_test;
 mod input_file_claim_test;
 mod input_file_creation_test;
+mod input_file_retention_test;
 mod input_file_upload_test;
 mod integration_test;
 mod json_input_test;

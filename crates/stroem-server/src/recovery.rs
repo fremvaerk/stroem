@@ -3,7 +3,7 @@ use crate::state::{AliveGuard, AppState};
 use anyhow::Result;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
-use stroem_db::{JobRepo, JobStepRepo, RetentionJobInfo, WorkerRepo};
+use stroem_db::{InputFileRepo, JobRepo, JobStepRepo, RetentionJobInfo, WorkerRepo};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -614,6 +614,58 @@ pub async fn retention_cleanup(state: &AppState) {
             }
             _ => {}
         }
+    }
+
+    sweep_input_files(state).await;
+}
+
+/// Delete expired upload tokens, then unattached expired (or already marked)
+/// input files: mark `deleting_at` under the row lock, delete the blob, then
+/// the row. A failed blob delete keeps the marked row for the next sweep.
+async fn sweep_input_files(state: &AppState) {
+    match stroem_db::UploadTokenRepo::delete_expired(&state.pool).await {
+        Ok(n) => tracing::debug!("Retention: deleted {} expired upload token(s)", n),
+        Err(e) => tracing::warn!("Retention: failed to delete expired upload tokens: {:#}", e),
+    }
+
+    let Some(ref blob) = state.input_blob else {
+        tracing::debug!("Retention: no input-file blob backend configured, skipping file sweep");
+        return;
+    };
+    let ttl = state.input_files_config.upload_ttl_secs as i64;
+    let ids = match InputFileRepo::sweep_candidates(&state.pool, ttl, 1000).await {
+        Ok(ids) => ids,
+        Err(e) => {
+            tracing::warn!("Retention: failed to list input-file candidates: {:#}", e);
+            return;
+        }
+    };
+    let mut deleted = 0u64;
+    for file_id in ids {
+        state.background_tasks.recovery_beat.beat();
+        let row = match InputFileRepo::mark_deleting(&state.pool, &file_id).await {
+            Ok(Some(row)) => row,
+            Ok(None) => continue,
+            Err(e) => {
+                tracing::warn!("Retention: failed to mark input file {file_id}: {:#}", e);
+                continue;
+            }
+        };
+        if let Err(e) = blob.delete(&row.storage_key).await {
+            tracing::warn!(
+                "Retention: failed to delete blob of input file {file_id}, retrying next sweep: {:#}",
+                e
+            );
+            continue;
+        }
+        match InputFileRepo::delete(&state.pool, &file_id).await {
+            Ok(true) => deleted += 1,
+            Ok(false) => {}
+            Err(e) => tracing::warn!("Retention: failed to delete input file {file_id}: {:#}", e),
+        }
+    }
+    if deleted > 0 {
+        tracing::info!("Retention: deleted {} unused input file(s)", deleted);
     }
 }
 
