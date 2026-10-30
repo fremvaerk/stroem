@@ -5,4 +5,4 @@ pub mod accept;
 pub mod stream;
 pub mod upload;
 
-pub use accept::{attach_all_tx, task_file_values, FileGrant};
+pub use accept::{attach_all_tx, preflight, task_file_values, FileGrant};

@@ -3,8 +3,9 @@
 //! attachment rows written in the creation transaction.
 
 use serde_json::Value;
+use std::collections::HashMap;
 use stroem_common::file_field::{is_file_id, FileInputError, FileInputErrorKind, FILE_TYPE};
-use stroem_common::models::workflow::TaskDef;
+use stroem_common::models::workflow::{InputFieldDef, TaskDef};
 use stroem_db::{AttachRule, JobInputFileRepo};
 use uuid::Uuid;
 
@@ -42,22 +43,16 @@ pub fn task_file_values(
     task: &TaskDef,
     input: &Value,
 ) -> Result<Vec<(String, String)>, FileInputError> {
-    let mut fields: Vec<_> = task
-        .input
-        .iter()
-        .filter(|(_, def)| def.field_type == FILE_TYPE)
-        .collect();
-    fields.sort_by(|a, b| a.0.cmp(b.0));
+    let fields = sorted_file_fields(&task.input);
     let mut values = Vec::new();
     for (name, def) in fields {
         match input.get(name) {
-            None | Some(Value::Null) => {}
-            Some(Value::String(s)) if s.is_empty() => {}
+            v if is_no_file(v) => {}
             Some(Value::String(s)) if is_file_id(s) => {
                 values.push((name.clone(), s.clone()));
                 continue;
             }
-            Some(_) => {
+            _ => {
                 return Err(FileInputError {
                     field: name.clone(),
                     kind: FileInputErrorKind::CannotUse,
@@ -72,6 +67,49 @@ pub fn task_file_values(
         }
     }
     Ok(values)
+}
+
+/// For a creation that can never carry a file (trigger, webhook, action
+/// hook; spec § 4.5, § 4.6): fails on the first required `file` field, else
+/// on the first `file` field the input gives a value. Field-name order.
+pub fn preflight(
+    schema: &HashMap<String, InputFieldDef>,
+    input: &Value,
+) -> Result<(), FileInputError> {
+    let fields = sorted_file_fields(schema);
+    if let Some((name, _)) = fields.iter().find(|(_, def)| def.required) {
+        return Err(FileInputError {
+            field: (*name).clone(),
+            kind: FileInputErrorKind::Required,
+        });
+    }
+    for (name, _) in fields {
+        if !is_no_file(input.get(name)) {
+            return Err(FileInputError {
+                field: name.clone(),
+                kind: FileInputErrorKind::CannotUse,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Absent, `null` and `""` are "no file".
+fn is_no_file(value: Option<&Value>) -> bool {
+    match value {
+        None | Some(Value::Null) => true,
+        Some(Value::String(s)) => s.is_empty(),
+        Some(_) => false,
+    }
+}
+
+fn sorted_file_fields(schema: &HashMap<String, InputFieldDef>) -> Vec<(&String, &InputFieldDef)> {
+    let mut fields: Vec<_> = schema
+        .iter()
+        .filter(|(_, def)| def.field_type == FILE_TYPE)
+        .collect();
+    fields.sort_by(|a, b| a.0.cmp(b.0));
+    fields
 }
 
 /// In the creation transaction, after the job row: attach each pair by the
@@ -113,6 +151,8 @@ pub async fn attach_all_tx(
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::collections::HashMap;
+    use stroem_common::models::workflow::InputFieldDef;
 
     fn task(yaml: &str) -> TaskDef {
         serde_yaml::from_str(yaml).unwrap()
@@ -125,6 +165,52 @@ mod tests {
             field: field.into(),
             kind,
         }
+    }
+
+    fn schema(yaml: &str) -> HashMap<String, InputFieldDef> {
+        task(yaml).input
+    }
+
+    #[test]
+    fn preflight_cases() {
+        let optional = schema("input: { f: { type: file }, s: { type: string } }\nflow: {}");
+        for input in [
+            json!({}),
+            json!(null),
+            json!({"f": null}),
+            json!({"f": ""}),
+            json!({"s": 1}),
+        ] {
+            assert_eq!(preflight(&optional, &input), Ok(()), "{input}");
+        }
+        for value in [json!(ID), json!(42), json!(["x"])] {
+            assert_eq!(
+                preflight(&optional, &json!({ "f": value })),
+                Err(err("f", FileInputErrorKind::CannotUse)),
+                "{value}"
+            );
+        }
+        let required = schema("input: { f: { type: file, required: true } }\nflow: {}");
+        for input in [json!({}), json!({"f": null}), json!({"f": ""})] {
+            assert_eq!(
+                preflight(&required, &input),
+                Err(err("f", FileInputErrorKind::Required)),
+                "{input}"
+            );
+        }
+        // Required wins over CannotUse, and the first field alphabetically wins.
+        let both =
+            schema("input: { a: { type: file }, z: { type: file, required: true } }\nflow: {}");
+        assert_eq!(
+            preflight(&both, &json!({"a": ID})),
+            Err(err("z", FileInputErrorKind::Required))
+        );
+        let two = schema("input: { b: { type: file }, a: { type: file } }\nflow: {}");
+        assert_eq!(
+            preflight(&two, &json!({"a": ID, "b": ID})),
+            Err(err("a", FileInputErrorKind::CannotUse))
+        );
+        assert_eq!(preflight(&HashMap::new(), &json!({"a": 1})), Ok(()));
     }
 
     #[test]

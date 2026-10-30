@@ -149,6 +149,15 @@ async fn webhook_handler(
         }
     };
 
+    // Spec 2026-10-29 § 4.5: a webhook cannot carry a file; fail before any
+    // job row exists.
+    if let Some(task) = target.config.config().tasks.get(&target.task_name) {
+        if let Err(e) = crate::input_files::preflight(&task.input, &input_value) {
+            tracing::warn!("Webhook '{}' cannot create its job: {:#}", name, e);
+            return crate::web::api::classify_execute_error(anyhow::Error::new(e)).into_response();
+        }
+    }
+
     let is_sync = wh.mode.as_deref() == Some("sync");
     let timeout_secs = wh.timeout_secs.unwrap_or(DEFAULT_SYNC_TIMEOUT_SECS);
 

@@ -47,6 +47,10 @@ actions:
   noop: { type: script, script: "true" }
   call-required: { type: task, task: files-required }
   call-files: { type: task, task: files }
+  needs-file:
+    type: script
+    script: "true"
+    input: { data_file: { type: file, required: true } }
 tasks:
   files:
     input: { data_file: { type: file } }
@@ -75,9 +79,18 @@ tasks:
     on_success:
       - action: call-files
         input: { data_file: "__FILE__" }
+  hooked-action-required:
+    flow: { run: { action: noop } }
+    on_success:
+      - action: needs-file
   consumer:
     flow: { run: { action: noop } }
 triggers:
+  nightly-required-skip:
+    { type: scheduler, cron: "0 2 * * *", task: files-required, concurrency: skip }
+  nightly-required-cancel:
+    { type: scheduler, cron: "0 2 * * *", task: files-required, concurrency: cancel_previous }
+  wh-required: { type: webhook, name: wh-required, task: files-required }
   feed-required: { type: event_source, task: consumer, target_task: files-required }
   feed-files: { type: event_source, task: consumer, target_task: files }
   nightly-required: { type: scheduler, cron: "0 2 * * *", task: files-required }
@@ -804,5 +817,128 @@ async fn event_source_emit_with_file_value_is_dropped() -> Result<()> {
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     assert!(jobs_of_task(&app.pool, "files").await.is_empty());
     assert!(logs.text().contains(CANNOT_USE), "{}", logs.text());
+    Ok(())
+}
+
+async fn fire(app: &App, key: &str) {
+    stroem_server::scheduler::fire_trigger_once(
+        &app.state,
+        &app.state.workspaces,
+        &app.state.workspaces,
+        key,
+    )
+    .await;
+}
+
+async fn jobs_with_status(pool: &PgPool, status: &str) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM job WHERE status = $1")
+        .bind(status)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn scheduler_required_file_skip_policy_is_missed_without_skipped_row() -> Result<()> {
+    let app = build_app(Opts::default()).await?;
+    // An active job of the trigger: `skip` would record a skipped row.
+    let (_, body) = execute(&app, "files", None, json!({"input": {}})).await;
+    let active = job_id_of(&body);
+    sqlx::query("UPDATE job SET source_type = 'trigger', source_id = $2, status = 'running' WHERE job_id = $1")
+        .bind(active)
+        .bind("default/nightly-required-skip")
+        .execute(&app.pool)
+        .await?;
+    let (logs, guard) = capture();
+    fire(&app, "default/nightly-required-skip").await;
+    drop(guard);
+    let text = logs.text();
+    assert!(
+        text.contains("Trigger 'default/nightly-required-skip' MISSED"),
+        "{text}"
+    );
+    assert!(text.contains(REQUIRED), "{text}");
+    assert_eq!(jobs_with_status(&app.pool, "skipped").await, 0);
+    assert!(jobs_of_task(&app.pool, "files-required").await.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn scheduler_required_file_cancel_previous_cancels_nothing() -> Result<()> {
+    let app = build_app(Opts::default()).await?;
+    let (_, body) = execute(&app, "files", None, json!({"input": {}})).await;
+    let active = job_id_of(&body);
+    sqlx::query("UPDATE job SET source_type = 'trigger', source_id = $2, status = 'running' WHERE job_id = $1")
+        .bind(active)
+        .bind("default/nightly-required-cancel")
+        .execute(&app.pool)
+        .await?;
+    let (logs, guard) = capture();
+    fire(&app, "default/nightly-required-cancel").await;
+    drop(guard);
+    let text = logs.text();
+    assert!(text.contains("MISSED"), "{text}");
+    assert!(text.contains(REQUIRED), "{text}");
+    let job = JobRepo::get(&app.pool, active).await?.unwrap();
+    assert_eq!(job.status, "running");
+    assert!(jobs_of_task(&app.pool, "files-required").await.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn scheduler_trigger_input_with_file_value_is_missed() -> Result<()> {
+    let app = build_app(Opts::default()).await?;
+    let id = upload(&app.state, "default", "files", None, b"x").await;
+    app.state
+        .workspaces
+        .replace_config_for_test("default", workspace(&id))
+        .await;
+    let (logs, guard) = capture();
+    fire(&app, "default/nightly-files").await;
+    drop(guard);
+    let text = logs.text();
+    assert!(
+        text.contains("Trigger 'default/nightly-files' MISSED"),
+        "{text}"
+    );
+    assert!(text.contains(CANNOT_USE), "{text}");
+    assert!(jobs_of_task(&app.pool, "files").await.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn webhook_required_file_is_400_and_creates_no_job() -> Result<()> {
+    let app = build_app(Opts::default()).await?;
+    let (status, body) = post(&app, "/hooks/wh-required", None, json!({})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"], json!(REQUIRED));
+    assert!(jobs_of_task(&app.pool, "files-required").await.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn action_hook_required_file_fails_and_logs_to_source_job() -> Result<()> {
+    let app = build_app(Opts::default()).await?;
+    let (status, body) = execute(&app, "hooked-action-required", None, json!({"input": {}})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let source = job_id_of(&body);
+    complete(&app, source).await;
+    let log = job_log_text(&app.pool, &app.state, source).await;
+    assert!(log.contains(REQUIRED), "{log}");
+    assert!(jobs_of_task(&app.pool, "_hook:needs-file").await.is_empty());
+    assert_eq!(jobs_with_status(&app.pool, "pending").await, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn task_hook_required_file_fails_and_logs_to_source_job() -> Result<()> {
+    let app = build_app(Opts::default()).await?;
+    let (status, body) = execute(&app, "hooked-required", None, json!({"input": {}})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let source = job_id_of(&body);
+    complete(&app, source).await;
+    let log = job_log_text(&app.pool, &app.state, source).await;
+    assert!(log.contains(REQUIRED), "{log}");
+    assert!(jobs_of_task(&app.pool, "files-required").await.is_empty());
     Ok(())
 }
