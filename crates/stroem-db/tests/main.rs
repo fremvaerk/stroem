@@ -3,6 +3,7 @@
 
 mod common;
 mod git_refs_test;
+mod input_file_test;
 mod integration_test;
 mod job_artifact_repo;
 mod job_step_status_tests;
