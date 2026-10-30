@@ -1,6 +1,6 @@
 # File inputs (`type: file`)
 
-Status: draft, revision 1 (2026-10-29). Branch `feat/file-inputs`.
+Status: draft, revision 6 (2026-10-30). Branch `feat/file-inputs`.
 
 ## Revision history
 
@@ -39,6 +39,14 @@ Status: draft, revision 1 (2026-10-29). Branch `feat/file-inputs`.
   not the chain root (§ 4.4, § 4.6); the § 4.6 closure sentence now says
   what is true (a file follows only existing input-copy edges; content is
   never redacted).
+- **Revision 6** (2026-10-30) — Codex spec review round 3 (round-2 findings
+  all confirmed fixed; 1 new finding, verified against
+  `web/api/tasks.rs:472-491`, `:622-626`, `:674-687` and fixed): the
+  `source_job_id` upload now writes execute's order out step by step — the
+  source ACL first with one identical 404 for a missing and a denied source,
+  then 403 for a pinned source with only View, then source validation, ref
+  resolution and the destination `Run` + schema check (§ 4.2); two tests
+  added (§ 13).
 
 ## 1. Goal
 
@@ -205,17 +213,35 @@ validation at load — F12 / CLAUDE.md):
     must declare at least one `file` field, else 400.
   - **with `source_job_id`** (a replacement file for a Re-run; Restart takes
     no new input, `RestartJobRequest` at `web/api/jobs.rs:653`, and only
-    replays the source's files through A2):
-    the Re-run authorisation sequence, reused as is — the source must be a
-    top-level job of this `{ws}` and `{task}` (`is_top_level_job`, else 400);
-    `check_job_acl` on the SOURCE job (Deny → 404); a pinned source's ref is
-    re-resolved with `pinned_source::resolve_source_pin`
-    (`web/api/pinned_source.rs:44`) and the selected task — at that commit
-    for a pinned source, live otherwise — gets `require_task_run`
-    (`web/api/tasks.rs:594`: Deny → 404, View → 403) and must declare a
-    `file` field, else 400. So a pinned Re-run whose task exists only at its
-    ref, or whose `file` field exists only there, can replace a file
-    (`web/api/tasks.rs:472-505` is the execute-side precedent).
+    replays the source's files through A2): the Re-run authorisation of
+    execute, in this fixed order (execute-side precedent
+    `web/api/tasks.rs:472-505` and `execute_pinned_rerun` at `:665-696`):
+    1. Load the source job row.
+    2. A missing source, and a source where `check_job_acl` gives Deny,
+       answer the **identical** 404 `Source job not found`
+       (`source_job_not_found`, `tasks.rs:622-626`). Nothing runs before
+       this: no workspace, task, top-level or `raw_input` check, so a denied
+       source answers the same for every `{ws}` / `{task}` and every kind of
+       job it is.
+    3. A **pinned** source (`git_ref` set) where `check_job_acl` gives View →
+       403 `View-only access` (`tasks.rs:674-678`), before any validation
+       and before the ref is resolved. (An unpinned source's ACL path is the
+       live task's, which step 6 checks once step 4 has made it the
+       destination, so View there is the 403 of step 6.)
+    4. Validate the source: `check_rerun_source` (same `{ws}`, top-level
+       job, `raw_input` present; `tasks.rs:631-652`) and the same task name
+       as `{task}` — each 400.
+    5. Select the task: a pinned source's ref is re-resolved with
+       `pinned_source::resolve_source_pin` (`web/api/pinned_source.rs:44`)
+       and the task taken at that commit; an unpinned source takes the live
+       task (missing → 404 `Task not found`).
+    6. `require_task_run` on the selected task (`tasks.rs:594`: Deny → 404,
+       View → 403), then the task must declare a `file` field, else 400.
+
+    So a pinned Re-run whose task exists only at its ref, or whose `file`
+    field exists only there, can replace a file. The unpinned execute path
+    keeps its own order (destination before source validation); that leaks
+    nothing, because it too runs only after step 2.
 
   The row records `(workspace, task_name)` either way, which is all A1
   (§ 4.4) matches on; the execute call re-resolves and re-checks on its own.
@@ -779,7 +805,12 @@ Per CLAUDE.md § Mandatory Test Coverage, at least:
   orphan sweep race (creation vs sweep) with both orders;
 - server integration: upload ACL (Run / View / Deny, auth off), body limit,
   upload with `source_job_id` for a pinned source whose task exists only at
-  its ref (accepted) and for a source the caller may not view (404), A1
+  its ref (accepted) and for a source the caller may not view (404), the
+  § 4.2 order: a denied source with mismatched coordinates (other workspace,
+  other task, a `type: task` child, no `raw_input`) answers the same status
+  and body as a missing source, and a pinned source where the caller has
+  only View answers 403 even when its ref no longer resolves (not 400;
+  `PinnedFixture::break_remote`), A1
   (other user, other task, expired, and a trigger / hook creation that names
   a valid upload — rejected), A2 for Re-run / Restart / retry / child (same
   and other workspace), the retry chain after a schema change: a second
