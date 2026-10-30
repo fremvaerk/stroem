@@ -282,6 +282,21 @@ pub struct JobDetailResponse {
     /// side of `source_job_id`. Skipped whole by redaction
     /// (`JOB_IDENTIFIER_KEYS`), so [`DerivedJobRef`] holds identifiers only.
     pub derived_jobs: Vec<DerivedJobRef>,
+    /// Files attached to the job's `type: file` input fields, ordered by field.
+    pub input_files: Vec<InputFileRef>,
+}
+
+/// One `input_files[]` entry of job detail. `field` and `file_id` are
+/// identifiers; `name` and `content_type` are content and are redacted
+/// (`redaction::INPUT_FILE_IDENTIFIER_KEYS`).
+#[derive(Debug, Serialize)]
+pub struct InputFileRef {
+    pub field: String,
+    pub file_id: String,
+    /// The name the uploader gave the file.
+    pub name: String,
+    pub size_bytes: i64,
+    pub content_type: String,
 }
 
 /// One `derived_jobs[]` entry of job detail. Identifiers, an enum, a status,
@@ -565,6 +580,19 @@ pub async fn get_job(
         }
     }
 
+    let input_files = crate::input_files::load_attachments(&state.pool, job.job_id)
+        .await
+        .context("load job input files")?
+        .into_iter()
+        .map(|r| InputFileRef {
+            field: r.field,
+            file_id: r.file_id,
+            name: r.original_name,
+            size_bytes: r.size_bytes,
+            content_type: r.content_type,
+        })
+        .collect();
+
     let response = JobDetailResponse {
         job_id: job.job_id,
         workspace: job.workspace,
@@ -592,6 +620,7 @@ pub async fn get_job(
         retry_attempt: job.retry_attempt,
         max_retries: job.max_retries,
         derived_jobs,
+        input_files,
     };
 
     // Whole-response redaction (spec § 7.4): every content string of the job
@@ -1273,6 +1302,7 @@ mod tests {
             retry_attempt: 0,
             max_retries: None,
             derived_jobs: vec![],
+            input_files: vec![],
         }
     }
 
@@ -1313,6 +1343,7 @@ mod tests {
         let response = JobDetailResponse {
             input: Some(json!({"env": "prod"})),
             derived_jobs: vec![derived_fixture()],
+            input_files: vec![],
             ..job_detail_fixture()
         };
         let mut v = serde_json::to_value(&response).unwrap();
@@ -1332,6 +1363,7 @@ mod tests {
     fn redaction_keeps_derived_job_links() {
         let response = JobDetailResponse {
             derived_jobs: vec![derived_fixture()],
+            input_files: vec![],
             ..job_detail_fixture()
         };
         let v = redacted(&response, &["deploy".to_string(), "failed".to_string()]);
@@ -1374,6 +1406,7 @@ mod tests {
             retry_attempt: 0,
             max_retries: None,
             derived_jobs: vec![],
+            input_files: vec![],
         };
         let v = redacted(&response, &secrets);
         assert_eq!(v["input"]["token"], json!(REDACTED));
@@ -1444,6 +1477,7 @@ mod tests {
             retry_attempt: 0,
             max_retries: None,
             derived_jobs: vec![],
+            input_files: vec![],
         };
         let v = redacted(&response, &secrets);
         let raw = &v["raw_input"];

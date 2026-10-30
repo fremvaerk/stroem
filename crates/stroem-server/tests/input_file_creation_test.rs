@@ -275,6 +275,21 @@ async fn post(app: &App, uri: &str, key: Option<&str>, body: Value) -> (StatusCo
     (status, value)
 }
 
+async fn get(app: &App, uri: &str) -> (StatusCode, Value) {
+    let resp = app
+        .router
+        .clone()
+        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
 async fn execute(app: &App, task: &str, key: Option<&str>, body: Value) -> (StatusCode, Value) {
     post(
         app,
@@ -410,6 +425,29 @@ async fn execute_accepts_own_upload_and_attaches() -> Result<()> {
     let job = JobRepo::get(&app.pool, job_id).await?.unwrap();
     assert_eq!(job.input.unwrap()["data_file"], json!(id));
     assert_eq!(job.raw_input.unwrap()["data_file"], json!(id));
+    Ok(())
+}
+
+#[tokio::test]
+async fn job_detail_lists_input_files() -> Result<()> {
+    let app = build_app(Opts::default()).await?;
+    let id = upload(&app.state, "default", "files", None, b"a,b\n").await;
+    let (status, body) = execute(&app, "files", None, json!({"input": {"data_file": id}})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let job_id = job_id_of(&body);
+
+    let (status, detail) = get(&app, &format!("/api/jobs/{job_id}")).await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(
+        detail["input_files"],
+        json!([{
+            "field": "data_file",
+            "file_id": id,
+            "name": "data.csv",
+            "size_bytes": 4,
+            "content_type": "text/csv"
+        }])
+    );
     Ok(())
 }
 

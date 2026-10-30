@@ -152,6 +152,11 @@ pub const JOB_IDENTIFIER_KEYS: &[&str] = &[
     "derived_jobs",
 ];
 
+/// `input_files[]` entry keys that carry identifiers: the task's input field
+/// name and the file id. `name` and `content_type` are user content and are
+/// redacted like any other value.
+pub(crate) const INPUT_FILE_IDENTIFIER_KEYS: &[&str] = &["field", "file_id"];
+
 /// Step-entry keys that carry identifiers, timestamps or enums. `child_jobs`
 /// holds only links to child jobs (id, workspace, task name, status,
 /// timestamp), so it is skipped whole.
@@ -605,6 +610,15 @@ fn walk_job_content(job: &mut Value, f: &dyn Fn(&mut Value)) {
                 }
                 other => f(other),
             }
+        } else if key == "input_files" {
+            match v {
+                Value::Array(files) => {
+                    for file in files.iter_mut() {
+                        walk_object_except(file, INPUT_FILE_IDENTIFIER_KEYS, f);
+                    }
+                }
+                other => f(other),
+            }
         } else if !JOB_IDENTIFIER_KEYS.contains(&key.as_str()) {
             f(v);
         }
@@ -831,6 +845,49 @@ mod tests {
         JobRedaction::MaskAll.apply_job_response(&mut v);
         assert_eq!(v["derived_jobs"], json!([derived]));
         assert_eq!(v["output"]["r"], json!(REDACTED));
+    }
+
+    fn input_files_fixture() -> Value {
+        json!({
+            "job_id": "j1",
+            "input_files": [{
+                "field": "data_file",
+                "file_id": "file_0123456789abcdef0123456789abcdef",
+                "name": "customer-list.csv",
+                "size_bytes": 12,
+                "content_type": "text/csv"
+            }]
+        })
+    }
+
+    #[test]
+    fn redaction_keeps_input_file_identifiers_with_secret_file() {
+        let mut v = input_files_fixture();
+        JobRedaction::Values(vec!["file".to_string(), "csv".to_string()])
+            .apply_job_response(&mut v);
+        let e = &v["input_files"][0];
+        assert_eq!(e["field"], json!("data_file"));
+        assert_eq!(e["file_id"], json!("file_0123456789abcdef0123456789abcdef"));
+        assert_eq!(e["name"], json!(format!("customer-list.{REDACTED}")));
+        assert_eq!(e["content_type"], json!(format!("text/{REDACTED}")));
+    }
+
+    #[test]
+    fn mask_all_keeps_input_file_identifiers() {
+        let mut v = input_files_fixture();
+        JobRedaction::MaskAll.apply_job_response(&mut v);
+        let e = &v["input_files"][0];
+        assert_eq!(e["field"], json!("data_file"));
+        assert_eq!(e["file_id"], json!("file_0123456789abcdef0123456789abcdef"));
+    }
+
+    #[test]
+    fn mask_all_masks_input_file_name_and_content_type() {
+        let mut v = input_files_fixture();
+        JobRedaction::MaskAll.apply_job_response(&mut v);
+        let e = &v["input_files"][0];
+        assert_eq!(e["name"], json!(REDACTED));
+        assert_eq!(e["content_type"], json!(REDACTED));
     }
 
     #[test]
