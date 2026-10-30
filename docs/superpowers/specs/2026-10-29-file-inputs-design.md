@@ -1,6 +1,6 @@
 # File inputs (`type: file`)
 
-Status: approved (Codex MERGE-READY on revision 6), revision 8 (2026-10-30).
+Status: approved (Codex MERGE-READY on revision 6), revision 9 (2026-10-30).
 Branch `feat/file-inputs-impl`.
 
 ## Revision history
@@ -72,6 +72,20 @@ Branch `feat/file-inputs-impl`.
   `each.item` that is the canonical path of a file attached to the job to
   the render root, so "one file has one path in every context of a step"
   also holds for loop items on `runner: local`.
+- **Revision 9** (2026-10-30) — after the final whole-branch review; the
+  code already does (b), the rest came with the final fix wave.
+  (a) § 8: the worker's and the pod init container's diagnostics name the
+  FILE ID — an identifier the job detail already shows (`input_files[]`) —
+  never the original name or a path; revision 8 said "never the ID" for
+  every message. (b) § 5.1: on a re-claim, a merged non-file field that
+  holds the same attached file's path under another root is rebased to the
+  current root, only for a prepared input that passes through from the
+  earlier claim (ruling R11). (c) § 5.4: a claim that cannot read the job's
+  `job_input_file` rows releases the step back to `ready` like a transient
+  pin failure; it fails only at the release cap (§ 12 holds for jobs
+  without files). (d) § 10: upper caps on `upload_ttl_secs`,
+  `upload_url_ttl_secs` and `max_file_bytes`. Also § 7.5: no upload URL is
+  minted without file storage.
 
 ## 1. Goal
 
@@ -469,12 +483,25 @@ field, the template form (the path `{claim root}/{file_id}/{safe_name}`),
 so a script never receives a bare file ID. The path is then in the step's
 prepared input like any other string.
 
+That prepared input is persisted (`job_step.input`), and a flow step with
+no `input:` passes it through to the next claim of the same step (a
+retry). A retried `runner: local` step is claimed under a fresh
+`inputs_dir` (§ 5.2), so on such a re-claim a merged non-file field whose
+value is the path of the same attached file under another root
+(`…/{file_id}/{safe_name}`) is rebased to the current root (revision 9,
+ruling R11). Only the pass-through input is rebased: a value this claim
+rendered from the author's `input:` is the author's (for example a
+deliberate `/mnt/host{{ input.data_file }}`) and is never changed.
+
 A `for_each` item is rendered once in the S5 context (root `/inputs`) and
 stored on the instance row. At claim, `render_context::build` rebases every
 string in `each.item` that equals `/inputs/{file_id}/{safe_name}` of a file
 attached to the job to the render root (revision 8).
 
-The ID → path mapping happens in `render_context::build` (F14), driven by:
+The ID → path mapping of every template context happens in
+`render_context::build` (F14) — besides it, only the merge above writes a
+path, into the prepared input, and `stroem run` maps IDs through its own
+`JobFiles` (revision 9 wording) — driven by:
 the job's `job_input_file` rows for `input` of the job (not the live task
 schema, which may have changed since creation); the step's persisted
 `action_spec.input` (D10 of the json spec) for the prepared action input. No
@@ -531,6 +558,16 @@ step uses it. Consequences, accepted:
 
 Agent steps (`type: agent`) have no runner and no file system for the step;
 they receive no `input_files` and never fail § 6.5 (author's call).
+
+The claim reads the job's `job_input_file` rows for EVERY claimed step,
+before any render. A read error (a database blip) is transient and would
+otherwise fail steps of jobs that have no file at all (§ 12), so the claim
+is released back to `ready` like a transient pin failure (git-refs spec
+§ 7.2: `JobStepRepo::release_claim`, no retry attempt consumed, the same
+delay, cap and outcomes; job log `[files] could not load the job's input
+files, retrying`). Only at the release cap does the step fail, with the
+fixed text `could not load the job's input files after N attempts`; the
+cause goes to the server log only (revision 9).
 
 ## 6. Delivery to runners
 
@@ -691,7 +728,9 @@ Two calls: upload (§ 4.2), then execute with `{"input": {"data_file":
   {auth.base_url}/api/uploads/{token}`. Without `auth.base_url` (only
   possible with no `auth` section, F18) the tool answers a fixed tool error
   `upload URLs need auth.base_url; send the file inline or use the REST
-  upload` — no URL is ever built from request headers (the same spoofing
+  upload`; without file storage (§ 4.3) it answers `file storage is not
+  configured` and mints no token, whose first `POST` would otherwise be
+  used up on a 503 (revision 9) — no URL is ever built from request headers (the same spoofing
   reason `config.rs:870-875` gives for the OAuth issuer). So a token always
   has a user (`user_id NOT NULL`). `token` = 32 random bytes, stored as SHA-256 only, TTL
   `input_files.upload_url_ttl_secs` (default 900), **single use**. `POST`
@@ -715,6 +754,14 @@ Two calls: upload (§ 4.2), then execute with `{"input": {"data_file":
 All new messages follow CLAUDE.md § Secrets in logs: they name the **input
 field** and a fixed kind, never the ID, the name, the path or a rendered
 value.
+
+Exception (revision 9): the diagnostics of the worker (§ 6.1, § 6.2, a
+failed download or check of one file, `input file {file_id}: …`) and of
+the pod init container (§ 6.4, one stderr line per failure) name the
+**file ID** — an identifier that the job detail already shows in
+`input_files[]` and that the redaction walk keeps intact (§ 7.2) — so an
+operator can tell which of several files failed. They never name the
+original name, the safe name or a path.
 
 | Situation | Message |
 |---|---|
@@ -774,7 +821,13 @@ input_files:
 
 Env overrides follow `STROEM__INPUT_FILES__…`. Caps validated in
 `ServerConfig::validate` (positive; `mcp_inline_max_bytes` ≤ 1.4 MiB so the
-base64 form fits the `/mcp` 2 MiB body limit).
+base64 form fits the `/mcp` 2 MiB body limit). Upper caps (revision 9), each
+error naming the key and the cap: `upload_ttl_secs` ≤ 2 592 000 (30 days)
+and `upload_url_ttl_secs` ≤ 86 400 (24 hours) — larger values overflow the
+expiry arithmetic (`chrono::Duration::seconds` panics) or wrap the orphan
+sweep's signed age negative, which would delete every unattached upload;
+`max_file_bytes` ≤ 10 000 × the 8 MiB S3 part (83 886 080 000 bytes), the
+most one S3 multipart upload can hold with that part size.
 
 ## 11. Touch points
 
