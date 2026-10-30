@@ -346,6 +346,12 @@ pub fn render_image(
 /// is copied by the action field's TYPE (spec 2026-10-29 § 5.1): a `file`
 /// field gets the id, any other field the path under `files`' root, so a
 /// script never receives a bare file id.
+///
+/// Such a non-`file` field that already holds the SAME file's path under
+/// another root is refreshed to the current root: it is this merge's output
+/// from an earlier claim of the step, persisted with the step input and
+/// passed through again when the flow step has no `input:` — and a retried
+/// `runner: local` step is claimed under a fresh `inputs_dir` (§ 5.2).
 pub fn merge_missing_action_fields(
     input_val: &mut serde_json::Value,
     job_input: Option<&serde_json::Value>,
@@ -359,24 +365,31 @@ pub fn merge_missing_action_fields(
         return;
     };
     for (field_name, def) in action_schema {
-        if input_obj.contains_key(field_name) {
-            continue;
-        }
-        let Some(val) = job_map.get(field_name) else {
+        let Some(val) = job_map.get(field_name).filter(|v| !v.is_null()) else {
             continue;
         };
-        if val.is_null() {
-            continue;
-        }
-        let attached = files
+        // The current path, when the job value is this field's attached
+        // file and the action field is not `file`-typed.
+        let as_path = files
             .field_file(field_name)
-            .filter(|f| val.as_str() == Some(f.file_id.as_str()));
-        let merged = match attached {
-            Some(f) if def.field_type != FILE_TYPE => files
-                .path_of(&f.file_id)
-                .map(serde_json::Value::String)
-                .unwrap_or_else(|| val.clone()),
-            _ => val.clone(),
+            .filter(|f| val.as_str() == Some(f.file_id.as_str()) && def.field_type != FILE_TYPE)
+            .and_then(|f| files.path_of(&f.file_id).map(|path| (f, path)));
+        if let Some(existing) = input_obj.get(field_name) {
+            let stale = match (&as_path, existing.as_str()) {
+                (Some((f, path)), Some(s)) => {
+                    s != path
+                        && s.starts_with('/')
+                        && s.ends_with(&format!("/{}/{}", f.file_id, f.safe_name))
+                }
+                _ => false,
+            };
+            if !stale {
+                continue;
+            }
+        }
+        let merged = match as_path {
+            Some((_, path)) => serde_json::Value::String(path),
+            None => val.clone(),
         };
         input_obj.insert(field_name.clone(), merged);
     }
@@ -2155,6 +2168,47 @@ mod tests {
         let job_input = json!({"data_file": FILE_X});
         merge_missing_action_fields(&mut v, Some(&job_input), &schema, &JobFiles::empty());
         assert_eq!(v["data_file"], FILE_X);
+    }
+
+    /// A retried step is claimed again under a fresh `inputs_dir` (spec
+    /// § 5.2) and its persisted input passes through: this file's path from
+    /// the earlier claim is moved to the current root; nothing else changes.
+    #[test]
+    fn test_merge_refreshes_this_files_path_from_an_earlier_claim() {
+        let files = files_x();
+        let job_input = json!({"data_file": FILE_X});
+        let schema = schema_of(&[("data_file", "string")]);
+        let earlier = "/tmp/stroem-inputs-1/in/file_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/r.csv";
+
+        let mut v = json!({"data_file": earlier});
+        merge_missing_action_fields(&mut v, Some(&job_input), &schema, &files);
+        assert_eq!(v, json!({"data_file": PATH_X}));
+
+        // Anything else the step holds stays: another value, another file,
+        // another name, a relative path, the current path.
+        for kept in [
+            "mine",
+            "/old/file_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/r.csv",
+            "/old/file_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/other.csv",
+            "old/file_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/r.csv",
+            PATH_X,
+        ] {
+            let mut v = json!({"data_file": kept});
+            merge_missing_action_fields(&mut v, Some(&job_input), &schema, &files);
+            assert_eq!(v, json!({"data_file": kept}), "{kept}");
+        }
+
+        // A `file` field is never rewritten (its stored form is the id).
+        let mut v = json!({"data_file": earlier});
+        let file_schema = schema_of(&[("data_file", "file")]);
+        merge_missing_action_fields(&mut v, Some(&job_input), &file_schema, &files);
+        assert_eq!(v, json!({"data_file": earlier}));
+
+        // Only when the job value is the field's attached file.
+        let mut v = json!({"data_file": earlier});
+        let other = json!({"data_file": "something else"});
+        merge_missing_action_fields(&mut v, Some(&other), &schema, &files);
+        assert_eq!(v, json!({"data_file": earlier}));
     }
 
     #[test]

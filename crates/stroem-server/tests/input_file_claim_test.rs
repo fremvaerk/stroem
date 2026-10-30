@@ -113,6 +113,12 @@ tasks:
   merge-to-string:
     input: { data_file: { type: file } }
     flow: { run: { action: merge-string } }
+  merge-retry:
+    input: { data_file: { type: file } }
+    flow:
+      run:
+        action: merge-string
+        retry: { max_attempts: 2, delay: 1s }
   collide:
     input: { a: { type: file }, b: { type: file } }
     flow:
@@ -466,6 +472,47 @@ async fn merge_missing_by_target_type() -> Result<()> {
     );
     let row = step_row(&app.pool, job_id, "run").await;
     assert_eq!(row.input.unwrap()["data_file"], json!(path));
+    Ok(())
+}
+
+/// A retried `runner: local` step is claimed again by a worker with another
+/// `inputs_dir` (a fresh one per claim, spec § 5.2): the merged path must
+/// follow the new root, not keep the first claim's.
+#[tokio::test]
+async fn reclaim_after_retry_renders_the_new_worker_root() -> Result<()> {
+    let app = build_app().await?;
+    let up = upload(&app, "merge-retry", "report.csv", b"x").await;
+    let job_id = execute(&app, "merge-retry", json!({"data_file": up.file_id})).await;
+
+    let body = claim_local(&app).await;
+    let first = path_under(INPUTS_DIR, &up.file_id, "report.csv");
+    assert_eq!(body["input"]["data_file"], json!(first));
+
+    // The attempt fails; the step is retried in place.
+    let (status, resp) = worker_post(
+        &app,
+        &format!("/worker/jobs/{job_id}/steps/run/complete"),
+        json!({"exit_code": 1, "error": "boom"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{resp}");
+    assert_eq!(step_row(&app.pool, job_id, "run").await.status, "ready");
+    sqlx::query("UPDATE job_step SET retry_at = NULL WHERE job_id = $1")
+        .bind(job_id)
+        .execute(&app.pool)
+        .await?;
+
+    let (status, body) = claim(&app, &["script"], Some("/w/other")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["job_id"], json!(job_id.to_string()));
+    let second = path_under("/w/other", &up.file_id, "report.csv");
+    assert_eq!(body["input"]["data_file"], json!(second));
+    assert_eq!(
+        body["action_spec"]["script"].as_str().unwrap(),
+        format!("cat \"{second}\"")
+    );
+    let row = step_row(&app.pool, job_id, "run").await;
+    assert_eq!(row.input.unwrap()["data_file"], json!(second));
     Ok(())
 }
 
