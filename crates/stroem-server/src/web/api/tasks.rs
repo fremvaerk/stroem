@@ -1,5 +1,4 @@
 use crate::acl::{load_user_acl_context, make_task_path, TaskPermission};
-use crate::config::JobDefaults;
 use crate::input_files::FileGrant;
 use crate::job_creator::{create_job_for_task_detailed, create_job_for_task_pinned, CreationMode};
 use crate::state::AppState;
@@ -553,7 +552,7 @@ pub async fn execute_task(
                 src_id,
                 &req.replay_fields,
                 state.config.agents.as_ref(),
-                JobDefaults::from(state.config.as_ref()),
+                state.job_defaults(),
                 files,
             )
             .await
@@ -571,7 +570,7 @@ pub async fn execute_task(
                 revision.as_deref(),
                 None,
                 state.config.agents.as_ref(),
-                JobDefaults::from(state.config.as_ref()),
+                state.job_defaults(),
                 files,
             )
             .await
@@ -724,7 +723,7 @@ async fn execute_pinned_rerun(
             replay_fields: &req.replay_fields,
         },
         state.config.agents.as_ref(),
-        JobDefaults::from(state.config.as_ref()),
+        state.job_defaults(),
         files,
     )
     .await

@@ -440,9 +440,14 @@ pub fn build_api_routes(state: Arc<AppState>) -> Router {
 /// Typed [`PinError`](crate::workspace::pins::PinError) /
 /// [`RefResolveError`](crate::refs::RefResolveError) / `GitRefError` are
 /// classified first, by their own permanence (git-refs spec § 8). Before
-/// them all, a `FileInputError` (file inputs spec § 8) is always a 400.
+/// them all, a `FileInputError` (file inputs spec § 8) is always a 400, and
+/// before that an `InputStorageUnavailable` (no file storage on this
+/// server, § 4.3) is always a 503 with its fixed text.
 pub(crate) fn classify_execute_error(e: anyhow::Error) -> AppError {
     use crate::workspace::pins::{PinError, PinLoadWithheld};
+    if let Some(u) = e.downcast_ref::<crate::input_files::InputStorageUnavailable>() {
+        return AppError::ServiceUnavailable(u.to_string());
+    }
     // File inputs (spec 2026-10-29 § 8): a value-free author mistake, checked
     // before everything else — in particular before "is not available" (500).
     if let Some(f) = e.downcast_ref::<stroem_common::file_field::FileInputError>() {
@@ -540,6 +545,25 @@ mod classify_execute_error_tests {
             match classify_execute_error(err) {
                 AppError::BadRequest(msg) => assert_eq!(msg, text),
                 other => panic!("expected BadRequest, got {other:?}"),
+            }
+        }
+    }
+
+    /// No file storage (spec 2026-10-29 § 4.3) is a server condition: 503
+    /// with the fixed text, also under a context layer that would otherwise
+    /// decide (here "is not available", a 500).
+    #[test]
+    fn classify_input_storage_unavailable_is_503() {
+        use crate::input_files::InputStorageUnavailable;
+        for err in [
+            anyhow::Error::new(InputStorageUnavailable),
+            anyhow::Error::new(InputStorageUnavailable).context("workspace 'x' is not available"),
+        ] {
+            match classify_execute_error(err) {
+                AppError::ServiceUnavailable(msg) => {
+                    assert_eq!(msg, "file storage is not configured")
+                }
+                other => panic!("expected ServiceUnavailable, got {other:?}"),
             }
         }
     }

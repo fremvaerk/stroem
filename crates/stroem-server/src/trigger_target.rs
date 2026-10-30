@@ -195,7 +195,7 @@ pub(crate) async fn create_target_job(
     source_id: &str,
 ) -> Result<CreatedJob> {
     let agents = state.config.agents.as_ref();
-    let defaults = crate::config::JobDefaults::from(state.config.as_ref());
+    let defaults = state.job_defaults();
     match &target.pin {
         Some(pin) => {
             crate::job_creator::create_job_for_task_pinned(

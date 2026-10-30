@@ -889,22 +889,41 @@ pub struct ServerConfig {
     pub pin_store: Option<PinStoreSection>,
 }
 
-/// Resolved timeout defaults passed into job creation.
+/// Resolved server defaults passed into job creation.
 ///
-/// Bundles the two `Option<i32>` values so we don't have to thread two more
-/// arguments through every `create_job_for_task` call site. `Copy` + `Default`
-/// keep test callers terse: `JobDefaults::default()`.
-#[derive(Debug, Clone, Copy, Default)]
+/// Bundles the timeout defaults and the input-file storage flag so we don't
+/// have to thread more arguments through every `create_job_for_task` call
+/// site. `Copy` + `Default` keep test callers terse: `JobDefaults::default()`.
+///
+/// Production paths build it with `AppState::job_defaults`, which sets
+/// `input_storage` from the configured blob backend. `From<&ServerConfig>`
+/// and `Default` cannot see that backend and assume storage is there.
+#[derive(Debug, Clone, Copy)]
 pub struct JobDefaults {
     /// Default step timeout in seconds. `None` = no default (run unbounded).
     pub step_timeout_secs: Option<i32>,
     /// Default job timeout in seconds. `None` = no default.
     pub job_timeout_secs: Option<i32>,
+    /// Input-file storage is configured. When `false`, a creation whose input
+    /// carries a `file` value is refused with
+    /// `input_files::InputStorageUnavailable` (file inputs spec § 4.3).
+    pub input_storage: bool,
+}
+
+impl Default for JobDefaults {
+    fn default() -> Self {
+        Self {
+            step_timeout_secs: None,
+            job_timeout_secs: None,
+            input_storage: true,
+        }
+    }
 }
 
 impl From<&ServerConfig> for JobDefaults {
     /// Conversion is fallible only at the `i32::try_from` cast, which
     /// validation guarantees fits (caps are well below `i32::MAX`).
+    /// `input_storage` is `true`: use `AppState::job_defaults` on a server.
     fn from(config: &ServerConfig) -> Self {
         Self {
             step_timeout_secs: config.default_step_timeout.map(|d| {
@@ -913,6 +932,7 @@ impl From<&ServerConfig> for JobDefaults {
             job_timeout_secs: config.default_job_timeout.map(|d| {
                 i32::try_from(d.as_secs()).expect("default_job_timeout validated to fit i32")
             }),
+            input_storage: true,
         }
     }
 }
@@ -3200,6 +3220,17 @@ worker_token: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         let d = JobDefaults::default();
         assert!(d.step_timeout_secs.is_none());
         assert!(d.job_timeout_secs.is_none());
+    }
+
+    /// The config alone cannot see the blob backend: `Default` and
+    /// `From<&ServerConfig>` assume storage (`AppState::job_defaults` is the
+    /// production source of `input_storage`).
+    #[test]
+    fn test_job_defaults_without_state_assume_input_storage() {
+        assert!(JobDefaults::default().input_storage);
+        let yaml = make_minimal_config_with_field("");
+        let config: ServerConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert!(JobDefaults::from(&config).input_storage);
     }
 
     /// `log_ha_diagnostics` must not emit secret bytes.

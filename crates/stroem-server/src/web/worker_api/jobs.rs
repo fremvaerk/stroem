@@ -1079,6 +1079,25 @@ pub async fn claim_job(
             .await;
         }
     };
+    // Safety net behind the creation check (spec § 4.3): a job with files on
+    // a server without file storage (e.g. restarted without its archive
+    // config) can never deliver them — every download would answer 503 until
+    // the worker gives up. Fail here, with the real cause.
+    if !is_agent && !attachments.is_empty() && state.input_blob.is_none() {
+        return Ok(fail_claimed_step(
+            &state,
+            step.job_id,
+            &step.step_name,
+            crate::input_files::STORAGE_NOT_CONFIGURED,
+            &ws_set,
+            &ClaimFailure {
+                claim,
+                pin_secrets: &pin_secrets,
+                withheld: None,
+            },
+        )
+        .await);
+    }
     // `inputs_dir` in the request is the worker's "I place input files"
     // signal, whatever the step's root: an older worker would run the step
     // without them. An ordinary claim failure — no release, which would loop
@@ -1778,7 +1797,7 @@ pub async fn agent_task_tool(
         job_id,
         &step_name,
         job.revision.as_deref(),
-        crate::config::JobDefaults::from(state.config.as_ref()),
+        state.job_defaults(),
         job.git_ref.as_deref(),
     )
     .await

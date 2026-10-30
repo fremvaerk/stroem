@@ -27678,6 +27678,7 @@ async fn test_defaults_apply_when_task_has_no_timeout() -> Result<()> {
     let defaults = JobDefaults {
         step_timeout_secs: Some(300),
         job_timeout_secs: Some(600),
+        ..JobDefaults::default()
     };
 
     let job_id = create_job_for_task(
@@ -27765,6 +27766,7 @@ async fn test_explicit_task_timeout_overrides_default() -> Result<()> {
     let defaults = JobDefaults {
         step_timeout_secs: None,
         job_timeout_secs: Some(600),
+        ..JobDefaults::default()
     };
 
     let job_id = create_job_for_task(
@@ -27807,6 +27809,7 @@ async fn test_explicit_step_timeout_overrides_default() -> Result<()> {
     let defaults = JobDefaults {
         step_timeout_secs: Some(300),
         job_timeout_secs: None,
+        ..JobDefaults::default()
     };
 
     let job_id = create_job_for_task(
@@ -27845,6 +27848,7 @@ async fn test_only_step_default_set_job_timeout_is_null() -> Result<()> {
     let defaults = JobDefaults {
         step_timeout_secs: Some(300),
         job_timeout_secs: None,
+        ..JobDefaults::default()
     };
 
     let job_id = create_job_for_task(
@@ -27890,6 +27894,7 @@ async fn test_explicit_larger_task_timeout_beats_smaller_default() -> Result<()>
     let defaults = JobDefaults {
         step_timeout_secs: None,
         job_timeout_secs: Some(300),
+        ..JobDefaults::default()
     };
 
     let job_id = create_job_for_task(
@@ -27938,6 +27943,7 @@ async fn test_explicit_smaller_step_timeout_beats_larger_default() -> Result<()>
     let defaults = JobDefaults {
         step_timeout_secs: Some(3600),
         job_timeout_secs: None,
+        ..JobDefaults::default()
     };
 
     let job_id = create_job_for_task(
@@ -27982,6 +27988,7 @@ async fn test_for_each_instances_inherit_step_default() -> Result<()> {
     let defaults = JobDefaults {
         step_timeout_secs: Some(120),
         job_timeout_secs: None,
+        ..JobDefaults::default()
     };
 
     let job_id = create_job_for_task(
@@ -28026,6 +28033,7 @@ async fn test_retry_job_inherits_defaults() -> Result<()> {
     let defaults = JobDefaults {
         step_timeout_secs: None,
         job_timeout_secs: Some(90),
+        ..JobDefaults::default()
     };
 
     let retry_job_id = create_job_for_task(
@@ -28081,6 +28089,7 @@ async fn test_sub_task_inherits_defaults() -> Result<()> {
     let defaults = JobDefaults {
         step_timeout_secs: Some(45),
         job_timeout_secs: Some(90),
+        ..JobDefaults::default()
     };
 
     let parent_job_id = create_job_for_task(

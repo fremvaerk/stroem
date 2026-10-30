@@ -702,11 +702,14 @@ impl StromMcpHandler {
             revision.as_deref(),
             None,
             self.state.config.agents.as_ref(),
-            crate::config::JobDefaults::from(self.state.config.as_ref()),
+            self.state.job_defaults(),
             files,
         )
         .await
         .map_err(|e| {
+            if let Some(u) = e.downcast_ref::<crate::input_files::InputStorageUnavailable>() {
+                return internal_err(u.to_string());
+            }
             match e.downcast_ref::<stroem_common::file_field::FileInputError>() {
                 Some(f) => rmcp::ErrorData::invalid_params(f.to_string(), None),
                 None => internal_err(format!("Failed to create job: {e}")),

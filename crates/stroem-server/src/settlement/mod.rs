@@ -96,7 +96,7 @@ impl AppState {
         Settlement {
             pool: self.pool.clone(),
             workspaces: self.workspaces.clone(),
-            defaults: JobDefaults::from(self.config.as_ref()),
+            defaults: self.job_defaults(),
             log_storage: self.log_storage.clone(),
             log_broadcast: self.log_broadcast.clone(),
             job_completion: self.job_completion.clone(),

@@ -17,7 +17,7 @@ use stroem_db::{JobPinCols, JobRefPinRepo, JobRepo, JobRow, JobStepRepo, NewJobS
 use uuid::Uuid;
 
 use crate::config::{AgentsConfig, JobDefaults};
-use crate::input_files::{attach_all_tx, task_file_values, FileGrant};
+use crate::input_files::{attach_all_tx, task_file_values, FileGrant, InputStorageUnavailable};
 use crate::refs::{inherited_pin, plan_reference, RefPlan, RefResolveError, RefWorld};
 use crate::settlement::CreatedJob;
 use crate::workspace::pins::{PinRef, Pinned};
@@ -595,6 +595,12 @@ pub(crate) fn create_job_for_task_inner<'a>(
             _ => None,
         };
         let file_values = task_file_values(task, &effective_input).map_err(anyhow::Error::new)?;
+        // § 4.3: without storage no job may carry a file — also an existing
+        // attachment a Re-run, Restart, retry or child replays — or the step
+        // would fail later at delivery. Before the transaction: no job row.
+        if !file_values.is_empty() && !defaults.input_storage {
+            return Err(anyhow::Error::new(InputStorageUnavailable));
+        }
 
         // Capture the user's submission verbatim before defaults/connections are merged.
         let raw_input_to_persist = Some(effective_input.clone());
@@ -2642,6 +2648,7 @@ mod tests {
             defaults: JobDefaults {
                 step_timeout_secs: Some(600),
                 job_timeout_secs: None,
+                ..JobDefaults::default()
             },
         };
         let step = |yaml: &str| -> FlowStep { serde_yaml::from_str(yaml).unwrap() };

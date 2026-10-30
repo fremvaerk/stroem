@@ -43,7 +43,7 @@ pub async fn download_input_file(
         .context("get attached input file")?
         .ok_or_else(not_found)?;
     let Some(archive) = state.input_blob.clone() else {
-        return Ok(unavailable("file storage is not configured"));
+        return Ok(unavailable(crate::input_files::STORAGE_NOT_CONFIGURED));
     };
     let body = match download_body(archive.as_ref(), &rec.storage_key).await {
         Ok(Some(body)) => body,

@@ -235,6 +235,17 @@ impl AppState {
         self
     }
 
+    /// The job-creation defaults of this server: the config's timeouts, and
+    /// `input_storage` from the configured input-file backend. Every
+    /// production creation path uses this, never `JobDefaults::from(config)`
+    /// alone, which cannot see the backend (file inputs spec § 4.3).
+    pub fn job_defaults(&self) -> crate::config::JobDefaults {
+        crate::config::JobDefaults {
+            input_storage: self.input_blob.is_some(),
+            ..crate::config::JobDefaults::from(self.config.as_ref())
+        }
+    }
+
     /// Storage key for an uploaded input file: `{prefix}{workspace}/{file_id}`.
     pub fn input_file_storage_key(&self, workspace: &str, file_id: &str) -> String {
         format!(
@@ -653,6 +664,18 @@ mod tests {
         assert!(!logs1.contains("error for job2"));
         assert!(logs2.contains("error for job2"));
         assert!(!logs2.contains("error for job1"));
+    }
+
+    #[tokio::test]
+    async fn job_defaults_input_storage_follows_the_input_blob() {
+        let dir = TempDir::new().unwrap();
+        let state = test_state(dir.path());
+        assert!(!state.job_defaults().input_storage);
+        let archive: Arc<dyn crate::blob_storage::BlobArchive> = Arc::new(
+            crate::blob_storage::LocalBlobArchive::new(dir.path().join("inputs")),
+        );
+        let state = state.with_input_blob(Some(archive));
+        assert!(state.job_defaults().input_storage);
     }
 
     #[tokio::test]

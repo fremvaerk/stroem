@@ -1075,3 +1075,38 @@ async fn worker_download_storage_error_is_503_with_retry_after() -> Result<()> {
     assert!(!String::from_utf8_lossy(&bytes).contains("simulated"));
     Ok(())
 }
+
+/// Codex implementation round 1 (safety net behind the creation check): a
+/// runner step of a job with files, claimed on a server without file
+/// storage, fails at claim — the worker would otherwise use up its download
+/// attempts on 503s. An agent step (no files) and a job without files claim
+/// as before.
+#[tokio::test]
+async fn claim_without_storage_fails_a_step_with_files() -> Result<()> {
+    const NO_STORAGE: &str = "file storage is not configured";
+    let mut app = build_app().await?;
+    let up = upload(&app, "local", "report.csv", b"x").await;
+    let job_id = execute(&app, "local", json!({"data_file": up.file_id})).await;
+    let ask = upload(&app, "ask", "report.csv", b"x").await;
+    let ask_job = execute(&app, "ask", json!({"data_file": ask.file_id})).await;
+
+    // The server restarts without its archive configuration.
+    app.state = state_with(&app.pool, &app._tmp, None);
+    app.router = build_router(app.state.clone(), CancellationToken::new());
+
+    let (status, body) = claim(&app, &["script"], Some(INPUTS_DIR)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["error"], json!(NO_STORAGE));
+    let row = step_row(&app.pool, job_id, "run").await;
+    assert_eq!(row.status, "failed");
+    assert_eq!(row.error_message.as_deref(), Some(NO_STORAGE));
+
+    let (status, body) = claim(&app, &["agent"], None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["job_id"], json!(ask_job.to_string()));
+
+    let plain = execute(&app, "plain", json!({"name": "n"})).await;
+    let body = claim_local(&app).await;
+    assert_eq!(body["job_id"], json!(plain.to_string()));
+    Ok(())
+}

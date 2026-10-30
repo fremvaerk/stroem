@@ -861,7 +861,7 @@ pub async fn restart_job(
         &req.from_step,
         source_id.as_deref(),
         revision.as_deref(),
-        crate::config::JobDefaults::from(state.config.as_ref()),
+        state.job_defaults(),
         source_pin.as_ref().map(|sp| sp.pin.git_ref.as_str()),
         files,
     )

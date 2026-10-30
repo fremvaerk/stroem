@@ -1262,3 +1262,66 @@ async fn rerun_accepts_fresh_own_replacement_upload() -> Result<()> {
     );
     Ok(())
 }
+
+const NO_STORAGE: &str = "file storage is not configured";
+
+/// The server restarts without its archive configuration: same database,
+/// no input-file storage.
+fn drop_storage(app: &mut App) {
+    app.state = app.state.clone().with_input_blob(None);
+    app.router = build_router(app.state.clone(), CancellationToken::new());
+}
+
+/// Codex implementation round 1 (spec § 4.3): without file storage a
+/// creation that would carry a file — a fresh own upload, or an existing
+/// attachment that a Re-run or a Restart replays — is refused with 503 and
+/// creates no job. A creation without a file value needs no storage.
+#[tokio::test]
+async fn creation_with_file_without_storage_is_503_and_creates_no_job() -> Result<()> {
+    let mut app = build_app(Opts::default()).await?;
+    let id = upload(&app.state, "default", "files", None, b"x").await;
+    let (status, body) = execute(&app, "files", None, json!({"input": {"data_file": id}})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let source = job_id_of(&body);
+    complete(&app, source).await;
+
+    drop_storage(&mut app);
+    let before = jobs_of_task(&app.pool, "files").await.len();
+
+    for request in [
+        json!({"input": {"data_file": id}}),
+        json!({"input": {"data_file": id}, "source_job_id": source}),
+        json!({"input": {}, "source_job_id": source, "replay_fields": ["data_file"]}),
+    ] {
+        let (status, body) = execute(&app, "files", None, request.clone()).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{request}: {body}");
+        assert_eq!(body["error"], json!(NO_STORAGE), "{request}");
+    }
+
+    let (status, body) = post(
+        &app,
+        &format!("/api/jobs/{source}/restart"),
+        None,
+        json!({"from_step": "run"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["error"], json!(NO_STORAGE));
+
+    let resp = mcp_execute(&app, "files", json!({"data_file": id})).await;
+    assert_eq!(resp["error"]["code"], json!(-32603), "{resp}");
+    assert_eq!(resp["error"]["message"], json!(NO_STORAGE), "{resp}");
+
+    assert_eq!(
+        jobs_of_task(&app.pool, "files").await.len(),
+        before,
+        "a job was created without file storage"
+    );
+
+    // No file value: no storage needed.
+    let (status, body) = execute(&app, "files", None, json!({"input": {}})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = execute(&app, "plain", None, json!({"input": {"name": "n"}})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    Ok(())
+}

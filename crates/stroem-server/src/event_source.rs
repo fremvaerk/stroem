@@ -673,7 +673,7 @@ async fn create_event_source_job(
         revision.as_deref(),
         None,
         state.config.agents.as_ref(),
-        crate::config::JobDefaults::from(state.config.as_ref()),
+        state.job_defaults(),
         crate::input_files::FileGrant::Indirect,
     )
     .await

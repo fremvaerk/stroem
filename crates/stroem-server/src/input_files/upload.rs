@@ -56,7 +56,7 @@ impl std::fmt::Display for UploadError {
         match self {
             UploadError::InvalidName => f.write_str("invalid file name"),
             UploadError::TooLarge { max } => write!(f, "file is larger than {max} bytes"),
-            UploadError::NotConfigured => f.write_str("file storage is not configured"),
+            UploadError::NotConfigured => f.write_str(super::STORAGE_NOT_CONFIGURED),
             UploadError::Internal(_) => f.write_str("the file could not be stored"),
         }
     }

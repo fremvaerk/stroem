@@ -276,10 +276,9 @@ pub async fn download_input_file(
         .await
         .context("get job input file")?
         .ok_or_else(|| AppError::not_found("Input file"))?;
-    let archive = state
-        .input_blob
-        .clone()
-        .ok_or_else(|| AppError::ServiceUnavailable("file storage is not configured".into()))?;
+    let archive = state.input_blob.clone().ok_or_else(|| {
+        AppError::ServiceUnavailable(crate::input_files::STORAGE_NOT_CONFIGURED.into())
+    })?;
     let body = download_body(archive.as_ref(), &rec.storage_key)
         .await
         .map_err(AppError::Internal)?
