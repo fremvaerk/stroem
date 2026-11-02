@@ -408,7 +408,8 @@ Returns job metadata and all steps with statuses.
       "source_type": "restart",
       "status": "running",
       "created_at": "2025-02-10T12:30:00Z",
-      "restart_from_step": "say-hello"
+      "restart_from_step": "say-hello",
+      "restart_from_steps": null
     }
   ]
 }
@@ -430,8 +431,11 @@ step's task runs at. A `type: task` step also lists its `child_jobs[]`
 
 `derived_jobs[]` lists the [Restarts and Re-runs](/guides/rerun-and-restart/)
 created from this job, newest first: `id`, `source_type` (`restart` or
-`rerun`), `status`, `created_at` and `restart_from_step` (`null` for a
-re-run). Hook jobs are not listed. With ACL configured, a run you may not
+`rerun`), `status`, `created_at`, `restart_from_step` (`null` for a
+re-run and for a restart of failed steps) and `restart_from_steps` (the
+failed or cancelled steps a [restart of failed
+steps](/guides/rerun-and-restart/#restart-failed-steps) began at, else
+`null`). The job itself has the same two fields. Hook jobs are not listed. With ACL configured, a run you may not
 view is left out. It is an empty array when nothing was created from the
 job.
 
@@ -485,14 +489,17 @@ Cancels a pending or running job. Running steps are actively killed (processes t
 stroem cancel <job_id>
 ```
 
-## Restart Job From a Step
+## Restart Job
 
 ```
 POST /api/jobs/{id}/restart
 ```
 
-Creates a new job for the same task and input, rerunning only the given step and its
-dependents; every other step is carried over from the source job unchanged (see
+Creates a new job for the same task and input, rerunning only the start steps and
+their dependents; every other step is carried over from the source job unchanged. The
+start step is either one step you choose (`from_step`) or every failed or cancelled
+step of the source job (`all_failed: true`; see
+[Restart failed steps](/guides/rerun-and-restart/#restart-failed-steps) and
 [Re-running and Restarting Jobs](/guides/rerun-and-restart)). Requires Run
 permission on the task. The source job must be terminal, must be a **top-level** job
 (not a `type: task` child, agent tool call, hook or uploaded-state job) and must have
@@ -511,15 +518,26 @@ permission on the task. The source job must be terminal, must be a **top-level**
 }
 ```
 
+```json
+{
+  "all_failed": true,
+  "dry_run": false
+}
+```
+
+Give exactly one of `from_step` and `all_failed: true`; both or neither is a `400`.
+
 | Field | Type | Description |
 |-------|------|-------------|
 | `from_step` | string | Step name to restart from. Must be a step in the task's *current* flow, and not a `for_each` instance name (e.g. `step[0]`). For a [pinned](/guides/git-refs/) source job, "current" means the flow at the source's ref re-resolved now. |
+| `all_failed` | bool | When `true`, start at every top-level step of the source job that is `failed` or `cancelled` (or did not finish), `continue_on_failure` steps included. A `for_each` loop restarts as a whole. Steps no longer in the current flow are ignored. |
 | `dry_run` | bool | When `true`, returns the plan without creating a job. |
 
 **Response — `dry_run: true` (200):**
 
 ```json
 {
+  "start_steps": ["publish"],
   "restart_steps": ["agg-sessions", "publish", "recalc"],
   "carried_over": ["dates", "recalc-sessions", "ai-sources"],
   "carried_failed": [],
@@ -532,24 +550,27 @@ permission on the task. The source job must be terminal, must be a **top-level**
 ```json
 {
   "job_id": "a1b2c3d4-...",
+  "start_steps": ["publish"],
   "restart_steps": ["agg-sessions", "publish", "recalc"],
   "carried_over": ["dates", "recalc-sessions", "ai-sources"],
-  "carried_failed": []
+  "carried_failed": [],
+  "carried_failed_tolerated": []
 }
 ```
 
 | Field | Description |
 |-------|-------------|
+| `start_steps` | The steps the restart begins at, sorted: `[from_step]`, or the failed and cancelled steps. Steps added to the flow since the source job ran also rerun, but are listed only in `restart_steps`. |
 | `restart_steps` | Steps that will run (or ran) again under the current flow, sorted by name. |
 | `carried_over` | Steps copied forward from the source job without re-executing. |
-| `carried_failed` | Carried-over steps that ended `failed` and are **not** caught (on that step or on every path below it) under the current flow — the new job will end `failed`. |
-| `carried_failed_tolerated` | Carried-over steps that ended `failed` but are caught by `continue_on_failure` under the current flow (on that step itself, or on every path below it). Dry-run only. |
+| `carried_failed` | Carried-over steps that ended `failed` and whose own `continue_on_failure` (under the current flow) does not tolerate it — the new job will end `failed`. Always empty with `all_failed`. |
+| `carried_failed_tolerated` | Carried-over steps that ended `failed` but whose own `continue_on_failure` (under the current flow) tolerates it. They are not rerun. Always empty with `all_failed`. |
 
 **Error responses:**
 
 | Status | Description |
 |--------|-------------|
-| `400` | Source job is not top-level, has no `raw_input`, `from_step` is not in the current flow, `from_step` is a loop instance, the workspace/task no longer exists, or the task's input schema has gained a required field with no default |
+| `400` | The body gives both or neither of `from_step` and `all_failed: true`; the source job is not top-level or has no `raw_input`; `from_step` is not in the current flow or is a loop instance; `all_failed` finds no failed or cancelled step in the current flow; the workspace/task no longer exists; or the task's input schema has gained a required field with no default |
 | `401` | Auth is configured and no user was authenticated |
 | `403` | Authenticated user has View but not Run permission on the task |
 | `404` | Job not found, or ACL denies access |

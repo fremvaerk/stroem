@@ -1,19 +1,19 @@
 ---
 title: Re-running and Restarting Jobs
-description: Re-run a job from scratch with the same input, or restart it from a specific step and skip work that already succeeded
+description: Re-run a job from scratch with the same input, or restart it from a specific step or from all failed steps and skip work that already succeeded
 ---
 
-Two ways to recover from a failed (or otherwise finished) job without retyping input: **Re-run**, which starts a brand-new job from the beginning, and **Restart from a step**, which reruns only the steps affected by a chosen step and carries the rest forward unchanged.
+Three ways to recover from a failed (or otherwise finished) job without retyping input: **Re-run**, which starts a brand-new job from the beginning; **Restart from a step**, which reruns only the steps affected by a chosen step and carries the rest forward unchanged; and **Restart failed steps**, which does the same for every failed or cancelled step at once.
 
-Both are available from the job detail page once a job reaches a terminal state (`completed`, `failed`, or `cancelled`), and only on **top-level** jobs — a job you started yourself, or one a trigger, webhook, schedule or retry started. A child job of a `type: task` step, an agent tool call, or a hook job cannot be re-run or restarted: both actions create a brand-new job with no parent, so the original parent would never learn about it. Restart or re-run the top-level job instead. The buttons are hidden on those jobs, and the API rejects them with `400`.
+All three are available from the job detail page once a job reaches a terminal state (`completed`, `failed`, or `cancelled`), and only on **top-level** jobs — a job you started yourself, or one a trigger, webhook, schedule or retry started. A child job of a `type: task` step, an agent tool call, or a hook job cannot be re-run or restarted: both actions create a brand-new job with no parent, so the original parent would never learn about it. Restart or re-run the top-level job instead. The buttons are hidden on those jobs, and the API rejects them with `400`.
 
 ## Re-run
 
 The **Re-run** button on a job's detail page opens the task's execute form prefilled with that job's original input (`raw_input`), including connection selections and non-default secret fields. Adjust anything you like, then submit — it creates a normal new job via `POST /api/workspaces/{ws}/tasks/{name}/execute`, running every step from scratch on the current workspace revision.
 
-The new job records `source_type: "rerun"` and `source_job_id` pointing at the job it was re-run from, so the job detail page shows **re-run of `<id>`** under the job title (and in the **Source** card), linking back to the source job. A restarted job shows **restart of `<id>` from `<step>`** the same way. Re-run is only offered for jobs whose `raw_input` was captured — jobs created before this feature (or via legacy clients) show "This job predates Re-run prefill" and fall back to blank defaults.
+The new job records `source_type: "rerun"` and `source_job_id` pointing at the job it was re-run from, so the job detail page shows **re-run of `<id>`** under the job title (and in the **Source** card), linking back to the source job. A restarted job shows **restart of `<id>` from `<step>`** the same way (**restart of `<id>` of failed steps `<a, b, …>`** for a restart of failed steps). Re-run is only offered for jobs whose `raw_input` was captured — jobs created before this feature (or via legacy clients) show "This job predates Re-run prefill" and fall back to blank defaults.
 
-The link goes the other way too. A job that was restarted or re-run shows a **Later runs** card on its detail page, with one row for each new job, newest first: the job id (a link to it), its status and, for a restart, the step it began at (**restart `0438a27a` failed from `ai_sources`**). The card shows the five newest runs and counts the others (**+2 more**). The page keeps the card current while it is open: a new run, or a run whose status changes, shows within 30 seconds (10 seconds while one of the runs is still running). Jobs that the job's [hooks](/guides/hooks/) created are not listed, because they are not new runs; each of them links back with **hook for `<id>`**. A [task retry](/guides/retry/#retry-chain) has its own **Retried** link. With [ACL](/operations/authorization/) configured, the card leaves out a run that you may not view: the restart of a [pinned job](#pinned-jobs) takes its folder from the commit it ran at, which can differ from the source's folder.
+The link goes the other way too. A job that was restarted or re-run shows a **Later runs** card on its detail page, with one row for each new job, newest first: the job id (a link to it), its status and, for a restart, the step it began at (**restart `0438a27a` failed from `ai_sources`**) or the failed steps it began at (**restart `0438a27a` running failed steps `ai_maintain`, `ml-prediction-master`**). The card shows the five newest runs and counts the others (**+2 more**). The page keeps the card current while it is open: a new run, or a run whose status changes, shows within 30 seconds (10 seconds while one of the runs is still running). Jobs that the job's [hooks](/guides/hooks/) created are not listed, because they are not new runs; each of them links back with **hook for `<id>`**. A [task retry](/guides/retry/#retry-chain) has its own **Retried** link. With [ACL](/operations/authorization/) configured, the card leaves out a run that you may not view: the restart of a [pinned job](#pinned-jobs) takes its folder from the commit it ran at, which can differ from the source's folder.
 
 A `json` field starts a re-run in *replay* mode, masked or not: the previous run's value is reused exactly (the server copies the source job's stored value). Choose *Edit* to change it. A value typed in the form is parsed by the browser, so integers beyond 2^53 lose precision there — use the API or replay for those. API clients do the same with `replay_fields`: `{"source_job_id": "…", "replay_fields": ["cfg"], "input": {…}}`. A re-run must use a source job of the same task; `replay_fields` needs `source_job_id`, may only name the task's fields, may not repeat a field given in `input`, and fails when the source has no value for a required field with no default — each a `400`.
 
@@ -38,6 +38,8 @@ The preview is computed when you open the dialog and the create request recomput
 
 If any carried-over step ended failed and that step's own `continue_on_failure` (under the current flow) doesn't catch it, the dialog adds a warning that the new job will still end failed, and suggests restarting from an earlier step to rerun those failures too.
 
+If a carried-over step ended failed but its own `continue_on_failure` lets the job pass, the dialog shows a note with those steps: they are copied, not rerun. Use [Restart failed steps](#restart-failed-steps) to rerun them too.
+
 ### What gets rerun vs. carried over
 
 Given the step you chose:
@@ -56,12 +58,39 @@ The new job runs through the normal creation, promotion, and dispatch pipeline f
 
 A carried `failed` step whose own `continue_on_failure` (under the current flow) catches it does not fail the job. A carried `cancelled` step with no failures ends the job `cancelled`, not `completed` (skipped rows never decide job status).
 
+## Restart failed steps
+
+**Restart failed steps** creates one new job that reruns every step that failed or was cancelled in the source job, and every step below them. Everything else is carried over, exactly as for [Restart from a step](#restart-from-a-step): same input, current workspace revision, same rules for steps added to or removed from the flow, same limitations.
+
+Use it when several independent branches failed for one cause — for example two workers were replaced at the same time and steps on four branches failed. Restart from a step starts at one step only, so the other failures would be copied as `failed` and their downstream steps skipped again.
+
+### Where to find it
+
+The **Restart failed steps** button is in the job header, next to **Re-run**. It is shown when the job is terminal and top-level, you have Run permission on the task, and at least one top-level step failed, was cancelled or did not finish. Clicking it opens the same confirmation dialog, built from a dry run (`POST /api/jobs/{id}/restart` with `{"all_failed": true, "dry_run": true}`):
+
+> Restart the failed steps of **{task}**?
+> Starts at *N* failed or cancelled step(s): *step-a, step-b*. Reruns *M* step(s): … *K* step(s) are carried over unchanged.
+
+### Which steps it starts at
+
+- Every top-level step whose status in the source job is `failed` or `cancelled`. A step with `continue_on_failure: true` is included: its failure did not fail the job, but it is still a failure you may want to rerun.
+- A step that did not finish (for example it was still running when the job was cancelled) is included too: Restart from a step would carry it as `cancelled`.
+- A `for_each` loop is restarted as a whole when its placeholder ended `failed`; single instances are never restarted on their own. A loop whose instances were all `cancelled` (none `failed`) ends `completed`, so it is carried over, not restarted.
+- A failed or cancelled step that is no longer in the task's current flow is ignored.
+- `skipped` steps are rerun only when they are below a start step (for example the steps skipped `unreachable` below a failed step).
+
+If no step qualifies, the request is rejected with `400` *No failed or cancelled steps to restart*. The new job records the start steps in `restart_from_steps` (and `restart_from_step` is `null`).
+
+### Rollout
+
+The button needs a server that knows `all_failed`. During a rolling upgrade, a request that reaches a replica still on the previous release fails with `422`; try again when every replica runs the new release. The release adds migration `055`, which only adds a nullable column (no table scan, no manual step). As with every migration, a server binary older than the migration refuses to start against the migrated database. To roll back, stop every new replica, run `DELETE FROM _sqlx_migrations WHERE version = 55`, then start the old release; the column can stay. A later upgrade applies `055` again without error.
+
 ## Files
 
 A task with [`file` input fields](/guides/file-inputs/) keeps its files on both paths.
 
 - **Re-run:** the form shows the file of the source job (name and size) with a **Replace** button. If you keep it, the new job uses the same file. If you replace it, the browser uploads the new file with `source_job_id`, so the permission check uses the task of the source job (also for a [pinned job](#pinned-jobs)). The replacement is a normal upload and follows the upload lifetime.
-- **Restart from a step:** the restart takes no new input. It uses the files of the source job.
+- **Restart from a step** and **Restart failed steps:** the restart takes no new input. It uses the files of the source job.
 
 ## Limitations
 
@@ -75,7 +104,7 @@ Restart from a step does not fully reconstruct the source job's environment for 
 - **Child jobs** created by a carried `type: task` step are not re-linked to the new job; only the step's final output comes along.
 - **Duration statistics**: restart jobs (whole job and per-step) are excluded from the task duration stats used for percentile charts and ETA, even when the restart reran from the very first step. A restarted job also never falls back to the whole-task p50 for its ETA — it either computes a step-weighted estimate from steps it's actually rerunning, or shows none.
 
-If a failure you want to retry isn't in the set you'd get by restarting from where it happened (because an earlier carried step is also failed and untolerated), restart from that earlier step instead so it reruns too.
+If a failure you want to retry isn't in the set you'd get by restarting from where it happened (because an earlier carried step is also failed and untolerated), restart from that earlier step instead so it reruns too — or use [Restart failed steps](#restart-failed-steps), which reruns every failure in one job.
 
 ## Pinned jobs
 
