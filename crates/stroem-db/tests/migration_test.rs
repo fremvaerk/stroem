@@ -389,3 +389,23 @@ async fn test_054_input_files_schema() -> Result<()> {
     assert!(bad.is_err(), "file_id CHECK must reject 'x'");
     Ok(())
 }
+
+/// Migration 055: `job.restart_from_steps` is a nullable `text[]`, and the
+/// file can run again on a migrated schema (a rollback deletes its history
+/// row and keeps the column; spec 2026-11-02 § 6).
+#[tokio::test]
+async fn test_055_job_restart_from_steps() -> Result<()> {
+    let pool = setup_db().await?;
+    let (data_type, nullable): (String, String) = sqlx::query_as(
+        "SELECT udt_name::text, is_nullable::text FROM information_schema.columns \
+         WHERE table_name = 'job' AND column_name = 'restart_from_steps'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(data_type, "_text");
+    assert_eq!(nullable, "YES");
+    sqlx::raw_sql(include_str!("../migrations/055_job_restart_from_steps.sql"))
+        .execute(&pool)
+        .await?;
+    Ok(())
+}

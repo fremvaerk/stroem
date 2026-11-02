@@ -15,7 +15,7 @@ const MAX_TASK_DEPTH: i32 = 10;
 /// `concat!` it into a `&'static str`, which sqlx accepts as SQL directly.
 macro_rules! job_columns {
     () => {
-        "job_id, workspace, task_name, mode, input, output, status, source_type, source_id, worker_id, revision, created_at, started_at, completed_at, log_path, parent_job_id, parent_step_name, timeout_secs, retry_of_job_id, retry_job_id, retry_attempt, max_retries, raw_input, source_job_id, restart_from_step, git_ref, task_folder"
+        "job_id, workspace, task_name, mode, input, output, status, source_type, source_id, worker_id, revision, created_at, started_at, completed_at, log_path, parent_job_id, parent_step_name, timeout_secs, retry_of_job_id, retry_job_id, retry_attempt, max_retries, raw_input, source_job_id, restart_from_step, restart_from_steps, git_ref, task_folder"
     };
 }
 const JOB_COLUMNS: &str = job_columns!();
@@ -56,6 +56,10 @@ pub struct JobRow {
     pub raw_input: Option<JsonValue>,
     pub source_job_id: Option<Uuid>,
     pub restart_from_step: Option<String>,
+    /// The start steps of an all-failed restart (migration 055, spec
+    /// 2026-11-02 § 4.4); `None` for every other job, a single-step restart
+    /// included. At most one of this and `restart_from_step` is set.
+    pub restart_from_steps: Option<Vec<String>>,
     /// The spec's `job.ref` (2026-10-02 § 6): the ref string as written, for a
     /// job created in owner@ref. `revision` holds its commit. `Some` ⇔ pinned job.
     pub git_ref: Option<String>,
@@ -95,6 +99,7 @@ impl JobRow {
             raw_input: None,
             source_job_id: None,
             restart_from_step: None,
+            restart_from_steps: None,
             git_ref: None,
             task_folder: None,
         }
@@ -117,6 +122,16 @@ pub struct RetentionJobInfo {
 /// another job. Its identifiers, plus the job-row ACL coordinates
 /// (`workspace`, `task_name`, `git_ref`, `task_folder`) — a pinned restart
 /// takes its folder from the new commit, so it can differ from the source's.
+/// The restart lineage a new job row records (spec 2026-11-02 § 4.4). One
+/// value per row, so the two columns can never both be set.
+#[derive(Debug, Clone, Copy)]
+pub enum RestartLineage<'a> {
+    /// Restart From Step: `restart_from_step`.
+    FromStep(&'a str),
+    /// Restart Failed Steps: `restart_from_steps`, the start steps.
+    FromSteps(&'a [String]),
+}
+
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct DerivedRunRow {
     pub job_id: Uuid,
@@ -126,6 +141,7 @@ pub struct DerivedRunRow {
     pub status: String,
     pub created_at: DateTime<Utc>,
     pub restart_from_step: Option<String>,
+    pub restart_from_steps: Option<Vec<String>>,
     pub git_ref: Option<String>,
     pub task_folder: Option<String>,
 }
@@ -337,7 +353,7 @@ impl JobRepo {
         revision: Option<&str>,
         raw_input: Option<JsonValue>,
         source_job_id: Option<Uuid>,
-        restart_from_step: Option<&str>,
+        restart: Option<RestartLineage<'_>>,
     ) -> Result<Uuid> {
         Self::create_with_parent_tx(
             pool,
@@ -353,7 +369,7 @@ impl JobRepo {
             revision,
             raw_input,
             source_job_id,
-            restart_from_step,
+            restart,
             None, // max_retries
             None, // pin
         )
@@ -380,7 +396,7 @@ impl JobRepo {
         revision: Option<&str>,
         raw_input: Option<JsonValue>,
         source_job_id: Option<Uuid>,
-        restart_from_step: Option<&str>,
+        restart: Option<RestartLineage<'_>>,
         max_retries: Option<i32>,
         pin: Option<&JobPinCols>,
     ) -> Result<Uuid>
@@ -402,7 +418,7 @@ impl JobRepo {
             revision,
             raw_input,
             source_job_id,
-            restart_from_step,
+            restart,
             max_retries,
             pin,
         )
@@ -426,7 +442,7 @@ impl JobRepo {
         revision: Option<&str>,
         raw_input: Option<JsonValue>,
         source_job_id: Option<Uuid>,
-        restart_from_step: Option<&str>,
+        restart: Option<RestartLineage<'_>>,
         max_retries: Option<i32>,
         pin: Option<&JobPinCols>,
     ) -> Result<Uuid>
@@ -435,8 +451,8 @@ impl JobRepo {
     {
         sqlx::query(
             r#"
-            INSERT INTO job (job_id, workspace, task_name, mode, input, source_type, source_id, parent_job_id, parent_step_name, timeout_secs, revision, raw_input, source_job_id, restart_from_step, max_retries, git_ref, task_folder)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+            INSERT INTO job (job_id, workspace, task_name, mode, input, source_type, source_id, parent_job_id, parent_step_name, timeout_secs, revision, raw_input, source_job_id, restart_from_step, restart_from_steps, max_retries, git_ref, task_folder)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
             "#,
         )
         .bind(job_id)
@@ -452,7 +468,14 @@ impl JobRepo {
         .bind(revision)
         .bind(raw_input)
         .bind(source_job_id)
-        .bind(restart_from_step)
+        .bind(match restart {
+            Some(RestartLineage::FromStep(step)) => Some(step),
+            _ => None,
+        })
+        .bind(match restart {
+            Some(RestartLineage::FromSteps(steps)) => Some(steps),
+            _ => None,
+        })
         .bind(max_retries)
         .bind(pin.map(|p| p.git_ref.as_str()))
         .bind(pin.and_then(|p| p.task_folder.as_deref()))
@@ -1103,7 +1126,7 @@ impl JobRepo {
     ) -> Result<Vec<DerivedRunRow>> {
         let rows = sqlx::query_as::<_, DerivedRunRow>(
             "SELECT job_id, workspace, task_name, source_type, status, created_at, \
-                    restart_from_step, git_ref, task_folder \
+                    restart_from_step, restart_from_steps, git_ref, task_folder \
              FROM job \
              WHERE source_job_id = $1 AND source_type IN ('restart', 'rerun') \
              ORDER BY created_at DESC, job_id DESC",
