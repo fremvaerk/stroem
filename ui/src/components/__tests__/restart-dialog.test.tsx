@@ -22,7 +22,7 @@ function renderDialog(
       open
       plan={plan}
       taskName="line"
-      stepName="b"
+      target={{ kind: "step", step: "b" }}
       onConfirm={handlers.onConfirm ?? (() => {})}
       onCancel={handlers.onCancel ?? (() => {})}
     />,
@@ -60,6 +60,48 @@ describe("RestartDialog", () => {
     expect(screen.queryByTestId("restart-failure-warning")).not.toBeInTheDocument();
   });
 
+  it("titles a restart of failed steps and lists its start steps", () => {
+    render(
+      <RestartDialog
+        open
+        plan={makePlan({
+          start_steps: ["b", "c"],
+          restart_steps: ["c", "b", "d"],
+          carried_failed: [],
+        })}
+        taskName="line"
+        target={{ kind: "failed" }}
+        onConfirm={() => {}}
+        onCancel={() => {}}
+      />,
+    );
+
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("Restart the failed steps of line?");
+    expect(text).toContain("Starts at 2 failed or cancelled step(s): b, c.");
+    expect(text).toContain("Reruns 3 step(s): b, c, d.");
+  });
+
+  it("notes carried-over failures that continue_on_failure tolerates", () => {
+    renderDialog(makePlan({ carried_failed: [], carried_failed_tolerated: ["y", "x"] }));
+
+    const note = screen.getByTestId("restart-tolerated-note");
+    expect(note.textContent).toContain(
+      "2 carried-over step(s) ended failed but continue_on_failure lets the job pass (x, y). They are not rerun.",
+    );
+    expect(note.textContent).toContain("Use Restart failed steps to rerun them.");
+    expect(screen.queryByTestId("restart-failure-warning")).not.toBeInTheDocument();
+  });
+
+  it("omits the tolerated note when there is none or an older server omits it", () => {
+    renderDialog(makePlan({ carried_failed_tolerated: [] }));
+    expect(screen.queryByTestId("restart-tolerated-note")).not.toBeInTheDocument();
+    const { carried_failed_tolerated: _omit, ...older } = makePlan();
+    void _omit;
+    renderDialog(older);
+    expect(screen.queryByTestId("restart-tolerated-note")).not.toBeInTheDocument();
+  });
+
   it("calls onConfirm when the confirm button is clicked", () => {
     const onConfirm = vi.fn();
     renderDialog(makePlan(), { onConfirm });
@@ -85,7 +127,7 @@ describe("RestartDialog", () => {
         busy
         plan={makePlan()}
         taskName="line"
-        stepName="b"
+        target={{ kind: "step", step: "b" }}
         onConfirm={() => {}}
         onCancel={() => {}}
       />,
@@ -101,7 +143,7 @@ describe("RestartDialog", () => {
         open
         plan={null}
         taskName="line"
-        stepName="b"
+        target={{ kind: "step", step: "b" }}
         onConfirm={() => {}}
         onCancel={() => {}}
       />,

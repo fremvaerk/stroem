@@ -450,28 +450,38 @@ export async function cancelJob(id: string): Promise<{ status: string }> {
  *
  * With `dry_run: true` the server returns the plan only (no `job_id`); with
  * `dry_run: false` it creates the job and echoes the same plan alongside the
- * new `job_id`. `carried_failed` lists carried-over steps that ended failed and
- * are NOT tolerated by the current flow; `carried_failed_tolerated` lists the
- * ones covered by `continue_on_failure`.
+ * new `job_id`. `start_steps` are the steps the restart begins at (the chosen
+ * step, or every failed or cancelled step); `carried_failed` lists carried-over
+ * steps that ended failed and are NOT tolerated by the current flow;
+ * `carried_failed_tolerated` lists the ones covered by `continue_on_failure`.
+ * `start_steps` is absent from an older server.
  */
 export interface RestartPlanResponse {
   job_id?: string;
+  start_steps?: string[];
   restart_steps: string[];
   carried_over: string[];
   carried_failed: string[];
   carried_failed_tolerated?: string[];
 }
 
+/** What a restart starts at: one step, or every failed or cancelled step. */
+export type RestartTarget = { kind: "step"; step: string } | { kind: "failed" };
+
 export async function restartJob(
   jobId: string,
-  fromStep: string,
+  target: RestartTarget,
   dryRun: boolean,
 ): Promise<RestartPlanResponse> {
+  const body =
+    target.kind === "step"
+      ? { from_step: target.step, dry_run: dryRun }
+      : { all_failed: true, dry_run: dryRun };
   return apiFetch<RestartPlanResponse>(
     `/api/jobs/${encodeURIComponent(jobId)}/restart`,
     {
       method: "POST",
-      body: JSON.stringify({ from_step: fromStep, dry_run: dryRun }),
+      body: JSON.stringify(body),
     },
   );
 }

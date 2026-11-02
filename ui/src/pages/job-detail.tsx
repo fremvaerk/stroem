@@ -1,11 +1,20 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams, Link } from "react-router";
-import { ArrowLeft, ChevronUp, ChevronDown, Network, TriangleAlert, XCircle } from "lucide-react";
+import {
+  ArrowLeft,
+  ChevronUp,
+  ChevronDown,
+  Network,
+  RotateCcw,
+  TriangleAlert,
+  XCircle,
+} from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/status-badge";
 import { InfoGrid } from "@/components/info-grid";
 import { StepTimeline } from "@/components/step-timeline";
+import { RestartDialog } from "@/components/restart-dialog";
 import { WorkflowDag } from "@/components/workflow-dag";
 import { ErrorBoundary } from "@/components/error-boundary";
 import { ServerEvents } from "@/components/server-events";
@@ -16,9 +25,18 @@ import { LoadingSpinner } from "@/components/loading-spinner";
 import { ApiError, getJob, getTask, getTaskStats, cancelJob, listJobArtifacts } from "@/lib/api";
 import { useTitle } from "@/hooks/use-title";
 import { useWorkerNames } from "@/hooks/use-worker-names";
+import { useRestart } from "@/hooks/use-restart";
 import { formatTime, formatDuration, formatDurationMs } from "@/lib/formatting";
 import { computeEta } from "@/lib/eta";
-import { isTopLevelJob, jobLineage, jobPollInterval, laterRuns } from "@/lib/job-status";
+import {
+  formatStepList,
+  isTerminalJobStatus,
+  isTopLevelJob,
+  jobLineage,
+  jobPollInterval,
+  laterRuns,
+  restartableFailedSteps,
+} from "@/lib/job-status";
 import { formatPin } from "@/lib/job-ref";
 import type { JobLineage, LaterRuns } from "@/lib/job-status";
 import type { ArtifactItem } from "@/lib/api";
@@ -59,13 +77,22 @@ function LineageLink({ lineage }: { lineage: JobLineage }) {
           <span className="font-mono">{lineage.step}</span>
         </>
       )}
+      {lineage.steps && lineage.steps.length > 0 && (
+        <>
+          {" of failed steps "}
+          <span className="font-mono" title={lineage.steps.join(", ")}>
+            {formatStepList(lineage.steps)}
+          </span>
+        </>
+      )}
     </span>
   );
 }
 
 /**
  * The "Later runs" card: "restart 0438a27a <status> from build" /
- * "re-run 1a2b3c4d <status>", newest first, then "+N more".
+ * "restart 0438a27a <status> failed steps a, b" / "re-run 1a2b3c4d <status>",
+ * newest first, then "+N more".
  */
 function LaterRunsList({ runs }: { runs: LaterRuns }) {
   return (
@@ -88,6 +115,16 @@ function LaterRunsList({ runs }: { runs: LaterRuns }) {
               from <span className="font-mono">{run.restart_from_step}</span>
             </span>
           )}
+          {run.source_type === "restart" &&
+            run.restart_from_steps &&
+            run.restart_from_steps.length > 0 && (
+              <span className="text-xs font-normal text-muted-foreground">
+                failed steps{" "}
+                <span className="font-mono" title={run.restart_from_steps.join(", ")}>
+                  {formatStepList(run.restart_from_steps)}
+                </span>
+              </span>
+            )}
         </li>
       ))}
       {runs.more > 0 && (
@@ -140,6 +177,9 @@ export function JobDetailPage() {
   // `_hook:<action>` / `_global_state` job, or a task since removed). Any other
   // failure is not proof of absence, so the header keeps its link.
   const [taskMissing, setTaskMissing] = useState(false);
+  // "Restart failed steps" in the header; the per-step buttons keep their own
+  // dialog in StepTimeline.
+  const restartFailed = useRestart(id ?? "");
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -343,6 +383,12 @@ export function JobDetailPage() {
   const lineage = jobLineage(job);
   const lineageNote = lineage && lineageDetail(job, lineage);
   const later = laterRuns(job.derived_jobs);
+  // Same gate as "Restart from here", plus at least one step to start at.
+  const canRestartFailed =
+    canExecute === true &&
+    topLevel &&
+    isTerminalJobStatus(job.status) &&
+    restartableFailedSteps(job.steps).length > 0;
 
   return (
     <div className="space-y-6">
@@ -438,6 +484,26 @@ export function JobDetailPage() {
               </Link>
             </Button>
           )}
+          {canRestartFailed && (
+            <Button
+              variant="outline"
+              disabled={restartFailed.pending !== null}
+              onClick={() => void restartFailed.open({ kind: "failed" })}
+              title="Rerun every failed or cancelled step and the steps below them; carry the rest over"
+            >
+              <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
+              {restartFailed.pending !== null ? "Planning..." : "Restart failed steps"}
+            </Button>
+          )}
+          <RestartDialog
+            open={restartFailed.target !== null}
+            plan={restartFailed.plan}
+            taskName={job.task_name}
+            target={{ kind: "failed" }}
+            busy={restartFailed.confirming}
+            onConfirm={() => void restartFailed.confirm()}
+            onCancel={restartFailed.close}
+          />
         </div>
       </div>
 

@@ -167,6 +167,8 @@ export interface DerivedJobRef {
   status: string;
   created_at: string;
   restart_from_step: string | null;
+  /** Start steps of a Restart failed steps job. Absent from an older server. */
+  restart_from_steps?: string[] | null;
 }
 
 export interface JobStep {
@@ -235,6 +237,8 @@ export interface JobDetail {
   source_id: string | null;
   source_job_id: string | null;
   restart_from_step: string | null;
+  /** Start steps of a Restart failed steps job. Absent from an older server. */
+  restart_from_steps?: string[] | null;
   parent_job_id: string | null;
   parent_step_name: string | null;
   revision: string | null;

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link, useNavigate } from "react-router";
+import { Link } from "react-router";
 import {
   AlertCircle,
   ChevronDown,
@@ -13,8 +13,7 @@ import { RestartDialog } from "@/components/restart-dialog";
 import { Button } from "@/components/ui/button";
 import { formatDuration, formatDurationMs } from "@/lib/formatting";
 import { isTerminalJobStatus } from "@/lib/job-status";
-import { restartJob } from "@/lib/api";
-import type { RestartPlanResponse } from "@/lib/api";
+import { useRestart } from "@/hooks/use-restart";
 import { statusIcons } from "@/lib/status-icons";
 import type { JobStep, StepDurationStats } from "@/lib/types";
 import { skipBadgeLabel } from "@/lib/skip-reason";
@@ -505,42 +504,11 @@ export function StepTimeline({
 
   // Restart state — a single dialog serves both the StepDetail button and the
   // loop-group header button, so the plan lives here rather than per-row.
-  const navigate = useNavigate();
-  const [restartStep, setRestartStep] = useState<string | null>(null);
-  const [restartPlan, setRestartPlan] = useState<RestartPlanResponse | null>(null);
-  const [restartPending, setRestartPending] = useState<string | null>(null);
-  const [restartConfirming, setRestartConfirming] = useState(false);
-
-  const handleRestart = async (stepName: string) => {
-    setRestartPending(stepName);
-    try {
-      const plan = await restartJob(jobId, stepName, true);
-      setRestartPlan(plan);
-      setRestartStep(stepName);
-    } catch (err) {
-      alert(err instanceof Error ? err.message : "Failed to plan restart");
-    } finally {
-      setRestartPending(null);
-    }
-  };
-
-  const closeRestartDialog = () => {
-    setRestartStep(null);
-    setRestartPlan(null);
-  };
-
-  const confirmRestart = async () => {
-    if (!restartStep) return;
-    setRestartConfirming(true);
-    try {
-      const res = await restartJob(jobId, restartStep, false);
-      closeRestartDialog();
-      if (res.job_id) navigate(`/jobs/${res.job_id}`);
-    } catch (err) {
-      alert(err instanceof Error ? err.message : "Failed to restart job");
-    } finally {
-      setRestartConfirming(false);
-    }
+  const restart = useRestart(jobId);
+  const restartStep = restart.target?.kind === "step" ? restart.target.step : null;
+  const restartPending = restart.pending?.kind === "step" ? restart.pending.step : null;
+  const handleRestart = (stepName: string) => {
+    void restart.open({ kind: "step", step: stepName });
   };
 
   const restartContext: RestartContext = {
@@ -656,12 +624,12 @@ export function StepTimeline({
       })}
       <RestartDialog
         open={restartStep !== null}
-        plan={restartPlan}
+        plan={restartStep !== null ? restart.plan : null}
         taskName={taskName}
-        stepName={restartStep ?? ""}
-        busy={restartConfirming}
-        onConfirm={confirmRestart}
-        onCancel={closeRestartDialog}
+        target={{ kind: "step", step: restartStep ?? "" }}
+        busy={restart.confirming}
+        onConfirm={() => void restart.confirm()}
+        onCancel={restart.close}
       />
     </div>
   );
