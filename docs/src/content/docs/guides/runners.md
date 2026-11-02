@@ -13,6 +13,18 @@ Container runners are optional features that allow steps to execute inside Docke
 | `docker` | Step runs in a Docker container with workspace at `/workspace` |
 | `pod` | Step runs as a Kubernetes pod with workspace via init container |
 
+## Input files
+
+When a job has [file inputs](/guides/file-inputs/), every runner step receives every file of the job, read-only, at `{root}/{file_id}/{safe_name}`:
+
+| Runner | Root |
+|--------|------|
+| `local` | `{temp}/stroem-inputs-{uuid}/in`, new for each claim and removed after the step. Its parent `stroem-inputs-{uuid}` has mode `0700`; the files are `0444` and their directories `0555` |
+| `docker`, `type: docker` | `/inputs`, bind-mounted read-only (`/inputs:ro`) in both workspace and no-workspace modes |
+| `pod`, `type: pod` | `/inputs`, an `emptyDir` volume `stroem-inputs` mounted read-only. The init container `stroem-inputs-init` downloads the files and checks size and SHA-256 before the main container starts |
+
+A `runner: docker` step in a Helm deployment with the `dind` sidecar sees an empty `/inputs`, because the sidecar does not share the worker's file system. See [Limitations](/guides/file-inputs/#limitations).
+
 ## Docker runner
 
 ### Prerequisites

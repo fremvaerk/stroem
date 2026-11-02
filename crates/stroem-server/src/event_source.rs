@@ -673,7 +673,8 @@ async fn create_event_source_job(
         revision.as_deref(),
         None,
         state.config.agents.as_ref(),
-        crate::config::JobDefaults::from(state.config.as_ref()),
+        state.job_defaults(),
+        crate::input_files::FileGrant::Indirect,
     )
     .await
     .with_context(|| {
@@ -1067,6 +1068,7 @@ mod tests {
             agents: None,
             state_storage: None,
             artifact_storage: None,
+            input_files: None,
             default_step_timeout: None,
             default_job_timeout: None,
             workspace_reload: Default::default(),

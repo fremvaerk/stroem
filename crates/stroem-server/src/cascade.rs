@@ -1370,6 +1370,7 @@ mod tests {
         let fresh = Snapshots {
             task: mk(json!({"days_remaining": 60})),
             global: mk(json!({"flag": false})),
+            ..Default::default()
         };
         let plan = run(&t, &job(None), &rows, Some(&ws()), &fresh).unwrap();
         let s = final_statuses(&plan, &rows);
@@ -1379,6 +1380,7 @@ mod tests {
         let stale = Snapshots {
             task: mk(json!({"days_remaining": 10})),
             global: mk(json!({"flag": true})),
+            ..Default::default()
         };
         let plan = run(&t, &job(None), &rows, Some(&ws()), &stale).unwrap();
         let s = final_statuses(&plan, &rows);

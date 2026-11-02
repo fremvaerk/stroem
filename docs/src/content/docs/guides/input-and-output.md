@@ -40,6 +40,9 @@ The optional `description` field is displayed in the web UI as helper text below
 | `date`     | Date value (`YYYY-MM-DD`). Renders as a date field in the UI   |
 | `datetime` | Date and time (`YYYY-MM-DDTHH:MM`). Renders as a date field plus a time field in the UI |
 | `json`     | Any JSON value (object, array, string, number, boolean, null). Renders as a JSON editor in the UI |
+| `file`     | An uploaded file. The step gets a read-only path to it. Renders as a file picker in the UI. See [File Inputs](/guides/file-inputs/) |
+
+A `file` field cannot have `default`, `options`, `allow_custom`, `multiple` or `secret`. In a template, `{{ input.<field> }}` renders to a path, not to the file content.
 
 If the `type` is not one of the types above, it is treated as a [connection type](/guides/connections/) reference. The UI renders a searchable dropdown of matching connections in the workspace.
 

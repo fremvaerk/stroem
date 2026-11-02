@@ -13,4 +13,5 @@ export const PRIMITIVE_TYPES = new Set([
   "date",
   "datetime",
   "json",
+  "file",
 ]);

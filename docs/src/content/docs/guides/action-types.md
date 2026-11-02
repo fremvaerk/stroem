@@ -56,6 +56,10 @@ Quick reference showing which fields are valid for each action type:
 
 ## Script actions
 
+:::note
+An action `input` can declare `type: file` fields. The step gets a read-only path to the file, and every runner step of a job gets every file of the job. See [File Inputs](/guides/file-inputs/).
+:::
+
 Script actions run commands or scripts in a runner environment. By default, scripts run as shell commands, but you can use the `language` field to write inline scripts in Python, JavaScript, TypeScript, or Go.
 
 ### Inline command

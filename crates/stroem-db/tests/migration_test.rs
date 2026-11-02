@@ -359,3 +359,33 @@ async fn test_053_trigger_run_indexes() -> Result<()> {
     assert!(defs[1].1.contains("status = 'skipped'"), "{}", defs[1].1);
     Ok(())
 }
+
+#[tokio::test]
+async fn test_054_input_files_schema() -> Result<()> {
+    let pool = setup_db().await?;
+    for table in ["input_file", "job_input_file", "input_file_upload_token"] {
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = $1",
+        )
+        .bind(table)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(n, 1, "{table}");
+    }
+    let idx: Vec<String> = sqlx::query_scalar(
+        "SELECT indexname::text FROM pg_indexes WHERE indexname IN \
+         ('ix_input_file_created_at', 'ix_job_input_file_file_id') ORDER BY indexname",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(idx.len(), 2);
+    let bad = sqlx::query(
+        "INSERT INTO input_file (file_id, workspace, task_name, origin, original_name, \
+         safe_name, content_type, size_bytes, sha256, storage_key) \
+         VALUES ('x', 'w', 't', 'api', 'a', 'a', 'text/plain', 0, 's', 'k')",
+    )
+    .execute(&pool)
+    .await;
+    assert!(bad.is_err(), "file_id CHECK must reject 'x'");
+    Ok(())
+}

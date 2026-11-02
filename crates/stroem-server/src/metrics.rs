@@ -59,6 +59,12 @@ pub const STROEM_PIN_LOADS_TOTAL: &str = "stroem_pin_loads_total";
 /// `gauge` — pinned configs held in memory on THIS replica. Label: workspace.
 pub const STROEM_PINS_CACHED: &str = "stroem_pins_cached";
 
+/// `counter` — input-file uploads. Labels: origin (`api`, `mcp_inline`,
+/// `mcp_url`), result (`ok`, `too_large`, `invalid_name`, `error`).
+pub const STROEM_INPUT_FILE_UPLOADS_TOTAL: &str = "stroem_input_file_uploads_total";
+/// `counter` — bytes of stored input files. Label: origin.
+pub const STROEM_INPUT_FILE_BYTES_TOTAL: &str = "stroem_input_file_bytes_total";
+
 use anyhow::{Context, Result};
 use axum::extract::{MatchedPath, Request};
 use axum::middleware::Next;
@@ -311,6 +317,8 @@ mod tests {
             STROEM_WORKSPACE_LOAD_PERMITS_AVAILABLE,
             STROEM_PIN_LOADS_TOTAL,
             STROEM_PINS_CACHED,
+            STROEM_INPUT_FILE_UPLOADS_TOTAL,
+            STROEM_INPUT_FILE_BYTES_TOTAL,
         ];
         let unique: std::collections::HashSet<_> = names.iter().collect();
         assert_eq!(unique.len(), names.len(), "metric names must be unique");

@@ -86,7 +86,8 @@ where
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct InputFieldDef {
     /// Canonical type names: `string`, `text`, `integer`, `number`, `boolean`,
-    /// `date`, `datetime`, `json` (any JSON value), or a connection type name.
+    /// `date`, `datetime`, `json` (any JSON value), `file` (an uploaded file), or a
+    /// connection type name.
     /// Element type — value is an array when `multiple: true`. Aliases accepted
     /// on input: `bool` → `boolean` (see [`canonicalize_field_type`]).
     #[serde(rename = "type", deserialize_with = "deserialize_field_type")]

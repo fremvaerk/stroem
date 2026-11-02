@@ -431,6 +431,16 @@ async fn fire_trigger(app_state: &AppState, workspaces: &WorkspaceManager, tstat
         }
     };
 
+    // Spec 2026-10-29 § 4.5: a trigger never carries a file, so a target
+    // with a required `file` field (or a `file` value in the trigger input)
+    // can never run: the same MISSED branch, before the concurrency policy.
+    if let Some(task) = target.config.config().tasks.get(&target.task_name) {
+        if let Err(e) = crate::input_files::preflight(&task.input, &input) {
+            tracing::error!("Trigger '{}' MISSED: {:#}", source_id, e);
+            return;
+        }
+    }
+
     // Apply concurrency policy
     match tstate.concurrency {
         ConcurrencyPolicy::Skip => {
@@ -1198,6 +1208,7 @@ mod tests {
             agents: None,
             state_storage: None,
             artifact_storage: None,
+            input_files: None,
             default_step_timeout: None,
             default_job_timeout: None,
             workspace_reload: Default::default(),

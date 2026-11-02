@@ -157,6 +157,10 @@ pub struct AppState {
     /// from `ArtifactStorageConfig::default()` when the operator omits the
     /// `artifact_storage` section entirely.
     pub artifact_config: crate::config::ArtifactStorageConfig,
+    /// Blob backend for uploaded input files (`input_files.archive`, else the
+    /// artifact backend, else the log archive). `None` answers uploads with 503.
+    pub input_blob: Option<Arc<dyn crate::blob_storage::BlobArchive>>,
+    pub input_files_config: crate::config::InputFilesConfig,
     /// Leader-election handle. Background tasks gate themselves on
     /// `leader.is_leader()`. Defaults to an always-leader for tests and
     /// single-replica deployments; real HA wiring happens in `main.rs`.
@@ -184,6 +188,7 @@ impl AppState {
             .unwrap_or_else(|| PathBuf::from("tarball_cache"));
         let tarball_cache = TarballCache::new(tarball_cache_dir);
         let artifact_config = config.artifact_storage.clone().unwrap_or_default();
+        let input_files_config = config.input_files.clone().unwrap_or_default();
         Self {
             pool,
             workspaces: Arc::new(workspaces),
@@ -203,6 +208,8 @@ impl AppState {
             blob_archive: None,
             artifact_blob: None,
             artifact_config,
+            input_blob: None,
+            input_files_config,
             leader: LeaderElection::always(),
             event_bus: EventBus::noop(),
         }
@@ -217,6 +224,34 @@ impl AppState {
     ) -> Self {
         self.artifact_blob = archive;
         self
+    }
+
+    /// Replace the input-file blob backend (see `input_blob`).
+    pub fn with_input_blob(
+        mut self,
+        archive: Option<Arc<dyn crate::blob_storage::BlobArchive>>,
+    ) -> Self {
+        self.input_blob = archive;
+        self
+    }
+
+    /// The job-creation defaults of this server: the config's timeouts, and
+    /// `input_storage` from the configured input-file backend. Every
+    /// production creation path uses this, never `JobDefaults::from(config)`
+    /// alone, which cannot see the backend (file inputs spec § 4.3).
+    pub fn job_defaults(&self) -> crate::config::JobDefaults {
+        crate::config::JobDefaults {
+            input_storage: self.input_blob.is_some(),
+            ..crate::config::JobDefaults::from(self.config.as_ref())
+        }
+    }
+
+    /// Storage key for an uploaded input file: `{prefix}{workspace}/{file_id}`.
+    pub fn input_file_storage_key(&self, workspace: &str, file_id: &str) -> String {
+        format!(
+            "{}{}/{}",
+            self.input_files_config.prefix, workspace, file_id
+        )
     }
 
     /// Compose the storage key for an artifact:
@@ -341,6 +376,7 @@ pub(crate) fn test_app_state_with_pool(
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -405,6 +441,7 @@ mod tests {
             agents: None,
             state_storage: None,
             artifact_storage: None,
+            input_files: None,
             default_step_timeout: None,
             default_job_timeout: None,
             workspace_reload: Default::default(),
@@ -627,5 +664,28 @@ mod tests {
         assert!(!logs1.contains("error for job2"));
         assert!(logs2.contains("error for job2"));
         assert!(!logs2.contains("error for job1"));
+    }
+
+    #[tokio::test]
+    async fn job_defaults_input_storage_follows_the_input_blob() {
+        let dir = TempDir::new().unwrap();
+        let state = test_state(dir.path());
+        assert!(!state.job_defaults().input_storage);
+        let archive: Arc<dyn crate::blob_storage::BlobArchive> = Arc::new(
+            crate::blob_storage::LocalBlobArchive::new(dir.path().join("inputs")),
+        );
+        let state = state.with_input_blob(Some(archive));
+        assert!(state.job_defaults().input_storage);
+    }
+
+    #[tokio::test]
+    async fn input_storage_key_shape() {
+        let dir = TempDir::new().unwrap();
+        let state = test_state(dir.path());
+        assert!(state.input_blob.is_none());
+        assert_eq!(
+            state.input_file_storage_key("ws", "file_0123"),
+            "inputs/ws/file_0123"
+        );
     }
 }

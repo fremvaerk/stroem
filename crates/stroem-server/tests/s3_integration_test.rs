@@ -425,3 +425,343 @@ async fn s3_open_and_read_range_are_bounded_and_version_pinned() -> Result<()> {
     );
     Ok(())
 }
+
+// ─── put_stream / get_stream (file inputs, spec § 9) ────────────────────
+
+use futures_core::stream::BoxStream;
+use futures_util::StreamExt;
+use stroem_server::input_files::stream::S3_PART_BYTES;
+
+const MIB: usize = 1024 * 1024;
+
+/// `len` bytes that do not repeat on any part boundary.
+fn pattern(len: usize) -> Bytes {
+    (0..len)
+        .map(|i| (i % 251) as u8)
+        .collect::<Vec<u8>>()
+        .into()
+}
+
+/// `data` cut into `chunk`-byte pieces (the last one shorter).
+fn pieces(data: &Bytes, chunk: usize) -> Vec<anyhow::Result<Bytes>> {
+    (0..data.len())
+        .step_by(chunk)
+        .map(|i| Ok(data.slice(i..(i + chunk).min(data.len()))))
+        .collect()
+}
+
+fn body_of(parts: Vec<anyhow::Result<Bytes>>) -> BoxStream<'static, anyhow::Result<Bytes>> {
+    Box::pin(futures_util::stream::iter(parts))
+}
+
+async fn read_back(archive: &S3BlobArchive, key: &str) -> Result<(String, Vec<u8>, usize)> {
+    let (ct, mut stream) = archive.get_stream(key).await?.expect("object exists");
+    let mut got = Vec::new();
+    let mut frames = 0;
+    while let Some(chunk) = stream.next().await {
+        got.extend_from_slice(&chunk?);
+        frames += 1;
+    }
+    Ok((ct, got, frames))
+}
+
+async fn open_uploads(client: &aws_sdk_s3::Client, bucket: &str) -> Result<usize> {
+    let out = client
+        .list_multipart_uploads()
+        .bucket(bucket)
+        .send()
+        .await?;
+    Ok(out.uploads().len())
+}
+
+async fn etag(client: &aws_sdk_s3::Client, bucket: &str, key: &str) -> Result<String> {
+    let head = client.head_object().bucket(bucket).key(key).send().await?;
+    Ok(head.e_tag().unwrap_or_default().to_string())
+}
+
+#[tokio::test]
+async fn s3_put_stream_small_single_put() -> Result<()> {
+    let (_container, endpoint) = minio::start().await?;
+    let bucket = format!("test-{}", Uuid::new_v4());
+    let client = minio::s3_client(&endpoint);
+    create_bucket(&client, &bucket).await?;
+    let archive = S3BlobArchive::from_client(client.clone(), bucket.clone());
+
+    let data = pattern(3 * 1024 + 7);
+    archive
+        .put_stream(
+            "inputs/ws/file_small",
+            "text/csv",
+            body_of(pieces(&data, 1024)),
+        )
+        .await?;
+    // A multipart object's ETag carries a `-<parts>` suffix.
+    assert!(!etag(&client, &bucket, "inputs/ws/file_small")
+        .await?
+        .contains('-'));
+    let (ct, got, _) = read_back(&archive, "inputs/ws/file_small").await?;
+    assert_eq!(ct, "text/csv");
+    assert_eq!(got, data);
+
+    // A body of exactly one part is still a single PUT.
+    let data = pattern(S3_PART_BYTES);
+    archive
+        .put_stream(
+            "inputs/ws/file_one_part",
+            "application/octet-stream",
+            body_of(pieces(&data, 64 * 1024)),
+        )
+        .await?;
+    assert!(!etag(&client, &bucket, "inputs/ws/file_one_part")
+        .await?
+        .contains('-'));
+    assert_eq!(
+        read_back(&archive, "inputs/ws/file_one_part").await?.1,
+        data
+    );
+
+    // An empty body is an empty object.
+    archive
+        .put_stream("inputs/ws/file_empty", "text/plain", body_of(vec![]))
+        .await?;
+    assert!(read_back(&archive, "inputs/ws/file_empty")
+        .await?
+        .1
+        .is_empty());
+
+    assert!(archive
+        .get_stream("inputs/ws/file_missing")
+        .await?
+        .is_none());
+    assert_eq!(open_uploads(&client, &bucket).await?, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn s3_put_stream_multipart_roundtrip() -> Result<()> {
+    let (_container, endpoint) = minio::start().await?;
+    let bucket = format!("test-{}", Uuid::new_v4());
+    let client = minio::s3_client(&endpoint);
+    create_bucket(&client, &bucket).await?;
+    let archive = S3BlobArchive::from_client(client.clone(), bucket.clone());
+
+    let data = pattern(20 * MIB);
+    // 100 000-byte chunks straddle every part boundary.
+    archive
+        .put_stream(
+            "inputs/ws/file_multi",
+            "application/zip",
+            body_of(pieces(&data, 100_000)),
+        )
+        .await?;
+    let tag = etag(&client, &bucket, "inputs/ws/file_multi").await?;
+    assert!(
+        tag.trim_matches('"').ends_with("-3"),
+        "8 + 8 + 4 MiB parts, ETag {tag}"
+    );
+    let (ct, got, frames) = read_back(&archive, "inputs/ws/file_multi").await?;
+    assert_eq!(ct, "application/zip");
+    assert!(got == data, "content differs ({} bytes read)", got.len());
+    assert!(
+        frames >= 2,
+        "the download must stream, got {frames} frame(s)"
+    );
+    assert_eq!(open_uploads(&client, &bucket).await?, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn s3_put_stream_error_aborts_multipart() -> Result<()> {
+    let (_container, endpoint) = minio::start().await?;
+    let bucket = format!("test-{}", Uuid::new_v4());
+    let client = minio::s3_client(&endpoint);
+    create_bucket(&client, &bucket).await?;
+    let archive = S3BlobArchive::from_client(client.clone(), bucket.clone());
+
+    // Two full parts and a bit, then the body fails. When the failing item
+    // is asked for, two parts are already uploaded: record what S3 holds.
+    let data = pattern(2 * S3_PART_BYTES + 64 * 1024);
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let failing = {
+        let (client, bucket, seen) = (client.clone(), bucket.clone(), seen.clone());
+        futures_util::stream::once(async move {
+            let uploads = client
+                .list_multipart_uploads()
+                .bucket(&bucket)
+                .send()
+                .await?;
+            let parts = match uploads.uploads().first().and_then(|u| u.upload_id()) {
+                Some(id) => client
+                    .list_parts()
+                    .bucket(&bucket)
+                    .key("inputs/ws/file_cut")
+                    .upload_id(id)
+                    .send()
+                    .await?
+                    .parts()
+                    .len(),
+                None => 0,
+            };
+            *seen.lock().unwrap() = Some((uploads.uploads().len(), parts));
+            Err::<Bytes, _>(anyhow::anyhow!("client went away"))
+        })
+    };
+    let body = futures_util::stream::iter(pieces(&data, 64 * 1024)).chain(failing);
+    let err = archive
+        .put_stream("inputs/ws/file_cut", "text/plain", Box::pin(body))
+        .await
+        .unwrap_err();
+    assert!(format!("{err:#}").contains("client went away"), "{err:#}");
+    assert_eq!(
+        *seen.lock().unwrap(),
+        Some((1, 2)),
+        "(uploads, parts) before the error"
+    );
+    assert_eq!(open_uploads(&client, &bucket).await?, 0);
+    assert!(archive.get_stream("inputs/ws/file_cut").await?.is_none());
+    Ok(())
+}
+
+/// The request future is dropped mid-body (client disconnect): the open
+/// multipart upload is still aborted.
+#[tokio::test(flavor = "multi_thread")]
+async fn s3_put_stream_dropped_aborts_multipart() -> Result<()> {
+    let (_container, endpoint) = minio::start().await?;
+    let bucket = format!("test-{}", Uuid::new_v4());
+    let client = minio::s3_client(&endpoint);
+    create_bucket(&client, &bucket).await?;
+    let archive = std::sync::Arc::new(S3BlobArchive::from_client(client.clone(), bucket.clone()));
+
+    let data = pattern(S3_PART_BYTES + 64 * 1024);
+    let body =
+        futures_util::stream::iter(pieces(&data, 64 * 1024)).chain(futures_util::stream::pending());
+    let task = {
+        let archive = archive.clone();
+        tokio::spawn(async move {
+            archive
+                .put_stream("inputs/ws/file_drop", "text/plain", Box::pin(body))
+                .await
+        })
+    };
+    let mut started = false;
+    for _ in 0..200 {
+        if open_uploads(&client, &bucket).await? == 1 {
+            started = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(started, "the multipart upload never started");
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    let mut left = usize::MAX;
+    for _ in 0..200 {
+        left = open_uploads(&client, &bucket).await?;
+        if left == 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(left, 0, "the dropped upload was not aborted");
+    assert!(archive.get_stream("inputs/ws/file_drop").await?.is_none());
+    Ok(())
+}
+
+/// One request: `"METHOD uri"` and the names of its checksum headers.
+type SeenRequest = (String, Vec<String>);
+
+/// Records, per request other than GET/HEAD, the names of its checksum
+/// headers (`x-amz-checksum-*`, `x-amz-sdk-checksum-algorithm`, …).
+#[derive(Debug, Clone, Default)]
+struct ChecksumHeaders(std::sync::Arc<std::sync::Mutex<Vec<SeenRequest>>>);
+
+impl aws_sdk_s3::config::Intercept for ChecksumHeaders {
+    fn name(&self) -> &'static str {
+        "ChecksumHeaders"
+    }
+
+    fn read_before_transmit(
+        &self,
+        context: &aws_sdk_s3::config::interceptors::BeforeTransmitInterceptorContextRef<'_>,
+        _runtime_components: &aws_sdk_s3::config::RuntimeComponents,
+        _cfg: &mut aws_sdk_s3::config::ConfigBag,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let request = context.request();
+        if matches!(request.method(), "GET" | "HEAD") {
+            return Ok(());
+        }
+        let names: Vec<String> = request
+            .headers()
+            .iter()
+            .map(|(name, _)| name.to_ascii_lowercase())
+            .filter(|name| name.contains("checksum"))
+            .collect();
+        let what = format!("{} {}", request.method(), request.uri());
+        self.0.lock().unwrap().push((what, names));
+        Ok(())
+    }
+}
+
+/// Under `request_checksum_calculation = WhenRequired` (AWS's advice for
+/// third-party S3-compatible stores) a multipart upload names no checksum
+/// algorithm anywhere; under the default it uses CRC32 throughout. Both
+/// round-trip.
+#[tokio::test]
+async fn s3_put_stream_multipart_follows_the_client_checksum_setting() -> Result<()> {
+    use aws_sdk_s3::config::RequestChecksumCalculation;
+
+    let (_container, endpoint) = minio::start().await?;
+    let bucket = format!("test-{}", Uuid::new_v4());
+    let base = minio::s3_client(&endpoint);
+    create_bucket(&base, &bucket).await?;
+    let data = pattern(S3_PART_BYTES + 3 * MIB);
+
+    for (setting, key) in [
+        (None, "inputs/ws/file_default"),
+        (
+            Some(RequestChecksumCalculation::WhenRequired),
+            "inputs/ws/file_when_required",
+        ),
+    ] {
+        let seen = ChecksumHeaders::default();
+        let mut config = base.config().to_builder().interceptor(seen.clone());
+        if let Some(setting) = setting {
+            config = config.request_checksum_calculation(setting);
+        }
+        let client = aws_sdk_s3::Client::from_conf(config.build());
+        let archive = S3BlobArchive::from_client(client, bucket.clone());
+
+        archive
+            .put_stream(key, "text/plain", body_of(pieces(&data, 64 * 1024)))
+            .await?;
+        let tag = etag(&base, &bucket, key).await?;
+        assert!(
+            tag.trim_matches('"').ends_with("-2"),
+            "multipart, ETag {tag}"
+        );
+        assert!(
+            read_back(&archive, key).await?.1 == data,
+            "{key}: content differs"
+        );
+
+        let requests = seen.0.lock().unwrap().clone();
+        assert_eq!(
+            requests.len(),
+            4,
+            "create, 2 parts, complete: {requests:#?}"
+        );
+        if setting.is_some() {
+            assert!(
+                requests.iter().all(|(_, names)| names.is_empty()),
+                "WhenRequired must name no checksum: {requests:#?}"
+            );
+        } else {
+            assert!(
+                requests[..3].iter().all(|(_, names)| !names.is_empty()),
+                "the default declares CRC32 on create and every part: {requests:#?}"
+            );
+        }
+    }
+    assert_eq!(open_uploads(&base, &bucket).await?, 0);
+    Ok(())
+}

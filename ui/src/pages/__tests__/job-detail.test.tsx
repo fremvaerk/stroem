@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
-import { MemoryRouter, Routes, Route } from "react-router";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { MemoryRouter, Routes, Route, useLocation } from "react-router";
 import type { DerivedJobRef, JobDetail, JobStep, TaskDetail } from "@/lib/types";
 
 vi.mock("@/lib/api", async (importOriginal) => {
@@ -139,6 +139,56 @@ function renderPage() {
     </MemoryRouter>,
   );
 }
+
+function StateProbe() {
+  const loc = useLocation();
+  return <pre data-testid="state-probe">{JSON.stringify(loc.state)}</pre>;
+}
+
+describe("JobDetailPage — input files", () => {
+  const inputFiles = [
+    { field: "data_file", file_id: "file_" + "a".repeat(32), name: "report.csv", size_bytes: 2048, content_type: "text/csv" },
+  ];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(getTaskStats).mockRejectedValue(new Error("no stats"));
+    vi.mocked(listJobArtifacts).mockResolvedValue([]);
+    vi.mocked(listWorkers).mockResolvedValue({ items: [], total: 0 });
+    vi.mocked(getStepLogs).mockResolvedValue({ logs: "", truncated: false, total_bytes: 0, returned_bytes: 0 });
+    mockGetTask.mockResolvedValue(task(true));
+  });
+
+  it("shows the Input files card", async () => {
+    mockGetJob.mockResolvedValue(job({ input_files: inputFiles }));
+    renderPage();
+    expect(await screen.findByRole("heading", { name: "Input files" })).toBeTruthy();
+    expect(screen.getByText("report.csv")).toBeTruthy();
+  });
+
+  it("hides the card when the job has none or the server omits the key", async () => {
+    mockGetJob.mockResolvedValue(job());
+    renderPage();
+    expect(await screen.findByText("pipeline")).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Input files" })).toBeNull();
+  });
+
+  it("carries the input files in the Re-run link state", async () => {
+    mockGetJob.mockResolvedValue(job({ input_files: inputFiles }));
+    render(
+      <MemoryRouter initialEntries={["/jobs/11111111-1111-1111-1111-111111111111"]}>
+        <Routes>
+          <Route path="/jobs/:id" element={<JobDetailPage />} />
+          <Route path="/workspaces/:ws/tasks/:name" element={<StateProbe />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    fireEvent.click(await screen.findByRole("link", { name: "Re-run" }));
+    const state = JSON.parse((await screen.findByTestId("state-probe")).textContent ?? "null");
+    expect(state.inputFiles).toEqual(inputFiles);
+    expect(state.sourceJobId).toBe("11111111-1111-1111-1111-111111111111");
+  });
+});
 
 const rerunLink = () => screen.queryByRole("link", { name: "Re-run" });
 const restartButton = () =>

@@ -1,4 +1,5 @@
 pub mod api_key;
+pub mod input_file;
 pub mod job;
 pub mod job_artifact;
 pub mod job_ref_pin;

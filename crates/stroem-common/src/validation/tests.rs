@@ -6556,3 +6556,135 @@ fn reserved_type_names_cover_every_primitive() {
         assert!(crate::template::RESERVED_TYPE_NAMES.contains(&t), "{t}");
     }
 }
+
+fn file_cfg(extra: &str) -> WorkspaceConfig {
+    serde_yaml::from_str(extra).unwrap()
+}
+
+fn task_with_file(field_attrs: &str) -> WorkspaceConfig {
+    file_cfg(&format!(
+        "actions:\n  a:\n    type: script\n    script: \"true\"\ntasks:\n  x:\n    input:\n      data_file: {{ type: file{field_attrs} }}\n    flow:\n      s:\n        action: a\n"
+    ))
+}
+
+#[test]
+fn file_field_rejects_default_options_multiple_secret() {
+    for (attr, word) in [
+        (", default: foo", "default"),
+        (", options: [a, b]", "options"),
+        (", multiple: true", "multiple"),
+        (", secret: true", "secret"),
+    ] {
+        let err = format!(
+            "{:#}",
+            validate_workflow_config(&task_with_file(attr)).unwrap_err()
+        );
+        assert!(
+            err.contains("Task 'x' input 'data_file' is type file")
+                && err.contains(&format!("'{word}' is not supported")),
+            "{attr}: {err}"
+        );
+    }
+}
+
+#[test]
+fn file_field_in_action_input_rejects_default() {
+    let cfg = file_cfg(
+        "actions:\n  a:\n    type: script\n    script: \"true\"\n    input:\n      f: { type: file, default: x }\n",
+    );
+    let err = format!("{:#}", validate_workflow_config(&cfg).unwrap_err());
+    assert!(
+        err.contains("Action 'a' input 'f' is type file") && err.contains("'default'"),
+        "{err}"
+    );
+}
+
+#[test]
+fn plain_file_field_is_valid() {
+    let w = validate_workflow_config(&task_with_file(", required: true")).unwrap();
+    assert!(
+        w.iter().all(|m| !m.contains("cannot supply a file")),
+        "{w:?}"
+    );
+}
+
+#[test]
+fn connection_type_named_file_is_rejected() {
+    let cfg = file_cfg("connection_types:\n  file:\n    host:\n      type: string\n");
+    let err = format!("{:#}", validate_workflow_config(&cfg).unwrap_err());
+    assert!(err.contains("reserved"), "{err}");
+}
+
+/// Guard test: `file` is not in the connection property type list, so this
+/// held before the file-field rules were added.
+#[test]
+fn connection_property_of_type_file_is_rejected() {
+    let cfg = file_cfg("connection_types:\n  db:\n    upload:\n      type: file\n");
+    let err = format!("{:#}", validate_workflow_config(&cfg).unwrap_err());
+    assert!(err.contains("invalid type 'file'"), "{err}");
+}
+
+#[test]
+fn approval_action_with_file_input_is_rejected() {
+    let cfg = file_cfg(
+        "actions:\n  gate:\n    type: approval\n    message: \"ok?\"\n    input:\n      f: { type: file }\n",
+    );
+    let err = format!("{:#}", validate_workflow_config(&cfg).unwrap_err());
+    assert!(err.contains("approval") && err.contains("file"), "{err}");
+}
+
+fn file_trigger_cfg(file_attrs: &str, triggers: &str) -> WorkspaceConfig {
+    file_cfg(&format!(
+        "actions:\n  a:\n    type: script\n    script: \"true\"\ntasks:\n  x:\n    input:\n      data_file: {{ type: file{file_attrs} }}\n    flow:\n      s:\n        action: a\n  consumer:\n    flow:\n      s:\n        action: a\ntriggers:\n{triggers}"
+    ))
+}
+
+const SCHED: &str = "  nightly:\n    type: scheduler\n    cron: \"0 0 * * *\"\n    task: x\n";
+const HOOK: &str = "  ingest:\n    type: webhook\n    name: ingest\n    task: x\n";
+const EVSRC: &str = "  queue:\n    type: event_source\n    task: consumer\n    target_task: x\n";
+
+#[test]
+fn required_file_task_targeted_by_triggers_warns() {
+    for (trig, name) in [(SCHED, "nightly"), (HOOK, "ingest"), (EVSRC, "queue")] {
+        let w = validate_workflow_config(&file_trigger_cfg(", required: true", trig)).unwrap();
+        assert!(
+            w.iter()
+                .any(|m| m.contains(&format!("'{name}'")) && m.contains("cannot supply a file")),
+            "{name}: {w:?}"
+        );
+    }
+}
+
+#[test]
+fn optional_file_task_targeted_by_triggers_does_not_warn() {
+    for trig in [SCHED, HOOK, EVSRC] {
+        let w = validate_workflow_config(&file_trigger_cfg("", trig)).unwrap();
+        assert!(
+            w.iter().all(|m| !m.contains("cannot supply a file")),
+            "{w:?}"
+        );
+    }
+}
+
+fn agent_file_cfg(file_attrs: &str) -> WorkspaceConfig {
+    file_cfg(&format!(
+        "actions:\n  a:\n    type: script\n    script: \"true\"\n  bot:\n    type: agent\n    provider: p\n    prompt: hi\n    tools:\n      - task: x\ntasks:\n  x:\n    input:\n      data_file: {{ type: file{file_attrs} }}\n    flow:\n      s:\n        action: a\n"
+    ))
+}
+
+#[test]
+fn agent_tool_task_with_required_file_is_error() {
+    let err = format!(
+        "{:#}",
+        validate_workflow_config(&agent_file_cfg(", required: true")).unwrap_err()
+    );
+    assert!(
+        err.contains("bot") && err.contains("'x'") && err.contains("data_file"),
+        "{err}"
+    );
+}
+
+#[test]
+fn agent_tool_task_with_optional_file_is_ok() {
+    validate_workflow_config(&agent_file_cfg("")).unwrap();
+}

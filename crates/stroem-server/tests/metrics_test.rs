@@ -74,6 +74,7 @@ fn empty_config(url: &str, log_dir: &std::path::Path) -> ServerConfig {
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -1022,6 +1023,76 @@ async fn pin_store_metrics_are_exported() -> Result<()> {
                 && l.ends_with(" 0")
         ),
         "pins cached gauge not zeroed after eviction:\n{body}"
+    );
+    Ok(())
+}
+
+/// One ok upload of 5 bytes counts exactly once in both input-file metrics.
+/// Counted on a recorder local to the test (every test shares this process).
+#[tokio::test]
+async fn input_file_upload_metrics_recorded() -> Result<()> {
+    use futures_util::stream;
+    use std::sync::Arc;
+    use stroem_server::blob_storage::{BlobArchive, LocalBlobArchive};
+    use stroem_server::input_files::upload::{store_upload, UploadTarget};
+
+    let h = boot().await?;
+    let log_dir = h._temp.path().to_path_buf();
+    let config = empty_config(&h.url, &log_dir);
+    let mgr = WorkspaceManager::from_config("default", WorkspaceConfig::new());
+    let log_storage = LogStorage::new(&config.log_storage.local_dir);
+    let archive_dir = h._temp.path().join("inputs-archive");
+    std::fs::create_dir_all(&archive_dir)?;
+    let archive: Arc<dyn BlobArchive> = Arc::new(LocalBlobArchive::new(archive_dir));
+    let state = AppState::new(
+        h.pool.clone(),
+        mgr,
+        config,
+        log_storage,
+        HashMap::new(),
+        None,
+    )
+    .with_input_blob(Some(archive));
+
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let local = recorder.handle();
+    {
+        let _local = metrics::set_default_local_recorder(&recorder);
+        let body: futures_core::stream::BoxStream<'static, anyhow::Result<bytes::Bytes>> =
+            Box::pin(stream::iter(vec![Ok(bytes::Bytes::from_static(b"hello"))]));
+        let resp = store_upload(
+            &state,
+            UploadTarget {
+                workspace: "default",
+                task_name: "t",
+                original_name: "a.txt",
+                content_type: "text/plain",
+                user_id: None,
+                origin: "api",
+            },
+            body,
+            None,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        assert_eq!(resp.size_bytes, 5);
+    }
+    let text = local.render();
+    assert!(
+        text.lines().any(|l| l
+            .starts_with(stroem_server::metrics::STROEM_INPUT_FILE_UPLOADS_TOTAL)
+            && l.contains(r#"origin="api""#)
+            && l.contains(r#"result="ok""#)
+            && l.ends_with(" 1")),
+        "uploads counter missing:\n{text}"
+    );
+    assert!(
+        text.lines().any(
+            |l| l.starts_with(stroem_server::metrics::STROEM_INPUT_FILE_BYTES_TOTAL)
+                && l.contains(r#"origin="api""#)
+                && l.ends_with(" 5")
+        ),
+        "bytes counter missing:\n{text}"
     );
     Ok(())
 }

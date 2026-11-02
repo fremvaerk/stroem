@@ -1,6 +1,7 @@
 pub mod api_keys;
 pub mod artifacts;
 pub mod auth;
+pub mod input_files;
 pub mod jobs;
 pub mod logs;
 pub mod middleware;
@@ -313,6 +314,16 @@ pub fn build_api_routes(state: Arc<AppState>) -> Router {
             post(state_upload::upload_global_state)
                 .layer(axum::extract::DefaultBodyLimit::max(50 * 1024 * 1024)),
         )
+        .route(
+            "/workspaces/{ws}/tasks/{name}/files",
+            post(input_files::upload_task_file).layer(axum::extract::DefaultBodyLimit::max(
+                usize::try_from(state.input_files_config.max_file_bytes).unwrap_or(usize::MAX),
+            )),
+        )
+        .route(
+            "/jobs/{id}/input-files/{field}",
+            get(input_files::download_input_file),
+        )
         .route("/users", get(users::list_users).post(users::create_user))
         .route("/users/{id}", get(users::get_user))
         .route("/users/{id}/admin", put(users::set_user_admin))
@@ -378,6 +389,14 @@ pub fn build_api_routes(state: Arc<AppState>) -> Router {
     let public = Router::new()
         .route("/config", get(get_config))
         .route("/jobs/{id}/logs/stream", get(ws::job_log_stream))
+        // Single-use upload URL from the MCP `create_upload_url` tool: the
+        // token in the path is the credential, so no `require_auth`.
+        .route(
+            "/uploads/{token}",
+            post(input_files::upload_by_token).layer(axum::extract::DefaultBodyLimit::max(
+                usize::try_from(state.input_files_config.max_file_bytes).unwrap_or(usize::MAX),
+            )),
+        )
         .merge(login_routes)
         .merge(refresh_routes)
         .merge(general_auth_routes);
@@ -420,9 +439,20 @@ pub fn build_api_routes(state: Arc<AppState>) -> Router {
 ///
 /// Typed [`PinError`](crate::workspace::pins::PinError) /
 /// [`RefResolveError`](crate::refs::RefResolveError) / `GitRefError` are
-/// classified first, by their own permanence (git-refs spec § 8).
+/// classified first, by their own permanence (git-refs spec § 8). Before
+/// them all, a `FileInputError` (file inputs spec § 8) is always a 400, and
+/// before that an `InputStorageUnavailable` (no file storage on this
+/// server, § 4.3) is always a 503 with its fixed text.
 pub(crate) fn classify_execute_error(e: anyhow::Error) -> AppError {
     use crate::workspace::pins::{PinError, PinLoadWithheld};
+    if let Some(u) = e.downcast_ref::<crate::input_files::InputStorageUnavailable>() {
+        return AppError::ServiceUnavailable(u.to_string());
+    }
+    // File inputs (spec 2026-10-29 § 8): a value-free author mistake, checked
+    // before everything else — in particular before "is not available" (500).
+    if let Some(f) = e.downcast_ref::<stroem_common::file_field::FileInputError>() {
+        return AppError::BadRequest(f.to_string());
+    }
     // Templated refs (spec 2026-10-15 § 5.5): one value-free typed error,
     // checked first. Its kind decides: transient → 500, else → 400.
     if let Some(r) = e.downcast_ref::<crate::templated_ref::RenderedRefError>() {
@@ -490,6 +520,53 @@ pub(crate) fn classify_execute_error(e: anyhow::Error) -> AppError {
 #[cfg(test)]
 mod classify_execute_error_tests {
     use super::*;
+
+    /// A file input error is an author mistake: 400 with its own fixed text,
+    /// even under a context layer that says "is not available" (which would
+    /// otherwise force a 500) — spec 2026-10-29-file-inputs § 8.
+    #[test]
+    fn classify_file_input_error_is_400_before_is_not_available() {
+        use stroem_common::file_field::{FileInputError, FileInputErrorKind};
+        for (kind, text) in [
+            (
+                FileInputErrorKind::CannotUse,
+                "Input field 'data_file': the file cannot be used",
+            ),
+            (
+                FileInputErrorKind::Required,
+                "Input field 'data_file': a file is required",
+            ),
+        ] {
+            let err = anyhow::Error::new(FileInputError {
+                field: "data_file".into(),
+                kind,
+            })
+            .context("workspace 'x' is not available");
+            match classify_execute_error(err) {
+                AppError::BadRequest(msg) => assert_eq!(msg, text),
+                other => panic!("expected BadRequest, got {other:?}"),
+            }
+        }
+    }
+
+    /// No file storage (spec 2026-10-29 § 4.3) is a server condition: 503
+    /// with the fixed text, also under a context layer that would otherwise
+    /// decide (here "is not available", a 500).
+    #[test]
+    fn classify_input_storage_unavailable_is_503() {
+        use crate::input_files::InputStorageUnavailable;
+        for err in [
+            anyhow::Error::new(InputStorageUnavailable),
+            anyhow::Error::new(InputStorageUnavailable).context("workspace 'x' is not available"),
+        ] {
+            match classify_execute_error(err) {
+                AppError::ServiceUnavailable(msg) => {
+                    assert_eq!(msg, "file storage is not configured")
+                }
+                other => panic!("expected ServiceUnavailable, got {other:?}"),
+            }
+        }
+    }
 
     #[test]
     fn rendered_ref_errors_answer_by_kind_with_their_fixed_sentence() {

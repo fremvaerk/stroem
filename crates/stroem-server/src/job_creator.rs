@@ -17,6 +17,7 @@ use stroem_db::{JobPinCols, JobRefPinRepo, JobRepo, JobRow, JobStepRepo, NewJobS
 use uuid::Uuid;
 
 use crate::config::{AgentsConfig, JobDefaults};
+use crate::input_files::{attach_all_tx, task_file_values, FileGrant, InputStorageUnavailable};
 use crate::refs::{inherited_pin, plan_reference, RefPlan, RefResolveError, RefWorld};
 use crate::settlement::CreatedJob;
 use crate::workspace::pins::{PinRef, Pinned};
@@ -95,6 +96,7 @@ pub async fn create_job_for_task_detailed(
     source_job_id: Option<Uuid>,
     agents_config: Option<&AgentsConfig>,
     defaults: JobDefaults,
+    files: FileGrant,
 ) -> Result<CreatedJob> {
     create_job_for_task_inner(
         workspaces,
@@ -118,6 +120,7 @@ pub async fn create_job_for_task_detailed(
         agents_config,
         defaults,
         None,
+        files,
     )
     .await
 }
@@ -205,6 +208,7 @@ pub async fn create_job_for_rerun(
     replay_fields: &[String],
     agents_config: Option<&AgentsConfig>,
     defaults: JobDefaults,
+    files: FileGrant,
 ) -> Result<CreatedJob> {
     create_job_for_task_inner(
         workspaces,
@@ -225,6 +229,7 @@ pub async fn create_job_for_rerun(
         agents_config,
         defaults,
         None,
+        files,
     )
     .await
 }
@@ -256,6 +261,7 @@ pub async fn create_restart_job(
     revision: Option<&str>,
     defaults: JobDefaults,
     git_ref: Option<&str>,
+    files: FileGrant,
 ) -> Result<CreatedJob> {
     debug_assert!(
         plan.restart_steps.iter().any(|s| s == from_step),
@@ -289,6 +295,7 @@ pub async fn create_restart_job(
         None,
         defaults,
         git_ref,
+        files,
     )
     .await
 }
@@ -333,6 +340,8 @@ pub async fn create_child_job_for_task_detailed(
         None,
         defaults,
         git_ref,
+        // Agent tool children carry no file (spec 2026-10-29 § 7.6).
+        FileGrant::Indirect,
     )
     .await
 }
@@ -357,6 +366,7 @@ pub async fn create_job_for_task_pinned(
     mode: CreationMode<'_>,
     agents_config: Option<&AgentsConfig>,
     defaults: JobDefaults,
+    files: FileGrant,
 ) -> Result<CreatedJob> {
     create_job_for_task_inner(
         workspaces,
@@ -374,6 +384,7 @@ pub async fn create_job_for_task_pinned(
         agents_config,
         defaults,
         Some(git_ref),
+        files,
     )
     .await
 }
@@ -467,6 +478,7 @@ pub(crate) fn create_job_for_task_inner<'a>(
     _agents_config: Option<&'a AgentsConfig>,
     defaults: JobDefaults,
     git_ref: Option<&'a str>,
+    files: FileGrant,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<CreatedJob>> + Send + 'a>> {
     Box::pin(async move {
         // A pin needs both halves (spec § 6): never persist `git_ref` without
@@ -564,6 +576,31 @@ pub(crate) fn create_job_for_task_inner<'a>(
                 (Some(source.job_id), Some(*from_step))
             }
         };
+
+        // File inputs (spec 2026-10-29 § 4.4 – § 4.6): shape and required
+        // check on the input as submitted, before defaults. The job a value
+        // may come from (A2) is the one this creation names: the Re-run /
+        // Restart source, the retry's FAILED job (not the chain's root), or
+        // a `type: task` child's parent.
+        let file_lineage: Option<Uuid> = match (&mode, files) {
+            (CreationMode::Rerun { source_job_id, .. }, _) => Some(*source_job_id),
+            (CreationMode::Restart { source, .. }, _) => Some(source.job_id),
+            (CreationMode::Retry { failed_job_id, .. }, _) => Some(*failed_job_id),
+            (_, FileGrant::TaskChild) => Some(parent_job_id.with_context(|| {
+                format!(
+                    "child job of task '{}' in workspace '{}' has no parent job",
+                    task_name, workspace_name
+                )
+            })?),
+            _ => None,
+        };
+        let file_values = task_file_values(task, &effective_input).map_err(anyhow::Error::new)?;
+        // § 4.3: without storage no job may carry a file — also an existing
+        // attachment a Re-run, Restart, retry or child replays — or the step
+        // would fail later at delivery. Before the transaction: no job row.
+        if !file_values.is_empty() && !defaults.input_storage {
+            return Err(anyhow::Error::new(InputStorageUnavailable));
+        }
 
         // Capture the user's submission verbatim before defaults/connections are merged.
         let raw_input_to_persist = Some(effective_input.clone());
@@ -692,6 +729,20 @@ pub(crate) fn create_job_for_task_inner<'a>(
         )
         .await
         .context("Failed to create job")?;
+
+        // In the creation transaction: a refused value rolls the job back.
+        if !file_values.is_empty() {
+            attach_all_tx(
+                &mut tx,
+                job_id,
+                workspace_name,
+                task_name,
+                &file_values,
+                files,
+                file_lineage,
+            )
+            .await?;
+        }
 
         JobStepRepo::create_steps_tx(&mut *tx, &new_steps)
             .await
@@ -2597,6 +2648,7 @@ mod tests {
             defaults: JobDefaults {
                 step_timeout_secs: Some(600),
                 job_timeout_secs: None,
+                ..JobDefaults::default()
             },
         };
         let step = |yaml: &str| -> FlowStep { serde_yaml::from_str(yaml).unwrap() };

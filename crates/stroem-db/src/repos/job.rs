@@ -1531,13 +1531,22 @@ impl JobRepo {
         Ok(rows)
     }
 
-    /// Delete a job by ID. Steps are cascade-deleted via FK constraint.
+    /// Delete a job by ID. Steps are cascade-deleted via FK constraint; the
+    /// job's input-file attachments are removed first, in the same
+    /// transaction (the files and their blobs are left to the sweep).
     pub async fn delete(pool: &PgPool, job_id: Uuid) -> Result<()> {
+        let mut tx = pool.begin().await.context("Failed to begin job delete")?;
+        sqlx::query("DELETE FROM job_input_file WHERE job_id = $1")
+            .bind(job_id)
+            .execute(&mut *tx)
+            .await
+            .context("Failed to delete job input files")?;
         sqlx::query("DELETE FROM job WHERE job_id = $1")
             .bind(job_id)
-            .execute(pool)
+            .execute(&mut *tx)
             .await
             .context("Failed to delete job")?;
+        tx.commit().await.context("Failed to commit job delete")?;
         Ok(())
     }
 

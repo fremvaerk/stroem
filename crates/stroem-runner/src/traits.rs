@@ -80,6 +80,17 @@ pub struct RunConfig {
     /// that fetch the workspace themselves (KubeRunner's init container) must
     /// request exactly this revision; `None` means the server's live one.
     pub workspace_revision: Option<String>,
+    /// File inputs of the job (mounted read-only at `/inputs`); `None` = no file inputs.
+    pub inputs: Option<RunInputs>,
+}
+
+/// File inputs a step reads: the worker-side directory holding them and the claimed files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunInputs {
+    pub job_id: String,
+    /// Host directory bind-mounted read-only at `/inputs` (`None` = nothing to mount).
+    pub host_dir: Option<String>,
+    pub files: Vec<stroem_common::file_field::ClaimedInputFile>,
 }
 
 /// A callback for receiving log lines as they're produced

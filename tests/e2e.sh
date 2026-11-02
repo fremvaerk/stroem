@@ -992,6 +992,81 @@ echo "$JS_LOGS" | grep -q "PAYLOAD_KEY=from-api" || fail "API object input did n
     || fail "persisted step input count is not the number 3"
 pass "json input: native object, number and API object verified end to end"
 
+# --- 22. File inputs: upload, execute, read, download, re-run ---
+# No docker step here: the compose worker has only the `script` capability.
+info "File inputs: uploading report.csv..."
+FI_DIR=$(mktemp -d)
+printf 'id,name,score\n1,alpha,10\n2,beta,20\n' > "$FI_DIR/report.csv"
+if command -v sha256sum >/dev/null 2>&1; then
+    FI_SHA=$(sha256sum "$FI_DIR/report.csv" | cut -d' ' -f1)
+else
+    FI_SHA=$(shasum -a 256 "$FI_DIR/report.csv" | cut -d' ' -f1)
+fi
+FI_SIZE=$(wc -c < "$FI_DIR/report.csv" | tr -d ' ')
+# Plain curl (not acurl): acurl uses -f, which hides the status code and body of a 4xx.
+FI_UP_CODE=$(curl -s -o "$FI_DIR/upload.json" -w '%{http_code}' -X POST \
+    -H "Authorization: Bearer $TOKEN" -H "Content-Type: text/csv" \
+    --data-binary @"$FI_DIR/report.csv" \
+    "$BASE_URL/api/workspaces/default/tasks/file-demo/files?name=report.csv")
+[ "$FI_UP_CODE" = "201" ] || { cat "$FI_DIR/upload.json"; fail "file upload answered $FI_UP_CODE, expected 201"; }
+FI_ID=$(jq -r '.file_id' "$FI_DIR/upload.json")
+echo "$FI_ID" | grep -Eq '^file_[0-9a-f]{32}$' || fail "unexpected file_id: $FI_ID"
+[ "$(jq -r '.size_bytes' "$FI_DIR/upload.json")" = "$FI_SIZE" ] || fail "upload size_bytes differs from $FI_SIZE"
+[ "$(jq -r '.sha256' "$FI_DIR/upload.json")" = "$FI_SHA" ] || fail "upload sha256 differs from $FI_SHA"
+pass "file uploaded: $FI_ID"
+
+# fi_run <input-json> <source_job_id or empty>: execute file-demo, wait, set FI_RUN_JOB / FI_RUN_DETAIL
+fi_run() {
+    local body resp polled=0 status=pending
+    if [ -n "$2" ]; then
+        body="{\"input\": $1, \"source_job_id\": \"$2\"}"
+    else
+        body="{\"input\": $1}"
+    fi
+    resp=$(acurl -X POST "$BASE_URL/api/workspaces/default/tasks/file-demo/execute" \
+        -H "Content-Type: application/json" -d "$body")
+    FI_RUN_JOB=$(echo "$resp" | jq -r '.job_id')
+    [ -n "$FI_RUN_JOB" ] && [ "$FI_RUN_JOB" != "null" ] || fail "file-demo execute failed: $resp"
+    while [ "$status" != "completed" ] && [ "$status" != "failed" ]; do
+        sleep 2; polled=$((polled + 2))
+        [ "$polled" -lt "$MAX_POLL" ] || { acurl "$BASE_URL/api/jobs/$FI_RUN_JOB" | jq .; fail "file-demo did not finish"; }
+        FI_RUN_DETAIL=$(acurl "$BASE_URL/api/jobs/$FI_RUN_JOB"); status=$(echo "$FI_RUN_DETAIL" | jq -r '.status'); printf "."
+    done; echo ""
+    [ "$status" = "completed" ] || { echo "$FI_RUN_DETAIL" | jq .; fail "file-demo job failed"; }
+}
+
+info "Executing file-demo with the uploaded file..."
+fi_run "{\"data_file\": \"$FI_ID\"}" ""
+FI_JOB1="$FI_RUN_JOB"
+FI_LOGS=$(acurl "$BASE_URL/api/jobs/$FI_JOB1/logs" | jq -r '.logs')
+echo "$FI_LOGS" | grep -q "$FI_SHA" || fail "step log does not contain the file's SHA-256"
+echo "$FI_LOGS" | grep -q "id,name,score" || fail "step log does not contain the file's first line"
+pass "step read the file (sha256 and content in the log)"
+
+[ "$(echo "$FI_RUN_DETAIL" | jq -r '.input_files[0].field')" = "data_file" ] || fail "input_files[0].field is not data_file"
+[ "$(echo "$FI_RUN_DETAIL" | jq -r '.input_files[0].name')" = "report.csv" ] || fail "input_files[0].name is not report.csv"
+pass "job detail lists the input file"
+
+acurl -o "$FI_DIR/downloaded.csv" "$BASE_URL/api/jobs/$FI_JOB1/input-files/data_file"
+cmp "$FI_DIR/report.csv" "$FI_DIR/downloaded.csv" || fail "downloaded input file differs from the upload"
+pass "input file downloaded byte for byte"
+
+info "Re-running without a new upload..."
+fi_run "{\"data_file\": \"$FI_ID\"}" "$FI_JOB1"
+[ "$(echo "$FI_RUN_DETAIL" | jq -r '.input_files[0].file_id')" = "$FI_ID" ] || fail "Re-run job has a different file_id"
+pass "Re-run completed with the same file_id"
+
+info "Executing with an unknown file id..."
+FI_BAD_CODE=$(curl -s -o "$FI_DIR/bad.json" -w '%{http_code}' -X POST \
+    -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+    -d '{"input": {"data_file": "file_00000000000000000000000000000000"}}' \
+    "$BASE_URL/api/workspaces/default/tasks/file-demo/execute")
+[ "$FI_BAD_CODE" = "400" ] || { cat "$FI_DIR/bad.json"; fail "bogus file id answered $FI_BAD_CODE, expected 400"; }
+grep -q "Input field 'data_file': the file cannot be used" "$FI_DIR/bad.json" \
+    || { cat "$FI_DIR/bad.json"; fail "bogus file id error text unexpected"; }
+pass "unknown file id rejected with 400"
+rm -rf "$FI_DIR"
+
 # --- Summary ---
 echo ""
 echo -e "${GREEN}========================================${NC}"

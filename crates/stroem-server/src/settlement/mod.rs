@@ -96,7 +96,7 @@ impl AppState {
         Settlement {
             pool: self.pool.clone(),
             workspaces: self.workspaces.clone(),
-            defaults: JobDefaults::from(self.config.as_ref()),
+            defaults: self.job_defaults(),
             log_storage: self.log_storage.clone(),
             log_broadcast: self.log_broadcast.clone(),
             job_completion: self.job_completion.clone(),
@@ -311,8 +311,11 @@ impl Settlement {
         if let (false, Some((workspace, task))) = (is_terminal(&job.status), resolved.as_ref()) {
             // One sample per entry (spec §3.4): every render in this advance —
             // the cascade, task-step input, approval messages — sees the same
-            // snapshot. Nested advances sample independently.
-            let snapshots = crate::render_context::latest_snapshots(
+            // snapshot and the same input files. Nested advances sample
+            // independently. The state lookup is best-effort; the files are
+            // not (a `file` value would render as its id): the error
+            // propagates, like a cascade DB error.
+            let mut snapshots = crate::render_context::latest_snapshots(
                 &self.pool,
                 &job.workspace,
                 &job.task_name,
@@ -320,6 +323,10 @@ impl Settlement {
                 "advance",
             )
             .await;
+            snapshots.files = crate::input_files::job_files(
+                &crate::input_files::load_attachments(&self.pool, job_id).await?,
+                stroem_common::file_field::CANONICAL_INPUTS_ROOT,
+            );
             // Run the cascade: promote steps, skip unreachable, expand/resolve
             // for_each placeholders (inside the cascade), check terminal.
             cascade_and_settle(&self.pool, job_id, task, workspace, &snapshots).await?;

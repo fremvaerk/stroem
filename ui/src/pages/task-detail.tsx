@@ -28,8 +28,9 @@ import { SECRET_SENTINEL } from "@/components/task/constants";
 import { getTask, listJobs, executeTask } from "@/lib/api";
 import { buildExecutePayload } from "@/lib/execute-input";
 import { initialJsonFieldState } from "@/lib/json-field";
+import { fileFieldBlocksRun, initialFileFieldState } from "@/lib/file-field";
 import { useTitle } from "@/hooks/use-title";
-import { collectDependsOnNames, type TaskDetail, type JobListItem, type FlowStep } from "@/lib/types";
+import { collectDependsOnNames, type InputFileRef, type TaskDetail, type JobListItem, type FlowStep } from "@/lib/types";
 import { formatActionName } from "@/lib/utils";
 import { formatTime, formatDuration, formatFutureTime } from "@/lib/formatting";
 
@@ -91,9 +92,12 @@ export function TaskDetailPage() {
   const navigate = useNavigate();
   const location = useLocation();
   const prefill = location.state as
-    | { sourceJobId?: string; rawInput?: Record<string, unknown> | null }
+    | { sourceJobId?: string; rawInput?: Record<string, unknown> | null; inputFiles?: InputFileRef[] }
     | null;
   const sourceJobId = prefill?.sourceJobId;
+  // File fields are seeded ONLY from the source's `input_files[]`, never from
+  // `rawInput`, whose strings redaction may mask (spec file-inputs § 7.2).
+  const inputFiles = Array.isArray(prefill?.inputFiles) ? prefill.inputFiles : [];
   const rawInput = prefill?.rawInput ?? null;
   const isLegacySource = !!sourceJobId && !rawInput;
   useTitle(name ? `Task: ${name}` : "Task");
@@ -121,6 +125,10 @@ export function TaskDetailPage() {
           const defaults: Record<string, unknown> = {};
           for (const [key, field] of Object.entries(data.input)) {
             const hasSource = !!rawInput && Object.prototype.hasOwnProperty.call(rawInput, key);
+            if (field.type === "file") {
+              defaults[key] = initialFileFieldState(inputFiles.find((f) => f.field === key));
+              continue;
+            }
             if (field.type === "json") {
               defaults[key] = initialJsonFieldState(
                 field,
@@ -310,6 +318,9 @@ export function TaskDetailPage() {
                     value={values[key]}
                     onChange={(v) => setValues((prev) => ({ ...prev, [key]: v }))}
                     connections={task.connections}
+                    workspace={workspace}
+                    taskId={task.id}
+                    sourceJobId={sourceJobId}
                     replaySource={
                       rawInput && Object.prototype.hasOwnProperty.call(rawInput, key)
                         ? { value: rawInput[key] }
@@ -320,7 +331,12 @@ export function TaskDetailPage() {
               </div>
             )}
             <div className={inputFields.length > 0 ? "mt-6" : ""}>
-              <Button type="submit" disabled={submitting || task.can_execute === false}>
+              <Button type="submit" disabled={
+                  submitting ||
+                  task.can_execute === false ||
+                  Object.values(values).some(fileFieldBlocksRun)
+                }
+              >
                 {submitting ? "Running..." : "Run Task"}
               </Button>
               {task.can_execute === false && (

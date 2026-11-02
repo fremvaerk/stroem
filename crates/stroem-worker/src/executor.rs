@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use stroem_common::models::job::ActionType;
+use stroem_runner::traits::RunInputs;
 use stroem_runner::{LogCallback, LogLine, RunConfig, RunResult, Runner, RunnerMode, ShellRunner};
 use tokio_util::sync::CancellationToken;
 
@@ -12,6 +13,26 @@ use crate::client::{ClaimedStep, ServerClient};
 /// out to user-provided scripts and therefore have no artifacts to collect.
 pub(crate) fn step_supports_artifacts(step: &ClaimedStep) -> bool {
     !matches!(step.action_type.as_str(), "agent" | "approval" | "task")
+}
+
+/// The runner that executes a step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunnerKind {
+    Shell,
+    Docker,
+    Kube,
+}
+
+/// The one `(action_type, runner)` dispatch rule; `None` for a step no
+/// runner executes (e.g. `agent`) or an unknown combination.
+pub(crate) fn runner_kind(step: &ClaimedStep) -> Option<RunnerKind> {
+    let runner_field = step.runner.as_deref().unwrap_or("local");
+    match (step.action_type.as_str(), runner_field) {
+        ("script", "local") => Some(RunnerKind::Shell),
+        ("script", "docker") | ("docker", _) => Some(RunnerKind::Docker),
+        ("script", "pod") | ("pod", _) => Some(RunnerKind::Kube),
+        _ => None,
+    }
 }
 
 /// Executes workflow steps using the appropriate runner
@@ -65,10 +86,9 @@ impl StepExecutor {
 
     /// Select the appropriate runner for a step based on (action_type, runner) dispatch
     fn select_runner(&self, step: &ClaimedStep) -> Result<&dyn Runner> {
-        let runner_field = step.runner.as_deref().unwrap_or("local");
-        match (step.action_type.as_str(), runner_field) {
-            ("script", "local") => Ok(&self.shell_runner),
-            ("script", "docker") | ("docker", _) => {
+        match runner_kind(step) {
+            Some(RunnerKind::Shell) => Ok(&self.shell_runner),
+            Some(RunnerKind::Docker) => {
                 #[cfg(feature = "docker")]
                 {
                     self.docker_runner
@@ -81,7 +101,7 @@ impl StepExecutor {
                     anyhow::bail!("Docker runner not available. Build the worker with the 'docker' feature enabled.")
                 }
             }
-            ("script", "pod") | ("pod", _) => {
+            Some(RunnerKind::Kube) => {
                 #[cfg(feature = "kubernetes")]
                 {
                     self.kube_runner
@@ -94,7 +114,11 @@ impl StepExecutor {
                     anyhow::bail!("Kubernetes runner not available. Build the worker with the 'kubernetes' feature enabled.")
                 }
             }
-            (t, r) => anyhow::bail!("Unknown action type / runner combination: {t}/{r}"),
+            None => anyhow::bail!(
+                "Unknown action type / runner combination: {}/{}",
+                step.action_type,
+                step.runner.as_deref().unwrap_or("local")
+            ),
         }
     }
 
@@ -485,6 +509,18 @@ impl StepExecutor {
             })
             .unwrap_or_default();
 
+        // File inputs (spec § 6.2–6.4): only Docker bind-mounts the worker's
+        // dir at `/inputs`; a pod's init container fetches its own copy; a
+        // local step reads the absolute paths the server already rendered.
+        let inputs = (!step.input_files.is_empty()).then(|| RunInputs {
+            job_id: step.job_id.to_string(),
+            host_dir: match runner_kind(step) {
+                Some(RunnerKind::Docker) => step.inputs_dir.clone(),
+                _ => None,
+            },
+            files: step.input_files.clone(),
+        });
+
         Ok(RunConfig {
             cmd,
             script,
@@ -507,6 +543,7 @@ impl StepExecutor {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: step.revision.clone(),
+            inputs,
         })
     }
 }
@@ -542,7 +579,66 @@ mod tests {
             state_has_json: None,
             global_state_storage_key: None,
             global_state_has_json: None,
+            input_files: Vec::new(),
+            inputs_dir: None,
         }
+    }
+
+    /// Only a Docker step bind-mounts the worker's inputs dir; a pod gets the
+    /// file list for its init container, a local step already has absolute
+    /// paths rendered by the server (spec § 6.2–6.4).
+    #[test]
+    fn run_config_carries_host_dir_for_docker_only() {
+        use stroem_common::file_field::ClaimedInputFile;
+
+        let executor = StepExecutor::new();
+        let files = vec![ClaimedInputFile {
+            file_id: "file_0123456789abcdef0123456789abcdef".to_string(),
+            safe_name: "data.csv".to_string(),
+            size_bytes: 4,
+            sha256: "ab".repeat(32),
+        }];
+        let dir = "/tmp/stroem-inputs-0123";
+        let step_with = |action_type: &str, runner: Option<&str>| {
+            let spec = if action_type == "script" {
+                serde_json::json!({"script": "cat /inputs/x"})
+            } else {
+                serde_json::json!({"cmd": "cat /inputs/x"})
+            };
+            let mut step = test_step(Some(spec));
+            step.action_type = action_type.to_string();
+            step.action_image = Some("alpine:3".to_string());
+            step.runner = runner.map(str::to_string);
+            step.input_files = files.clone();
+            step.inputs_dir = Some(dir.to_string());
+            step
+        };
+
+        for (action_type, runner, host_dir) in [
+            ("script", Some("local"), None),
+            ("script", None, None),
+            ("script", Some("docker"), Some(dir)),
+            ("docker", None, Some(dir)),
+            ("script", Some("pod"), None),
+            ("pod", None, None),
+        ] {
+            let step = step_with(action_type, runner);
+            let config = executor.build_run_config(&step, "/ws").unwrap();
+            assert_eq!(
+                config.inputs,
+                Some(RunInputs {
+                    job_id: step.job_id.to_string(),
+                    host_dir: host_dir.map(str::to_string),
+                    files: files.clone(),
+                }),
+                "{action_type}/{runner:?}"
+            );
+        }
+
+        let mut no_files = step_with("script", Some("docker"));
+        no_files.input_files.clear();
+        let config = executor.build_run_config(&no_files, "/ws").unwrap();
+        assert!(config.inputs.is_none(), "no files, no inputs");
     }
 
     #[test]

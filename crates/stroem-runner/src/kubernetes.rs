@@ -1,6 +1,7 @@
 use crate::script_exec;
 use crate::traits::{
-    parse_output_line, LogCallback, LogLine, LogStream, RunConfig, RunResult, Runner, RunnerMode,
+    parse_output_line, LogCallback, LogLine, LogStream, RunConfig, RunInputs, RunResult, Runner,
+    RunnerMode,
 };
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
@@ -15,6 +16,7 @@ use stroem_common::language::ScriptLanguage;
 use tokio_util::sync::CancellationToken;
 
 use stroem_common::constants::{DEFAULT_INIT_IMAGE, DEFAULT_RUNNER_IMAGE};
+use stroem_common::file_field::CANONICAL_INPUTS_ROOT;
 
 /// Kubernetes caps label values at 63 characters. Pod names may be longer DNS
 /// subdomains, but Strøm keeps them to a 63-char DNS-1123 label for compatibility.
@@ -53,6 +55,39 @@ fn workspace_init_script(url: &str, archive: &str, dest: &str) -> String {
         dest = shell_escape(dest),
     )
 }
+
+/// Init container that downloads the step's input files into [`INPUTS_VOLUME`].
+pub(crate) const INPUTS_INIT_CONTAINER: &str = "stroem-inputs-init";
+/// `emptyDir` volume holding the input files: read-write in the init
+/// container, read-only at `/inputs` in the `step` container.
+pub(crate) const INPUTS_VOLUME: &str = "stroem-inputs";
+
+/// Shell script of the `stroem-inputs-init` container. A constant: every value
+/// comes from the environment (`inputs_init_env`), and `eval` splices in only
+/// the loop counter, so no file ID, name or URL is ever parsed as code.
+///
+/// Per file: create `$STROEM_INPUTS_ROOT/<id>` (curl creates no parent
+/// directories), download to a file with the `workspace-init` retry policy
+/// (`--retry 11 --retry-delay 5` = `INIT_DOWNLOAD_ATTEMPTS - 1` and
+/// `INIT_DOWNLOAD_RETRY_DELAY_SECS`), then check the byte count and SHA-256 —
+/// the only integrity check of the pod's copy, which the worker cannot see.
+/// Each failure prints one line naming the file ID and exits 1.
+pub(crate) const INPUTS_INIT_SCRIPT: &str = r#"set -eu
+i=0
+while [ "$i" -lt "$STROEM_INPUT_COUNT" ]; do
+  eval "id=\${STROEM_INPUT_${i}_ID}"
+  eval "name=\${STROEM_INPUT_${i}_NAME}"
+  eval "url=\${STROEM_INPUT_${i}_URL}"
+  eval "size=\${STROEM_INPUT_${i}_SIZE}"
+  eval "sha=\${STROEM_INPUT_${i}_SHA256}"
+  dir="$STROEM_INPUTS_ROOT/$id"
+  f="$dir/$name"
+  mkdir -p "$dir" || { echo "stroem-inputs-init: input file $id: cannot create its directory" >&2; exit 1; }
+  curl -sSf --retry 11 --retry-delay 5 -H "Authorization: Bearer $STROEM_WORKER_TOKEN" -o "$f" "$url" || { echo "stroem-inputs-init: input file $id: download failed" >&2; exit 1; }
+  [ "$(wc -c < "$f" | tr -d ' ')" = "$size" ] || { echo "stroem-inputs-init: input file $id: size does not match" >&2; exit 1; }
+  [ "$(sha256sum "$f" | cut -d ' ' -f 1)" = "$sha" ] || { echo "stroem-inputs-init: input file $id: SHA-256 does not match" >&2; exit 1; }
+  i=$((i + 1))
+done"#;
 
 /// FNV-1a (32-bit): a tiny hash that is stable across processes and Rust versions,
 /// which `DefaultHasher` does not promise.
@@ -113,6 +148,75 @@ impl KubeRunner {
                 url::form_urlencoded::byte_serialize(rev.as_bytes()).collect::<String>()
             ),
             None => url,
+        }
+    }
+
+    /// URL the `stroem-inputs-init` container downloads one input file from.
+    fn input_file_url(&self, job_id: &str, file_id: &str) -> String {
+        format!(
+            "{}/worker/jobs/{job_id}/input-files/{file_id}",
+            self.server_url.trim_end_matches('/')
+        )
+    }
+
+    /// Environment of the `stroem-inputs-init` container, the only input of
+    /// [`INPUTS_INIT_SCRIPT`]. The worker token reaches it as a plain env
+    /// value, like `workspace-init`'s.
+    fn inputs_init_env(&self, inputs: &RunInputs) -> Vec<Value> {
+        let var = |name: String, value: String| serde_json::json!({"name": name, "value": value});
+        let mut env = vec![
+            var("STROEM_WORKER_TOKEN".into(), self.worker_token.clone()),
+            var("STROEM_INPUTS_ROOT".into(), CANONICAL_INPUTS_ROOT.into()),
+            var("STROEM_INPUT_COUNT".into(), inputs.files.len().to_string()),
+        ];
+        for (i, file) in inputs.files.iter().enumerate() {
+            let url = self.input_file_url(&inputs.job_id, &file.file_id);
+            env.extend([
+                var(format!("STROEM_INPUT_{i}_ID"), file.file_id.clone()),
+                var(format!("STROEM_INPUT_{i}_NAME"), file.safe_name.clone()),
+                var(format!("STROEM_INPUT_{i}_URL"), url),
+                var(
+                    format!("STROEM_INPUT_{i}_SIZE"),
+                    file.size_bytes.to_string(),
+                ),
+                var(format!("STROEM_INPUT_{i}_SHA256"), file.sha256.clone()),
+            ]);
+        }
+        env
+    }
+
+    /// Add the `stroem-inputs-init` container (after `workspace-init`, if
+    /// any), the `stroem-inputs` volume and its read-only `/inputs` mount in
+    /// the `step` container — only when the step has input files. Runs before
+    /// the manifest overrides, so a user can rewrite both by name (F9).
+    fn inject_inputs_init(&self, pod_json: &mut Value, config: &RunConfig) {
+        let Some(inputs) = config.inputs.as_ref().filter(|i| !i.files.is_empty()) else {
+            return;
+        };
+        let init = serde_json::json!({
+            "name": INPUTS_INIT_CONTAINER,
+            "image": self.init_image,
+            "command": ["sh", "-c", INPUTS_INIT_SCRIPT],
+            "env": self.inputs_init_env(inputs),
+            "volumeMounts": [{"name": INPUTS_VOLUME, "mountPath": CANONICAL_INPUTS_ROOT}],
+        });
+        push_or_create(&mut pod_json["spec"]["initContainers"], init);
+        push_or_create(
+            &mut pod_json["spec"]["volumes"],
+            serde_json::json!({"name": INPUTS_VOLUME, "emptyDir": {}}),
+        );
+        if let Some(step) = pod_json["spec"]["containers"]
+            .as_array_mut()
+            .and_then(|cs| cs.iter_mut().find(|c| c["name"] == "step"))
+        {
+            push_or_create(
+                &mut step["volumeMounts"],
+                serde_json::json!({
+                    "name": INPUTS_VOLUME,
+                    "mountPath": CANONICAL_INPUTS_ROOT,
+                    "readOnly": true,
+                }),
+            );
         }
     }
 
@@ -447,6 +551,8 @@ impl KubeRunner {
             }
         };
 
+        self.inject_inputs_init(&mut pod_json, config);
+
         // Inject startup scripts volume + mount if configured (script actions only —
         // container action pods run the user's image as-is without the startup entrypoint)
         if config.runner_mode == RunnerMode::WithWorkspace {
@@ -593,6 +699,16 @@ fn shell_escape(s: &str) -> String {
         return s.to_string();
     }
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Append `item` to the array at `slot`, creating the array when the key is
+/// missing (or not an array).
+fn push_or_create(slot: &mut Value, item: Value) {
+    if let Some(items) = slot.as_array_mut() {
+        items.push(item);
+    } else {
+        *slot = Value::Array(vec![item]);
+    }
 }
 
 /// Deep-merge two JSON values. For objects, keys are merged recursively.
@@ -1874,6 +1990,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let mut labels = HashMap::new();
@@ -1953,6 +2070,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let mut labels = HashMap::new();
@@ -2009,6 +2127,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let mut labels = HashMap::new();
@@ -2062,6 +2181,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let mut labels = HashMap::new();
@@ -2134,6 +2254,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let mut labels = HashMap::new();
@@ -2208,6 +2329,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let labels = HashMap::new();
@@ -2287,6 +2409,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let labels = HashMap::new();
@@ -2361,6 +2484,7 @@ mod tests {
             global_state_out_dir: Some("/tmp/global-state-out".to_string()),
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let labels = HashMap::new();
@@ -2444,6 +2568,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let labels = HashMap::new();
@@ -2505,6 +2630,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let result = runner
@@ -2545,6 +2671,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let pod_json = runner.build_pod_json_with_workspace(
@@ -2607,6 +2734,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: revision.map(str::to_string),
+            inputs: None,
         }
     }
 
@@ -2805,6 +2933,683 @@ mod tests {
         );
     }
 
+    // --- input files: the `stroem-inputs-init` container ---
+
+    use stroem_common::file_field::ClaimedInputFile;
+
+    const INPUTS_JOB_ID: &str = "0b5f9d7e-3c1a-4a52-9e0f-6d2b8c4a1e77";
+    const BODY_A: &str = "alpha,1\nalpha,2\n";
+    const SHA_A: &str = "e28cbb28b8c963ca00251a1d80d9f2582b01a8423e251ffc2e4f364b41dc7e15";
+    const BODY_B: &str = "beta report\n";
+    const SHA_B: &str = "c1aaee0265db334affbea605e51d32f3b6ae55a679eab294a679c0d8725982e9";
+
+    /// A plausible file ID (`file_` + 32 hex); IDs sort by `c`, so a glob over
+    /// the inputs root lists them in a known order.
+    fn file_id(c: char) -> String {
+        let id = format!("file_{}", c.to_string().repeat(32));
+        assert!(stroem_common::file_field::is_file_id(&id), "{id}");
+        id
+    }
+
+    fn claimed(id: &str, name: &str, body: &str, sha256: &str) -> ClaimedInputFile {
+        ClaimedInputFile {
+            file_id: id.to_string(),
+            safe_name: name.to_string(),
+            size_bytes: body.len() as u64,
+            sha256: sha256.to_string(),
+        }
+    }
+
+    fn run_inputs_with(files: Vec<ClaimedInputFile>) -> RunInputs {
+        RunInputs {
+            job_id: INPUTS_JOB_ID.to_string(),
+            host_dir: None,
+            files,
+        }
+    }
+
+    /// `data.csv` (file `a`) and `report.txt` (file `b`).
+    fn two_inputs() -> RunInputs {
+        run_inputs_with(vec![
+            claimed(&file_id('a'), "data.csv", BODY_A, SHA_A),
+            claimed(&file_id('b'), "report.txt", BODY_B, SHA_B),
+        ])
+    }
+
+    fn inputs_pod_config(
+        mode: RunnerMode,
+        inputs: Option<RunInputs>,
+        overrides: Option<serde_json::Value>,
+    ) -> RunConfig {
+        RunConfig {
+            runner_mode: mode,
+            inputs,
+            ..make_pod_config(overrides)
+        }
+    }
+
+    fn input_file_path(id: &str) -> String {
+        format!("/worker/jobs/{INPUTS_JOB_ID}/input-files/{id}")
+    }
+
+    fn names<T>(items: &[T], name: impl Fn(&T) -> &str) -> Vec<String> {
+        items.iter().map(|i| name(i).to_string()).collect()
+    }
+
+    fn assert_inputs_init_container(c: &k8s_openapi::api::core::v1::Container) {
+        assert_eq!(c.name, INPUTS_INIT_CONTAINER);
+        assert_eq!(c.image.as_deref(), Some(DEFAULT_INIT_IMAGE));
+        assert_eq!(
+            c.command.as_deref(),
+            Some(
+                &[
+                    "sh".to_string(),
+                    "-c".to_string(),
+                    INPUTS_INIT_SCRIPT.to_string()
+                ][..]
+            )
+        );
+        let mounts = c.volume_mounts.as_ref().expect("init container mounts");
+        assert_eq!(mounts.len(), 1, "{mounts:?}");
+        assert_eq!(mounts[0].name, INPUTS_VOLUME);
+        assert_eq!(mounts[0].mount_path, "/inputs");
+        assert_ne!(
+            mounts[0].read_only,
+            Some(true),
+            "init container writes the files"
+        );
+        let env_names = names(c.env.as_deref().unwrap_or_default(), |e| &e.name);
+        assert_eq!(
+            env_names,
+            [
+                "STROEM_WORKER_TOKEN",
+                "STROEM_INPUTS_ROOT",
+                "STROEM_INPUT_COUNT",
+                "STROEM_INPUT_0_ID",
+                "STROEM_INPUT_0_NAME",
+                "STROEM_INPUT_0_URL",
+                "STROEM_INPUT_0_SIZE",
+                "STROEM_INPUT_0_SHA256",
+                "STROEM_INPUT_1_ID",
+                "STROEM_INPUT_1_NAME",
+                "STROEM_INPUT_1_URL",
+                "STROEM_INPUT_1_SIZE",
+                "STROEM_INPUT_1_SHA256",
+            ]
+        );
+    }
+
+    fn step_container(
+        containers: &[k8s_openapi::api::core::v1::Container],
+    ) -> &k8s_openapi::api::core::v1::Container {
+        containers
+            .iter()
+            .find(|c| c.name == "step")
+            .expect("step container")
+    }
+
+    fn assert_step_mounts_inputs_read_only(containers: &[k8s_openapi::api::core::v1::Container]) {
+        let mounts = step_container(containers)
+            .volume_mounts
+            .as_ref()
+            .expect("step mounts");
+        let inputs: Vec<_> = mounts.iter().filter(|m| m.name == INPUTS_VOLUME).collect();
+        assert_eq!(inputs.len(), 1, "{mounts:?}");
+        assert_eq!(inputs[0].mount_path, "/inputs");
+        assert_eq!(inputs[0].read_only, Some(true));
+    }
+
+    #[test]
+    fn inputs_init_added_with_workspace() {
+        let config = inputs_pod_config(RunnerMode::WithWorkspace, Some(two_inputs()), None);
+        let pod = make_runner()
+            .build_pod_spec("test-pod", &config, "default", make_labels())
+            .unwrap();
+        let spec = pod.spec.unwrap();
+
+        let init = spec.init_containers.unwrap();
+        assert_eq!(
+            names(&init, |c| &c.name),
+            ["workspace-init", INPUTS_INIT_CONTAINER]
+        );
+        assert_inputs_init_container(&init[1]);
+
+        let volumes = spec.volumes.unwrap();
+        assert_eq!(names(&volumes, |v| &v.name), ["workspace", INPUTS_VOLUME]);
+        assert!(volumes[1].empty_dir.is_some(), "{:?}", volumes[1]);
+
+        assert_step_mounts_inputs_read_only(&spec.containers);
+        // The workspace mount is untouched.
+        assert!(step_container(&spec.containers)
+            .volume_mounts
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|m| m.name == "workspace" && m.mount_path == "/workspace"));
+    }
+
+    #[test]
+    fn inputs_init_added_no_workspace() {
+        let config = inputs_pod_config(RunnerMode::NoWorkspace, Some(two_inputs()), None);
+        let pod = make_runner()
+            .build_pod_spec("test-pod", &config, "default", make_labels())
+            .unwrap();
+        let spec = pod.spec.unwrap();
+
+        let init = spec.init_containers.unwrap();
+        assert_eq!(names(&init, |c| &c.name), [INPUTS_INIT_CONTAINER]);
+        assert_inputs_init_container(&init[0]);
+
+        let volumes = spec.volumes.unwrap();
+        assert_eq!(names(&volumes, |v| &v.name), [INPUTS_VOLUME]);
+        assert!(volumes[0].empty_dir.is_some(), "{:?}", volumes[0]);
+
+        assert_step_mounts_inputs_read_only(&spec.containers);
+        assert_eq!(
+            step_container(&spec.containers)
+                .volume_mounts
+                .as_ref()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn no_inputs_no_init_container() {
+        for inputs in [None, Some(run_inputs_with(vec![]))] {
+            let with_ws = inputs_pod_config(RunnerMode::WithWorkspace, inputs.clone(), None);
+            let spec = make_runner()
+                .build_pod_spec("test-pod", &with_ws, "default", make_labels())
+                .unwrap()
+                .spec
+                .unwrap();
+            assert_eq!(
+                names(&spec.init_containers.unwrap(), |c| &c.name),
+                ["workspace-init"],
+                "{inputs:?}"
+            );
+            assert_eq!(names(&spec.volumes.unwrap(), |v| &v.name), ["workspace"]);
+            assert!(!step_container(&spec.containers)
+                .volume_mounts
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|m| m.name == INPUTS_VOLUME));
+
+            let no_ws = inputs_pod_config(RunnerMode::NoWorkspace, inputs.clone(), None);
+            let spec = make_runner()
+                .build_pod_spec("test-pod", &no_ws, "default", make_labels())
+                .unwrap()
+                .spec
+                .unwrap();
+            assert!(
+                spec.init_containers.as_ref().is_none_or(|c| c.is_empty()),
+                "{inputs:?}"
+            );
+            assert!(spec.volumes.as_ref().is_none_or(|v| v.is_empty()));
+            assert!(step_container(&spec.containers).volume_mounts.is_none());
+        }
+    }
+
+    #[test]
+    fn manifest_override_can_rewrite_inputs_init() {
+        // F9: overrides merge named arrays by name, so a user can rewrite the
+        // Strøm-added init container and volume (not validated, documented).
+        let overrides = serde_json::json!({
+            "spec": {
+                "initContainers": [{
+                    "name": INPUTS_INIT_CONTAINER,
+                    "image": "registry.example/curl:8",
+                }],
+                "volumes": [{
+                    "name": INPUTS_VOLUME,
+                    "emptyDir": {"medium": "Memory"},
+                }],
+            }
+        });
+        let config = inputs_pod_config(
+            RunnerMode::WithWorkspace,
+            Some(two_inputs()),
+            Some(overrides),
+        );
+        let spec = make_runner()
+            .build_pod_spec("test-pod", &config, "default", make_labels())
+            .unwrap()
+            .spec
+            .unwrap();
+
+        let init = spec.init_containers.unwrap();
+        assert_eq!(
+            names(&init, |c| &c.name),
+            ["workspace-init", INPUTS_INIT_CONTAINER]
+        );
+        assert_eq!(init[0].image.as_deref(), Some(DEFAULT_INIT_IMAGE));
+        assert_eq!(init[1].image.as_deref(), Some("registry.example/curl:8"));
+        // Merged, not replaced: the script, env and mount stay.
+        assert_eq!(init[1].command.as_ref().unwrap()[2], INPUTS_INIT_SCRIPT);
+        assert_eq!(init[1].env.as_ref().unwrap().len(), 13);
+        assert_eq!(
+            init[1].volume_mounts.as_ref().unwrap()[0].name,
+            INPUTS_VOLUME
+        );
+
+        let volumes = spec.volumes.unwrap();
+        assert_eq!(names(&volumes, |v| &v.name), ["workspace", INPUTS_VOLUME]);
+        assert_eq!(
+            volumes[1].empty_dir.as_ref().unwrap().medium.as_deref(),
+            Some("Memory")
+        );
+    }
+
+    #[test]
+    fn inputs_init_env_is_safe() {
+        let runner = make_runner();
+        let env = runner.inputs_init_env(&two_inputs());
+        let pairs: Vec<(String, String)> = env
+            .iter()
+            .map(|e| {
+                (
+                    e["name"].as_str().unwrap().to_string(),
+                    e["value"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        let (a, b) = (file_id('a'), file_id('b'));
+        let url = |id: &str| format!("http://stroem-server:8080{}", input_file_path(id));
+        let expected: Vec<(String, String)> = [
+            ("STROEM_WORKER_TOKEN", "test-token".to_string()),
+            ("STROEM_INPUTS_ROOT", "/inputs".to_string()),
+            ("STROEM_INPUT_COUNT", "2".to_string()),
+            ("STROEM_INPUT_0_ID", a.clone()),
+            ("STROEM_INPUT_0_NAME", "data.csv".to_string()),
+            ("STROEM_INPUT_0_URL", url(&a)),
+            ("STROEM_INPUT_0_SIZE", "16".to_string()),
+            ("STROEM_INPUT_0_SHA256", SHA_A.to_string()),
+            ("STROEM_INPUT_1_ID", b.clone()),
+            ("STROEM_INPUT_1_NAME", "report.txt".to_string()),
+            ("STROEM_INPUT_1_URL", url(&b)),
+            ("STROEM_INPUT_1_SIZE", "12".to_string()),
+            ("STROEM_INPUT_1_SHA256", SHA_B.to_string()),
+        ]
+        .into_iter()
+        .map(|(n, v)| (n.to_string(), v))
+        .collect();
+        assert_eq!(pairs, expected);
+
+        // Every value is plain text the script only ever quotes: `^[A-Za-z0-9._:/=?&%-]*$`.
+        for (name, value) in &pairs {
+            assert!(
+                value
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "._:/=?&%-".contains(c)),
+                "{name}={value}"
+            );
+        }
+
+        // The pod runs the constant script: nothing of the files is in its text.
+        let config = inputs_pod_config(RunnerMode::NoWorkspace, Some(two_inputs()), None);
+        let pod_json = serde_json::to_value(
+            runner
+                .build_pod_spec("test-pod", &config, "default", make_labels())
+                .unwrap(),
+        )
+        .unwrap();
+        let script = pod_json["spec"]["initContainers"][0]["command"][2]
+            .as_str()
+            .unwrap();
+        assert_eq!(script, INPUTS_INIT_SCRIPT);
+        assert!(!script.contains(&a) && !script.contains("data.csv"));
+    }
+
+    #[test]
+    fn input_file_url_trims_trailing_slash() {
+        assert_eq!(
+            test_runner("http://srv:8080/").input_file_url("job-1", "file_x"),
+            "http://srv:8080/worker/jobs/job-1/input-files/file_x"
+        );
+        assert_eq!(
+            test_runner("http://srv:8080").input_file_url("job-1", "file_x"),
+            "http://srv:8080/worker/jobs/job-1/input-files/file_x"
+        );
+    }
+
+    #[test]
+    fn inputs_init_retry_policy_matches_workspace_init() {
+        assert_eq!(INIT_DOWNLOAD_ATTEMPTS - 1, 11);
+        assert_eq!(INIT_DOWNLOAD_RETRY_DELAY_SECS, 5);
+        assert!(INPUTS_INIT_SCRIPT.contains("curl -sSf --retry 11 --retry-delay 5 "));
+        assert!(INPUTS_INIT_SCRIPT.starts_with("set -eu\n"));
+    }
+
+    /// The bodies of the `$(…)` references in `text` that the kubelet would
+    /// try to expand in a container `command` (`$((` arithmetic excluded):
+    /// everything from `$(` to the first `)`.
+    fn kubelet_refs(text: &str) -> Vec<&str> {
+        let mut refs = Vec::new();
+        let mut rest = text;
+        while let Some(at) = rest.find("$(") {
+            let after = &rest[at + 2..];
+            if let Some(arith) = after.strip_prefix('(') {
+                rest = arith;
+                continue;
+            }
+            let end = after.find(')').unwrap_or(after.len());
+            refs.push(&after[..end]);
+            rest = &after[end..];
+        }
+        refs
+    }
+
+    fn is_env_name(s: &str) -> bool {
+        let mut chars = s.chars();
+        chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    }
+
+    #[test]
+    fn kubelet_refs_finds_command_substitutions_only() {
+        assert_eq!(
+            kubelet_refs("a $(FOO) b $((i + 1)) c $(wc -c < \"$f\") ${BAR}"),
+            vec!["FOO", "wc -c < \"$f\""]
+        );
+        assert!(is_env_name("STROEM_INPUT_0_ID") && is_env_name("_x"));
+        assert!(!is_env_name("wc -c") && !is_env_name("0A") && !is_env_name(""));
+    }
+
+    /// The kubelet expands `$(NAME)` in a container `command` when `NAME` is
+    /// an env var of the container, and turns `$$` into `$`. The init
+    /// script is the first `command` with `$(…)` and `$((…))`, so neither may
+    /// appear in a form the kubelet would rewrite.
+    #[test]
+    fn inputs_init_script_survives_kubelet_expansion() {
+        assert!(!INPUTS_INIT_SCRIPT.contains("$$"));
+        let refs = kubelet_refs(INPUTS_INIT_SCRIPT);
+        assert!(!refs.is_empty(), "the script has command substitutions");
+        for body in refs {
+            assert!(
+                !is_env_name(body),
+                "`$({body})` would be expanded by the kubelet"
+            );
+        }
+    }
+
+    // Executed: the script runs on this host against wiremock, and once in
+    // the real init image (host tools differ from BusyBox).
+
+    fn have_sh_curl_and_sha256sum() -> bool {
+        ["sh", "curl", "sha256sum"]
+            .iter()
+            .all(|tool| which::which(tool).is_ok())
+    }
+
+    /// Runs `INPUTS_INIT_SCRIPT` on this host with `env` (from
+    /// `inputs_init_env`), `STROEM_INPUTS_ROOT` moved to `root`. Returns the
+    /// whole output so a test can tell WHICH check failed.
+    async fn run_inputs_script(
+        root: &std::path::Path,
+        env: &[serde_json::Value],
+    ) -> std::process::Output {
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c").arg(INPUTS_INIT_SCRIPT);
+        for e in env {
+            let name = e["name"].as_str().unwrap();
+            let value = if name == "STROEM_INPUTS_ROOT" {
+                root.to_str().unwrap()
+            } else {
+                e["value"].as_str().unwrap()
+            };
+            cmd.env(name, value);
+        }
+        cmd.output().await.unwrap()
+    }
+
+    /// Serves `id` once, only with the worker token.
+    async fn serve_input(
+        server: &wiremock::MockServer,
+        id: &str,
+        response: wiremock::ResponseTemplate,
+    ) {
+        use wiremock::matchers::{header, method, path};
+        wiremock::Mock::given(method("GET"))
+            .and(path(input_file_path(id)))
+            .and(header("Authorization", "Bearer test-token"))
+            .respond_with(response)
+            .expect(1)
+            .mount(server)
+            .await;
+    }
+
+    fn ok_body(body: &str) -> wiremock::ResponseTemplate {
+        wiremock::ResponseTemplate::new(200).set_body_bytes(body.as_bytes().to_vec())
+    }
+
+    fn assert_failed_with(out: &std::process::Output, line: &str) {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "must fail; stderr: {stderr}");
+        assert!(
+            stderr.contains(line),
+            "expected {line:?} in stderr: {stderr}"
+        );
+    }
+
+    #[tokio::test]
+    async fn inputs_script_downloads_and_verifies_from_empty_root() {
+        if !have_sh_curl_and_sha256sum() {
+            eprintln!("skipping: sh, curl or sha256sum not on PATH");
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+        let server = wiremock::MockServer::start().await;
+        serve_input(&server, &file_id('a'), ok_body(BODY_A)).await;
+        serve_input(&server, &file_id('b'), ok_body(BODY_B)).await;
+        let env = test_runner(&server.uri()).inputs_init_env(&two_inputs());
+
+        let out = run_inputs_script(root.path(), &env).await;
+
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let read = |id: &str, name: &str| {
+            std::fs::read_to_string(root.path().join(id).join(name)).unwrap()
+        };
+        assert_eq!(read(&file_id('a'), "data.csv"), BODY_A);
+        assert_eq!(read(&file_id('b'), "report.txt"), BODY_B);
+    }
+
+    #[tokio::test]
+    async fn inputs_script_size_mismatch_fails() {
+        if !have_sh_curl_and_sha256sum() {
+            eprintln!("skipping: sh, curl or sha256sum not on PATH");
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let server = wiremock::MockServer::start().await;
+        // One byte more than the claimed 16.
+        serve_input(&server, &file_id('a'), ok_body("alpha,1\nalpha,22\n")).await;
+        let inputs = run_inputs_with(vec![claimed(&file_id('a'), "data.csv", BODY_A, SHA_A)]);
+        let env = test_runner(&server.uri()).inputs_init_env(&inputs);
+
+        let out = run_inputs_script(root.path(), &env).await;
+
+        assert_failed_with(
+            &out,
+            &format!("input file {}: size does not match", file_id('a')),
+        );
+    }
+
+    #[tokio::test]
+    async fn inputs_script_digest_mismatch_fails() {
+        if !have_sh_curl_and_sha256sum() {
+            eprintln!("skipping: sh, curl or sha256sum not on PATH");
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let server = wiremock::MockServer::start().await;
+        // Same 16 bytes long as BODY_A, other content.
+        serve_input(&server, &file_id('a'), ok_body("alpha,1\nalpha,3\n")).await;
+        let inputs = run_inputs_with(vec![claimed(&file_id('a'), "data.csv", BODY_A, SHA_A)]);
+        let env = test_runner(&server.uri()).inputs_init_env(&inputs);
+
+        let out = run_inputs_script(root.path(), &env).await;
+
+        assert_failed_with(
+            &out,
+            &format!("input file {}: SHA-256 does not match", file_id('a')),
+        );
+    }
+
+    #[tokio::test]
+    async fn inputs_script_404_fails() {
+        if !have_sh_curl_and_sha256sum() {
+            eprintln!("skipping: sh, curl or sha256sum not on PATH");
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let server = wiremock::MockServer::start().await;
+        serve_input(&server, &file_id('a'), wiremock::ResponseTemplate::new(404)).await;
+        let inputs = run_inputs_with(vec![claimed(&file_id('a'), "data.csv", BODY_A, SHA_A)]);
+        let env = test_runner(&server.uri()).inputs_init_env(&inputs);
+
+        let out = run_inputs_script(root.path(), &env).await;
+
+        assert_failed_with(
+            &out,
+            &format!("input file {}: download failed", file_id('a')),
+        );
+    }
+
+    #[tokio::test]
+    async fn inputs_script_retries_503_then_succeeds() {
+        // Takes INIT_DOWNLOAD_RETRY_DELAY_SECS (5 s): curl really waits
+        // before its retry. Do not drop the retry to make it faster.
+        use wiremock::matchers::{header, method, path};
+        if !have_sh_curl_and_sha256sum() {
+            eprintln!("skipping: sh, curl or sha256sum not on PATH");
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(method("GET"))
+            .and(path(input_file_path(&file_id('a'))))
+            .and(header("Authorization", "Bearer test-token"))
+            .respond_with(wiremock::ResponseTemplate::new(503).insert_header("Retry-After", "1"))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        serve_input(&server, &file_id('a'), ok_body(BODY_A)).await;
+        let inputs = run_inputs_with(vec![claimed(&file_id('a'), "data.csv", BODY_A, SHA_A)]);
+        let env = test_runner(&server.uri()).inputs_init_env(&inputs);
+
+        let out = run_inputs_script(root.path(), &env).await;
+
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join(file_id('a')).join("data.csv")).unwrap(),
+            BODY_A
+        );
+    }
+
+    /// Runs the script in the real init image (`DEFAULT_INIT_IMAGE`, BusyBox
+    /// `wc`/`sha256sum`), as its default non-root user, from a missing
+    /// `/tmp/inputs`; on success it prints every downloaded file.
+    async fn run_inputs_script_in_image(env: &[serde_json::Value]) -> std::process::Output {
+        let mut cmd = tokio::process::Command::new("docker");
+        cmd.args([
+            "run",
+            "--rm",
+            "--add-host",
+            "host.docker.internal:host-gateway",
+        ]);
+        for e in env {
+            let name = e["name"].as_str().unwrap();
+            let value = if name == "STROEM_INPUTS_ROOT" {
+                "/tmp/inputs"
+            } else {
+                e["value"].as_str().unwrap()
+            };
+            cmd.arg("-e").arg(format!("{name}={value}"));
+        }
+        // A newline, not `&&`: `cat` runs only if the script did not exit,
+        // and the script keeps its `set -e` (ignored left of `&&`).
+        cmd.args(["--entrypoint", "sh", DEFAULT_INIT_IMAGE, "-c"])
+            .arg(format!("{INPUTS_INIT_SCRIPT}\ncat /tmp/inputs/*/*"));
+        cmd.output().await.unwrap()
+    }
+
+    fn docker_available() -> bool {
+        std::process::Command::new("docker")
+            .arg("info")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+
+    #[tokio::test]
+    async fn inputs_script_in_real_curl_image() {
+        if !docker_available() {
+            eprintln!("skipping: `docker info` failed (no Docker daemon)");
+            return;
+        }
+        let listener = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+        let server = wiremock::MockServer::builder()
+            .listener(listener)
+            .start()
+            .await;
+        let runner = test_runner(&format!(
+            "http://host.docker.internal:{}",
+            server.address().port()
+        ));
+
+        // Success: both files, each checked, then printed in ID order.
+        serve_input(&server, &file_id('a'), ok_body(BODY_A)).await;
+        serve_input(&server, &file_id('b'), ok_body(BODY_B)).await;
+        let out = run_inputs_script_in_image(&runner.inputs_init_env(&two_inputs())).await;
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "stderr: {stderr}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            format!("{BODY_A}{BODY_B}")
+        );
+        eprintln!(
+            "real image {DEFAULT_INIT_IMAGE}: success variant printed {:?}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+
+        // Size mismatch (one byte more), digest mismatch (same 16 bytes,
+        // other content), 404: each exits non-zero with its own line, and
+        // `cat` never runs.
+        let failures = [
+            ('c', ok_body("alpha,1\nalpha,22\n"), "size does not match"),
+            ('d', ok_body("alpha,1\nalpha,3\n"), "SHA-256 does not match"),
+            ('e', wiremock::ResponseTemplate::new(404), "download failed"),
+        ];
+        for (c, response, reason) in failures {
+            let id = file_id(c);
+            serve_input(&server, &id, response).await;
+            let inputs = run_inputs_with(vec![claimed(&id, "data.csv", BODY_A, SHA_A)]);
+            let out = run_inputs_script_in_image(&runner.inputs_init_env(&inputs)).await;
+            assert_failed_with(&out, &format!("input file {id}: {reason}"));
+            assert!(out.stdout.is_empty(), "{reason}");
+            eprintln!(
+                "real image {DEFAULT_INIT_IMAGE}, {reason}: {} / {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+    }
+
     // --- script file handling tests ---
 
     #[test]
@@ -2838,6 +3643,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let pod_json = runner.build_pod_json_with_workspace(
@@ -2904,6 +3710,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let pod_json = runner.build_pod_json_with_workspace(
@@ -2951,6 +3758,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let pod_json = runner.build_pod_json_with_workspace(
@@ -3051,6 +3859,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         }
     }
 
@@ -3201,6 +4010,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
         let pod = runner
             .build_pod_spec("test-pod", &config, "default", make_labels())
@@ -3339,6 +4149,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
         let pod = runner
             .build_pod_spec("test-pod", &config, "default", make_labels())
@@ -3400,6 +4211,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
         let pod = runner
             .build_pod_spec("test-pod", &config, "default", make_labels())
@@ -3473,6 +4285,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
         let pod = runner
             .build_pod_spec("test-pod", &config, "default", make_labels())
@@ -3522,6 +4335,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
         let pod = runner
             .build_pod_spec("test-pod", &config, "default", make_labels())
@@ -3570,6 +4384,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
         let pod = runner
             .build_pod_spec("test-pod", &config, "default", make_labels())
@@ -4425,6 +5240,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let pod = runner.build_pod_json_with_workspace(
@@ -4477,6 +5293,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
 
         let token = CancellationToken::new();

@@ -1,5 +1,6 @@
 pub mod artifacts;
 pub mod event_source;
+pub mod input_files;
 pub mod jobs;
 pub mod rendering;
 pub mod state;
@@ -120,6 +121,10 @@ pub fn build_worker_api_routes(state: Arc<AppState>) -> Router {
         .route(
             "/jobs/{job_id}/steps/{step_name}/artifacts",
             delete(artifacts::delete_step_artifacts),
+        )
+        .route(
+            "/jobs/{job_id}/input-files/{file_id}",
+            get(input_files::download_input_file),
         )
         .layer(middleware::from_fn_with_state(
             state.clone(),

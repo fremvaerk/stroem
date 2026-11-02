@@ -78,8 +78,47 @@ fn audit_opts() -> PinnedFixtureOpts {
             },
         ],
         etl_main: Some(AUDIT_ETL_MAIN.to_string()),
+        input_blob: true,
         ..Default::default()
     }
+}
+
+/// Attach a stored input file to `job_id` under `field` (rows + blob), so the
+/// job's input-file download would answer 200 to a reader allowed to see it.
+async fn attach_input_file(fx: &PinnedFixture, job_id: Uuid, field: &str) -> Result<()> {
+    use stroem_db::{InputFileRepo, NewInputFile};
+    let file_id = stroem_common::file_field::new_file_id();
+    let key = fx.state.input_file_storage_key("etl", &file_id);
+    fx.state
+        .input_blob
+        .as_ref()
+        .expect("the audit fixture has an input-file archive")
+        .put(&key, "text/plain", bytes::Bytes::from_static(b"x"))
+        .await?;
+    InputFileRepo::insert(
+        &fx.pool,
+        &NewInputFile {
+            file_id: &file_id,
+            workspace: "etl",
+            task_name: "nightly",
+            uploaded_by_user_id: None,
+            origin: "api",
+            original_name: "a.txt",
+            safe_name: "a.txt",
+            content_type: "text/plain",
+            size_bytes: 1,
+            sha256: "00",
+            storage_key: &key,
+        },
+    )
+    .await?;
+    sqlx::query("INSERT INTO job_input_file (job_id, field, file_id) VALUES ($1, $2, $3)")
+        .bind(job_id)
+        .bind(field)
+        .bind(&file_id)
+        .execute(&fx.pool)
+        .await?;
+    Ok(())
 }
 
 /// A viewer of the parent sees the summary of a child it may not open. The
@@ -150,10 +189,14 @@ async fn child_job_summary_in_job_detail_is_identifiers_only_and_the_child_stays
 
         // Its own data stays job-scoped: denied to the viewer as an unknown
         // job, readable by the admin (so the 404 is the ACL, not a missing row).
+        // The child gets an input file, so its download answers the admin 200
+        // (without one it would be 404 "Input file not found").
+        attach_input_file(&fx, child, "data_file").await?;
         for uri in [
             format!("/api/jobs/{child}"),
             format!("/api/jobs/{child}/logs"),
             format!("/api/jobs/{child}/artifacts"),
+            format!("/api/jobs/{child}/input-files/data_file"),
         ] {
             let (st, b) = api_req(&fx.router, "GET", &uri, Some(&viewer), None).await;
             assert_eq!(st, StatusCode::NOT_FOUND, "{uri}: {b}");

@@ -218,6 +218,71 @@ Creates a new job for the given task.
 }
 ```
 
+## Upload Input File
+
+```
+POST /api/workspaces/{ws}/tasks/{name}/files?name=<file name>[&source_job_id=<job id>]
+```
+
+Uploads a file for a [`file` input field](/guides/file-inputs/). Send the raw bytes as the body (not multipart). The `Content-Type` header is stored as sent (default `application/octet-stream`). The server streams the body to storage and computes the size and SHA-256.
+
+| Parameter | Description |
+|-----------|-------------|
+| `ws`, `name` | Workspace and task |
+| `name` (query) | The original file name. The step sees a [safe name](/guides/file-inputs/#limits-lifetime-and-names) |
+| `source_job_id` | Optional. Use it to upload a replacement file for a [Re-run](/guides/rerun-and-restart/#files) of that job |
+
+**Response** (`201`):
+
+```json
+{
+  "file_id": "file_7f3a91c2e0b84d5aa1c3b2d4e5f60718",
+  "name": "report.csv",
+  "size_bytes": 1234,
+  "sha256": "9f86d081…",
+  "content_type": "text/csv",
+  "expires_at": "2026-10-31T12:00:00Z"
+}
+```
+
+Execute the task with `{"input": {"data_file": "file_7f3a…"}}`. An unused upload expires after `input_files.upload_ttl_secs` (24 hours by default). An upload belongs to the user who made it and to this task.
+
+Without `source_job_id` the call needs the Run permission on the task as it is now, and the task must declare a `file` field. With `source_job_id` it follows the rules of a Re-run, in this order: a source job that does not exist or that you may not view gives `404 Source job not found` before anything else is checked; a [pinned](/guides/git-refs/) source job on which you have only View gives `403`; then the source is checked (same workspace, a top-level job with a recorded input, the same task); then the task is taken at the source job's ref (pinned) or as it is now, and it needs Run and a `file` field.
+
+| Status | Description |
+|--------|-------------|
+| `201` | Stored |
+| `400` | `invalid file name` (the `name` query is missing, empty, `.` or `..`); `task has no file input`; or the source job cannot be re-run with this task, for example `Source job … is a run of task 'a', not 'b'` |
+| `401` | `Authentication required` (no token), `Invalid or expired token`, or `Invalid API key` / `API key expired` |
+| `403` | `View-only access`: View permission on the task, or on a pinned source job |
+| `404` | `Workspace '{ws}' not found`, `Task not found` (also when you have no permission on the task), or `Source job not found` |
+| `413` | `file is larger than {max} bytes` (`input_files.max_file_bytes`). Nothing is kept |
+| `503` | `file storage is not configured` |
+
+## Upload With an Upload URL
+
+```
+POST /api/uploads/{token}
+```
+
+Uploads a file through a single-use URL that the MCP tool `create_upload_url` returned. Send **no** `Authorization` header: the token is the credential. The body and the response are the same as for [Upload Input File](#upload-input-file). The token is used up when the upload starts, so a failed upload needs a new URL. An unknown, used or expired token gives `404 Upload URL not found`. The upload re-checks that the URL's user may still run the task and that the task still has a `file` field; otherwise the answer is the same `404 Upload URL not found`.
+
+## Download Input File
+
+```
+GET /api/jobs/{id}/input-files/{field}
+```
+
+Streams the file that a job received for the task-level input field `field`. Requires `View` permission on the job, checked on the job's own task (a pinned job: the task folder at its ref). The response headers are like those of [Download Job Artifact](#download-job-artifact): the stored `Content-Type`, `Content-Length`, `X-Content-Type-Options: nosniff`, `Cache-Control: private, max-age=0, must-revalidate`, and a `Content-Disposition` that is `inline` only for the same safe types as artifacts, with the original name in `filename*=UTF-8''…` (and an ASCII-only `filename=` fallback).
+
+| Status | Description |
+|--------|-------------|
+| `200` | The file |
+| `400` | The job ID is not a valid UUID |
+| `401` | Authentication is on and the request has no valid token |
+| `404` | `Job not found` (also when you may not view the job), or `Input file not found` (the job has no file for `field`) |
+| `503` | `file storage is not configured` |
+
 ## List Triggers
 
 ```
@@ -334,6 +399,9 @@ Returns job metadata and all steps with statuses.
       "task_revision": null
     }
   ],
+  "input_files": [
+    { "field": "data_file", "file_id": "file_7f3a…", "name": "report.csv", "size_bytes": 1234, "content_type": "text/csv" }
+  ],
   "derived_jobs": [
     {
       "id": "e5f6a7b8-...",
@@ -357,6 +425,8 @@ action), `action_ref` the ref it was resolved through, and
 step's task runs at. A `type: task` step also lists its `child_jobs[]`
 (`id`, `workspace`, `task_name`, `status`, `created_at`, `ref`,
 `revision`).
+
+`input_files[]` lists the [files](/guides/file-inputs/) that the job received, one entry per task-level `file` field, ordered by `field`: `field`, `file_id`, `name` (the original name), `size_bytes` and `content_type`. It is an empty array when the job has none. `field` and `file_id` are identifiers and are never masked; `name` and `content_type` are masked like other content. Download a file with [Download Input File](#download-input-file).
 
 `derived_jobs[]` lists the [Restarts and Re-runs](/guides/rerun-and-restart/)
 created from this job, newest first: `id`, `source_type` (`restart` or
@@ -572,7 +642,7 @@ Streams the artifact body with the Content-Type recorded at upload time. `name` 
 - `Content-Type` — the type recorded when the worker uploaded the file (sniffed via `infer`).
 - `Content-Length` — exact byte count.
 - `X-Content-Type-Options: nosniff` — blocks browsers from second-guessing the type.
-- `Content-Disposition` — `inline; filename="..."` for safe types (PNG, JPEG, GIF, WebP, PDF, `text/plain`, `text/markdown`); `attachment; filename="..."` for everything else (including HTML, SVG, XML, JSON — to keep the host origin XSS-safe).
+- `Content-Disposition` — `inline; filename="..."` for safe types (PNG, JPEG, GIF, WebP, `text/plain`); `attachment; filename="..."` for everything else (including HTML, SVG, XML, JSON — to keep the host origin XSS-safe).
 
 **Errors:**
 

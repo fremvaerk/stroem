@@ -4,6 +4,7 @@ pub mod cron;
 pub mod dag;
 pub mod depends_on;
 pub mod duration;
+pub mod file_field;
 pub mod format;
 pub mod gate;
 pub mod git_ref;

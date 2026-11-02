@@ -10,6 +10,7 @@ import { WorkflowDag } from "@/components/workflow-dag";
 import { ErrorBoundary } from "@/components/error-boundary";
 import { ServerEvents } from "@/components/server-events";
 import { ArtifactList } from "@/components/artifact-list";
+import { InputFileList } from "@/components/input-file-list";
 import { JsonViewer } from "@/components/json-viewer";
 import { LoadingSpinner } from "@/components/loading-spinner";
 import { ApiError, getJob, getTask, getTaskStats, cancelJob, listJobArtifacts } from "@/lib/api";
@@ -431,7 +432,7 @@ export function JobDetailPage() {
             <Button variant="outline" asChild>
               <Link
                 to={`/workspaces/${encodeURIComponent(job.workspace)}/tasks/${encodeURIComponent(job.task_name)}`}
-                state={{ sourceJobId: job.job_id, rawInput: job.raw_input }}
+                state={{ sourceJobId: job.job_id, rawInput: job.raw_input, inputFiles: job.input_files }}
               >
                 Re-run
               </Link>
@@ -538,6 +539,8 @@ export function JobDetailPage() {
       />
 
       <ServerEvents jobId={job.job_id} jobStatus={job.status} />
+
+      <InputFileList jobId={job.job_id} items={job.input_files} />
 
       <ArtifactList items={artifacts} fetchError={artifactsFetchError} />
 

@@ -56,6 +56,13 @@ The new job runs through the normal creation, promotion, and dispatch pipeline f
 
 A carried `failed` step whose own `continue_on_failure` (under the current flow) catches it does not fail the job. A carried `cancelled` step with no failures ends the job `cancelled`, not `completed` (skipped rows never decide job status).
 
+## Files
+
+A task with [`file` input fields](/guides/file-inputs/) keeps its files on both paths.
+
+- **Re-run:** the form shows the file of the source job (name and size) with a **Replace** button. If you keep it, the new job uses the same file. If you replace it, the browser uploads the new file with `source_job_id`, so the permission check uses the task of the source job (also for a [pinned job](#pinned-jobs)). The replacement is a normal upload and follows the upload lifetime.
+- **Restart from a step:** the restart takes no new input. It uses the files of the source job.
+
 ## Limitations
 
 Restart from a step does not fully reconstruct the source job's environment for carried-over steps:

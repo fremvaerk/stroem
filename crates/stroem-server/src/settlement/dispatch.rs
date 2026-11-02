@@ -10,7 +10,7 @@ use stroem_common::git_ref::{check_rendered_ref, classify_ref, rendered_ref_valu
 use stroem_common::models::job::{JobStatus, StepStatus};
 use stroem_common::models::workflow::{InputFieldDef, TaskDef, WorkspaceConfig};
 use stroem_common::template::{
-    merge_action_defaults, render_input_map, render_input_typed, render_ref_projection,
+    merge_action_defaults, render_input_map, render_input_typed_with_files, render_ref_projection,
     render_ref_template, resolve_task_input_by_provenance_roles, RoleConfig, RoleScope,
 };
 use stroem_db::{JobRepo, JobRow, JobStepRepo};
@@ -689,7 +689,12 @@ async fn handle_task_steps_pass(
                         .collect();
                     // Bucket C lands in task T's input: T's schema decides
                     // which fields are `json` (spec 2026-10-06-json-input-type D6).
-                    match render_input_typed(&map, Some(&resolved.task.input), context_value) {
+                    match render_input_typed_with_files(
+                        &map,
+                        Some(&resolved.task.input),
+                        context_value,
+                        &snapshots.files,
+                    ) {
                         Ok(rendered) => rendered,
                         Err(e) => {
                             let err = format!(
@@ -946,6 +951,8 @@ async fn handle_task_steps_pass(
             None,                 // agents_config not available; orchestrator will dispatch
             defaults,
             child_git_ref.as_deref(),
+            // A2 against the parent job (spec 2026-10-29 § 4.6).
+            crate::input_files::FileGrant::TaskChild,
         )
         .await
         {
@@ -1358,9 +1365,10 @@ pub async fn init(
     defaults: JobDefaults,
 ) -> Result<Option<JobStatus>> {
     // One sample per entry (spec §3.4): the creation-time cascade, the
-    // `type: task` input and the approval messages all see the same snapshot.
+    // `type: task` input and the approval messages all see the same snapshot
+    // and the same input files.
     // The job's own state partition (spec § 7.6). Best-effort: job creation
-    // must never fail on this lookup.
+    // must never fail on this lookup, nor on the state lookup below.
     let git_ref = match JobRepo::get(pool, job_id).await {
         Ok(job) => job.and_then(|j| j.git_ref),
         Err(e) => {
@@ -1368,7 +1376,7 @@ pub async fn init(
             None
         }
     };
-    let snapshots = render_context::latest_snapshots(
+    let mut snapshots = render_context::latest_snapshots(
         pool,
         workspace_name,
         task_name,
@@ -1376,6 +1384,13 @@ pub async fn init(
         "init",
     )
     .await;
+    // The input files are NOT best-effort: without them a `file` value would
+    // render as its id. A failure takes the `[creation] initialisation
+    // failed` path like any other init error.
+    snapshots.files = crate::input_files::job_files(
+        &crate::input_files::load_attachments(pool, job_id).await?,
+        stroem_common::file_field::CANONICAL_INPUTS_ROOT,
+    );
 
     crate::cascade::execute(pool, job_id, task, Some(workspace_config), &snapshots)
         .await

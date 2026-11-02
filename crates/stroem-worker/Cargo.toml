@@ -38,6 +38,9 @@ kube = { workspace = true, optional = true }
 k8s-openapi = { workspace = true, optional = true }
 tempfile.workspace = true
 bytes.workspace = true
+sha2.workspace = true
+# Lowercase hex of sha2 0.11 digests (input file verification), as in stroem-server.
+hex = "0.4"
 infer = "0.22"
 walkdir = "2"
 

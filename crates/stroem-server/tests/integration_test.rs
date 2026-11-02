@@ -111,6 +111,7 @@ async fn create_job_for_task(
         source_job_id,
         agents_config,
         defaults,
+        stroem_server::input_files::FileGrant::Indirect,
     )
     .await
     .map(|c| c.job_id)
@@ -1323,6 +1324,7 @@ async fn setup() -> Result<(Router, PgPool, TempDir)> {
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -1539,6 +1541,7 @@ async fn setup_two_workspaces() -> Result<(Router, PgPool, TempDir)> {
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -1897,6 +1900,7 @@ async fn setup_shared_connections() -> Result<(Router, PgPool, TempDir)> {
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -2571,6 +2575,7 @@ async fn setup_with_task_needing_missing_connection() -> Result<(Router, PgPool,
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -2978,6 +2983,7 @@ async fn setup_with_library_dotted_action() -> Result<(Router, PgPool, TempDir)>
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -3851,6 +3857,7 @@ async fn setup_cross_task_workspaces(
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -6496,6 +6503,7 @@ async fn test_task_detail_connections() -> Result<()> {
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -8760,6 +8768,7 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -9042,6 +9051,7 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -9292,6 +9302,7 @@ async fn setup_with_auth_rate_limit(
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -11780,6 +11791,7 @@ async fn setup_multi_workspace_mapped(
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -12104,6 +12116,7 @@ async fn setup_with_auth_and_acl() -> Result<(Router, PgPool, TempDir)> {
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -12745,6 +12758,7 @@ async fn test_workspace_tarball_download() -> Result<()> {
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -12947,6 +12961,7 @@ async fn test_tarball_mismatched_etag_returns_200() -> Result<()> {
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -13046,6 +13061,7 @@ async fn test_tarball_bare_etag_matches() -> Result<()> {
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -13161,6 +13177,7 @@ async fn test_tarball_stale_etag_after_workspace_change() -> Result<()> {
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -13311,6 +13328,7 @@ async fn test_tarball_etag_header_format() -> Result<()> {
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -14238,6 +14256,7 @@ async fn test_config_returns_oidc_providers_with_auth() -> Result<()> {
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -14335,6 +14354,7 @@ async fn test_config_returns_has_internal_auth_true() -> Result<()> {
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -14416,6 +14436,7 @@ async fn test_config_returns_has_internal_auth_false_oidc_only() -> Result<()> {
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -14618,6 +14639,7 @@ fn hook_test_state(pool: PgPool, workspace: &WorkspaceConfig) -> AppState {
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -14665,6 +14687,7 @@ fn hook_test_state_with_default_step_timeout(
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -16818,6 +16841,7 @@ async fn setup_recovery() -> Result<(AppState, PgPool, TempDir)> {
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -17330,6 +17354,7 @@ async fn test_recovery_propagates_to_parent() -> Result<()> {
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -19113,6 +19138,7 @@ async fn test_connection_input_passthrough_at_claim() -> Result<()> {
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -19483,6 +19509,7 @@ async fn setup_sync_webhook() -> Result<(Router, PgPool, TempDir)> {
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -20049,6 +20076,7 @@ async fn test_scheduler_fires_cron_trigger() -> Result<()> {
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -20141,6 +20169,7 @@ async fn test_scheduler_disabled_trigger_does_not_fire() -> Result<()> {
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -20215,6 +20244,7 @@ async fn test_scheduler_passes_trigger_input_to_job() -> Result<()> {
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -20297,6 +20327,7 @@ async fn test_scheduler_clean_shutdown() -> Result<()> {
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -20717,6 +20748,7 @@ async fn test_multi_workspace_tarball_download() -> Result<()> {
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -20965,6 +20997,7 @@ async fn setup_recovery_with_unmatched_timeout(
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -22347,6 +22380,7 @@ async fn test_scheduler_triggered_job_stores_revision() -> Result<()> {
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -22558,6 +22592,7 @@ fn revision_test_state(pool: PgPool, workspace: WorkspaceConfig) -> AppState {
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -23210,6 +23245,7 @@ async fn setup_with_workspace(workspace: WorkspaceConfig) -> Result<(Router, PgP
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -23269,6 +23305,7 @@ async fn setup_state_with_workspace(
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -24209,6 +24246,7 @@ async fn setup_event_source() -> Result<(Router, AppState, PgPool, TempDir)> {
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -24730,6 +24768,7 @@ async fn test_emit_endpoint_disabled_trigger() -> Result<()> {
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -24860,6 +24899,7 @@ async fn setup_event_source_with_workspace(
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -27638,6 +27678,7 @@ async fn test_defaults_apply_when_task_has_no_timeout() -> Result<()> {
     let defaults = JobDefaults {
         step_timeout_secs: Some(300),
         job_timeout_secs: Some(600),
+        ..JobDefaults::default()
     };
 
     let job_id = create_job_for_task(
@@ -27725,6 +27766,7 @@ async fn test_explicit_task_timeout_overrides_default() -> Result<()> {
     let defaults = JobDefaults {
         step_timeout_secs: None,
         job_timeout_secs: Some(600),
+        ..JobDefaults::default()
     };
 
     let job_id = create_job_for_task(
@@ -27767,6 +27809,7 @@ async fn test_explicit_step_timeout_overrides_default() -> Result<()> {
     let defaults = JobDefaults {
         step_timeout_secs: Some(300),
         job_timeout_secs: None,
+        ..JobDefaults::default()
     };
 
     let job_id = create_job_for_task(
@@ -27805,6 +27848,7 @@ async fn test_only_step_default_set_job_timeout_is_null() -> Result<()> {
     let defaults = JobDefaults {
         step_timeout_secs: Some(300),
         job_timeout_secs: None,
+        ..JobDefaults::default()
     };
 
     let job_id = create_job_for_task(
@@ -27850,6 +27894,7 @@ async fn test_explicit_larger_task_timeout_beats_smaller_default() -> Result<()>
     let defaults = JobDefaults {
         step_timeout_secs: None,
         job_timeout_secs: Some(300),
+        ..JobDefaults::default()
     };
 
     let job_id = create_job_for_task(
@@ -27898,6 +27943,7 @@ async fn test_explicit_smaller_step_timeout_beats_larger_default() -> Result<()>
     let defaults = JobDefaults {
         step_timeout_secs: Some(3600),
         job_timeout_secs: None,
+        ..JobDefaults::default()
     };
 
     let job_id = create_job_for_task(
@@ -27942,6 +27988,7 @@ async fn test_for_each_instances_inherit_step_default() -> Result<()> {
     let defaults = JobDefaults {
         step_timeout_secs: Some(120),
         job_timeout_secs: None,
+        ..JobDefaults::default()
     };
 
     let job_id = create_job_for_task(
@@ -27986,6 +28033,7 @@ async fn test_retry_job_inherits_defaults() -> Result<()> {
     let defaults = JobDefaults {
         step_timeout_secs: None,
         job_timeout_secs: Some(90),
+        ..JobDefaults::default()
     };
 
     let retry_job_id = create_job_for_task(
@@ -28041,6 +28089,7 @@ async fn test_sub_task_inherits_defaults() -> Result<()> {
     let defaults = JobDefaults {
         step_timeout_secs: Some(45),
         job_timeout_secs: Some(90),
+        ..JobDefaults::default()
     };
 
     let parent_job_id = create_job_for_task(
@@ -28402,6 +28451,7 @@ async fn test_create_job_detailed_reports_terminal_at_creation() -> Result<()> {
         None,
         None,
         JobDefaults::default(),
+        stroem_server::input_files::FileGrant::Indirect,
     )
     .await?;
     assert!(created.terminal_at_creation());
@@ -28423,6 +28473,7 @@ async fn test_create_job_detailed_reports_terminal_at_creation() -> Result<()> {
         None,
         None,
         JobDefaults::default(),
+        stroem_server::input_files::FileGrant::Indirect,
     )
     .await?;
     assert!(!created.terminal_at_creation());
@@ -29057,6 +29108,7 @@ async fn test_propagate_defers_agent_tool_child_before_registration() -> Result<
         None,
         None,
         JobDefaults::default(),
+        stroem_server::input_files::FileGrant::Indirect,
     )
     .await?;
     let job_id = created.job_id;
@@ -29503,6 +29555,7 @@ async fn test_reconcile_settled_children_is_idempotent() -> Result<()> {
         None,
         None,
         JobDefaults::default(),
+        stroem_server::input_files::FileGrant::Indirect,
     )
     .await?;
     let job_id = created.job_id;
@@ -29867,6 +29920,7 @@ async fn test_approval_dispatch_failure_compensates_the_job() -> Result<()> {
         None,
         None,
         JobDefaults::default(),
+        stroem_server::input_files::FileGrant::Indirect,
     )
     .await?;
 
@@ -29986,6 +30040,7 @@ async fn test_indirect_hook_cycle_is_bounded() -> Result<()> {
         None,
         None,
         JobDefaults::default(),
+        stroem_server::input_files::FileGrant::Indirect,
     )
     .await?;
     let job_id = created.job_id;
@@ -31101,6 +31156,7 @@ async fn setup_with_state_storage() -> Result<(Router, PgPool, TempDir)> {
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -32314,6 +32370,7 @@ async fn setup_with_log_archive() -> Result<(Router, PgPool, TempDir, Arc<dyn Bl
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),

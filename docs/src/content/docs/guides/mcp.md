@@ -58,7 +58,7 @@ mcp:
 
 ## Available Tools
 
-The MCP server provides ten tools for interacting with Strøm:
+The MCP server provides eleven tools for interacting with Strøm:
 
 | Tool | Description | Parameters |
 |------|-------------|------------|
@@ -72,6 +72,7 @@ The MCP server provides ten tools for interacting with Strøm:
 | `cancel_job` | Cancel a running or pending job | `job_id` |
 | `list_artifacts` | List a job's artifacts (name, content type, size, download URL) | `job_id` |
 | `get_artifact` | Fetch one artifact's content | `job_id`, `name` |
+| `create_upload_url` | Get a single-use URL to upload a file for a `file` input field | `workspace`, `task_name`, `file_name` |
 
 When the log is longer than the tail, the result ends with `[truncated: showing the last 256.0 KiB of up to 83.3 MiB — earlier lines omitted]`.
 
@@ -80,6 +81,34 @@ When the log is longer than the tail, the result ends with `[truncated: showing 
 blocks the agent can view, and any other binary (PDF, archives, …) as a base64
 blob resource. Artifacts larger than 1 MiB are not inlined — download them via
 the HTTP artifact API (the URL is in `list_artifacts`) instead.
+
+### Sending files
+
+A task can have [`file` input fields](/guides/file-inputs/). `get_task` shows them as `type: file`. There are two ways to give such a field a file with `execute_task`.
+
+**Inline**, for small files. Put an object in `input` instead of a value. The decoded content must not be more than 1 MiB (`input_files.mcp_inline_max_bytes`):
+
+```
+Call: execute_task(
+  workspace="default",
+  task_name="import-report",
+  input={ "data_file": { "name": "report.csv", "content": "id,total\n1,10\n" } }
+)
+```
+
+Use `content_base64` instead of `content` for binary data. The object must have exactly the two keys `name` and `content` (or `content_base64`); another shape or invalid base64 gives `Input field '…': the file cannot be used`. A file over the limit gives `Input field '…': inline content is larger than N bytes`. The server stores the file as your upload (content type `application/octet-stream`) and then creates the job.
+
+**Upload URL**, for larger files and for agents that have a shell:
+
+```
+Call: create_upload_url(workspace="default", task_name="import-report", file_name="report.csv")
+Returns: { "upload_url": "https://strom.example.com/api/uploads/…", "method": "POST",
+           "max_bytes": 104857600, "expires_at": "2026-10-30T12:15:00Z" }
+```
+
+Then `POST` the raw bytes to `upload_url` with no `Authorization` header (`curl --data-binary @report.csv "$upload_url"`). The URL token is the credential. The URL works once and expires after 15 minutes (`input_files.upload_url_ttl_secs`). The token is used up when the request arrives, before the body is read: if the upload fails, ask for a new URL. A used, expired or unknown URL answers `404 Upload URL not found`. When the upload arrives, the server checks again that the URL's user may still run the task and that the task still has a `file` field. If not, it answers the same `404 Upload URL not found` and the URL stays used. The answer holds the `file_id`. Pass it as the field value in `execute_task`.
+
+`create_upload_url` needs `auth.base_url` in the server config. Without it the tool answers `upload URLs need auth.base_url; send the file inline or use the REST upload`. It needs the Run permission on the task (View only gives `Insufficient permissions: execute requires Run access`), a task with a `file` field (else `task has no file input`) and a usable `file_name` (else `invalid file name`).
 
 ## Authentication
 

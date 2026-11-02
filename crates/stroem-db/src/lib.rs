@@ -4,6 +4,10 @@ pub mod repos;
 // Re-export commonly used items
 pub use pool::{create_pool, migration_fingerprint, run_migrations};
 pub use repos::api_key::{ApiKeyRepo, ApiKeyRow};
+pub use repos::input_file::{
+    AttachRule, InputFileRepo, InputFileRow, JobInputFileRepo, JobInputFileRow, NewInputFile,
+    UploadTokenRepo, UploadTokenRow,
+};
 pub use repos::job::{
     ClosureBounds, ClosurePinRow, DerivedRunRow, DurationStatsRow, JobAclScope, JobPinCols,
     JobRepo, JobRow, RecentDurationRow, RedactionClosure, RetentionJobInfo, StalledPinnedJob,

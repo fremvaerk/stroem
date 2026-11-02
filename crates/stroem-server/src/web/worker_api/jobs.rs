@@ -62,6 +62,11 @@ pub struct ClaimRequest {
     /// worker-row lookup.
     #[serde(default)]
     pub exclusive: bool,
+    /// Absolute directory where this worker places a local step's input
+    /// files (spec 2026-10-29 § 5.2). Its presence means the worker supports
+    /// file inputs (§ 6.5); a relative path is a 400.
+    #[serde(default)]
+    pub inputs_dir: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -169,6 +174,13 @@ pub struct ClaimResponse {
     /// in Tera templates.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub global_state_has_json: Option<bool>,
+
+    // ── Input files ────────────────────────────────────────────────
+    /// Every distinct file of the job (spec 2026-10-29 § 5.4), which the
+    /// worker places at `{root}/{file_id}/{safe_name}` before the step
+    /// runs. Empty for agent steps and jobs without files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_files: Vec<stroem_common::file_field::ClaimedInputFile>,
 }
 
 impl ClaimResponse {
@@ -199,6 +211,7 @@ impl ClaimResponse {
             state_has_json: None,
             global_state_storage_key: None,
             global_state_has_json: None,
+            input_files: Vec::new(),
         }
     }
 }
@@ -402,6 +415,12 @@ pub(crate) const MAX_PIN_RELEASES: i32 = 30;
 /// Delay before a released step may be claimed again.
 pub(crate) const PIN_RELEASE_RETRY_SECS: i64 = 10;
 
+/// Fixed text when the job's `job_input_file` rows cannot be read (spec
+/// 2026-10-29 § 5.4): rendering without them would show a `file` value as its
+/// id, so the claim is released (`release_or_fail_claim`) and fails with this
+/// text only at the release cap. The cause goes to the server log only.
+const INPUT_FILES_UNREADABLE: &str = "could not load the job's input files";
+
 /// What `fail_claimed_step` needs besides the message (spec § 7.2, § 7.4).
 struct ClaimFailure<'a> {
     /// The claim this request holds: the failure applies only while the row
@@ -537,52 +556,88 @@ async fn pin_failure(
     let secrets = claim_redaction_values(&ws_set, failure.pin_secrets);
     let detail = crate::workspace_set::redact_secrets_in_str(&format!("{err:#}"), &secrets);
 
-    let outcome = JobStepRepo::release_claim(
-        &state.pool,
+    release_or_fail_claim(
+        state,
         job.job_id,
         &step.step_name,
+        &ws_set,
+        failure,
+        ReleaseTexts {
+            what: "pin failure",
+            retrying: format!("[pin] {label} not available yet on this server, retrying: {detail}"),
+            cancelled: format!(
+                "[pin] {label} not available and the job was cancelled; step '{}' cancelled",
+                step.step_name
+            ),
+            cap_reached: format!(
+                "[pin] {label} still unavailable after {MAX_PIN_RELEASES} attempts: {detail}"
+            ),
+        },
+    )
+    .await
+}
+
+/// The job-log lines of a released claim (`release_or_fail_claim`).
+struct ReleaseTexts {
+    /// What failed, for the release's own DB-error context.
+    what: &'static str,
+    /// Logged when the step is back in `ready`.
+    retrying: String,
+    /// Logged when the job was cancelled meanwhile.
+    cancelled: String,
+    /// The step's failure message once `MAX_PIN_RELEASES` is reached.
+    cap_reached: String,
+}
+
+/// A TRANSIENT claim-time failure (spec 2026-10-02 § 7.2; spec 2026-10-29
+/// § 5.4): release the claim back to `ready` after `PIN_RELEASE_RETRY_SECS`
+/// without consuming a retry attempt (`JobStepRepo::release_claim`). A job
+/// cancelled meanwhile cancels the step; past `MAX_PIN_RELEASES` the step
+/// fails like any claim-time failure. Every text must already be
+/// value-free or scrubbed.
+async fn release_or_fail_claim(
+    state: &Arc<AppState>,
+    job_id: Uuid,
+    step_name: &str,
+    ws_set: &crate::workspace_set::WorkspaceSet<'_>,
+    failure: &ClaimFailure<'_>,
+    texts: ReleaseTexts,
+) -> Result<Response, AppError> {
+    let outcome = JobStepRepo::release_claim(
+        &state.pool,
+        job_id,
+        step_name,
         failure.claim,
         chrono::Duration::seconds(PIN_RELEASE_RETRY_SECS),
         MAX_PIN_RELEASES,
     )
     .await
-    .context("release claim after pin failure")?;
+    .with_context(|| format!("release claim after {}", texts.what))?;
 
     match outcome {
         ReleaseOutcome::Released => {
-            let line =
-                format!("[pin] {label} not available yet on this server, retrying: {detail}");
-            tracing::warn!(job_id = %job.job_id, step_name = %step.step_name, "{line}");
-            state.append_server_log(job.job_id, &line).await;
+            tracing::warn!(job_id = %job_id, step_name = %step_name, "{}", texts.retrying);
+            state.append_server_log(job_id, &texts.retrying).await;
             Ok(Json(ClaimResponse::no_work()).into_response())
         }
         ReleaseOutcome::Cancelled => {
-            state
-                .append_server_log(
-                    job.job_id,
-                    &format!(
-                        "[pin] {label} not available and the job was cancelled; step '{}' cancelled",
-                        step.step_name
-                    ),
-                )
-                .await;
+            state.append_server_log(job_id, &texts.cancelled).await;
             // The step (and its unclaimed siblings) are terminal now: let the
             // drain gate see it and run terminal handling.
-            if let Err(e) = state
-                .settlement()
-                .step_settled(job.job_id, &step.step_name)
-                .await
-            {
-                tracing::error!(job_id = %job.job_id, "settle after cancelled release: {:#}", e);
+            if let Err(e) = state.settlement().step_settled(job_id, step_name).await {
+                tracing::error!(job_id = %job_id, "settle after cancelled release: {:#}", e);
             }
             Ok(Json(ClaimResponse::no_work()).into_response())
         }
-        ReleaseOutcome::CapReached => {
-            let msg = format!(
-                "[pin] {label} still unavailable after {MAX_PIN_RELEASES} attempts: {detail}"
-            );
-            Ok(fail_claimed_step(state, job.job_id, &step.step_name, &msg, &ws_set, failure).await)
-        }
+        ReleaseOutcome::CapReached => Ok(fail_claimed_step(
+            state,
+            job_id,
+            step_name,
+            &texts.cap_reached,
+            ws_set,
+            failure,
+        )
+        .await),
         ReleaseOutcome::NotApplied => Ok(Json(ClaimResponse::no_work()).into_response()),
     }
 }
@@ -859,6 +914,18 @@ pub async fn claim_job(
         )));
     }
 
+    // Spec 2026-10-29 § 5.2: where the worker places a local step's input
+    // files. Rejected before any step is claimed, so none is left running.
+    if req
+        .inputs_dir
+        .as_deref()
+        .is_some_and(|dir| !std::path::Path::new(dir).is_absolute())
+    {
+        return Err(AppError::BadRequest(
+            "inputs_dir must be an absolute path".to_string(),
+        ));
+    }
+
     let step = match JobStepRepo::claim_ready_step(
         &state.pool,
         &capabilities,
@@ -970,6 +1037,102 @@ pub async fn claim_job(
         .await);
     }
 
+    // ── Input files (spec 2026-10-29 § 5.2 – § 5.4, § 6.5) ──────────────────
+    // Loaded before any rendering: without them a `file` value would render
+    // as its id. Every runner step gets every file of its job (U9) under its
+    // runner's root; an agent step gets none and renders under `/inputs`.
+    let is_agent = step.action_type == "agent";
+    // A read error is transient (a DB blip) and hits every job, file fields
+    // or not (spec § 12): release the claim like an unavailable pin, never
+    // fail the step on the first error.
+    let attachments = match crate::input_files::load_attachments(&state.pool, step.job_id).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::error!(
+                job_id = %step.job_id,
+                step_name = %step.step_name,
+                "Failed to load the job's input files at claim: {:#}",
+                e
+            );
+            return release_or_fail_claim(
+                &state,
+                step.job_id,
+                &step.step_name,
+                &ws_set,
+                &ClaimFailure {
+                    claim,
+                    pin_secrets: &pin_secrets,
+                    withheld: None,
+                },
+                ReleaseTexts {
+                    what: "an input-file read failure",
+                    retrying: format!("[files] {INPUT_FILES_UNREADABLE}, retrying"),
+                    cancelled: format!(
+                        "[files] {INPUT_FILES_UNREADABLE} and the job was cancelled; step '{}' cancelled",
+                        step.step_name
+                    ),
+                    cap_reached: format!(
+                        "{INPUT_FILES_UNREADABLE} after {MAX_PIN_RELEASES} attempts"
+                    ),
+                },
+            )
+            .await;
+        }
+    };
+    // Safety net behind the creation check (spec § 4.3): a job with files on
+    // a server without file storage (e.g. restarted without its archive
+    // config) can never deliver them — every download would answer 503 until
+    // the worker gives up. Fail here, with the real cause.
+    if !is_agent && !attachments.is_empty() && state.input_blob.is_none() {
+        return Ok(fail_claimed_step(
+            &state,
+            step.job_id,
+            &step.step_name,
+            crate::input_files::STORAGE_NOT_CONFIGURED,
+            &ws_set,
+            &ClaimFailure {
+                claim,
+                pin_secrets: &pin_secrets,
+                withheld: None,
+            },
+        )
+        .await);
+    }
+    // `inputs_dir` in the request is the worker's "I place input files"
+    // signal, whatever the step's root: an older worker would run the step
+    // without them. An ordinary claim failure — no release, which would loop
+    // on a fleet of old workers.
+    if !is_agent && !attachments.is_empty() && req.inputs_dir.is_none() {
+        return Ok(fail_claimed_step(
+            &state,
+            step.job_id,
+            &step.step_name,
+            rendering::OLD_WORKER_INPUTS,
+            &ws_set,
+            &ClaimFailure {
+                claim,
+                pin_secrets: &pin_secrets,
+                withheld: None,
+            },
+        )
+        .await);
+    }
+    let inputs_root = if is_agent {
+        None
+    } else {
+        rendering::inputs_root(
+            &step.action_type,
+            Some(step.runner.as_str()),
+            req.inputs_dir.as_deref(),
+        )
+    }
+    .unwrap_or_else(|| stroem_common::file_field::CANONICAL_INPUTS_ROOT.to_string());
+    let input_files = if is_agent {
+        Vec::new()
+    } else {
+        crate::input_files::claimed_files(&attachments)
+    };
+
     // Fetch all steps once — reused for both the template context and agent rendering.
     let all_steps_for_job = JobStepRepo::get_steps_for_job(&state.pool, step.job_id)
         .await
@@ -1004,6 +1167,7 @@ pub async fn claim_job(
             }
         }
     }
+    snapshots.files = crate::input_files::job_files(&attachments, &inputs_root);
     // The worker only needs these to download the archive blob, which is
     // impossible without configured storage; rendering from the persisted
     // sidecar (above) is correct either way, so resolution stays unconditional.
@@ -1086,6 +1250,7 @@ pub async fn claim_job(
             },
             lookup: &ws_set,
             input_schema: input_schema.as_ref(),
+            files: &snapshots.files,
         };
 
         let input_ctx = crate::render_context::build(
@@ -1156,6 +1321,7 @@ pub async fn claim_job(
         loop_slot,
         crate::render_context::Scope::ActionBody {
             prepared_input: rendered_input.as_ref(),
+            action_schema: input_schema.as_ref(),
         },
     );
     collision_lines.extend(body_ctx.log_lines());
@@ -1392,6 +1558,7 @@ pub async fn claim_job(
         state_has_json,
         global_state_storage_key,
         global_state_has_json,
+        input_files,
     })
     .into_response())
 }
@@ -1630,11 +1797,18 @@ pub async fn agent_task_tool(
         job_id,
         &step_name,
         job.revision.as_deref(),
-        crate::config::JobDefaults::from(state.config.as_ref()),
+        state.job_defaults(),
         job.git_ref.as_deref(),
     )
     .await
-    .context("create child job for task tool")?;
+    .map_err(|e| {
+        // A file value the tool call may not use (A2 is not granted to an
+        // agent tool child) is a value-free author mistake: 400.
+        if let Some(f) = e.downcast_ref::<stroem_common::file_field::FileInputError>() {
+            return AppError::BadRequest(f.to_string());
+        }
+        AppError::Internal(e.context("create child job for task tool"))
+    })?;
 
     // A child that is already terminal the moment it is created (every root step
     // skipped by `when`, a server-dispatched root step that failed, or a nested
@@ -1864,6 +2038,7 @@ mod tests {
             state_has_json: None,
             global_state_storage_key: None,
             global_state_has_json: None,
+            input_files: Vec::new(),
         };
         let dbg = format!("{resp:?}");
         assert!(!dbg.contains(SENTINEL), "ClaimResponse Debug leaked: {dbg}");
@@ -1952,6 +2127,7 @@ mod tests {
             state_has_json: None,
             global_state_storage_key: None,
             global_state_has_json: None,
+            input_files: Vec::new(),
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["task_name"], "deploy-api");
@@ -2112,6 +2288,7 @@ mod tests {
             state_has_json: None,
             global_state_storage_key: None,
             global_state_has_json: None,
+            input_files: Vec::new(),
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert!(json["task_name"].is_null());
@@ -2144,6 +2321,7 @@ mod tests {
             state_has_json: None,
             global_state_storage_key: None,
             global_state_has_json: None,
+            input_files: Vec::new(),
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["revision"], "abc123");
@@ -2176,6 +2354,7 @@ mod tests {
             state_has_json: None,
             global_state_storage_key: None,
             global_state_has_json: None,
+            input_files: Vec::new(),
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert!(
@@ -2211,6 +2390,7 @@ mod tests {
             state_has_json: None,
             global_state_storage_key: None,
             global_state_has_json: None,
+            input_files: Vec::new(),
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert!(
@@ -2259,6 +2439,7 @@ mod tests {
             state_has_json: None,
             global_state_storage_key: None,
             global_state_has_json: None,
+            input_files: Vec::new(),
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["event_source_config"]["target_task"], "process-event");

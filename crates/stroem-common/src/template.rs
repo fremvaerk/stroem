@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use crate::budget::{is_deadline_exceeded, run_with_deadline, LoadBudget};
+use crate::file_field::{FileInputError, FileInputErrorKind, JobFiles, FILE_TYPE};
 use crate::models::workflow::{ConnectionDef, InputFieldDef, WorkspaceConfig};
 use crate::template_error::{TemplateError, ValsFailure, ValsFailureKind};
 
@@ -599,24 +600,56 @@ pub fn render_input_typed(
     schema: Option<&HashMap<String, InputFieldDef>>,
     context: &serde_json::Value,
 ) -> Result<serde_json::Value> {
-    let is_json = |k: &str| {
-        schema
-            .and_then(|s| s.get(k))
-            .is_some_and(|f| f.field_type == JSON_TYPE)
-    };
-    let (json_fields, rest): (
-        HashMap<String, serde_json::Value>,
-        HashMap<String, serde_json::Value>,
-    ) = input_map
-        .iter()
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .partition(|(k, _)| is_json(k));
+    render_input_typed_with_files(input_map, schema, context, &JobFiles::empty())
+}
+
+/// [`render_input_typed`] that also renders `file` fields: the value is
+/// rendered as a template, trimmed, and must name a file attached to the job
+/// (its id or its path). An empty value or JSON `null` omits the field; any
+/// other value is a value-free [`FileInputError`] (spec 2026-10-29 § 5.1).
+pub fn render_input_typed_with_files(
+    input_map: &HashMap<String, serde_json::Value>,
+    schema: Option<&HashMap<String, InputFieldDef>>,
+    context: &serde_json::Value,
+    files: &JobFiles,
+) -> Result<serde_json::Value> {
+    let type_of = |k: &str| schema.and_then(|s| s.get(k)).map(|f| f.field_type.as_str());
+    let mut json_fields = HashMap::new();
+    let mut file_fields = HashMap::new();
+    let mut rest = HashMap::new();
+    for (k, v) in input_map {
+        let target = match type_of(k) {
+            Some(JSON_TYPE) => &mut json_fields,
+            Some(FILE_TYPE) => &mut file_fields,
+            _ => &mut rest,
+        };
+        target.insert(k.clone(), v.clone());
+    }
     let mut out = render_input_map(&rest, context)?;
     let map = out
         .as_object_mut()
         .expect("render_input_map always returns an object");
     for (k, v) in &json_fields {
         map.insert(k.clone(), render_json_value(v, k, context)?);
+    }
+    for (k, v) in &file_fields {
+        let cannot_use = || {
+            anyhow::Error::new(FileInputError {
+                field: k.clone(),
+                kind: FileInputErrorKind::CannotUse,
+            })
+        };
+        let text = match v {
+            serde_json::Value::Null => continue,
+            serde_json::Value::String(s) => render_template(s, context)?,
+            _ => return Err(cannot_use()),
+        };
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        let file = files.resolve_target(text).ok_or_else(cannot_use)?;
+        map.insert(k.clone(), serde_json::Value::String(file.file_id.clone()));
     }
     Ok(out)
 }
@@ -714,14 +747,14 @@ pub const JSON_TYPE: &str = "json";
 
 /// Primitive type names that are NOT connection type references.
 pub const PRIMITIVE_TYPES: &[&str] = &[
-    "string", "text", "integer", "number", "boolean", "date", "datetime", JSON_TYPE,
+    "string", "text", "integer", "number", "boolean", "date", "datetime", JSON_TYPE, FILE_TYPE,
 ];
 
 /// Names a connection type may not take: every primitive, the `bool` alias
 /// (`canonicalize_field_type`) and the agent output-schema types.
 pub const RESERVED_TYPE_NAMES: &[&str] = &[
-    "string", "text", "integer", "number", "boolean", "date", "datetime", JSON_TYPE, "bool",
-    "array", "object",
+    "string", "text", "integer", "number", "boolean", "date", "datetime", JSON_TYPE, FILE_TYPE,
+    "bool", "array", "object",
 ];
 
 /// Resolve connection inputs: replace connection name strings with the full
@@ -1365,6 +1398,83 @@ pub fn json_type_name(v: &serde_json::Value) -> &'static str {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn file_schema() -> HashMap<String, InputFieldDef> {
+        let mut schema = HashMap::new();
+        schema.insert(
+            "data".to_string(),
+            InputFieldDef {
+                field_type: FILE_TYPE.to_string(),
+                ..Default::default()
+            },
+        );
+        schema
+    }
+
+    fn one_file() -> (JobFiles, String, String) {
+        let id = crate::file_field::new_file_id();
+        let files = JobFiles::new(
+            "/inputs",
+            [(
+                "f".to_string(),
+                crate::file_field::FileRef {
+                    file_id: id.clone(),
+                    safe_name: "a.csv".to_string(),
+                },
+            )],
+        );
+        let path = files.path_of(&id).unwrap();
+        (files, id, path)
+    }
+
+    #[test]
+    fn render_file_target_accepts_id_and_path() {
+        let (files, id, path) = one_file();
+        let schema = file_schema();
+        let input: HashMap<String, serde_json::Value> =
+            HashMap::from([("data".to_string(), json!("{{ input.f }}"))]);
+        for value in [&path, &id] {
+            let ctx = json!({"input": {"f": value}});
+            let out = render_input_typed_with_files(&input, Some(&schema), &ctx, &files).unwrap();
+            assert_eq!(out["data"], json!(id));
+        }
+    }
+
+    #[test]
+    fn render_file_target_rejects_unknown() {
+        let (files, _, _) = one_file();
+        let schema = file_schema();
+        let ctx = json!({"input": {"f": "/inputs/elsewhere/x.csv"}});
+        for value in [json!("{{ input.f }}"), json!(5), json!(["x"])] {
+            let input = HashMap::from([("data".to_string(), value)]);
+            let err =
+                render_input_typed_with_files(&input, Some(&schema), &ctx, &files).unwrap_err();
+            let typed = err.downcast_ref::<FileInputError>().expect("typed error");
+            assert_eq!(typed.field, "data");
+            assert_eq!(typed.kind, FileInputErrorKind::CannotUse);
+        }
+    }
+
+    #[test]
+    fn render_file_target_empty_omits_field() {
+        let (files, _, _) = one_file();
+        let schema = file_schema();
+        for value in [json!(""), json!("  "), json!(null)] {
+            let input = HashMap::from([("data".to_string(), value)]);
+            let out =
+                render_input_typed_with_files(&input, Some(&schema), &json!({}), &files).unwrap();
+            assert!(out.get("data").is_none());
+        }
+    }
+
+    #[test]
+    fn render_input_typed_without_files_rejects_file_value() {
+        let (_, id, _) = one_file();
+        let schema = file_schema();
+        let input = HashMap::from([("data".to_string(), json!(id))]);
+        let err = render_input_typed(&input, Some(&schema), &json!({})).unwrap_err();
+        assert!(err.downcast_ref::<FileInputError>().is_some());
+    }
 
     #[test]
     fn when_truth_table_follows_rendered_text() {

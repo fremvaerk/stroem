@@ -709,6 +709,9 @@ fn validate_workflow_config_inner(
     // Validate input field options
     warnings.extend(validate_input_options(config)?);
 
+    // file fields: trigger targets and agent tools (spec 2026-10-29-file-inputs § 4.1, § 7.6)
+    warnings.extend(validate_file_field_targets(config)?);
+
     // json field templates (spec 2026-10-06-json-input-type § 5.4)
     warnings.extend(validate_json_fields(config)?);
 
@@ -999,6 +1002,63 @@ fn warn_non_string_secrets(config: &WorkspaceConfig) -> Vec<String> {
     warnings
 }
 
+/// Name of the first (alphabetical) required `file` field of a task.
+fn required_file_field(task: &crate::models::workflow::TaskDef) -> Option<&str> {
+    task.input
+        .iter()
+        .filter(|(_, f)| f.field_type == crate::file_field::FILE_TYPE && f.required)
+        .map(|(name, _)| name.as_str())
+        .min()
+}
+
+/// A task with a required `file` field cannot be started by a trigger (warning)
+/// or used as an agent task tool (error). Only same-config targets without
+/// `ref:` are checked.
+fn validate_file_field_targets(config: &WorkspaceConfig) -> Result<Vec<String>> {
+    use crate::models::workflow::{AgentToolRef, TriggerDef};
+    let mut warnings = Vec::new();
+
+    for (trigger_name, trigger) in &config.triggers {
+        let (target, git_ref) = match trigger {
+            TriggerDef::EventSource {
+                target_task,
+                git_ref,
+                ..
+            } => (target_task.as_str(), git_ref.as_deref()),
+            other => (other.task(), other.git_ref()),
+        };
+        if git_ref.is_some() {
+            continue;
+        }
+        if let Some(task) = config.tasks.get(target) {
+            if required_file_field(task).is_some() {
+                warnings.push(format!(
+                    "Trigger '{trigger_name}' targets task '{target}', which has a required file input: triggers cannot supply a file, so every run will fail"
+                ));
+            }
+        }
+    }
+
+    for (action_name, action) in &config.actions {
+        for tool in &action.tools {
+            let AgentToolRef::Task {
+                task: tool_task,
+                git_ref: None,
+            } = tool
+            else {
+                continue;
+            };
+            if let Some(field) = config.tasks.get(tool_task).and_then(required_file_field) {
+                bail!(
+                    "Action '{action_name}' uses task '{tool_task}' as an agent tool, but its input '{field}' is a required file (an agent cannot supply a file)"
+                );
+            }
+        }
+    }
+
+    Ok(warnings)
+}
+
 /// Validates input field options across all actions and tasks.
 /// Returns warnings for soft issues; bails for unrecoverable misconfigurations
 /// (e.g., `multiple: true` combined with `secret: true` or a non-string `type`).
@@ -1035,6 +1095,25 @@ fn check_input_field_options(
     field: &crate::models::workflow::InputFieldDef,
     warnings: &mut Vec<String>,
 ) -> Result<()> {
+    if field.field_type == crate::file_field::FILE_TYPE {
+        let unsupported = if field.default.is_some() {
+            Some("default")
+        } else if field.options.is_some() {
+            Some("options")
+        } else if field.multiple {
+            Some("multiple")
+        } else if field.secret {
+            Some("secret")
+        } else if field.allow_custom {
+            Some("allow_custom")
+        } else {
+            None
+        };
+        if let Some(attr) = unsupported {
+            bail!("{context} is type file: '{attr}' is not supported");
+        }
+    }
+
     if field.field_type == crate::template::JSON_TYPE {
         if field.secret {
             bail!("{context}: secret is not supported on json fields");
@@ -2029,6 +2108,18 @@ fn validate_approval_action(action: &ActionDef, action_name: &str) -> Result<Vec
     {
         bail!(
             "Action '{}' is type 'approval' but input '{}' is type json (not supported in approval forms)",
+            action_name,
+            field_name
+        );
+    }
+
+    if let Some((field_name, _)) = action
+        .input
+        .iter()
+        .find(|(_, f)| f.field_type == crate::file_field::FILE_TYPE)
+    {
+        bail!(
+            "Action '{}' is type 'approval' but input '{}' is type file (not supported in approval forms)",
             action_name,
             field_name
         );

@@ -277,7 +277,7 @@ Input parameters define the schema for action and task inputs.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `type` | string | **required** | `string`, `text`, `integer`, `number`, `boolean`, `date`, `datetime`, or a connection type name. Alias: `bool` is accepted as a shorthand for `boolean` and normalized on load |
+| `type` | string | **required** | `string`, `text`, `integer`, `number`, `boolean`, `date`, `datetime`, `json`, `file`, or a connection type name. Alias: `bool` is accepted as a shorthand for `boolean` and normalized on load |
 | `name` | string | — | Human-readable label for the UI |
 | `description` | string | — | Help text |
 | `required` | bool | `false` | Whether the field must be provided |
@@ -303,6 +303,8 @@ input:
     default: false
     order: 99
 ```
+
+A `file` field (task or action level) takes an uploaded file; `{{ input.<field> }}` renders to a read-only path. It cannot have `default`, `options`, `allow_custom`, `multiple` or `secret`. `file` is a reserved name: a connection type cannot be called `file`. See [File Inputs](/guides/file-inputs/).
 
 When `type` is not a primitive, it references a [connection type](#connection-types). The input value (a connection name) is resolved to the full connection object at execution time.
 

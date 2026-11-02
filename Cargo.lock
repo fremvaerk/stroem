@@ -5270,6 +5270,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "uuid",
  "wiremock",
  "yaml_serde",
 ]
@@ -5452,6 +5453,7 @@ dependencies = [
  "dashmap",
  "flate2",
  "futures-util",
+ "hex",
  "infer",
  "k8s-openapi",
  "kube",
@@ -5460,6 +5462,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "stroem-agent",
  "stroem-common",
  "stroem-runner",

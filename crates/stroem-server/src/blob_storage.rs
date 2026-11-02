@@ -175,9 +175,48 @@ impl LocalBlobArchive {
     }
 }
 
+/// Read size of `LocalBlobArchive::get_stream`: each chunk it yields, and
+/// the open file's own buffer, are at most this big.
+const LOCAL_STREAM_CHUNK: usize = 64 * 1024;
+
+/// The temp files of an unfinished local write. If the write's future is
+/// dropped (a cancelled request, mid-body) they are removed here,
+/// synchronously: `Drop` cannot await, and an unlink is cheap. Every
+/// finished write disarms it first.
+struct TempFiles {
+    paths: [PathBuf; 2],
+    armed: bool,
+}
+
+impl Drop for TempFiles {
+    fn drop(&mut self) {
+        if self.armed {
+            for path in &self.paths {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl BlobArchive for LocalBlobArchive {
     async fn put(&self, key: &str, content_type: &str, data: Bytes) -> Result<()> {
+        let body = futures_util::stream::once(async move { Ok(data) });
+        self.put_stream(key, content_type, Box::pin(body)).await
+    }
+
+    /// Writes the body chunk by chunk to a temp file next to the target,
+    /// fsyncs it, then renames it into place (data first, then the `.ct`
+    /// sidecar). A body or write error removes the temp files and leaves
+    /// any previous blob untouched.
+    async fn put_stream(
+        &self,
+        key: &str,
+        content_type: &str,
+        body: BoxStream<'static, Result<Bytes>>,
+    ) -> Result<()> {
+        use futures_util::StreamExt;
+        let mut body = body;
         let path = self.path_for(key)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
@@ -204,15 +243,23 @@ impl BlobArchive for LocalBlobArchive {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default()
         ));
+        let mut guard = TempFiles {
+            paths: [tmp_data.clone(), tmp_ct.clone()],
+            armed: true,
+        };
 
         let write_result = async {
-            // Data temp file: write, flush, fsync.
+            // Data temp file: write chunk by chunk, flush, fsync. A body
+            // error ends the write here, with no context of its own: the
+            // caller's stream error is what matters.
             let mut f = fs::File::create(&tmp_data)
                 .await
                 .with_context(|| format!("create temp {}", tmp_data.display()))?;
-            f.write_all(&data)
-                .await
-                .with_context(|| format!("write temp {}", tmp_data.display()))?;
+            while let Some(chunk) = body.next().await {
+                f.write_all(&chunk?)
+                    .await
+                    .with_context(|| format!("write temp {}", tmp_data.display()))?;
+            }
             f.flush()
                 .await
                 .with_context(|| format!("flush temp {}", tmp_data.display()))?;
@@ -257,7 +304,30 @@ impl BlobArchive for LocalBlobArchive {
             let _ = fs::remove_file(&tmp_data).await;
             let _ = fs::remove_file(&tmp_ct).await;
         }
+        guard.armed = false;
         write_result
+    }
+
+    async fn get_stream(
+        &self,
+        key: &str,
+    ) -> Result<Option<(String, BoxStream<'static, Result<Bytes>>)>> {
+        use futures_util::StreamExt;
+        let path = self.path_for(key)?;
+        let mut file = match fs::File::open(&path).await {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e).with_context(|| format!("open {}", path.display())),
+        };
+        // Keep tokio's own file buffer at one chunk too.
+        file.set_max_buf_size(LOCAL_STREAM_CHUNK);
+        let content_type = fs::read_to_string(Self::ct_path_for(&path))
+            .await
+            .unwrap_or_else(|_| "application/octet-stream".to_string());
+        let key = key.to_string();
+        let stream = tokio_util::io::ReaderStream::with_capacity(file, LOCAL_STREAM_CHUNK)
+            .map(move |chunk| chunk.with_context(|| format!("read {key}")));
+        Ok(Some((content_type, Box::pin(stream))))
     }
 
     async fn get(&self, key: &str) -> Result<Option<Blob>> {
@@ -360,10 +430,15 @@ pub use s3_blob_archive::S3BlobArchive;
 mod s3_blob_archive {
     use super::*;
     use crate::config::ArchiveConfig;
+    use crate::input_files::stream::S3_PART_BYTES;
+    use aws_sdk_s3::config::RequestChecksumCalculation;
+    use aws_sdk_s3::error::DisplayErrorContext;
     use aws_sdk_s3::operation::get_object::GetObjectError;
     use aws_sdk_s3::operation::head_object::HeadObjectError;
     use aws_sdk_s3::primitives::ByteStream;
-    use aws_sdk_s3::types::{Delete, ObjectIdentifier};
+    use aws_sdk_s3::types::{
+        ChecksumAlgorithm, CompletedMultipartUpload, CompletedPart, Delete, ObjectIdentifier,
+    };
 
     /// Which precondition header pins a ranged GET to the version `open`
     /// saw. Pure and independent of the SDK's own `DateTime` type so it's
@@ -427,6 +502,231 @@ mod s3_blob_archive {
         pub fn from_client(client: aws_sdk_s3::Client, bucket: String) -> Self {
             Self { client, bucket }
         }
+
+        /// Whether a multipart upload declares CRC32: unless the client is
+        /// set to `request_checksum_calculation = WhenRequired` (env
+        /// `AWS_REQUEST_CHECKSUM_CALCULATION`, profile setting; AWS's advice
+        /// for third-party S3-compatible stores). Under `WhenRequired` the
+        /// SDK computes no `UploadPart` checksum, but still sends the
+        /// algorithm header when one is set, so an upload declaring CRC32
+        /// would then fail on its parts.
+        fn multipart_crc32(&self) -> bool {
+            !matches!(
+                self.client.config().request_checksum_calculation(),
+                Some(RequestChecksumCalculation::WhenRequired)
+            )
+        }
+
+        async fn create_upload(
+            &self,
+            key: &str,
+            content_type: &str,
+            crc32: bool,
+        ) -> Result<OpenUpload> {
+            let out = self
+                .client
+                .create_multipart_upload()
+                .bucket(&self.bucket)
+                .key(key)
+                .content_type(content_type)
+                .set_checksum_algorithm(crc32.then_some(ChecksumAlgorithm::Crc32))
+                .send()
+                .await
+                .with_context(|| format!("S3 create multipart upload {key}"))?;
+            let upload_id = out
+                .upload_id()
+                .with_context(|| format!("S3 create multipart upload {key}: no upload id"))?
+                .to_string();
+            Ok(OpenUpload {
+                client: self.client.clone(),
+                bucket: self.bucket.clone(),
+                key: key.to_string(),
+                upload_id,
+                crc32,
+                parts: Vec::new(),
+                armed: true,
+            })
+        }
+
+        /// The body of `put_stream`; on error the caller aborts `upload`.
+        async fn put_parts(
+            &self,
+            key: &str,
+            content_type: &str,
+            mut body: BoxStream<'static, Result<Bytes>>,
+            crc32: bool,
+            upload: &mut Option<OpenUpload>,
+        ) -> Result<()> {
+            use futures_util::StreamExt;
+            // Grows to one part; see `push_capped`.
+            let mut part: Vec<u8> = Vec::new();
+            while let Some(chunk) = body.next().await {
+                let mut chunk = chunk?;
+                while !chunk.is_empty() {
+                    if part.len() == S3_PART_BYTES {
+                        // A full part, and more data follows: send it.
+                        let full = Bytes::from(std::mem::take(&mut part));
+                        let open = match upload {
+                            Some(open) => open,
+                            None => {
+                                upload.insert(self.create_upload(key, content_type, crc32).await?)
+                            }
+                        };
+                        open.send_part(full).await?;
+                        part = Vec::with_capacity(S3_PART_BYTES);
+                    }
+                    let take = chunk.len().min(S3_PART_BYTES - part.len());
+                    push_capped(&mut part, &chunk[..take]);
+                    chunk = chunk.slice(take..);
+                }
+            }
+            match upload {
+                // The body ended inside the first part: one plain PUT.
+                None => {
+                    self.client
+                        .put_object()
+                        .bucket(&self.bucket)
+                        .key(key)
+                        .content_type(content_type)
+                        .body(ByteStream::from(Bytes::from(part)))
+                        .send()
+                        .await
+                        .with_context(|| format!("S3 PUT {key}"))?;
+                    Ok(())
+                }
+                Some(open) => {
+                    // Non-empty: a part is sent only when more data follows.
+                    open.send_part(Bytes::from(part)).await?;
+                    open.complete().await
+                }
+            }
+        }
+    }
+
+    /// Append `data` to `part`, doubling its capacity as needed but never
+    /// past one part: a small body costs about its own size, and the
+    /// buffer never grows beyond `S3_PART_BYTES`. The caller keeps
+    /// `part.len() + data.len() <= S3_PART_BYTES`.
+    fn push_capped(part: &mut Vec<u8>, data: &[u8]) {
+        let need = part.len() + data.len();
+        if need > part.capacity() {
+            let target = (part.capacity() * 2).max(need).min(S3_PART_BYTES);
+            part.reserve_exact(target - part.len());
+        }
+        part.extend_from_slice(data);
+    }
+
+    /// An open multipart upload. Aborted inline on an error (`abort`), or
+    /// in the background if it is dropped while still armed -- the upload
+    /// future was cancelled mid-body (a client disconnect) -- so no
+    /// incomplete upload is left to accrue storage.
+    struct OpenUpload {
+        client: aws_sdk_s3::Client,
+        bucket: String,
+        key: String,
+        upload_id: String,
+        /// Declared CRC32 at creation: every part and the completion
+        /// carry it too (see `S3BlobArchive::multipart_crc32`).
+        crc32: bool,
+        parts: Vec<CompletedPart>,
+        armed: bool,
+    }
+
+    impl OpenUpload {
+        async fn send_part(&mut self, data: Bytes) -> Result<()> {
+            let number = i32::try_from(self.parts.len() + 1)
+                .with_context(|| format!("S3 upload of {}: too many parts", self.key))?;
+            let out = self
+                .client
+                .upload_part()
+                .bucket(&self.bucket)
+                .key(&self.key)
+                .upload_id(&self.upload_id)
+                .part_number(number)
+                .set_checksum_algorithm(self.crc32.then_some(ChecksumAlgorithm::Crc32))
+                .body(ByteStream::from(data))
+                .send()
+                .await
+                .with_context(|| format!("S3 upload part {number} of {}", self.key))?;
+            // An upload created with CRC32 needs each part's checksum as
+            // well as its ETag to complete; one created without names none.
+            let checksum = if self.crc32 {
+                out.checksum_crc32().map(str::to_string)
+            } else {
+                None
+            };
+            self.parts.push(
+                CompletedPart::builder()
+                    .part_number(number)
+                    .set_e_tag(out.e_tag().map(str::to_string))
+                    .set_checksum_crc32(checksum)
+                    .build(),
+            );
+            Ok(())
+        }
+
+        async fn complete(&mut self) -> Result<()> {
+            let parts = CompletedMultipartUpload::builder()
+                .set_parts(Some(std::mem::take(&mut self.parts)))
+                .build();
+            self.client
+                .complete_multipart_upload()
+                .bucket(&self.bucket)
+                .key(&self.key)
+                .upload_id(&self.upload_id)
+                .multipart_upload(parts)
+                .send()
+                .await
+                .with_context(|| format!("S3 complete multipart upload {}", self.key))?;
+            self.armed = false;
+            Ok(())
+        }
+
+        /// Best effort: a failure is logged, never returned (the caller
+        /// already has the error that made it abort). Disarmed only after
+        /// the request: if this future is dropped mid-abort, `Drop` still
+        /// aborts (a second abort only logs `NoSuchUpload`).
+        async fn abort(mut self) {
+            abort_upload(&self.client, &self.bucket, &self.key, &self.upload_id).await;
+            self.armed = false;
+        }
+    }
+
+    impl Drop for OpenUpload {
+        fn drop(&mut self) {
+            if !self.armed {
+                return;
+            }
+            let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+                tracing::warn!(
+                    key = %self.key,
+                    "S3 multipart upload dropped outside a runtime; it is not aborted"
+                );
+                return;
+            };
+            let client = self.client.clone();
+            let bucket = std::mem::take(&mut self.bucket);
+            let key = std::mem::take(&mut self.key);
+            let upload_id = std::mem::take(&mut self.upload_id);
+            runtime.spawn(async move { abort_upload(&client, &bucket, &key, &upload_id).await });
+        }
+    }
+
+    async fn abort_upload(client: &aws_sdk_s3::Client, bucket: &str, key: &str, upload_id: &str) {
+        if let Err(e) = client
+            .abort_multipart_upload()
+            .bucket(bucket)
+            .key(key)
+            .upload_id(upload_id)
+            .send()
+            .await
+        {
+            tracing::warn!(
+                key,
+                "S3 abort multipart upload failed: {}",
+                DisplayErrorContext(&e)
+            );
+        }
     }
 
     #[async_trait]
@@ -475,6 +775,70 @@ mod s3_blob_archive {
                 content_type,
                 bytes: body,
             }))
+        }
+
+        /// Up to one part in memory: the body fills one `S3_PART_BYTES`
+        /// buffer; a body that ends inside it is one `PutObject`, anything
+        /// longer a multipart upload, aborted on any error.
+        async fn put_stream(
+            &self,
+            key: &str,
+            content_type: &str,
+            body: BoxStream<'static, Result<Bytes>>,
+        ) -> Result<()> {
+            let crc32 = self.multipart_crc32();
+            let mut upload = None;
+            let result = self
+                .put_parts(key, content_type, body, crc32, &mut upload)
+                .await;
+            if result.is_err() {
+                if let Some(open) = upload.take() {
+                    open.abort().await;
+                }
+            }
+            result
+        }
+
+        /// The object's body chunks as the SDK receives them; never
+        /// collected.
+        async fn get_stream(
+            &self,
+            key: &str,
+        ) -> Result<Option<(String, BoxStream<'static, Result<Bytes>>)>> {
+            let out = match self
+                .client
+                .get_object()
+                .bucket(&self.bucket)
+                .key(key)
+                .send()
+                .await
+            {
+                Ok(o) => o,
+                Err(e) => {
+                    if matches!(e.as_service_error(), Some(GetObjectError::NoSuchKey(_))) {
+                        return Ok(None);
+                    }
+                    return Err(anyhow::anyhow!(e)).context(format!("S3 GET {key}"));
+                }
+            };
+            let content_type = out
+                .content_type()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "application/octet-stream".to_string());
+            let state = (Some(out.body), key.to_string());
+            let stream = futures_util::stream::unfold(state, |(body, key)| async move {
+                let mut body = body?;
+                match body.try_next().await {
+                    Ok(Some(chunk)) => Some((Ok(chunk), (Some(body), key))),
+                    Ok(None) => None,
+                    // End the stream after the error: never re-poll the body.
+                    Err(e) => {
+                        let err = anyhow::Error::new(e).context(format!("S3 read body {key}"));
+                        Some((Err(err), (None, key)))
+                    }
+                }
+            });
+            Ok(Some((content_type, Box::pin(stream))))
         }
 
         async fn delete(&self, key: &str) -> Result<()> {
@@ -708,6 +1072,28 @@ mod s3_blob_archive {
         #[test]
         fn neither_header_pins_nothing() {
             assert_eq!(range_precondition(None, None), Precondition::None);
+        }
+    }
+
+    #[cfg(test)]
+    mod part_buffer_tests {
+        use super::*;
+
+        #[test]
+        fn push_capped_grows_with_the_body_and_stops_at_one_part() {
+            let mut part = Vec::new();
+            push_capped(&mut part, &[1u8; 3]);
+            assert!(part.capacity() < 64, "a tiny body stays tiny");
+
+            // Odd-sized chunks would double past a part without the cap.
+            let chunk = vec![7u8; 100_000];
+            while part.len() < S3_PART_BYTES {
+                let take = chunk.len().min(S3_PART_BYTES - part.len());
+                push_capped(&mut part, &chunk[..take]);
+                assert!(part.capacity() <= S3_PART_BYTES, "{}", part.capacity());
+            }
+            assert_eq!(part.len(), S3_PART_BYTES);
+            assert_eq!(part.capacity(), S3_PART_BYTES);
         }
     }
 }
@@ -1116,6 +1502,258 @@ mod tests {
         let mut v = Vec::new();
         store.read_range(&obj, 0, 100, &mut v).await.unwrap();
         assert_eq!(v, b"old-content");
+    }
+
+    fn chunks(parts: Vec<Result<Bytes>>) -> BoxStream<'static, Result<Bytes>> {
+        Box::pin(futures_util::stream::iter(parts))
+    }
+
+    /// Every leftover temp file (`<name>.tmp.<uuid>`, `<name>.ct.tmp.<uuid>`)
+    /// under `dir`.
+    fn temp_entries(dir: &Path) -> Vec<String> {
+        walkdir::WalkDir::new(dir)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path().display().to_string())
+            .filter(|p| p.contains(".tmp."))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn local_put_stream_roundtrip_and_no_temp_left() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = LocalBlobArchive::new(tmp.path().to_path_buf());
+        let body = chunks(vec![
+            Ok(Bytes::from_static(b"hello ")),
+            Ok(Bytes::new()),
+            Ok(Bytes::from_static(b"streamed ")),
+            Ok(Bytes::from_static(b"world")),
+        ]);
+        store
+            .put_stream("inputs/ws/file_1", "text/plain", body)
+            .await
+            .unwrap();
+        let got = store.get("inputs/ws/file_1").await.unwrap().unwrap();
+        assert_eq!(got.content_type, "text/plain");
+        assert_eq!(&got.bytes[..], b"hello streamed world");
+
+        // Overwrite replaces both the bytes and the content type.
+        store
+            .put_stream(
+                "inputs/ws/file_1",
+                "application/json",
+                chunks(vec![Ok(Bytes::from_static(b"{}"))]),
+            )
+            .await
+            .unwrap();
+        let got = store.get("inputs/ws/file_1").await.unwrap().unwrap();
+        assert_eq!(got.content_type, "application/json");
+        assert_eq!(&got.bytes[..], b"{}");
+
+        // An empty body is an empty blob, not a missing one.
+        store
+            .put_stream("inputs/ws/file_2", "text/plain", chunks(vec![]))
+            .await
+            .unwrap();
+        let got = store.get("inputs/ws/file_2").await.unwrap().unwrap();
+        assert!(got.bytes.is_empty());
+
+        assert!(
+            temp_entries(tmp.path()).is_empty(),
+            "temp files left: {:?}",
+            temp_entries(tmp.path())
+        );
+    }
+
+    #[tokio::test]
+    async fn local_put_stream_error_leaves_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = LocalBlobArchive::new(tmp.path().to_path_buf());
+        let err = store
+            .put_stream(
+                "inputs/ws/file_new",
+                "text/plain",
+                chunks(vec![
+                    Ok(Bytes::from_static(b"first ")),
+                    Ok(Bytes::from_static(b"second")),
+                    Err(anyhow::anyhow!("client went away")),
+                ]),
+            )
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("client went away"), "{err:#}");
+        assert!(store.get("inputs/ws/file_new").await.unwrap().is_none());
+        assert!(
+            temp_entries(tmp.path()).is_empty(),
+            "temp files left: {:?}",
+            temp_entries(tmp.path())
+        );
+
+        // A failed overwrite keeps the previous blob and its content type.
+        store
+            .put(
+                "inputs/ws/file_kept",
+                "text/plain",
+                Bytes::from_static(b"v1"),
+            )
+            .await
+            .unwrap();
+        store
+            .put_stream(
+                "inputs/ws/file_kept",
+                "application/x-new",
+                chunks(vec![
+                    Ok(Bytes::from_static(b"v2")),
+                    Err(anyhow::anyhow!("client went away")),
+                ]),
+            )
+            .await
+            .unwrap_err();
+        let got = store.get("inputs/ws/file_kept").await.unwrap().unwrap();
+        assert_eq!(&got.bytes[..], b"v1");
+        assert_eq!(got.content_type, "text/plain");
+        assert!(temp_entries(tmp.path()).is_empty());
+    }
+
+    /// The first chunk reaches the temp file on disk before the second one
+    /// is even asked for: nothing is buffered up to the end of the body.
+    #[tokio::test]
+    async fn local_put_stream_writes_chunk_by_chunk() {
+        use futures_util::StreamExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let store = LocalBlobArchive::new(tmp.path().to_path_buf());
+        let dir = tmp.path().join("inputs/ws");
+        let body = futures_util::stream::iter([0u8, 1]).then(move |i| {
+            let dir = dir.clone();
+            async move {
+                if i == 0 {
+                    return Ok(Bytes::from(vec![b'x'; 4096]));
+                }
+                // The temp data file holds the first chunk (allow the
+                // blocking write a moment to land).
+                for _ in 0..200 {
+                    let on_disk: u64 = std::fs::read_dir(&dir)
+                        .map(|rd| {
+                            rd.filter_map(|e| e.ok())
+                                .filter(|e| {
+                                    let n = e.file_name().to_string_lossy().into_owned();
+                                    n.contains(".tmp.") && !n.contains(".ct.")
+                                })
+                                .filter_map(|e| e.metadata().ok())
+                                .map(|m| m.len())
+                                .sum()
+                        })
+                        .unwrap_or(0);
+                    if on_disk == 4096 {
+                        return Ok(Bytes::from_static(b"tail"));
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                anyhow::bail!("the first chunk never reached the temp file")
+            }
+        });
+        store
+            .put_stream("inputs/ws/file_cbc", "text/plain", Box::pin(body))
+            .await
+            .unwrap();
+        let got = store.get("inputs/ws/file_cbc").await.unwrap().unwrap();
+        assert_eq!(got.bytes.len(), 4096 + 4);
+    }
+
+    /// A dropped upload (the request future is cancelled mid-body) leaves no
+    /// temp file behind.
+    #[tokio::test]
+    async fn local_put_stream_dropped_mid_body_leaves_no_temp() {
+        use futures_util::StreamExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(LocalBlobArchive::new(tmp.path().to_path_buf()));
+        let body = futures_util::stream::iter([Ok(Bytes::from_static(b"first"))])
+            .chain(futures_util::stream::pending());
+        let task = {
+            let store = std::sync::Arc::clone(&store);
+            tokio::spawn(async move {
+                store
+                    .put_stream("inputs/ws/file_drop", "text/plain", Box::pin(body))
+                    .await
+            })
+        };
+        for _ in 0..200 {
+            if !temp_entries(tmp.path()).is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            !temp_entries(tmp.path()).is_empty(),
+            "the upload never started writing"
+        );
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(
+            temp_entries(tmp.path()).is_empty(),
+            "temp files left: {:?}",
+            temp_entries(tmp.path())
+        );
+        assert!(store.get("inputs/ws/file_drop").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn local_get_stream_yields_multiple_chunks() {
+        use futures_util::StreamExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let store = LocalBlobArchive::new(tmp.path().to_path_buf());
+        let data: Vec<u8> = (0..1024 * 1024).map(|i| (i % 251) as u8).collect();
+        store
+            .put(
+                "inputs/ws/file_big",
+                "application/x-big",
+                Bytes::from(data.clone()),
+            )
+            .await
+            .unwrap();
+        let (ct, mut stream) = store
+            .get_stream("inputs/ws/file_big")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ct, "application/x-big");
+        let mut got = Vec::new();
+        let mut n = 0;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.unwrap();
+            assert!(chunk.len() <= 64 * 1024, "chunk of {} bytes", chunk.len());
+            got.extend_from_slice(&chunk);
+            n += 1;
+        }
+        assert!(
+            n >= 2,
+            "a 1 MiB blob must stream in several chunks, got {n}"
+        );
+        assert_eq!(got, data);
+        assert!(store
+            .get_stream("inputs/ws/file_missing")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(store.get_stream("../escape").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn local_get_stream_without_sidecar_falls_back_to_octet_stream() {
+        use futures_util::StreamExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let store = LocalBlobArchive::new(tmp.path().to_path_buf());
+        let path = tmp.path().join("inputs/ws/file_raw");
+        fs::create_dir_all(path.parent().unwrap()).await.unwrap();
+        fs::write(&path, b"raw").await.unwrap();
+        let (ct, mut stream) = store
+            .get_stream("inputs/ws/file_raw")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ct, "application/octet-stream");
+        assert_eq!(&stream.next().await.unwrap().unwrap()[..], b"raw");
+        assert!(stream.next().await.is_none());
     }
 
     #[tokio::test]

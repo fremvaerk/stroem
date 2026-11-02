@@ -712,6 +712,8 @@ async fn fire_single_hook(
             None, // agents_config not available in hook context; orchestrator dispatches agents
             defaults,
             source_git_ref,
+            // A hook cannot hold an upload (spec 2026-10-29 § 4.4, § 4.6).
+            crate::input_files::FileGrant::Indirect,
         )
         .await
         .context("Failed to create hook task job")?;
@@ -729,6 +731,12 @@ async fn fire_single_hook(
 
         return Ok(());
     }
+
+    // A single-step hook job cannot hold an upload either (spec 2026-10-29
+    // § 4.6): the caller logs this to the source job.
+    crate::input_files::preflight(&action.input, &rendered_input)
+        .map_err(anyhow::Error::new)
+        .context("Hook action cannot be given its file input")?;
 
     // Create the hook job (single-step, always distributed)
     let task_name = format!("_hook:{}", hook.action);

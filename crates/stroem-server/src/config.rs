@@ -214,6 +214,75 @@ impl Default for ArtifactStorageConfig {
     }
 }
 
+/// Upper bound for `input_files.mcp_inline_max_bytes`: the base64 form of the
+/// decoded size must fit the 2 MiB `/mcp` body limit.
+pub const MAX_MCP_INLINE_BYTES: u64 = 1_468_006;
+
+/// Upper bound for `input_files.upload_ttl_secs` (30 days). Larger values
+/// overflow the expiry arithmetic (`chrono::Duration::seconds` panics) and the
+/// sweep's signed age.
+pub const MAX_UPLOAD_TTL_SECS: u64 = 2_592_000;
+
+/// Upper bound for `input_files.upload_url_ttl_secs` (24 hours).
+pub const MAX_UPLOAD_URL_TTL_SECS: u64 = 86_400;
+
+/// Most parts in one S3 multipart upload.
+pub const S3_MAX_PARTS: u64 = 10_000;
+
+/// Upper bound for `input_files.max_file_bytes`: an S3 multipart upload has at
+/// most [`S3_MAX_PARTS`] parts of `S3_PART_BYTES` each.
+pub const MAX_INPUT_FILE_BYTES: u64 =
+    S3_MAX_PARTS * crate::input_files::stream::S3_PART_BYTES as u64;
+
+/// Input file (`type: file`) storage and upload limits.
+///
+/// All fields optional; absent section = defaults. The blob backend falls back
+/// to the artifact backend, then to the log archive.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct InputFilesConfig {
+    #[serde(default = "default_input_max_file_bytes")]
+    pub max_file_bytes: u64,
+    #[serde(default = "default_input_upload_ttl_secs")]
+    pub upload_ttl_secs: u64,
+    #[serde(default = "default_input_upload_url_ttl_secs")]
+    pub upload_url_ttl_secs: u64,
+    #[serde(default = "default_input_mcp_inline_max_bytes")]
+    pub mcp_inline_max_bytes: u64,
+    #[serde(default = "default_input_prefix")]
+    pub prefix: String,
+    pub archive: Option<ArchiveConfig>,
+}
+
+fn default_input_max_file_bytes() -> u64 {
+    100 * 1024 * 1024
+}
+fn default_input_upload_ttl_secs() -> u64 {
+    86_400
+}
+fn default_input_upload_url_ttl_secs() -> u64 {
+    900
+}
+fn default_input_mcp_inline_max_bytes() -> u64 {
+    1024 * 1024
+}
+fn default_input_prefix() -> String {
+    "inputs/".to_string()
+}
+
+impl Default for InputFilesConfig {
+    fn default() -> Self {
+        Self {
+            max_file_bytes: default_input_max_file_bytes(),
+            upload_ttl_secs: default_input_upload_ttl_secs(),
+            upload_url_ttl_secs: default_input_upload_url_ttl_secs(),
+            mcp_inline_max_bytes: default_input_mcp_inline_max_bytes(),
+            prefix: default_input_prefix(),
+            archive: None,
+        }
+    }
+}
+
 /// Git auth configuration for workspace sources
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -797,6 +866,9 @@ pub struct ServerConfig {
     /// with 100 MiB per-file and 1 GiB per-job limits)
     #[serde(default)]
     pub artifact_storage: Option<ArtifactStorageConfig>,
+    /// Input file (`type: file`) limits and storage (optional — defaults apply).
+    #[serde(default)]
+    pub input_files: Option<InputFilesConfig>,
     /// Default step timeout applied when a `FlowStep` has no `timeout` field.
     /// Capped at the same 24h limit as per-step timeouts. `None` = no default
     /// (existing behaviour: steps without timeouts run unbounded).
@@ -817,22 +889,41 @@ pub struct ServerConfig {
     pub pin_store: Option<PinStoreSection>,
 }
 
-/// Resolved timeout defaults passed into job creation.
+/// Resolved server defaults passed into job creation.
 ///
-/// Bundles the two `Option<i32>` values so we don't have to thread two more
-/// arguments through every `create_job_for_task` call site. `Copy` + `Default`
-/// keep test callers terse: `JobDefaults::default()`.
-#[derive(Debug, Clone, Copy, Default)]
+/// Bundles the timeout defaults and the input-file storage flag so we don't
+/// have to thread more arguments through every `create_job_for_task` call
+/// site. `Copy` + `Default` keep test callers terse: `JobDefaults::default()`.
+///
+/// Production paths build it with `AppState::job_defaults`, which sets
+/// `input_storage` from the configured blob backend. `From<&ServerConfig>`
+/// and `Default` cannot see that backend and assume storage is there.
+#[derive(Debug, Clone, Copy)]
 pub struct JobDefaults {
     /// Default step timeout in seconds. `None` = no default (run unbounded).
     pub step_timeout_secs: Option<i32>,
     /// Default job timeout in seconds. `None` = no default.
     pub job_timeout_secs: Option<i32>,
+    /// Input-file storage is configured. When `false`, a creation whose input
+    /// carries a `file` value is refused with
+    /// `input_files::InputStorageUnavailable` (file inputs spec § 4.3).
+    pub input_storage: bool,
+}
+
+impl Default for JobDefaults {
+    fn default() -> Self {
+        Self {
+            step_timeout_secs: None,
+            job_timeout_secs: None,
+            input_storage: true,
+        }
+    }
 }
 
 impl From<&ServerConfig> for JobDefaults {
     /// Conversion is fallible only at the `i32::try_from` cast, which
     /// validation guarantees fits (caps are well below `i32::MAX`).
+    /// `input_storage` is `true`: use `AppState::job_defaults` on a server.
     fn from(config: &ServerConfig) -> Self {
         Self {
             step_timeout_secs: config.default_step_timeout.map(|d| {
@@ -841,6 +932,7 @@ impl From<&ServerConfig> for JobDefaults {
             job_timeout_secs: config.default_job_timeout.map(|d| {
                 i32::try_from(d.as_secs()).expect("default_job_timeout validated to fit i32")
             }),
+            input_storage: true,
         }
     }
 }
@@ -970,6 +1062,43 @@ impl ServerConfig {
             anyhow::bail!("workspace_reload git timeouts must be between 1 and {c_int_max} ms");
         }
         self.leader.validate()?;
+        if let Some(f) = &self.input_files {
+            for (key, value) in [
+                ("max_file_bytes", f.max_file_bytes),
+                ("upload_ttl_secs", f.upload_ttl_secs),
+                ("upload_url_ttl_secs", f.upload_url_ttl_secs),
+                ("mcp_inline_max_bytes", f.mcp_inline_max_bytes),
+            ] {
+                if value == 0 {
+                    anyhow::bail!("input_files.{key} must be greater than 0");
+                }
+            }
+            if f.mcp_inline_max_bytes > MAX_MCP_INLINE_BYTES {
+                anyhow::bail!(
+                    "input_files.mcp_inline_max_bytes must be at most {MAX_MCP_INLINE_BYTES} (the base64 form must fit the 2 MiB /mcp body limit), got {}",
+                    f.mcp_inline_max_bytes
+                );
+            }
+            if f.upload_ttl_secs > MAX_UPLOAD_TTL_SECS {
+                anyhow::bail!(
+                    "input_files.upload_ttl_secs must be at most {MAX_UPLOAD_TTL_SECS} (30 days), got {}",
+                    f.upload_ttl_secs
+                );
+            }
+            if f.upload_url_ttl_secs > MAX_UPLOAD_URL_TTL_SECS {
+                anyhow::bail!(
+                    "input_files.upload_url_ttl_secs must be at most {MAX_UPLOAD_URL_TTL_SECS} (24 hours), got {}",
+                    f.upload_url_ttl_secs
+                );
+            }
+            if f.max_file_bytes > MAX_INPUT_FILE_BYTES {
+                anyhow::bail!(
+                    "input_files.max_file_bytes must be at most {MAX_INPUT_FILE_BYTES} ({S3_MAX_PARTS} S3 parts of {} bytes), got {}",
+                    crate::input_files::stream::S3_PART_BYTES,
+                    f.max_file_bytes
+                );
+            }
+        }
         if let Some(p) = &self.pin_store {
             if p.dir.as_deref().is_some_and(str::is_empty) {
                 anyhow::bail!("pin_store.dir must not be empty");
@@ -3093,6 +3222,17 @@ worker_token: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         assert!(d.job_timeout_secs.is_none());
     }
 
+    /// The config alone cannot see the blob backend: `Default` and
+    /// `From<&ServerConfig>` assume storage (`AppState::job_defaults` is the
+    /// production source of `input_storage`).
+    #[test]
+    fn test_job_defaults_without_state_assume_input_storage() {
+        assert!(JobDefaults::default().input_storage);
+        let yaml = make_minimal_config_with_field("");
+        let config: ServerConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert!(JobDefaults::from(&config).input_storage);
+    }
+
     /// `log_ha_diagnostics` must not emit secret bytes.
     ///
     /// We set up a tracing subscriber that captures log output, call
@@ -3199,6 +3339,7 @@ worker_token: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             metrics: None,
             state_storage: None,
             artifact_storage: None,
+            input_files: None,
             default_step_timeout: None,
             default_job_timeout: None,
             workspace_reload: Default::default(),
@@ -3289,6 +3430,138 @@ artifact_storage:
         assert_eq!(art.max_file_bytes, 52_428_800);
         assert_eq!(art.max_job_bytes, 524_288_000);
         assert_eq!(art.prefix, "art/");
+    }
+
+    const INPUT_FILES_BASE_YAML: &str = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://x"
+log_storage:
+  local_dir: "./logs"
+workspaces: {}
+worker_token: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+"#;
+
+    #[test]
+    fn input_files_defaults() {
+        let cfg: ServerConfig = serde_yaml::from_str(INPUT_FILES_BASE_YAML).unwrap();
+        assert!(cfg.input_files.is_none());
+        let f = cfg.input_files.unwrap_or_default();
+        assert_eq!(f.max_file_bytes, 104_857_600);
+        assert_eq!(f.upload_ttl_secs, 86_400);
+        assert_eq!(f.upload_url_ttl_secs, 900);
+        assert_eq!(f.mcp_inline_max_bytes, 1_048_576);
+        assert_eq!(f.prefix, "inputs/");
+        assert!(f.archive.is_none());
+        let partial: ServerConfig = serde_yaml::from_str(&format!(
+            "{INPUT_FILES_BASE_YAML}input_files:\n  prefix: \"x/\"\n"
+        ))
+        .unwrap();
+        let p = partial.input_files.unwrap();
+        assert_eq!(p.prefix, "x/");
+        assert_eq!(p.max_file_bytes, 104_857_600);
+    }
+
+    #[test]
+    fn input_files_env_override() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut file, INPUT_FILES_BASE_YAML.as_bytes()).unwrap();
+        std::io::Write::flush(&mut file).unwrap();
+        // SAFETY: test-only, serialized by ENV_MUTEX
+        unsafe {
+            std::env::set_var("STROEM__INPUT_FILES__MAX_FILE_BYTES", "10");
+        }
+        let config = load_config(file.path().to_str().unwrap());
+        unsafe {
+            std::env::remove_var("STROEM__INPUT_FILES__MAX_FILE_BYTES");
+        }
+        let f = config.unwrap().input_files.unwrap();
+        assert_eq!(f.max_file_bytes, 10);
+        assert_eq!(f.prefix, "inputs/");
+    }
+
+    fn input_files_cfg(f: impl FnOnce(&mut InputFilesConfig)) -> ServerConfig {
+        let mut cfg: ServerConfig = serde_yaml::from_str(INPUT_FILES_BASE_YAML).unwrap();
+        let mut i = InputFilesConfig::default();
+        f(&mut i);
+        cfg.input_files = Some(i);
+        cfg
+    }
+
+    #[test]
+    fn input_files_default_config_validates() {
+        input_files_cfg(|_| {}).validate().unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_zero_caps() {
+        type Setter = fn(&mut InputFilesConfig);
+        let cases: [(&str, Setter); 4] = [
+            ("max_file_bytes", |i| i.max_file_bytes = 0),
+            ("upload_ttl_secs", |i| i.upload_ttl_secs = 0),
+            ("upload_url_ttl_secs", |i| i.upload_url_ttl_secs = 0),
+            ("mcp_inline_max_bytes", |i| i.mcp_inline_max_bytes = 0),
+        ];
+        for (key, set) in cases {
+            let err = input_files_cfg(set).validate().unwrap_err().to_string();
+            assert_eq!(err, format!("input_files.{key} must be greater than 0"));
+        }
+    }
+
+    #[test]
+    fn validate_rejects_mcp_inline_over_cap() {
+        input_files_cfg(|i| i.mcp_inline_max_bytes = MAX_MCP_INLINE_BYTES)
+            .validate()
+            .unwrap();
+        let err = input_files_cfg(|i| i.mcp_inline_max_bytes = 1_468_007)
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err,
+            "input_files.mcp_inline_max_bytes must be at most 1468006 (the base64 form must fit the 2 MiB /mcp body limit), got 1468007"
+        );
+    }
+
+    #[test]
+    fn validate_caps_input_file_ttls_and_size() {
+        type Setter = fn(&mut InputFilesConfig);
+        let at_cap: [Setter; 3] = [
+            |i| i.upload_ttl_secs = 2_592_000,
+            |i| i.upload_url_ttl_secs = 86_400,
+            |i| i.max_file_bytes = 83_886_080_000,
+        ];
+        for set in at_cap {
+            input_files_cfg(set).validate().unwrap();
+        }
+        let over: [(Setter, &str); 3] = [
+            (
+                |i| i.upload_ttl_secs = 2_592_001,
+                "input_files.upload_ttl_secs must be at most 2592000 (30 days), got 2592001",
+            ),
+            (
+                |i| i.upload_url_ttl_secs = 86_401,
+                "input_files.upload_url_ttl_secs must be at most 86400 (24 hours), got 86401",
+            ),
+            (
+                |i| i.max_file_bytes = 83_886_080_001,
+                "input_files.max_file_bytes must be at most 83886080000 (10000 S3 parts of 8388608 bytes), got 83886080001",
+            ),
+        ];
+        for (set, msg) in over {
+            let err = input_files_cfg(set).validate().unwrap_err().to_string();
+            assert_eq!(err, msg);
+        }
+        // u64::MAX would overflow `chrono::Duration::seconds` and wrap the
+        // sweep's `as i64` cast negative.
+        for set in [
+            (|i| i.upload_ttl_secs = u64::MAX) as Setter,
+            |i| i.upload_url_ttl_secs = u64::MAX,
+            |i| i.max_file_bytes = u64::MAX,
+        ] {
+            assert!(input_files_cfg(set).validate().is_err());
+        }
     }
 
     #[test]

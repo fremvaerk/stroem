@@ -335,6 +335,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         }
     }
 
@@ -517,6 +518,7 @@ mod tests {
             global_state_out_dir: None,
             artifacts_out_dir: None,
             workspace_revision: None,
+            inputs: None,
         };
         // spawn will fail because the working directory doesn't exist, or return non-zero
         let result = runner.execute(config, None, CancellationToken::new()).await;

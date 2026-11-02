@@ -232,6 +232,7 @@ async fn build_test_app_with_pool(
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -438,6 +439,7 @@ async fn restart_from_middle_carries_upstream_and_reruns_downstream() -> Result<
         None,
         JobDefaults::default(),
         None,
+        stroem_server::input_files::FileGrant::Indirect,
     )
     .await?;
     // `terminal_at_creation` is private to the settlement module; the step
@@ -531,6 +533,7 @@ async fn restart_set_entirely_skipped_settles_failed_at_creation() -> Result<()>
         None,
         JobDefaults::default(),
         None,
+        stroem_server::input_files::FileGrant::Indirect,
     )
     .await?;
     assert!(created.terminal_at_creation());
@@ -577,6 +580,7 @@ async fn restart_rejects_legacy_source_without_raw_input() -> Result<()> {
         None,
         JobDefaults::default(),
         None,
+        stroem_server::input_files::FileGrant::Indirect,
     )
     .await
     .unwrap_err();
@@ -783,6 +787,7 @@ async fn carried_for_each_placeholder_exposes_aggregated_output_without_instance
         None,
         JobDefaults::default(),
         None,
+        stroem_server::input_files::FileGrant::Indirect,
     )
     .await?;
 
@@ -898,6 +903,7 @@ async fn carried_task_step_keeps_output_and_creates_no_child() -> Result<()> {
         None,
         JobDefaults::default(),
         None,
+        stroem_server::input_files::FileGrant::Indirect,
     )
     .await?;
 
@@ -955,6 +961,7 @@ async fn restart_from_task_step_creates_child_under_new_job() -> Result<()> {
         None,
         JobDefaults::default(),
         None,
+        stroem_server::input_files::FileGrant::Indirect,
     )
     .await?;
 
@@ -1066,6 +1073,7 @@ async fn restart_from_approval_step_suspends_new_job() -> Result<()> {
         None,
         JobDefaults::default(),
         None,
+        stroem_server::input_files::FileGrant::Indirect,
     )
     .await?;
 
@@ -1168,6 +1176,7 @@ async fn flow_change_new_upstream_step_forces_rerun_of_dependent() -> Result<()>
         None,
         JobDefaults::default(),
         None,
+        stroem_server::input_files::FileGrant::Indirect,
     )
     .await?;
 
@@ -1276,6 +1285,7 @@ async fn input_replay_rotated_connection_yields_new_value() -> Result<()> {
         None,
         JobDefaults::default(),
         None,
+        stroem_server::input_files::FileGrant::Indirect,
     )
     .await?;
 
@@ -1333,6 +1343,7 @@ async fn seed_failure_rolls_back_the_whole_restart_job() -> Result<()> {
         None,
         JobDefaults::default(),
         None,
+        stroem_server::input_files::FileGrant::Indirect,
     )
     .await
     .unwrap_err();

@@ -3,12 +3,15 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::path::Path;
 use stroem_common::dag;
+use stroem_common::file_field::{
+    new_file_id, safe_name, FileInputError, FileInputErrorKind, FileRef, JobFiles, FILE_TYPE,
+};
 use stroem_common::gate::{gate, DepOutcome, Gate};
 use stroem_common::models::job::SkipReason;
 use stroem_common::models::workflow::{ActionDef, FlowStep, TaskDef, WorkspaceConfig};
 use stroem_common::template::{
-    evaluate_condition, merge_defaults, prepare_action_input, render_env_map, render_template,
-    resolve_connection_inputs,
+    evaluate_condition, merge_defaults, prepare_action_input, render_env_map,
+    render_input_typed_with_files, render_template, resolve_connection_inputs,
 };
 use stroem_common::workspace_loader;
 use stroem_runner::{
@@ -50,10 +53,15 @@ pub async fn cmd_run(task_name: &str, path: &str, input: Option<&str>) -> Result
     validate_actions_local(&task.flow, &config)?;
 
     // Parse user input
-    let user_input: serde_json::Value = match input {
+    let mut user_input: serde_json::Value = match input {
         Some(json_str) => serde_json::from_str(json_str).context("Invalid JSON input")?,
         None => json!({}),
     };
+
+    // `file` fields: a local path becomes a read-only copy under a temp tree,
+    // so templates see the same `{root}/{id}/{name}` path shape as on the
+    // server. The guard removes the tree on every exit path.
+    let (_inputs_guard, files) = stage_file_inputs(&task.input, &mut user_input)?;
 
     // Merge task-level input defaults
     let ctx_for_defaults = json!({ "secret": &config.secrets });
@@ -78,12 +86,13 @@ pub async fn cmd_run(task_name: &str, path: &str, input: Option<&str>) -> Result
     .context("Failed to install Ctrl-C handler")?;
 
     // Run DAG
-    let summary = run_dag(
+    let summary = run_dag_with_files(
         task,
         &config,
         &resolved_input,
         &workspace_path,
         &cancel_token,
+        &files,
     )
     .await?;
 
@@ -96,6 +105,142 @@ pub async fn cmd_run(task_name: &str, path: &str, input: Option<&str>) -> Result
     }
 
     Ok(summary.outcome == RunOutcome::Completed)
+}
+
+/// The temp tree holding the copied `file` inputs; removed on drop.
+struct InputsRoot {
+    path: std::path::PathBuf,
+}
+
+impl Drop for InputsRoot {
+    fn drop(&mut self) {
+        // The `{id}` dirs are read-only: make each dir owner-writable first
+        // (`0700`, never wider, so removal opens no window to other users).
+        #[cfg(unix)]
+        fn relax(dir: &Path) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for e in entries.flatten() {
+                    let p = e.path();
+                    if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                        relax(&p);
+                    }
+                }
+            }
+        }
+        #[cfg(unix)]
+        relax(&self.path);
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+/// Create `path` (never an existing one) as `0700` on unix, like the
+/// worker's inputs wrapper: the tree below it is world-readable (`0555` dirs,
+/// `0444` files), so the root alone keeps other host users out.
+fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(path)
+}
+
+#[cfg(unix)]
+fn set_mode(path: &Path, mode: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+}
+
+#[cfg(not(unix))]
+fn set_mode(path: &Path, mode: u32) -> std::io::Result<()> {
+    let mut perms = std::fs::metadata(path)?.permissions();
+    perms.set_readonly(mode & 0o200 == 0);
+    std::fs::set_permissions(path, perms)
+}
+
+/// Copies the local file named by each `file` field of the user input into a
+/// temp tree and replaces the value with the file's local id.
+fn stage_file_inputs(
+    schema: &HashMap<String, stroem_common::models::workflow::InputFieldDef>,
+    user_input: &mut serde_json::Value,
+) -> Result<(Option<InputsRoot>, JobFiles)> {
+    let mut fields: Vec<&String> = schema
+        .iter()
+        .filter(|(_, d)| d.field_type == FILE_TYPE)
+        .map(|(n, _)| n)
+        .collect();
+    fields.sort();
+
+    let mut guard: Option<InputsRoot> = None;
+    let mut attachments: Vec<(String, FileRef)> = Vec::new();
+    for name in fields {
+        let value = user_input.get(name.as_str()).cloned();
+        let path = match value {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(s)) if s.trim().is_empty() => None,
+            Some(serde_json::Value::String(s)) => Some(s),
+            Some(_) => bail!("Input field '{name}': expected a path to a local file"),
+        };
+        let Some(path) = path else {
+            if schema[name].required {
+                return Err(FileInputError {
+                    field: name.clone(),
+                    kind: FileInputErrorKind::Required,
+                }
+                .into());
+            }
+            continue;
+        };
+        let src = Path::new(&path);
+        let is_file = std::fs::metadata(src).map(|m| m.is_file()).unwrap_or(false);
+        if !is_file {
+            bail!("Input field '{name}': the value is not a readable regular file");
+        }
+        let base = src
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let Some(safe) = safe_name(&base) else {
+            bail!("Input field '{name}': the file name cannot be used");
+        };
+        let root = match &guard {
+            Some(g) => g.path.clone(),
+            None => {
+                let p = std::env::temp_dir().join(format!(
+                    "stroem-run-inputs-{}",
+                    uuid::Uuid::new_v4().simple()
+                ));
+                create_private_dir(&p)
+                    .context("Failed to create the temp directory for file inputs")?;
+                guard = Some(InputsRoot { path: p.clone() });
+                p
+            }
+        };
+        let id = new_file_id();
+        let dir = root.join(&id);
+        std::fs::create_dir(&dir).context("Failed to stage a file input")?;
+        let dest = dir.join(&safe);
+        std::fs::copy(src, &dest)
+            .with_context(|| format!("Input field '{name}': failed to copy the file"))?;
+        set_mode(&dest, 0o444).context("Failed to make a staged file read-only")?;
+        set_mode(&dir, 0o555).context("Failed to make a staged directory read-only")?;
+        user_input[name.as_str()] = json!(id);
+        attachments.push((
+            name.clone(),
+            FileRef {
+                file_id: id,
+                safe_name: safe,
+            },
+        ));
+    }
+    let files = match &guard {
+        Some(g) => JobFiles::new(g.path.to_string_lossy().into_owned(), attachments),
+        None => JobFiles::empty(),
+    };
+    Ok((guard, files))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -201,6 +346,7 @@ fn validate_actions_local(
 }
 
 /// Run the task's DAG locally, returning a summary of results.
+#[cfg(test)]
 async fn run_dag(
     task: &TaskDef,
     config: &WorkspaceConfig,
@@ -208,6 +354,27 @@ async fn run_dag(
     workspace_path: &Path,
     cancel_token: &CancellationToken,
 ) -> Result<RunSummary> {
+    run_dag_with_files(
+        task,
+        config,
+        input,
+        workspace_path,
+        cancel_token,
+        &JobFiles::empty(),
+    )
+    .await
+}
+
+async fn run_dag_with_files(
+    task: &TaskDef,
+    config: &WorkspaceConfig,
+    input: &serde_json::Value,
+    workspace_path: &Path,
+    cancel_token: &CancellationToken,
+    files: &JobFiles,
+) -> Result<RunSummary> {
+    // Every context sees file fields as paths, as on the server.
+    let input = &files.template_input(input);
     let runner = ShellRunner::new();
     let mut outcomes: HashMap<String, DepOutcome> = HashMap::new();
     let mut outputs: HashMap<String, Option<serde_json::Value>> = HashMap::new();
@@ -350,6 +517,7 @@ async fn run_dag(
                         &runner,
                         workspace_path,
                         cancel_token,
+                        files,
                     )
                     .await
                     {
@@ -424,6 +592,7 @@ async fn run_dag(
                 &runner,
                 workspace_path,
                 cancel_token,
+                files,
             )
             .await
             {
@@ -504,10 +673,11 @@ async fn execute_step(
     runner: &ShellRunner,
     workspace_path: &Path,
     cancel_token: &CancellationToken,
+    files: &JobFiles,
 ) -> Result<RunResult> {
     // Render step input
     let rendered_input =
-        stroem_common::template::render_input_typed(&step.input, Some(&action.input), ctx)
+        render_input_typed_with_files(&step.input, Some(&action.input), ctx, files)
             .with_context(|| format!("Step '{}': failed to render input", step_name))?;
 
     // Prepare action input (merge action defaults + resolve connections)
@@ -517,6 +687,7 @@ async fn execute_step(
     };
     let action_input = prepare_action_input(&rendered_input, &action.input, &lookup)
         .with_context(|| format!("Step '{}': failed to prepare action input", step_name))?;
+    let action_input = files.template_prepared(&action_input, &action.input);
 
     // Build context for script/env rendering: full step context + rendered input
     // The action's script templates may reference step outputs (e.g., {{ step1.output.val }})
@@ -680,6 +851,7 @@ fn build_run_config(
         global_state_out_dir: None,
         artifacts_out_dir: None,
         workspace_revision: None,
+        inputs: None,
     })
 }
 
@@ -1997,6 +2169,35 @@ tasks:
         );
         assert_eq!(summary.failed, 3, "all three iterations should fail");
         assert_eq!(summary.skipped, 0);
+    }
+
+    /// Codex implementation review round 1: the staging root is private
+    /// (`0700`, like the worker's wrapper), so another host user cannot
+    /// reach a copied file through the world-readable `0555`/`0444` tree
+    /// below it — even a source file that was `0600`. The guard removes it.
+    #[cfg(unix)]
+    #[test]
+    fn staged_inputs_root_is_private_and_removed() {
+        use std::os::unix::fs::PermissionsExt;
+        let schema: HashMap<String, stroem_common::models::workflow::InputFieldDef> =
+            serde_yaml::from_str("data_file: { type: file }").unwrap();
+        let src_dir = tempfile::tempdir().unwrap();
+        let src = src_dir.path().join("secret.csv");
+        std::fs::write(&src, "s").unwrap();
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let mut input = json!({ "data_file": src.to_str().unwrap() });
+
+        let (guard, _files) = stage_file_inputs(&schema, &mut input).unwrap();
+        let guard = guard.expect("a file was staged");
+        let root = guard.path.clone();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&root), 0o700, "staging root {root:?}");
+        let id = input["data_file"].as_str().unwrap().to_string();
+        assert_eq!(mode(&root.join(&id)), 0o555);
+        assert_eq!(mode(&root.join(&id).join("secret.csv")), 0o444);
+
+        drop(guard);
+        assert!(!root.exists(), "{root:?} was not removed");
     }
 
     #[test]

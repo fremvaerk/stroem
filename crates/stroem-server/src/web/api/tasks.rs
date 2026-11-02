@@ -1,5 +1,5 @@
 use crate::acl::{load_user_acl_context, make_task_path, TaskPermission};
-use crate::config::JobDefaults;
+use crate::input_files::FileGrant;
 use crate::job_creator::{create_job_for_task_detailed, create_job_for_task_pinned, CreationMode};
 use crate::state::AppState;
 use crate::web::api::middleware::AuthUser;
@@ -533,6 +533,7 @@ pub async fn execute_task(
     }
 
     let input_value = serde_json::to_value(&req.input).unwrap_or_default();
+    let files = FileGrant::direct(&state, caller_user_id(&auth_user)?);
 
     // 5. Create job + steps via shared function
     let revision = state.workspaces.get_revision(&ws);
@@ -551,7 +552,8 @@ pub async fn execute_task(
                 src_id,
                 &req.replay_fields,
                 state.config.agents.as_ref(),
-                JobDefaults::from(state.config.as_ref()),
+                state.job_defaults(),
+                files,
             )
             .await
         }
@@ -568,7 +570,8 @@ pub async fn execute_task(
                 revision.as_deref(),
                 None,
                 state.config.agents.as_ref(),
-                JobDefaults::from(state.config.as_ref()),
+                state.job_defaults(),
+                files,
             )
             .await
         }
@@ -619,16 +622,47 @@ pub(crate) async fn require_task_run(
     }
 }
 
+/// The ACL permission of a stored user (no `AuthUser` extractor) on a task.
+/// `Run` everywhere when no ACL is configured.
+pub(crate) async fn task_permission_for_user(
+    state: &AppState,
+    user: &stroem_db::UserRow,
+    ws: &str,
+    name: &str,
+    folder: Option<&str>,
+) -> anyhow::Result<TaskPermission> {
+    if !state.acl.is_configured() {
+        return Ok(TaskPermission::Run);
+    }
+    let (is_admin, groups) = load_user_acl_context(&state.pool, user.user_id, user.is_admin)
+        .await
+        .context("load ACL context")?;
+    Ok(state.acl.evaluate(
+        ws,
+        &make_task_path(folder, name),
+        &user.email,
+        &groups,
+        is_admin,
+    ))
+}
+
 /// The one answer for a re-run source that does not exist AND for one the
 /// caller may not read (pinned or not): same status, same body, so neither
 /// existence nor pinned status is observable.
-fn source_job_not_found() -> AppError {
+pub(crate) fn source_job_not_found() -> AppError {
     AppError::NotFound("Source job not found".into())
+}
+
+/// The caller's user for A1 (own upload, spec 2026-10-29 § 4.4): the same
+/// identity the upload route records — `None` when no user is authenticated
+/// (auth off).
+pub(crate) fn caller_user_id(auth_user: &Option<AuthUser>) -> Result<Option<Uuid>, AppError> {
+    auth_user.as_ref().map(AuthUser::user_id).transpose()
 }
 
 /// The source checks every re-run makes, pinned or not: same workspace, a
 /// top-level job, and a `raw_input` to replay.
-fn check_rerun_source(source_job: &stroem_db::JobRow, ws: &str) -> Result<(), AppError> {
+pub(crate) fn check_rerun_source(source_job: &stroem_db::JobRow, ws: &str) -> Result<(), AppError> {
     if source_job.workspace != ws {
         return Err(AppError::BadRequest(
             "Source job belongs to a different workspace".into(),
@@ -695,6 +729,7 @@ async fn execute_pinned_rerun(
     let task = source_pin.task(name)?;
     require_task_run(state, auth_user, ws, name, task.folder.as_deref()).await?;
     let input_value = serde_json::to_value(&req.input).unwrap_or_default();
+    let files = FileGrant::direct(state, caller_user_id(auth_user)?);
 
     let created = create_job_for_task_pinned(
         &state.workspaces,
@@ -712,7 +747,8 @@ async fn execute_pinned_rerun(
             replay_fields: &req.replay_fields,
         },
         state.config.agents.as_ref(),
-        JobDefaults::from(state.config.as_ref()),
+        state.job_defaults(),
+        files,
     )
     .await
     .map_err(classify_execute_error)?;

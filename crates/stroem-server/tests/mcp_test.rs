@@ -6,14 +6,16 @@ use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use sqlx::PgPool;
 use std::collections::HashMap;
+use std::sync::Arc;
 use stroem_common::models::workflow::{
     ActionDef, FlowStep, HookDef, InputFieldDef, TaskDef, WorkspaceConfig,
 };
 use stroem_db::{JobRepo, JobStepRepo, UserRepo, WorkerRepo};
 use stroem_server::auth::hash_password;
+use stroem_server::blob_storage::{BlobArchive, LocalBlobArchive};
 use stroem_server::config::{
-    AclAction, AclConfig, AuthConfig, DbConfig, InitialUserConfig, JobDefaults, LogStorageConfig,
-    McpConfig, RetentionConfig, ServerConfig, WorkspaceSourceDef,
+    AclAction, AclConfig, AclRule, AuthConfig, DbConfig, InitialUserConfig, JobDefaults,
+    LogStorageConfig, McpConfig, RetentionConfig, ServerConfig, WorkspaceSourceDef,
 };
 use stroem_server::log_storage::LogStorage;
 use stroem_server::state::AppState;
@@ -86,6 +88,7 @@ async fn create_job_for_task(
         source_job_id,
         agents_config,
         defaults,
+        stroem_server::input_files::FileGrant::Indirect,
     )
     .await
     .map(|c| c.job_id)
@@ -365,6 +368,7 @@ async fn setup_with_mcp_using(mgr: WorkspaceManager) -> Result<(Router, PgPool, 
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -373,7 +377,10 @@ async fn setup_with_mcp_using(mgr: WorkspaceManager) -> Result<(Router, PgPool, 
     };
 
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
-    let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None);
+    let archive: Arc<dyn BlobArchive> =
+        Arc::new(LocalBlobArchive::new(temp_dir.path().join("input-archive")));
+    let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None)
+        .with_input_blob(Some(archive));
     let router = build_router(state, CancellationToken::new());
 
     Ok((router, pool, temp_dir))
@@ -418,6 +425,7 @@ async fn setup_mcp_disabled() -> Result<(Router, PgPool, TempDir)> {
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -444,6 +452,25 @@ async fn setup_with_auth_and_mcp() -> Result<(Router, PgPool, TempDir)> {
 async fn setup_with_auth_and_mcp_cfg(
     acl: Option<AclConfig>,
     base_url: Option<String>,
+) -> Result<(Router, PgPool, TempDir)> {
+    setup_with_auth_and_mcp_ws(mcp_test_workspace(), acl, base_url).await
+}
+
+async fn setup_with_auth_and_mcp_ws(
+    workspace: WorkspaceConfig,
+    acl: Option<AclConfig>,
+    base_url: Option<String>,
+) -> Result<(Router, PgPool, TempDir)> {
+    setup_with_auth_and_mcp_ws_blob(workspace, acl, base_url, true).await
+}
+
+/// `setup_with_auth_and_mcp_ws`; `with_blob: false` leaves the server with
+/// no input-file archive (`file storage is not configured`).
+async fn setup_with_auth_and_mcp_ws_blob(
+    workspace: WorkspaceConfig,
+    acl: Option<AclConfig>,
+    base_url: Option<String>,
+    with_blob: bool,
 ) -> Result<(Router, PgPool, TempDir)> {
     let test_db = stroem_test_support::test_db().await;
     let pool = test_db.pool.clone();
@@ -496,6 +523,7 @@ async fn setup_with_auth_and_mcp_cfg(
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -514,10 +542,14 @@ async fn setup_with_auth_and_mcp_cfg(
     )
     .await?;
 
-    let workspace = mcp_test_workspace();
     let mgr = WorkspaceManager::from_config("default", workspace);
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
-    let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None);
+    let archive: Option<Arc<dyn BlobArchive>> = with_blob.then(|| {
+        Arc::new(LocalBlobArchive::new(temp_dir.path().join("input-archive")))
+            as Arc<dyn BlobArchive>
+    });
+    let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None)
+        .with_input_blob(archive);
     let router = build_router(state, CancellationToken::new());
 
     Ok((router, pool, temp_dir))
@@ -612,9 +644,9 @@ async fn mcp_initialize(router: Router) -> (Router, Option<String>) {
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
-/// Test 1: tools/list returns all 10 expected tools.
+/// Test 1: tools/list returns all 11 expected tools.
 #[tokio::test]
-async fn test_mcp_tools_list_returns_all_10_tools() -> Result<()> {
+async fn test_mcp_tools_list_returns_all_11_tools() -> Result<()> {
     let (router, _pool, _tmp) = setup_with_mcp().await?;
 
     let (router, session_id) = mcp_initialize(router).await;
@@ -659,6 +691,7 @@ async fn test_mcp_tools_list_returns_all_10_tools() -> Result<()> {
         "cancel_job",
         "list_artifacts",
         "get_artifact",
+        "create_upload_url",
     ];
 
     assert_eq!(
@@ -890,6 +923,56 @@ async fn test_mcp_execute_with_non_object_input_errors() -> Result<()> {
         "non-object input must produce a JSON-RPC error, got: {resp}"
     );
 
+    Ok(())
+}
+
+/// A `file` input value that is not the caller's own upload is a value-free
+/// invalid-params error (spec 2026-10-29-file-inputs § 8), not an internal one.
+#[tokio::test]
+async fn mcp_execute_with_unknown_file_id_is_invalid_params() -> Result<()> {
+    let ws: WorkspaceConfig = serde_yaml::from_str(
+        r#"
+actions:
+  noop: { type: script, script: "true" }
+tasks:
+  files:
+    input: { data_file: { type: file } }
+    flow: { run: { action: noop } }
+"#,
+    )?;
+    let (router, pool, _tmp) =
+        setup_with_mcp_using(WorkspaceManager::from_config("default", ws)).await?;
+    let (router, session_id) = mcp_initialize(router).await;
+
+    let unknown = stroem_common::file_field::new_file_id();
+    let exec_body = json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "id": 2,
+        "params": {
+            "name": "execute_task",
+            "arguments": {
+                "workspace": "default",
+                "task_name": "files",
+                "input": {"data_file": unknown}
+            }
+        }
+    });
+    let response = router
+        .oneshot(mcp_request(session_id.as_deref(), exec_body))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let resp = body_json(response).await;
+    assert_eq!(resp["error"]["code"], json!(-32602), "{resp}");
+    assert_eq!(
+        resp["error"]["message"],
+        json!("Input field 'data_file': the file cannot be used"),
+        "{resp}"
+    );
+    let created: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM job WHERE task_name = 'files'")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(created, 0);
     Ok(())
 }
 
@@ -1808,6 +1891,7 @@ async fn test_mcp_created_jobs_fire_hooks() -> Result<()> {
         agents: None,
         state_storage: None,
         artifact_storage: None,
+        input_files: None,
         default_step_timeout: None,
         default_job_timeout: None,
         workspace_reload: Default::default(),
@@ -1915,6 +1999,504 @@ async fn test_mcp_get_job_logs_tail_bytes_and_truncation_trailer() -> Result<()>
     assert!(
         resp.get("error").is_some(),
         "tail_bytes 0 is invalid params: {resp}"
+    );
+    Ok(())
+}
+
+// ─── File inputs (spec 2026-10-29-file-inputs § 7.5, § 8) ───────────────────
+
+const FILES_YAML: &str = r#"
+actions:
+  noop: { type: script, script: "true" }
+tasks:
+  files:
+    input: { data_file: { type: file } }
+    flow: { run: { action: noop } }
+  plain:
+    flow: { run: { action: noop } }
+  view-files:
+    folder: view
+    input: { data_file: { type: file } }
+    flow: { run: { action: noop } }
+"#;
+
+const FILES_BASE_URL: &str = "http://stroem.test";
+
+async fn files_app() -> Result<(Router, PgPool, TempDir, String)> {
+    files_app_with(true).await
+}
+
+/// `files_app`; `with_blob: false` = no input-file archive configured.
+async fn files_app_with(with_blob: bool) -> Result<(Router, PgPool, TempDir, String)> {
+    files_app_acl(
+        with_blob,
+        AclConfig {
+            default: AclAction::Run,
+            rules: vec![AclRule {
+                workspace: "default".to_string(),
+                tasks: vec!["view/*".to_string()],
+                action: AclAction::View,
+                groups: vec![],
+                users: vec![AUTH_USER_EMAIL.to_string()],
+            }],
+        },
+    )
+    .await
+}
+
+async fn files_app_acl(
+    with_blob: bool,
+    acl: AclConfig,
+) -> Result<(Router, PgPool, TempDir, String)> {
+    let ws: WorkspaceConfig = serde_yaml::from_str(FILES_YAML)?;
+    let (router, pool, tmp) =
+        setup_with_auth_and_mcp_ws_blob(ws, Some(acl), Some(FILES_BASE_URL.to_string()), with_blob)
+            .await?;
+    let user = UserRepo::get_by_email(&pool, AUTH_USER_EMAIL)
+        .await?
+        .expect("seeded user exists");
+    let (raw_key, key_hash) = stroem_server::auth::generate_api_key();
+    stroem_db::ApiKeyRepo::create(
+        &pool,
+        &key_hash,
+        user.user_id,
+        "files",
+        &raw_key[..12],
+        None,
+    )
+    .await?;
+    Ok((router, pool, tmp, raw_key))
+}
+
+/// Initialize a session and call one tool with an API key; returns the JSON-RPC body.
+async fn call_tool_authed(router: &Router, key: &str, name: &str, args: Value) -> Value {
+    let init = json!({
+        "jsonrpc": "2.0", "method": "initialize", "id": 0,
+        "params": {"protocolVersion": "2025-03-26", "capabilities": {},
+                   "clientInfo": {"name": "test", "version": "1.0"}}
+    });
+    let resp = router
+        .clone()
+        .oneshot(mcp_request_with_auth(None, key, init))
+        .await
+        .unwrap();
+    let sid = resp
+        .headers()
+        .get("Mcp-Session-Id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let body = json!({
+        "jsonrpc": "2.0", "method": "tools/call", "id": 2,
+        "params": {"name": name, "arguments": args}
+    });
+    let resp = router
+        .clone()
+        .oneshot(mcp_request_with_auth(sid.as_deref(), key, body))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    body_json(resp).await
+}
+
+/// The tool result's JSON text payload.
+fn tool_payload(resp: &Value) -> Value {
+    let text = resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no tool text: {resp}"));
+    serde_json::from_str(text).unwrap()
+}
+
+async fn file_origin_and_attachment(pool: &PgPool, job_id: &str) -> Result<(String, i64)> {
+    let origin: String = sqlx::query_scalar(
+        "SELECT f.origin FROM input_file f \
+         JOIN job_input_file j ON j.file_id = f.file_id WHERE j.job_id = $1::uuid",
+    )
+    .bind(job_id)
+    .fetch_one(pool)
+    .await?;
+    let size: i64 = sqlx::query_scalar(
+        "SELECT f.size_bytes FROM input_file f \
+         JOIN job_input_file j ON j.file_id = f.file_id WHERE j.job_id = $1::uuid",
+    )
+    .bind(job_id)
+    .fetch_one(pool)
+    .await?;
+    Ok((origin, size))
+}
+
+#[tokio::test]
+async fn mcp_execute_inline_text_file() -> Result<()> {
+    let (router, pool, _tmp, key) = files_app().await?;
+    let resp = call_tool_authed(
+        &router,
+        &key,
+        "execute_task",
+        json!({"workspace": "default", "task_name": "files",
+               "input": {"data_file": {"name": "a.txt", "content": "hello"}}}),
+    )
+    .await;
+    let job_id = tool_payload(&resp)["job_id"].as_str().unwrap().to_string();
+    let (origin, size) = file_origin_and_attachment(&pool, &job_id).await?;
+    assert_eq!(origin, "mcp_inline");
+    assert_eq!(size, 5);
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_execute_inline_base64_file() -> Result<()> {
+    let (router, pool, _tmp, key) = files_app().await?;
+    let resp = call_tool_authed(
+        &router,
+        &key,
+        "execute_task",
+        json!({"workspace": "default", "task_name": "files",
+               "input": {"data_file": {"name": "b.bin", "content_base64": "AAEC/w=="}}}),
+    )
+    .await;
+    let job_id = tool_payload(&resp)["job_id"].as_str().unwrap().to_string();
+    let (origin, size) = file_origin_and_attachment(&pool, &job_id).await?;
+    assert_eq!(origin, "mcp_inline");
+    assert_eq!(size, 4);
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_execute_inline_over_cap_names_field_and_cap() -> Result<()> {
+    let (router, pool, _tmp, key) = files_app().await?;
+    let big = "x".repeat(1024 * 1024 + 1);
+    let resp = call_tool_authed(
+        &router,
+        &key,
+        "execute_task",
+        json!({"workspace": "default", "task_name": "files",
+               "input": {"data_file": {"name": "a.txt", "content": big}}}),
+    )
+    .await;
+    assert_eq!(resp["error"]["code"], json!(-32602), "{resp}");
+    assert_eq!(
+        resp["error"]["message"],
+        json!("Input field 'data_file': inline content is larger than 1048576 bytes")
+    );
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM input_file")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(n, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_execute_inline_bad_base64_is_invalid_params() -> Result<()> {
+    let (router, _pool, _tmp, key) = files_app().await?;
+    for value in [
+        json!({"name": "a.bin", "content_base64": "!!not base64!!"}),
+        json!({"name": "a.bin"}),
+        json!({"name": "a.bin", "content": "x", "content_base64": "eA=="}),
+        json!({"name": "a.bin", "content": "x", "extra": 1}),
+    ] {
+        let resp = call_tool_authed(
+            &router,
+            &key,
+            "execute_task",
+            json!({"workspace": "default", "task_name": "files",
+                   "input": {"data_file": value}}),
+        )
+        .await;
+        assert_eq!(resp["error"]["code"], json!(-32602), "{resp}");
+        assert_eq!(
+            resp["error"]["message"],
+            json!("Input field 'data_file': the file cannot be used")
+        );
+    }
+    Ok(())
+}
+
+fn upload_url_request(url: &str, body: &'static str) -> Request<Body> {
+    let path = url.strip_prefix(FILES_BASE_URL).expect("base url prefix");
+    Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("content-type", "text/csv")
+        .body(Body::from(body))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn mcp_create_upload_url_and_upload_once() -> Result<()> {
+    let (router, pool, _tmp, key) = files_app().await?;
+    let resp = call_tool_authed(
+        &router,
+        &key,
+        "create_upload_url",
+        json!({"workspace": "default", "task_name": "files", "file_name": "data.csv"}),
+    )
+    .await;
+    let out = tool_payload(&resp);
+    assert_eq!(out["method"], json!("POST"));
+    assert_eq!(out["max_bytes"], json!(104_857_600u64));
+    assert!(out["expires_at"].as_str().is_some());
+    let url = out["upload_url"].as_str().unwrap().to_string();
+    assert!(url.starts_with("http://stroem.test/api/uploads/"), "{url}");
+
+    let r = router
+        .clone()
+        .oneshot(upload_url_request(&url, "a,b\n1,2\n"))
+        .await?;
+    assert_eq!(r.status(), StatusCode::CREATED);
+    let uploaded = body_json(r).await;
+    assert_eq!(uploaded["name"], json!("data.csv"));
+    assert_eq!(uploaded["size_bytes"], json!(8));
+    let file_id = uploaded["file_id"].as_str().unwrap().to_string();
+
+    let r = router
+        .clone()
+        .oneshot(upload_url_request(&url, "again"))
+        .await?;
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+    assert_eq!(body_json(r).await["error"], json!("Upload URL not found"));
+
+    let resp = call_tool_authed(
+        &router,
+        &key,
+        "execute_task",
+        json!({"workspace": "default", "task_name": "files",
+               "input": {"data_file": file_id}}),
+    )
+    .await;
+    let job_id = tool_payload(&resp)["job_id"].as_str().unwrap().to_string();
+    let (origin, _) = file_origin_and_attachment(&pool, &job_id).await?;
+    assert_eq!(origin, "mcp_url");
+    Ok(())
+}
+
+async fn input_file_count(pool: &PgPool) -> Result<i64> {
+    Ok(sqlx::query_scalar("SELECT COUNT(*) FROM input_file")
+        .fetch_one(pool)
+        .await?)
+}
+
+#[tokio::test]
+async fn mcp_upload_url_refused_when_run_permission_was_removed() -> Result<()> {
+    // Run comes from the "ops" group only; default is deny.
+    let (router, pool, _tmp, key) = files_app_acl(
+        true,
+        AclConfig {
+            default: AclAction::Deny,
+            rules: vec![AclRule {
+                workspace: "default".to_string(),
+                tasks: vec!["*".to_string()],
+                action: AclAction::Run,
+                groups: vec!["ops".to_string()],
+                users: vec![],
+            }],
+        },
+    )
+    .await?;
+    let user = UserRepo::get_by_email(&pool, AUTH_USER_EMAIL)
+        .await?
+        .expect("seeded user exists");
+    stroem_db::UserGroupRepo::add(&pool, user.user_id, "ops").await?;
+    let resp = call_tool_authed(
+        &router,
+        &key,
+        "create_upload_url",
+        json!({"workspace": "default", "task_name": "files", "file_name": "data.csv"}),
+    )
+    .await;
+    let url = tool_payload(&resp)["upload_url"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    stroem_db::UserGroupRepo::remove(&pool, user.user_id, "ops").await?;
+
+    for _ in 0..2 {
+        let r = router
+            .clone()
+            .oneshot(upload_url_request(&url, "a,b\n"))
+            .await?;
+        assert_eq!(r.status(), StatusCode::NOT_FOUND);
+        assert_eq!(body_json(r).await["error"], json!("Upload URL not found"));
+    }
+    assert_eq!(input_file_count(&pool).await?, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_upload_url_refused_when_task_has_no_file_field_or_is_gone() -> Result<()> {
+    let (router, pool, _tmp, _key) = files_app().await?;
+    let user = UserRepo::get_by_email(&pool, AUTH_USER_EMAIL)
+        .await?
+        .expect("seeded user exists");
+    for (n, task) in ["plain", "no-such-task"].into_iter().enumerate() {
+        let token = format!("refused-token-{n}");
+        stroem_db::UploadTokenRepo::insert(
+            &pool,
+            &stroem_server::auth::hash_token(&token),
+            user.user_id,
+            "default",
+            task,
+            "d.csv",
+            chrono::Utc::now() + chrono::Duration::seconds(900),
+        )
+        .await?;
+        let r = router
+            .clone()
+            .oneshot(upload_url_request(
+                &format!("{FILES_BASE_URL}/api/uploads/{token}"),
+                "x",
+            ))
+            .await?;
+        assert_eq!(r.status(), StatusCode::NOT_FOUND, "{task}");
+        assert_eq!(body_json(r).await["error"], json!("Upload URL not found"));
+    }
+    assert_eq!(input_file_count(&pool).await?, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_upload_url_expired_is_404() -> Result<()> {
+    let (router, pool, _tmp, key) = files_app().await?;
+    let resp = call_tool_authed(
+        &router,
+        &key,
+        "create_upload_url",
+        json!({"workspace": "default", "task_name": "files", "file_name": "data.csv"}),
+    )
+    .await;
+    let url = tool_payload(&resp)["upload_url"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    sqlx::query("UPDATE input_file_upload_token SET expires_at = NOW() - INTERVAL '1 second'")
+        .execute(&pool)
+        .await?;
+    let r = router.oneshot(upload_url_request(&url, "x")).await?;
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_create_upload_url_without_base_url_is_tool_error() -> Result<()> {
+    let ws: WorkspaceConfig = serde_yaml::from_str(FILES_YAML)?;
+    let (router, _pool, _tmp) =
+        setup_with_mcp_using(WorkspaceManager::from_config("default", ws)).await?;
+    let (router, session_id) = mcp_initialize(router).await;
+    let body = json!({
+        "jsonrpc": "2.0", "method": "tools/call", "id": 2,
+        "params": {"name": "create_upload_url", "arguments": {
+            "workspace": "default", "task_name": "files", "file_name": "d.csv"}}
+    });
+    let resp = body_json(
+        router
+            .oneshot(mcp_request(session_id.as_deref(), body))
+            .await?,
+    )
+    .await;
+    assert_eq!(resp["error"]["code"], json!(-32602), "{resp}");
+    assert_eq!(
+        resp["error"]["message"],
+        json!("upload URLs need auth.base_url; send the file inline or use the REST upload")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_create_upload_url_view_only_is_denied() -> Result<()> {
+    let (router, pool, _tmp, key) = files_app().await?;
+    let resp = call_tool_authed(
+        &router,
+        &key,
+        "create_upload_url",
+        json!({"workspace": "default", "task_name": "view-files", "file_name": "d.csv"}),
+    )
+    .await;
+    assert!(resp.get("error").is_some(), "{resp}");
+    assert!(
+        resp["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Insufficient permissions"),
+        "{resp}"
+    );
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM input_file_upload_token")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(n, 0);
+    // A task without a file field is invalid params.
+    let resp = call_tool_authed(
+        &router,
+        &key,
+        "create_upload_url",
+        json!({"workspace": "default", "task_name": "plain", "file_name": "d.csv"}),
+    )
+    .await;
+    assert_eq!(resp["error"]["code"], json!(-32602), "{resp}");
+    Ok(())
+}
+
+/// Without an input-file archive, no upload URL is minted: its first POST
+/// would consume the token and answer 503.
+#[tokio::test]
+async fn mcp_create_upload_url_without_file_storage_is_tool_error() -> Result<()> {
+    let (router, pool, _tmp, key) = files_app_with(false).await?;
+    let resp = call_tool_authed(
+        &router,
+        &key,
+        "create_upload_url",
+        json!({"workspace": "default", "task_name": "files", "file_name": "d.csv"}),
+    )
+    .await;
+    assert!(resp.get("result").is_none(), "{resp}");
+    assert_eq!(
+        resp["error"]["message"],
+        json!("file storage is not configured"),
+        "{resp}"
+    );
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM input_file_upload_token")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(n, 0);
+    Ok(())
+}
+
+/// Inline content is stored only after the Run check: a View-only task
+/// answers the ACL error and stores nothing.
+#[tokio::test]
+async fn mcp_execute_inline_on_view_only_task_stores_nothing() -> Result<()> {
+    let (router, pool, _tmp, key) = files_app().await?;
+    let resp = call_tool_authed(
+        &router,
+        &key,
+        "execute_task",
+        json!({"workspace": "default", "task_name": "view-files",
+               "input": {"data_file": {"name": "a.txt", "content": "hello"}}}),
+    )
+    .await;
+    assert!(
+        resp["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("Insufficient permissions")),
+        "{resp}"
+    );
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM input_file")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(n, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_get_task_shows_file_type() -> Result<()> {
+    let (router, _pool, _tmp, key) = files_app().await?;
+    let resp = call_tool_authed(
+        &router,
+        &key,
+        "get_task",
+        json!({"workspace": "default", "task_name": "files"}),
+    )
+    .await;
+    assert_eq!(
+        tool_payload(&resp)["input"]["data_file"]["type"],
+        json!("file")
     );
     Ok(())
 }

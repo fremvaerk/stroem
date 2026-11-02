@@ -97,3 +97,37 @@ describe("buildExecutePayload — json fields", () => {
     expect(buildExecutePayload({ opt: st("value", '"{{ x }}"') }, jf).input).toEqual({ opt: "{{ x }}" });
   });
 });
+
+describe("buildExecutePayload — file fields", () => {
+  const ff: Record<string, InputField> = {
+    data: { type: "file", required: true },
+    opt: { type: "file" },
+  };
+  const id = "file_" + "a".repeat(32);
+  const ready = { kind: "file", mode: "ready", fileId: id, name: "a", size: 1, fromSource: false } as const;
+  const empty = { kind: "file", mode: "empty" } as const;
+
+  it("sends the file id of a ready field", () => {
+    const p = buildExecutePayload({ data: ready }, ff);
+    expect(p.input).toEqual({ data: id });
+    expect(p.replayFields).toEqual([]);
+  });
+
+  it("rejects an empty required field", () => {
+    expect(() => buildExecutePayload({ data: empty }, ff)).toThrow(ExecuteFormError);
+    expect(() => buildExecutePayload({ data: empty }, ff)).toThrow(/a file is required/);
+  });
+
+  it("omits an empty optional field", () => {
+    expect(buildExecutePayload({ data: ready, opt: empty }, ff).input).toEqual({ data: id });
+  });
+
+  it("refuses a field that is still uploading or failed", () => {
+    expect(() =>
+      buildExecutePayload({ data: { kind: "file", mode: "uploading", name: "a", size: 1, progress: 0.1 } }, ff),
+    ).toThrow(ExecuteFormError);
+    expect(() => buildExecutePayload({ data: { kind: "file", mode: "failed", name: "a", error: "x" } }, ff)).toThrow(
+      ExecuteFormError,
+    );
+  });
+});
