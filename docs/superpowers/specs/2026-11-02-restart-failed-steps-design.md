@@ -197,16 +197,16 @@ from 422 to 400; `restart_endpoint_rejections`
 updated. A wrong JSON type (`"all_failed": "yes"`) is still the extractor's
 422. `from_step: ""` is Step mode and fails `UnknownStep` as today.
 
-The rest of the order is unchanged (`jobs.rs:731-830`), and both modes share
+The rest of the order is unchanged (`jobs.rs:730-835`), and both modes share
 it: 401 → 404 / 403 on the SOURCE job (`check_job_acl`) → 409 (not terminal)
 → 400 (not top-level, no `raw_input`) → then
 
 - unpinned source: 400 workspace not loaded / task gone;
-- pinned source (`resolve_source_pin`, `jobs.rs:770-790`): 400 `RefNotFound` /
+- pinned source (`resolve_source_pin`, `jobs.rs:788`): 400 `RefNotFound` /
   withheld `PinLoadFailed` / task missing at the re-resolved commit, **500**
   `PinUnavailable` (`jobs.rs:722-728`), then `require_task_run` on the folder
   the task declares at that commit — 404 "Task not found" / 403 "View-only
-  access" (`jobs.rs:788-803`);
+  access" (`require_task_run`, `jobs.rs:796-803`);
 
 → 400 plan error. `NoFailedSteps` is a plan error, so it comes after every
 check above. The plan is computed on the pinned flow for a pinned source, as
