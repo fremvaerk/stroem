@@ -434,7 +434,6 @@ async fn restart_from_middle_carries_upstream_and_reruns_downstream() -> Result<
         "default",
         &source,
         &plan,
-        "b",
         Some("tester"),
         None,
         JobDefaults::default(),
@@ -528,7 +527,6 @@ async fn restart_set_entirely_skipped_settles_failed_at_creation() -> Result<()>
         "default",
         &source,
         &plan,
-        "c",
         None,
         None,
         JobDefaults::default(),
@@ -575,7 +573,6 @@ async fn restart_rejects_legacy_source_without_raw_input() -> Result<()> {
         "default",
         &source,
         &plan,
-        "b",
         None,
         None,
         JobDefaults::default(),
@@ -782,7 +779,6 @@ async fn carried_for_each_placeholder_exposes_aggregated_output_without_instance
         "default",
         &source,
         &plan,
-        "tail",
         None,
         None,
         JobDefaults::default(),
@@ -898,7 +894,6 @@ async fn carried_task_step_keeps_output_and_creates_no_child() -> Result<()> {
         "default",
         &source,
         &plan,
-        "tail",
         None,
         None,
         JobDefaults::default(),
@@ -956,7 +951,6 @@ async fn restart_from_task_step_creates_child_under_new_job() -> Result<()> {
         "default",
         &source,
         &plan,
-        "sub",
         None,
         None,
         JobDefaults::default(),
@@ -1068,7 +1062,6 @@ async fn restart_from_approval_step_suspends_new_job() -> Result<()> {
         "default",
         &source,
         &plan,
-        "gate",
         None,
         None,
         JobDefaults::default(),
@@ -1171,7 +1164,6 @@ async fn flow_change_new_upstream_step_forces_rerun_of_dependent() -> Result<()>
         "default",
         &source,
         &plan,
-        "z",
         None,
         None,
         JobDefaults::default(),
@@ -1280,7 +1272,6 @@ async fn input_replay_rotated_connection_yields_new_value() -> Result<()> {
         "default",
         &source,
         &plan,
-        "b",
         None,
         None,
         JobDefaults::default(),
@@ -1338,7 +1329,6 @@ async fn seed_failure_rolls_back_the_whole_restart_job() -> Result<()> {
         "default",
         &source,
         &plan,
-        "b",
         None,
         None,
         JobDefaults::default(),
@@ -1458,11 +1448,16 @@ async fn restart_endpoint_rejections() -> Result<()> {
     );
     let (st, body) = restart_req(&app, Uuid::new_v4(), json!({"from_step": "a"})).await?;
     assert_eq!(st, StatusCode::NOT_FOUND, "{body}");
+    // Spec 2026-11-02 § 5.1: a body with neither `from_step` nor
+    // `all_failed` is now the handler's 400 (it was the extractor's 422).
     let (st, body) = restart_req(&app, source_id, json!({"nope": 1})).await?;
-    assert_eq!(
-        st,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "a body without from_step must not reach the handler: {body}"
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("exactly one of from_step or all_failed"),
+        "{body}"
     );
 
     // Legacy source without raw_input.
@@ -1818,6 +1813,7 @@ async fn job_detail_lists_restarts_and_reruns_but_not_hook_jobs() -> Result<()> 
                 "created_at",
                 "id",
                 "restart_from_step",
+                "restart_from_steps",
                 "source_type",
                 "status",
             ]),
@@ -2202,5 +2198,195 @@ async fn restart_from_task_step_with_born_terminal_child_settles_the_parent() ->
         "completed",
         "the restart job must settle rather than hang on the born-terminal child"
     );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Restart failed steps (spec 2026-11-02)
+// ---------------------------------------------------------------------------
+
+/// `a → b`, `a → c (continue_on_failure)`; both `b` and `c` fail. One
+/// all-failed restart reruns BOTH (the tolerated `c` included, D1), records
+/// the start steps on the new job and on the source's `derived_jobs[]`, and
+/// ends `completed` once they pass.
+#[tokio::test(flavor = "multi_thread")]
+async fn restart_all_failed_reruns_every_failed_step_in_one_job() -> Result<()> {
+    let app = build_test_app("default", fan_out_workspace(true)).await?;
+    let worker = register_worker(&app).await?;
+    let (st, body) = execute_task(&app, "default", "fan", json!({"input": {"note": "n1"}})).await?;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let source_id: Uuid = body["job_id"].as_str().unwrap().parse()?;
+    complete_next(&app, &worker, source_id, "a", json!({"output": {"val": 1}})).await?;
+    drain_steps(
+        &app,
+        &worker,
+        |step| json!({"exit_code": 1, "error": format!("{step} broke")}),
+    )
+    .await?;
+    assert_eq!(
+        get_job(&app, &source_id.to_string()).await?["status"],
+        "failed"
+    );
+
+    let (st, plan) = restart_req(
+        &app,
+        source_id,
+        json!({"all_failed": true, "dry_run": true}),
+    )
+    .await?;
+    assert_eq!(st, StatusCode::OK, "{plan}");
+    assert_eq!(plan["start_steps"], json!(["b", "c"]));
+    assert_eq!(plan["restart_steps"], json!(["b", "c"]));
+    assert_eq!(plan["carried_over"], json!(["a"]));
+    assert_eq!(plan["carried_failed"], json!([]));
+    assert_eq!(plan["carried_failed_tolerated"], json!([]));
+    assert!(plan.get("job_id").is_none(), "{plan}");
+
+    let (st, body) = restart_req(&app, source_id, json!({"all_failed": true})).await?;
+    assert_eq!(st, StatusCode::CREATED, "{body}");
+    assert_eq!(body["start_steps"], json!(["b", "c"]));
+    assert_eq!(body["restart_steps"], json!(["b", "c"]));
+    assert_eq!(body["carried_failed"], json!([]));
+    assert_eq!(body["carried_failed_tolerated"], json!([]));
+    let new_id: Uuid = body["job_id"].as_str().unwrap().parse()?;
+
+    let new = get_job(&app, &new_id.to_string()).await?;
+    assert_eq!(new["source_type"], "restart");
+    assert_eq!(new["source_job_id"], source_id.to_string());
+    assert_eq!(new["restart_from_step"], JsonValue::Null);
+    assert_eq!(new["restart_from_steps"], json!(["b", "c"]));
+    let row = JobRepo::get(&app.pool, new_id).await?.unwrap();
+    assert_eq!(row.restart_from_step, None);
+    assert_eq!(
+        row.restart_from_steps,
+        Some(vec!["b".to_string(), "c".to_string()])
+    );
+
+    let source = get_job(&app, &source_id.to_string()).await?;
+    let derived = source["derived_jobs"].as_array().unwrap();
+    assert_eq!(derived.len(), 1, "{source}");
+    assert_eq!(derived[0]["restart_from_step"], JsonValue::Null);
+    assert_eq!(derived[0]["restart_from_steps"], json!(["b", "c"]));
+
+    let by = steps_by_name(&app.pool, new_id).await?;
+    assert!(by["a"].carried_over);
+    assert!(!by["b"].carried_over && !by["c"].carried_over);
+    assert_eq!(
+        drain_steps(&app, &worker, |_| json!({"output": {}})).await?,
+        2
+    );
+    assert_eq!(
+        get_job(&app, &new_id.to_string()).await?["status"],
+        "completed"
+    );
+    Ok(())
+}
+
+/// A job cancelled while a step was still in flight: the in-flight row is
+/// still `running` on the source, its sibling `cancelled`. Both are start
+/// steps (D5), nothing is carried `cancelled`, and the restart can end
+/// `completed` — which a restart from one step cannot (see
+/// `carried_cancelled_row_settles_the_restart_job_cancelled`).
+#[tokio::test(flavor = "multi_thread")]
+async fn restart_all_failed_covers_a_cancelled_mid_flight_source() -> Result<()> {
+    let app = build_test_app("default", fan_out_workspace(false)).await?;
+    let worker = register_worker(&app).await?;
+    let (st, body) = execute_task(&app, "default", "fan", json!({"input": {"note": "n1"}})).await?;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let source_id: Uuid = body["job_id"].as_str().unwrap().parse()?;
+    complete_next(&app, &worker, source_id, "a", json!({"output": {"val": 1}})).await?;
+    let (_, in_flight) = claim_next(&app, &worker).await?.expect("b or c claimable");
+    let (st, body) = api_post(&app, &format!("/api/jobs/{}/cancel", source_id), json!({})).await?;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let by = steps_by_name(&app.pool, source_id).await?;
+    assert_eq!(by[&in_flight].status, "running", "{by:?}");
+    assert_eq!(
+        get_job(&app, &source_id.to_string()).await?["status"],
+        "cancelled"
+    );
+
+    let (st, body) = restart_req(&app, source_id, json!({"all_failed": true})).await?;
+    assert_eq!(st, StatusCode::CREATED, "{body}");
+    assert_eq!(body["start_steps"], json!(["b", "c"]));
+    assert_eq!(body["carried_over"], json!(["a"]));
+    let new_id: Uuid = body["job_id"].as_str().unwrap().parse()?;
+
+    assert_eq!(
+        drain_steps(&app, &worker, |_| json!({"output": {}})).await?,
+        2
+    );
+    let by = steps_by_name(&app.pool, new_id).await?;
+    assert!(by.values().all(|s| s.status != "cancelled"), "{by:?}");
+    assert_eq!(
+        get_job(&app, &new_id.to_string()).await?["status"],
+        "completed"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restart_all_failed_rejections() -> Result<()> {
+    let app = build_test_app("default", line_workspace()).await?;
+    let failed = run_source_job_failing_at_b(&app).await?;
+
+    for body in [
+        json!({"from_step": "b", "all_failed": true}),
+        json!({"from_step": "b", "all_failed": true, "dry_run": true}),
+        json!({}),
+        json!({"dry_run": true}),
+        json!({"all_failed": false}),
+    ] {
+        let (st, resp) = restart_req(&app, failed, body.clone()).await?;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{body}: {resp}");
+        assert!(
+            resp["error"]
+                .as_str()
+                .unwrap()
+                .contains("exactly one of from_step or all_failed"),
+            "{body}: {resp}"
+        );
+    }
+    // A wrong JSON type is still the extractor's rejection.
+    let (st, resp) = restart_req(&app, failed, json!({"all_failed": "yes"})).await?;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{resp}");
+    // The shape check runs before the job lookup: an unknown job with a bad
+    // body is a 400, a good body a 404.
+    let (st, resp) = restart_req(&app, Uuid::new_v4(), json!({})).await?;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{resp}");
+    let (st, resp) = restart_req(&app, Uuid::new_v4(), json!({"all_failed": true})).await?;
+    assert_eq!(st, StatusCode::NOT_FOUND, "{resp}");
+
+    // A job with nothing failed or cancelled: 400, dry run included, and
+    // nothing is created.
+    let (st, body) =
+        execute_task(&app, "default", "line", json!({"input": {"note": "ok"}})).await?;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let ok_id: Uuid = body["job_id"].as_str().unwrap().parse()?;
+    let worker = register_worker(&app).await?;
+    assert_eq!(
+        drain_steps(&app, &worker, |_| json!({"output": {"val": 1}})).await?,
+        3
+    );
+    assert_eq!(
+        get_job(&app, &ok_id.to_string()).await?["status"],
+        "completed"
+    );
+    for body in [
+        json!({"all_failed": true, "dry_run": true}),
+        json!({"all_failed": true}),
+    ] {
+        let (st, resp) = restart_req(&app, ok_id, body.clone()).await?;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{body}: {resp}");
+        assert_eq!(
+            resp["error"],
+            "No failed or cancelled steps to restart in the current flow of task 'line'",
+            "{resp}"
+        );
+    }
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM job WHERE source_job_id = $1")
+        .bind(ok_id)
+        .fetch_one(&app.pool)
+        .await?;
+    assert_eq!(count, 0);
     Ok(())
 }

@@ -1,6 +1,7 @@
-//! Restart From Step — pure planning (spec §4.1–4.2). No I/O.
+//! Restart From Step and Restart Failed Steps — pure planning (spec
+//! 2026-09-07 §4.1–4.2, spec 2026-11-02 §4). No I/O.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use stroem_common::models::job::StepStatus;
 use stroem_common::models::workflow::FlowStep;
 use stroem_db::{JobStepRow, Seed};
@@ -8,7 +9,12 @@ use stroem_db::{JobStepRow, Seed};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RestartError {
     UnknownStep(String),
-    LoopInstance { base: String },
+    LoopInstance {
+        base: String,
+    },
+    /// `RestartFrom::AllFailed` found no failed or cancelled step in the
+    /// current flow.
+    NoFailedSteps,
 }
 
 impl std::fmt::Display for RestartError {
@@ -18,13 +24,28 @@ impl std::fmt::Display for RestartError {
             Self::LoopInstance { base } => {
                 write!(f, "Restart from the loop step '{}', not an instance", base)
             }
+            Self::NoFailedSteps => write!(f, "No failed or cancelled steps to restart"),
         }
     }
 }
 impl std::error::Error for RestartError {}
 
-#[derive(Debug, Clone, Default)]
+/// Where a restart starts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RestartFrom {
+    /// Restart From Step: one chosen flow step.
+    Step(String),
+    /// Restart Failed Steps: every failed or cancelled top-level step.
+    AllFailed,
+}
+
+#[derive(Debug, Clone)]
 pub struct RestartPlan {
+    pub from: RestartFrom,
+    /// The steps the restart starts at (spec 2026-11-02 §4.1), sorted: `[x]`
+    /// for a step restart. Steps added to the flow since the source ran are
+    /// roots too but are not listed here (they are in `restart_steps`).
+    pub start_steps: Vec<String>,
     pub restart_steps: Vec<String>,
     pub carried: Vec<Seed>,
     pub carried_failed: Vec<String>,
@@ -33,22 +54,46 @@ pub struct RestartPlan {
 
 pub const CARRIED_CANCELLED_MSG: &str = "carried over from cancelled source job";
 
-/// roots = {from_step} ∪ {current steps with no source row};
-/// restart_set = roots ∪ transitive_dependents(flow, roots); everything else is carried.
+/// True for the four statuses a source row is carried with as-is.
+fn is_terminal(status: &str) -> bool {
+    status == StepStatus::Completed.as_ref()
+        || status == StepStatus::Failed.as_ref()
+        || status == StepStatus::Skipped.as_ref()
+        || status == StepStatus::Cancelled.as_ref()
+}
+
+/// The status a source row would be carried with: its own when terminal,
+/// `cancelled` otherwise (spec 2026-09-07 §4.2).
+fn carried_status(status: &str) -> &str {
+    if is_terminal(status) {
+        status
+    } else {
+        StepStatus::Cancelled.as_ref()
+    }
+}
+
+/// Restart From Step: [`plan_restart`] with [`RestartFrom::Step`].
 pub fn compute_restart_set(
     flow: &HashMap<String, FlowStep>,
     source_steps: &[JobStepRow],
     from_step: &str,
 ) -> Result<RestartPlan, RestartError> {
-    if let Some(i) = from_step.find('[') {
-        return Err(RestartError::LoopInstance {
-            base: from_step[..i].to_string(),
-        });
-    }
-    if !flow.contains_key(from_step) {
-        return Err(RestartError::UnknownStep(from_step.to_string()));
-    }
+    plan_restart(
+        flow,
+        source_steps,
+        &RestartFrom::Step(from_step.to_string()),
+    )
+}
 
+/// start_steps = `[x]`, or every flow step whose source row would be carried
+/// `failed` or `cancelled`; roots = start_steps ∪ {current steps with no
+/// source row}; restart_set = roots ∪ transitive_dependents(flow, roots);
+/// everything else is carried.
+pub fn plan_restart(
+    flow: &HashMap<String, FlowStep>,
+    source_steps: &[JobStepRow],
+    from: &RestartFrom,
+) -> Result<RestartPlan, RestartError> {
     // Placeholder/plain rows only — instances (loop_source set) are never in the flow.
     let source_by_name: HashMap<&str, &JobStepRow> = source_steps
         .iter()
@@ -56,8 +101,38 @@ pub fn compute_restart_set(
         .map(|s| (s.step_name.as_str(), s))
         .collect();
 
-    let mut restart: BTreeSet<String> = BTreeSet::new();
-    restart.insert(from_step.to_string());
+    let start_steps: Vec<String> = match from {
+        RestartFrom::Step(from_step) => {
+            if let Some(i) = from_step.find('[') {
+                return Err(RestartError::LoopInstance {
+                    base: from_step[..i].to_string(),
+                });
+            }
+            if !flow.contains_key(from_step.as_str()) {
+                return Err(RestartError::UnknownStep(from_step.clone()));
+            }
+            vec![from_step.clone()]
+        }
+        RestartFrom::AllFailed => {
+            let mut v: Vec<String> = flow
+                .keys()
+                .filter(|name| {
+                    source_by_name.get(name.as_str()).is_some_and(|src| {
+                        let st = carried_status(&src.status);
+                        st == StepStatus::Failed.as_ref() || st == StepStatus::Cancelled.as_ref()
+                    })
+                })
+                .cloned()
+                .collect();
+            if v.is_empty() {
+                return Err(RestartError::NoFailedSteps);
+            }
+            v.sort();
+            v
+        }
+    };
+
+    let mut restart: BTreeSet<String> = start_steps.iter().cloned().collect();
     for name in flow.keys() {
         if !source_by_name.contains_key(name.as_str()) {
             restart.insert(name.clone());
@@ -81,15 +156,6 @@ pub fn compute_restart_set(
         }
     }
 
-    let terminal: HashSet<&str> = [
-        StepStatus::Completed.as_ref(),
-        StepStatus::Failed.as_ref(),
-        StepStatus::Skipped.as_ref(),
-        StepStatus::Cancelled.as_ref(),
-    ]
-    .into_iter()
-    .collect();
-
     let mut carried = Vec::new();
     let mut carried_failed = Vec::new();
     let mut carried_failed_tolerated = Vec::new();
@@ -99,7 +165,7 @@ pub fn compute_restart_set(
         let Some(src) = source_by_name.get(name.as_str()) else {
             continue;
         };
-        let seed = if terminal.contains(src.status.as_str()) {
+        let seed = if is_terminal(&src.status) {
             Seed {
                 step_name: name.clone(),
                 status: src.status.clone(),
@@ -134,7 +200,22 @@ pub fn compute_restart_set(
         carried.push(seed);
     }
 
+    // Spec 2026-11-02 §4.3: I1 (no carried failure) and I2 (no carried
+    // cancellation) in AllFailed mode; I3 (start steps rerun) in both.
+    debug_assert!(
+        *from != RestartFrom::AllFailed
+            || carried
+                .iter()
+                .all(|s| carried_status(&s.status) != StepStatus::Failed.as_ref()
+                    && s.status != StepStatus::Cancelled.as_ref()),
+        "all-failed restart carried a failed or cancelled step: {:?}",
+        carried
+    );
+    debug_assert!(start_steps.iter().all(|s| restart.contains(s)));
+
     Ok(RestartPlan {
+        from: from.clone(),
+        start_steps,
         restart_steps: restart.into_iter().collect(),
         carried,
         carried_failed,
@@ -383,5 +464,222 @@ mod tests {
             compute_restart_set(&flow, &[], "nope"),
             Err(RestartError::UnknownStep(s)) if s == "nope"
         ));
+    }
+
+    // ---- Restart Failed Steps (spec 2026-11-02) ----
+
+    use super::{plan_restart, RestartFrom};
+
+    fn all_failed(
+        flow: &HashMap<String, FlowStep>,
+        src: &[JobStepRow],
+    ) -> Result<super::RestartPlan, RestartError> {
+        plan_restart(flow, src, &RestartFrom::AllFailed)
+    }
+
+    #[test]
+    fn all_failed_reruns_every_failed_branch_with_its_dependents() {
+        // a → b(failed) → c ; a → d(failed) → e ; f independent completed
+        let flow = HashMap::from([
+            ("a".into(), fs(&[], false)),
+            ("b".into(), fs(&["a"], false)),
+            ("c".into(), fs(&["b"], false)),
+            ("d".into(), fs(&["a"], false)),
+            ("e".into(), fs(&["d"], false)),
+            ("f".into(), fs(&[], false)),
+        ]);
+        let mut c = row("c", "skipped", None);
+        c.skip_reason = Some("unreachable".into());
+        let mut e = row("e", "skipped", None);
+        e.skip_reason = Some("unreachable".into());
+        let src = [
+            row("a", "completed", Some(json!(1))),
+            row("b", "failed", None),
+            c,
+            row("d", "failed", None),
+            e,
+            row("f", "completed", None),
+        ];
+        let p = all_failed(&flow, &src).unwrap();
+        assert_eq!(p.from, RestartFrom::AllFailed);
+        assert_eq!(p.start_steps, vec!["b", "d"]);
+        assert_eq!(p.restart_steps, vec!["b", "c", "d", "e"]);
+        assert_eq!(names(&p.carried), vec!["a", "f"]);
+        assert!(p.carried_failed.is_empty() && p.carried_failed_tolerated.is_empty());
+    }
+
+    #[test]
+    fn all_failed_includes_continue_on_failure_failures() {
+        // The prod dd4c3a6a shape: build → ai_maintain (cof, failed, leaf),
+        // build → ml_master (no cof, failed) → x, y (unreachable),
+        // build → ml_beta (cof, failed, leaf).
+        let flow = HashMap::from([
+            ("build".into(), fs(&[], false)),
+            ("ai_maintain".into(), fs(&["build"], true)),
+            ("ml_master".into(), fs(&["build"], false)),
+            ("ml_beta".into(), fs(&["build"], true)),
+            ("x".into(), fs(&["ml_master"], false)),
+            ("y".into(), fs(&["x"], false)),
+        ]);
+        let mut x = row("x", "skipped", None);
+        x.skip_reason = Some("unreachable".into());
+        let mut y = row("y", "skipped", None);
+        y.skip_reason = Some("unreachable".into());
+        let src = [
+            row("build", "completed", None),
+            row("ai_maintain", "failed", None),
+            row("ml_master", "failed", None),
+            row("ml_beta", "failed", None),
+            x,
+            y,
+        ];
+        let p = all_failed(&flow, &src).unwrap();
+        assert_eq!(p.start_steps, vec!["ai_maintain", "ml_beta", "ml_master"]);
+        assert_eq!(
+            p.restart_steps,
+            vec!["ai_maintain", "ml_beta", "ml_master", "x", "y"]
+        );
+        assert_eq!(names(&p.carried), vec!["build"]);
+        // I1: nothing failed is carried, tolerated or not.
+        assert!(p.carried_failed.is_empty());
+        assert!(p.carried_failed_tolerated.is_empty());
+    }
+
+    #[test]
+    fn all_failed_failed_loop_reruns_as_a_whole() {
+        let mut lp = fs(&[], false);
+        lp.for_each = Some(json!("{{ x }}"));
+        let flow = HashMap::from([("loop".into(), lp), ("after".into(), fs(&["loop"], false))]);
+        let mut i0 = row("loop[0]", "completed", Some(json!(1)));
+        i0.loop_source = Some("loop".into());
+        let mut i1 = row("loop[1]", "failed", None);
+        i1.loop_source = Some("loop".into());
+        let mut after = row("after", "skipped", None);
+        after.skip_reason = Some("unreachable".into());
+        let src = [row("loop", "failed", Some(json!([1, null]))), i0, i1, after];
+        let p = all_failed(&flow, &src).unwrap();
+        assert_eq!(
+            p.start_steps,
+            vec!["loop"],
+            "instances are never start steps"
+        );
+        assert_eq!(p.restart_steps, vec!["after", "loop"]);
+        assert!(p.carried.is_empty());
+    }
+
+    #[test]
+    fn all_failed_cancelled_only_loop_rolled_up_completed_is_carried() {
+        // Known quirk (CLAUDE.md § For-Each): only cancelled instances roll
+        // the placeholder up `completed`, so it is not a start step.
+        let mut lp = fs(&[], false);
+        lp.for_each = Some(json!("{{ x }}"));
+        let flow = HashMap::from([("loop".into(), lp), ("z".into(), fs(&[], false))]);
+        let mut i0 = row("loop[0]", "cancelled", None);
+        i0.loop_source = Some("loop".into());
+        let src = [
+            row("loop", "completed", Some(json!([null]))),
+            i0,
+            row("z", "failed", None),
+        ];
+        let p = all_failed(&flow, &src).unwrap();
+        assert_eq!(p.start_steps, vec!["z"]);
+        assert_eq!(names(&p.carried), vec!["loop"]);
+    }
+
+    #[test]
+    fn all_failed_cancelled_and_non_terminal_rows_are_start_steps() {
+        let flow = HashMap::from([
+            ("c".into(), fs(&[], false)),
+            ("p".into(), fs(&[], false)),
+            ("r".into(), fs(&[], false)),
+            ("cl".into(), fs(&[], false)),
+            ("ru".into(), fs(&[], false)),
+            ("su".into(), fs(&[], false)),
+            ("ok".into(), fs(&[], false)),
+            ("sk".into(), fs(&[], false)),
+        ]);
+        let mut sk = row("sk", "skipped", None);
+        sk.skip_reason = Some("condition".into());
+        let src = [
+            row("c", "cancelled", None),
+            row("p", "pending", None),
+            row("r", "ready", None),
+            row("cl", "claimed", None),
+            row("ru", "running", None),
+            row("su", "suspended", None),
+            row("ok", "completed", None),
+            sk,
+        ];
+        let p = all_failed(&flow, &src).unwrap();
+        assert_eq!(p.start_steps, vec!["c", "cl", "p", "r", "ru", "su"]);
+        assert_eq!(names(&p.carried), vec!["ok", "sk"]);
+        // I2: no carried row is cancelled.
+        assert!(p.carried.iter().all(|s| s.status != "cancelled"));
+    }
+
+    #[test]
+    fn all_failed_independent_failed_and_suspended_both_rerun() {
+        let flow = HashMap::from([("a".into(), fs(&[], false)), ("b".into(), fs(&[], false))]);
+        let src = [row("a", "failed", None), row("b", "suspended", None)];
+        let p = all_failed(&flow, &src).unwrap();
+        assert_eq!(p.start_steps, vec!["a", "b"]);
+        assert!(p.carried.is_empty());
+    }
+
+    #[test]
+    fn all_failed_with_nothing_failed_is_an_error_even_with_an_added_step() {
+        let flow = HashMap::from([
+            ("a".into(), fs(&[], false)),
+            ("new".into(), fs(&["a"], false)),
+        ]);
+        let src = [row("a", "completed", None)];
+        assert_eq!(
+            all_failed(&flow, &src).unwrap_err(),
+            RestartError::NoFailedSteps
+        );
+    }
+
+    #[test]
+    fn all_failed_ignores_a_failed_step_no_longer_in_the_flow() {
+        let flow = HashMap::from([("a".into(), fs(&[], false)), ("b".into(), fs(&[], false))]);
+        let src = [
+            row("a", "completed", None),
+            row("gone", "failed", None),
+            row("b", "failed", None),
+        ];
+        let p = all_failed(&flow, &src).unwrap();
+        assert_eq!(p.start_steps, vec!["b"]);
+        assert_eq!(p.restart_steps, vec!["b"]);
+        // Alone, a removed failed step is no start step at all.
+        let src = [row("a", "completed", None), row("gone", "failed", None)];
+        assert_eq!(
+            all_failed(&flow, &src).unwrap_err(),
+            RestartError::NoFailedSteps
+        );
+    }
+
+    #[test]
+    fn all_failed_added_step_is_a_root_but_not_a_start_step() {
+        let flow = HashMap::from([
+            ("a".into(), fs(&[], false)),
+            ("b".into(), fs(&[], false)),
+            ("new".into(), fs(&[], false)),
+        ]);
+        let src = [row("a", "failed", None), row("b", "completed", None)];
+        let p = all_failed(&flow, &src).unwrap();
+        assert_eq!(p.start_steps, vec!["a"]);
+        assert_eq!(p.restart_steps, vec!["a", "new"]);
+    }
+
+    #[test]
+    fn step_mode_reports_its_step_as_the_only_start_step() {
+        let flow = HashMap::from([
+            ("a".into(), fs(&[], false)),
+            ("b".into(), fs(&["a"], false)),
+        ]);
+        let src = [row("a", "completed", None), row("b", "failed", None)];
+        let p = compute_restart_set(&flow, &src, "b").unwrap();
+        assert_eq!(p.from, RestartFrom::Step("b".into()));
+        assert_eq!(p.start_steps, vec!["b"]);
     }
 }

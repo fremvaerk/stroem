@@ -49,12 +49,13 @@ pub enum CreationMode<'a> {
         source_job_id: Uuid,
         replay_fields: &'a [String],
     },
-    /// Restart From Step (spec 2026-09-07): `input` is the source's `raw_input`
-    /// replayed through the normal pipeline; carried rows are seeded in the
-    /// creation transaction; lineage + `restart_from_step` are persisted.
+    /// Restart From Step (spec 2026-09-07) and Restart Failed Steps (spec
+    /// 2026-11-02): `input` is the source's `raw_input` replayed through the
+    /// normal pipeline; carried rows are seeded in the creation transaction;
+    /// lineage + `restart_from_step` / `restart_from_steps` (from
+    /// `plan.from`) are persisted.
     Restart {
         source: &'a JobRow,
-        from_step: &'a str,
         plan: &'a crate::restart::RestartPlan,
     },
     /// A task-level retry of `failed_job_id`: input is handled exactly like
@@ -256,7 +257,6 @@ pub async fn create_restart_job(
     workspace_name: &str,
     source: &JobRow,
     plan: &crate::restart::RestartPlan,
-    from_step: &str,
     source_id: Option<&str>,
     revision: Option<&str>,
     defaults: JobDefaults,
@@ -264,9 +264,11 @@ pub async fn create_restart_job(
     files: FileGrant,
 ) -> Result<CreatedJob> {
     debug_assert!(
-        plan.restart_steps.iter().any(|s| s == from_step),
-        "restart plan for '{}' does not contain it: {:?} — plan was built for a different step",
-        from_step,
+        plan.start_steps
+            .iter()
+            .all(|s| plan.restart_steps.contains(s)),
+        "restart plan does not rerun its start steps {:?}: {:?}",
+        plan.start_steps,
         plan.restart_steps
     );
     let raw = source.raw_input.clone().ok_or_else(|| {
@@ -287,11 +289,7 @@ pub async fn create_restart_job(
         None,
         None,
         revision,
-        CreationMode::Restart {
-            source,
-            from_step,
-            plan,
-        },
+        CreationMode::Restart { source, plan },
         None,
         defaults,
         git_ref,
@@ -520,7 +518,10 @@ pub(crate) fn create_job_for_task_inner<'a>(
         // `raw_input` as `input`, so there is nothing to resolve — only the
         // lineage pointers to persist.
         let mut effective_input = input;
-        let (lineage_source_job_id, restart_from_step): (Option<Uuid>, Option<&str>) = match &mode {
+        let (lineage_source_job_id, restart_lineage): (
+            Option<Uuid>,
+            Option<stroem_db::RestartLineage<'_>>,
+        ) = match &mode {
             CreationMode::Normal | CreationMode::Retry { .. } => (None, None),
             CreationMode::Hook { source_job_id } => (Some(*source_job_id), None),
             CreationMode::Rerun {
@@ -562,9 +563,7 @@ pub(crate) fn create_job_for_task_inner<'a>(
                 .context("resolve re-run sentinels")?;
                 (Some(src_id), None)
             }
-            CreationMode::Restart {
-                source, from_step, ..
-            } => {
+            CreationMode::Restart { source, plan } => {
                 if source.workspace != workspace_name {
                     bail!(
                         "Source job {} belongs to workspace '{}', cannot restart into '{}'",
@@ -573,7 +572,15 @@ pub(crate) fn create_job_for_task_inner<'a>(
                         workspace_name
                     );
                 }
-                (Some(source.job_id), Some(*from_step))
+                let lineage = match &plan.from {
+                    crate::restart::RestartFrom::Step(step) => {
+                        stroem_db::RestartLineage::FromStep(step.as_str())
+                    }
+                    crate::restart::RestartFrom::AllFailed => {
+                        stroem_db::RestartLineage::FromSteps(&plan.start_steps)
+                    }
+                };
+                (Some(source.job_id), Some(lineage))
             }
         };
 
@@ -714,7 +721,7 @@ pub(crate) fn create_job_for_task_inner<'a>(
             revision,
             raw_input_to_persist,
             lineage_source_job_id,
-            restart_from_step,
+            restart_lineage,
             // `max_attempts` counts total executions; the DB column counts
             // retries only, so it's stored as `max_attempts - 1` (same
             // convention as the step-level `max_retries` above). Validation
