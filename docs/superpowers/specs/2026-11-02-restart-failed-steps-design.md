@@ -1,6 +1,6 @@
 # Restart Failed Steps — Design
 
-Revision 1 (2026-11-02). Extends
+Revision 2 (2026-11-02). Extends
 `docs/superpowers/specs/2026-09-07-restart-from-step-design.md` ("the base spec").
 Everything the base spec says holds unless a section below changes it.
 
@@ -50,12 +50,21 @@ Made in this spec (the brief's recommendations, confirmed or refined):
 - **D4 API.** `POST /api/jobs/{id}/restart` keeps `from_step` and gains
   `all_failed: bool` (default `false`). Exactly one of `from_step` /
   `all_failed: true` (§5.1).
-- **D5 Non-terminal source rows are start steps too.** A source row that is
+- **D5 D1 reads the status the restart gives the row.** A source row that is
   still `pending`/`ready`/`claimed`/`running`/`suspended` on a terminal job
-  (a job cancelled mid-flight) is carried as `cancelled` by the base spec
-  (§4.2). Under `all_failed` it is a start step instead: selection is on the
-  status the row WOULD be carried with, so a cancelled-mid-flight job is fully
-  covered by one click (§4.1).
+  can exist only when the job row went terminal before its steps did: an
+  explicit cancel (`JobRepo::cancel` stamps the job at once, the drain gate
+  waits for workers) or a job timeout. Restart never copies such a status: the
+  base spec (§4.2, `restart.rs:102-117`) turns it into a carried `cancelled`
+  row with `carried over from cancelled source job`. For the restart, the row
+  IS a cancelled step, so D1 makes it a start step.
+  The alternative (select only rows whose stored status is `failed` or
+  `cancelled`) carries the row as `cancelled`, and the decider then ends the
+  new job `cancelled` even when every rerun step succeeds
+  (`settlement/settle.rs:53-60`) — the "had to restart again" problem this
+  feature exists to remove. Codex round 1 (finding 1) read D5 as a widening of
+  D1; rev 2 keeps D5 and states this reasoning. It is reported to the user as
+  a decision of this spec.
 - **D6 New column, not a comma-joined `restart_from_step`** (§6). Migration
   `055_job_restart_from_steps.sql` adds `job.restart_from_steps TEXT[]`.
 - **D7 UI**: one **Restart failed steps** button in the job header; the
@@ -122,8 +131,11 @@ allowed).
   are always empty: every row of `S` in `F` with carried status `failed` is a
   start step, so it is in `restart_set`, never in `carry_set`. Asserted by a
   unit test and a `debug_assert!` in the planner.
-- **I2** In `AllFailed` mode no carried row has status `cancelled` (same
-  argument), so the new job's status is decided by the rerun steps alone.
+- **I2** In `AllFailed` mode no carried row has status `cancelled`: a row
+  stored `cancelled` is a start step, and a non-terminal row — the only other
+  source of a carried `cancelled` (`restart.rs:110-117`) — is a start step by
+  D5. So the new job's status is decided by the rerun steps alone (and by
+  carried `failed` rows, of which there are none by I1). Asserted with I1.
 - **I3** `start_steps ⊆ restart_steps` in both modes.
 
 | source row (in `F`) | `AllFailed` |
@@ -185,9 +197,20 @@ from 422 to 400; `restart_endpoint_rejections`
 updated. A wrong JSON type (`"all_failed": "yes"`) is still the extractor's
 422. `from_step: ""` is Step mode and fails `UnknownStep` as today.
 
-The rest of the order is unchanged (`jobs.rs:726-830`): 401 → 404 → 403 → 409
-→ 400 (not top-level, legacy source, pin re-resolution, workspace/task gone,
-plan error). `NoFailedSteps` is a plan error (400).
+The rest of the order is unchanged (`jobs.rs:731-830`), and both modes share
+it: 401 → 404 / 403 on the SOURCE job (`check_job_acl`) → 409 (not terminal)
+→ 400 (not top-level, no `raw_input`) → then
+
+- unpinned source: 400 workspace not loaded / task gone;
+- pinned source (`resolve_source_pin`, `jobs.rs:770-790`): 400 `RefNotFound` /
+  withheld `PinLoadFailed` / task missing at the re-resolved commit, **500**
+  `PinUnavailable` (`jobs.rs:722-728`), then `require_task_run` on the folder
+  the task declares at that commit — 404 "Task not found" / 403 "View-only
+  access" (`jobs.rs:788-803`);
+
+→ 400 plan error. `NoFailedSteps` is a plan error, so it comes after every
+check above. The plan is computed on the pinned flow for a pinned source, as
+today.
 
 Responses (both modes; additive keys in **bold**):
 
@@ -289,6 +312,18 @@ no scan, no index, so no manual pre-run and no upgrade note
   works once every replica runs the release. Documented in the guide's
   rollout note; no flag.
 - New replica before its own migration: impossible, it migrates at start.
+- **An old binary cannot START after 055 is applied** — a pod restart of an
+  old replica mid-rollout, or a rollback. `run_migrations`
+  (`pool.rs:18-21`, called from `main.rs:66-71` before serving) uses the
+  default sqlx migrator, which refuses an applied migration it does not know
+  (`VersionMissing`). This is true of every migration since 001, not new here
+  (054 behaves the same); it is not documented anywhere today. This change
+  documents it once, in the guide's rollout note and a TODO.md entry
+  ("rollback after a migration"), and does not change the migrator: a
+  rollback of this release needs `DELETE FROM _sqlx_migrations WHERE version =
+  55` (the column can stay; the old binary never reads it). No startup check
+  is added (out of scope; the fix belongs to the migrator for all
+  migrations).
 
 ## 7. UI
 
@@ -305,10 +340,11 @@ canExecute === true && isTopLevelJob(job) && isTerminalJobStatus(job.status)
 the same gate as the per-step **Restart from here**
 (`job-detail.tsx:625`, `step-detail.tsx:65-67`) plus at least one step.
 `restartableFailedSteps(steps)` (new, pure, `ui/src/lib/job-status.ts`):
-names of steps with `loop_source === null` and status `failed` or
-`cancelled`, sorted. It deliberately does not mirror D5 (a terminal job with
-non-terminal step rows is rare); the server's dry run is authoritative, and a
-400 `NoFailedSteps` is shown as the error.
+names of steps with `loop_source === null` whose status is not `completed`
+and not `skipped` — i.e. `failed`, `cancelled`, or non-terminal (D5), the same
+rule as the server — sorted. It does not know the current flow (a step
+removed from it), so the server's dry run stays authoritative and a 400
+`NoFailedSteps` is shown as the error.
 
 Click → dry run (`{all_failed: true, dry_run: true}`) → dialog → confirm →
 create → navigate to the new job, exactly like the per-step flow.
@@ -364,7 +400,9 @@ Unit (`restart.rs`):
   both are start steps, I1 holds;
 - a failed `for_each` placeholder is a start step, its instances are not;
 - a placeholder with only cancelled instances rolled up `completed` is carried;
-- a `cancelled` row and a non-terminal row (D5) are start steps;
+- a `cancelled` row and each non-terminal status (D5) are start steps; an
+  independent `failed` + `suspended` pair both rerun, and no carried row is
+  `cancelled` (I2);
 - zero start steps → `NoFailedSteps`, also when an added step exists;
 - a failed source row no longer in the flow is ignored (and alone → error);
 - Step mode output unchanged (existing tests stay as they are).
@@ -377,7 +415,13 @@ Integration (`crates/stroem-server/tests/restart_integration_test.rs`):
 - the new job runs to `completed` once the start steps pass;
 - request shape: both / neither → 400; zero start steps → 400;
 - existing `restart_endpoint_rejections` updated (422 → 400 for a body
-  without `from_step`).
+  without `from_step`);
+- a cancelled-mid-flight source (job row `cancelled`, a step row left
+  `running`): the all-failed restart reruns it and the new job ends
+  `completed`;
+- pinned source in AllFailed mode (`pinned_rerun_restart_test.rs`): dry run
+  and create use the flow at the re-resolved commit, and a View-only user on
+  the commit's folder gets 403.
 
 stroem-db: `migration_test::test_055_job_restart_from_steps` (column exists,
 `text[]`, nullable) and a round trip of `RestartLineage::FromSteps` through
@@ -407,3 +451,12 @@ Playwright: no restart spec exists in `ui/e2e/`; none is added.
 ## 10. Review Log
 
 - Rev 1 (2026-11-02): initial.
+- Rev 2 (2026-11-02), Codex round 1: (1) D5 kept, reasoning stated (a
+  non-terminal row is a carried `cancelled` row, so D1 selects it; the
+  alternative ends the new job `cancelled`); I2 argued from both sources of a
+  carried `cancelled`; UI selector mirrors the server; tests for
+  failed + suspended and a cancelled-mid-flight source. (2) Old binary cannot
+  start after 055 / rollback: pre-existing for every migration, documented with
+  the manual recovery, TODO entry, no migrator change. (3) §5.1 order now
+  spells out the pinned branch (500 `PinUnavailable`, second `Run` check);
+  pinned AllFailed test added.
