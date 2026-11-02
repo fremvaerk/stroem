@@ -10,7 +10,8 @@ pub use repos::input_file::{
 };
 pub use repos::job::{
     ClosureBounds, ClosurePinRow, DerivedRunRow, DurationStatsRow, JobAclScope, JobPinCols,
-    JobRepo, JobRow, RecentDurationRow, RedactionClosure, RetentionJobInfo, StalledPinnedJob,
+    JobRepo, JobRow, RecentDurationRow, RedactionClosure, RestartLineage, RetentionJobInfo,
+    StalledPinnedJob,
 };
 pub use repos::job_ref_pin::{JobRefPinRepo, JobRefPinRow};
 pub use repos::job_step::{

@@ -134,6 +134,7 @@ pub const JOB_IDENTIFIER_KEYS: &[&str] = &[
     "source_id",
     "source_job_id",
     "restart_from_step",
+    "restart_from_steps",
     "parent_job_id",
     "parent_step_name",
     "revision",
@@ -824,6 +825,25 @@ mod tests {
         redact_job_response(&mut v, &secrets);
         assert_eq!(v["derived_jobs"], json!([derived]));
         assert_eq!(v["input"]["why"], json!(REDACTED));
+    }
+
+    /// The start steps of a Restart failed steps job are step names
+    /// (identifiers): a secret equal to one, or `MaskAll`, leaves them intact
+    /// (spec 2026-11-02 § 5.5).
+    #[test]
+    fn restart_from_steps_is_an_identifier() {
+        let secrets = vec!["build".to_string()];
+        let mut v = json!({
+            "restart_from_steps": ["build", "deploy"],
+            "derived_jobs": [{"restart_from_steps": ["build"]}],
+            "output": {"r": "build"}
+        });
+        redact_job_response(&mut v, &secrets);
+        assert_eq!(v["restart_from_steps"], json!(["build", "deploy"]));
+        assert_eq!(v["derived_jobs"][0]["restart_from_steps"], json!(["build"]));
+        assert_eq!(v["output"]["r"], json!(REDACTED));
+        JobRedaction::MaskAll.apply_job_response(&mut v);
+        assert_eq!(v["restart_from_steps"], json!(["build", "deploy"]));
     }
 
     /// After a permanent pin failure every content string is masked, but the

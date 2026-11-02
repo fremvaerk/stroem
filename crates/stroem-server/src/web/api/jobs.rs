@@ -260,6 +260,9 @@ pub struct JobDetailResponse {
     pub source_id: Option<String>,
     pub source_job_id: Option<Uuid>,
     pub restart_from_step: Option<String>,
+    /// The start steps of a Restart failed steps job (spec 2026-11-02 § 4.4);
+    /// `None` for every other job.
+    pub restart_from_steps: Option<Vec<String>>,
     /// Parent job of a `type: task` / agent-tool child. `None` for top-level
     /// runs; the UI uses it (with `source_type`) to hide Re-run and Restart.
     pub parent_job_id: Option<Uuid>,
@@ -309,6 +312,8 @@ pub struct DerivedJobRef {
     pub status: String,
     pub created_at: chrono::DateTime<Utc>,
     pub restart_from_step: Option<String>,
+    /// Start steps of a Restart failed steps job; step names, identifiers.
+    pub restart_from_steps: Option<Vec<String>>,
 }
 
 /// The `derived_jobs[]` of job detail. Each run is authorised by its own row
@@ -345,6 +350,7 @@ async fn derived_job_refs(
             status: row.status,
             created_at: row.created_at,
             restart_from_step: row.restart_from_step,
+            restart_from_steps: row.restart_from_steps,
         });
     }
     Ok(refs)
@@ -606,6 +612,7 @@ pub async fn get_job(
         source_id: job.source_id,
         source_job_id: job.source_job_id,
         restart_from_step: job.restart_from_step,
+        restart_from_steps: job.restart_from_steps,
         parent_job_id: job.parent_job_id,
         parent_step_name: job.parent_step_name,
         revision: job.revision,
@@ -677,15 +684,31 @@ pub async fn cancel_job(
     }
 }
 
-/// Request body for `POST /api/jobs/{id}/restart`.
+/// Request body for `POST /api/jobs/{id}/restart`. Exactly one of
+/// `from_step` and `all_failed: true` (spec 2026-11-02 § 5.1).
 #[derive(Debug, Deserialize)]
 pub struct RestartJobRequest {
     /// Flow step to restart from. Must be a key of the task's *current* flow
     /// and must not be a `for_each` instance (`step[0]`).
-    pub from_step: String,
+    #[serde(default)]
+    pub from_step: Option<String>,
+    /// Restart every failed or cancelled step (Restart failed steps).
+    #[serde(default)]
+    pub all_failed: bool,
     /// Preview only: compute and return the plan, create nothing.
     #[serde(default)]
     pub dry_run: bool,
+}
+
+impl RestartJobRequest {
+    /// The restart mode, or `None` when the body names both or neither.
+    fn restart_from(&self) -> Option<crate::restart::RestartFrom> {
+        match (&self.from_step, self.all_failed) {
+            (Some(step), false) => Some(crate::restart::RestartFrom::Step(step.clone())),
+            (None, true) => Some(crate::restart::RestartFrom::AllFailed),
+            _ => None,
+        }
+    }
 }
 
 /// Source types whose jobs are *derived* runs rather than a user's own top-level
@@ -704,15 +727,19 @@ pub(crate) fn is_top_level_job(job: &stroem_db::JobRow) -> bool {
     job.parent_job_id.is_none() && !DERIVED_SOURCE_TYPES.contains(&job.source_type.as_str())
 }
 
-/// POST /api/jobs/:id/restart — Restart From Step (spec 2026-09-07 §6.1).
+/// POST /api/jobs/:id/restart — Restart From Step (spec 2026-09-07 §6.1) and
+/// Restart Failed Steps (spec 2026-11-02).
 ///
-/// Creates a new job for the source job's task in which the steps at and below
-/// `from_step` rerun while everything else is carried over from the source as
-/// it ended. `dry_run` returns the same plan without creating anything, so a
-/// confirm dialog can be authoritative about steps added to the flow since the
-/// source job ran.
+/// Creates a new job for the source job's task in which the start steps —
+/// `from_step`, or with `all_failed` every failed or cancelled step — and
+/// everything below them rerun, while everything else is carried over from
+/// the source as it ended. `dry_run` returns the same plan without creating
+/// anything, so a confirm dialog can be authoritative about steps added to the
+/// flow since the source job ran.
 ///
-/// Checks run in the spec's order: 401 (auth configured, no user) → 404 (job
+/// The body shape (exactly one of `from_step` / `all_failed`) is checked
+/// first, like the extractor rejection it replaces. Then checks run in the
+/// spec's order: 401 (auth configured, no user) → 404 (job
 /// missing or ACL `Deny`) → 403 (ACL `View`) → 409 (source not terminal) → 400
 /// (not top-level, legacy source, workspace/task gone, bad `from_step`).
 ///
@@ -734,6 +761,9 @@ pub async fn restart_job(
     Json(req): Json<RestartJobRequest>,
 ) -> Result<Response, AppError> {
     let job_id = parse_uuid_param(&id, "job")?;
+    let restart_from = req.restart_from().ok_or_else(|| {
+        AppError::BadRequest("Specify exactly one of from_step or all_failed".into())
+    })?;
 
     // Explicit 401: `check_job_acl` returns `Run` when no user is supplied, so
     // the missing-token case must be rejected before it (mirrors execute_task).
@@ -823,12 +853,16 @@ pub async fn restart_job(
     let source_steps = JobStepRepo::get_steps_for_job(&state.pool, job_id)
         .await
         .context("get source steps")?;
-    let plan = crate::restart::compute_restart_set(&task.flow, &source_steps, &req.from_step)
-        .map_err(|e| {
+    let plan =
+        crate::restart::plan_restart(&task.flow, &source_steps, &restart_from).map_err(|e| {
             AppError::BadRequest(match e {
                 crate::restart::RestartError::UnknownStep(s) => format!(
                     "Step '{}' is not in the current flow of task '{}'",
                     s, source.task_name
+                ),
+                crate::restart::RestartError::NoFailedSteps => format!(
+                    "No failed or cancelled steps to restart in the current flow of task '{}'",
+                    source.task_name
                 ),
                 other => other.to_string(),
             })
@@ -837,6 +871,7 @@ pub async fn restart_job(
     let carried_names: Vec<&str> = plan.carried.iter().map(|s| s.step_name.as_str()).collect();
     if req.dry_run {
         return Ok(Json(json!({
+            "start_steps": plan.start_steps,
             "restart_steps": plan.restart_steps,
             "carried_over": carried_names,
             "carried_failed": plan.carried_failed,
@@ -858,7 +893,6 @@ pub async fn restart_job(
         &source.workspace,
         &source,
         &plan,
-        &req.from_step,
         source_id.as_deref(),
         revision.as_deref(),
         state.job_defaults(),
@@ -878,9 +912,11 @@ pub async fn restart_job(
         StatusCode::CREATED,
         Json(json!({
             "job_id": new_job_id.to_string(),
+            "start_steps": plan.start_steps,
             "restart_steps": plan.restart_steps,
             "carried_over": carried_names,
             "carried_failed": plan.carried_failed,
+            "carried_failed_tolerated": plan.carried_failed_tolerated,
         })),
     )
         .into_response())
@@ -1288,6 +1324,7 @@ mod tests {
             source_id: None,
             source_job_id: None,
             restart_from_step: None,
+            restart_from_steps: None,
             parent_job_id: None,
             parent_step_name: None,
             revision: None,
@@ -1313,6 +1350,7 @@ mod tests {
             status: "failed".to_string(),
             created_at: "2026-10-22T07:00:00Z".parse().unwrap(),
             restart_from_step: Some("deploy".to_string()),
+            restart_from_steps: None,
         }
     }
 
@@ -1329,6 +1367,7 @@ mod tests {
                 "created_at",
                 "id",
                 "restart_from_step",
+                "restart_from_steps",
                 "source_type",
                 "status",
             ])
@@ -1387,6 +1426,7 @@ mod tests {
             source_id: None,
             source_job_id: None,
             restart_from_step: None,
+            restart_from_steps: None,
             parent_job_id: None,
             parent_step_name: None,
             revision: None,
@@ -1463,6 +1503,7 @@ mod tests {
             source_id: None,
             source_job_id: Some(Uuid::nil()),
             restart_from_step: None,
+            restart_from_steps: None,
             parent_job_id: None,
             parent_step_name: None,
             revision: None,

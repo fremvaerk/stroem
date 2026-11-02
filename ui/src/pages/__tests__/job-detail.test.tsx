@@ -26,6 +26,7 @@ import {
   listJobArtifacts,
   listWorkers,
   getStepLogs,
+  restartJob,
 } from "@/lib/api";
 import { POLL_LATER_RUN_MS, POLL_SETTLED_MS } from "@/lib/job-status";
 import { JobDetailPage } from "../job-detail";
@@ -193,6 +194,8 @@ describe("JobDetailPage — input files", () => {
 const rerunLink = () => screen.queryByRole("link", { name: "Re-run" });
 const restartButton = () =>
   screen.queryByRole("button", { name: /restart from here/i });
+const restartFailedButton = () =>
+  screen.queryByRole("button", { name: /restart failed steps/i });
 
 describe("JobDetailPage — Re-run and Restart availability", () => {
   beforeEach(() => {
@@ -211,6 +214,77 @@ describe("JobDetailPage — Re-run and Restart availability", () => {
     expect(await screen.findByText("pipeline")).toBeTruthy();
     await waitFor(() => expect(restartButton()).toBeTruthy());
     expect(rerunLink()).toBeTruthy();
+    expect(restartFailedButton()).toBeTruthy();
+  });
+
+  it("hides Restart failed steps when no top-level step failed or was cancelled", async () => {
+    mockGetJob.mockResolvedValue(
+      job({
+        status: "completed",
+        steps: [
+          step({ status: "completed" }),
+          step({
+            step_name: "loop[0]",
+            loop_source: "loop",
+            loop_index: 0,
+            loop_total: 1,
+            for_each_expr: null,
+            status: "failed",
+          }),
+        ],
+      }),
+    );
+    renderPage();
+
+    expect(await screen.findByText("pipeline")).toBeTruthy();
+    await waitFor(() => expect(restartButton()).toBeTruthy());
+    expect(restartFailedButton()).toBeNull();
+  });
+
+  it("hides Restart failed steps while the job is still running", async () => {
+    mockGetJob.mockResolvedValue(job({ status: "running" }));
+    renderPage();
+
+    expect(await screen.findByText("pipeline")).toBeTruthy();
+    await waitFor(() => expect(mockGetTask).toHaveBeenCalled());
+    expect(restartFailedButton()).toBeNull();
+  });
+
+  it("plans a restart of the failed steps and confirms it in the dialog", async () => {
+    mockGetJob.mockResolvedValue(job());
+    vi.mocked(restartJob).mockResolvedValue({
+      start_steps: ["loop"],
+      restart_steps: ["loop"],
+      carried_over: [],
+      carried_failed: [],
+      carried_failed_tolerated: [],
+    });
+    renderPage();
+
+    await waitFor(() => expect(restartFailedButton()).toBeTruthy());
+    fireEvent.click(restartFailedButton()!);
+
+    expect(await screen.findByText("Restart the failed steps of pipeline?")).toBeTruthy();
+    expect(vi.mocked(restartJob)).toHaveBeenCalledWith(
+      "11111111-1111-1111-1111-111111111111",
+      { kind: "failed" },
+      true,
+    );
+    vi.mocked(restartJob).mockResolvedValue({
+      job_id: "44444444-4444-4444-4444-444444444444",
+      start_steps: ["loop"],
+      restart_steps: ["loop"],
+      carried_over: [],
+      carried_failed: [],
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^restart$/i }));
+    await waitFor(() =>
+      expect(vi.mocked(restartJob)).toHaveBeenCalledWith(
+        "11111111-1111-1111-1111-111111111111",
+        { kind: "failed" },
+        false,
+      ),
+    );
   });
 
   it("hides both actions on a type: task child job", async () => {
@@ -227,6 +301,7 @@ describe("JobDetailPage — Re-run and Restart availability", () => {
     await waitFor(() => expect(mockGetTask).toHaveBeenCalled());
     expect(rerunLink()).toBeNull();
     expect(restartButton()).toBeNull();
+    expect(restartFailedButton()).toBeNull();
   });
 
   it("hides both actions on a hook job", async () => {
@@ -237,6 +312,7 @@ describe("JobDetailPage — Re-run and Restart availability", () => {
     await waitFor(() => expect(mockGetTask).toHaveBeenCalled());
     expect(rerunLink()).toBeNull();
     expect(restartButton()).toBeNull();
+    expect(restartFailedButton()).toBeNull();
   });
 
   it("keeps restart hidden until the permission fetch resolves", async () => {
@@ -252,10 +328,12 @@ describe("JobDetailPage — Re-run and Restart availability", () => {
     expect(await screen.findByText("pipeline")).toBeTruthy();
     // Permission unknown: Re-run is a plain link and stays, restart does not.
     expect(restartButton()).toBeNull();
+    expect(restartFailedButton()).toBeNull();
     expect(rerunLink()).toBeTruthy();
 
     resolveTask(task(true));
     await waitFor(() => expect(restartButton()).toBeTruthy());
+    expect(restartFailedButton()).toBeTruthy();
   });
 
   it("keeps restart hidden when the permission fetch fails", async () => {
@@ -266,6 +344,7 @@ describe("JobDetailPage — Re-run and Restart availability", () => {
     expect(await screen.findByText("pipeline")).toBeTruthy();
     await waitFor(() => expect(mockGetTask).toHaveBeenCalled());
     expect(restartButton()).toBeNull();
+    expect(restartFailedButton()).toBeNull();
   });
 
   it("hides restart when the task denies execute", async () => {
@@ -276,6 +355,7 @@ describe("JobDetailPage — Re-run and Restart availability", () => {
     expect(await screen.findByText("pipeline")).toBeTruthy();
     await waitFor(() => expect(mockGetTask).toHaveBeenCalled());
     expect(restartButton()).toBeNull();
+    expect(restartFailedButton()).toBeNull();
   });
 });
 
@@ -416,6 +496,21 @@ describe("JobDetailPage — navigation to the task and the source job", () => {
     expect(header.textContent).toBe("restart of 33333333 from build");
   });
 
+  it("names the failed steps a restart of failed steps began at", async () => {
+    mockGetJob.mockResolvedValue(
+      job({
+        source_type: "restart",
+        source_job_id: "33333333-3333-3333-3333-333333333333",
+        restart_from_steps: ["a", "b", "c", "d"],
+      }),
+    );
+    renderPage();
+
+    const header = await screen.findByTestId("job-lineage");
+    expect(header.textContent).toBe("restart of 33333333 of failed steps a, b, c, +1 more");
+    expect(within(header).getByTitle("a, b, c, d")).toBeTruthy();
+  });
+
   it("links a task retry to the first attempt", async () => {
     mockGetJob.mockResolvedValue(
       job({
@@ -527,6 +622,27 @@ describe("JobDetailPage — later runs", () => {
     expect(links.map((l) => l.getAttribute("href"))).toEqual([
       "/jobs/22222222-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
       "/jobs/11111111-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    ]);
+  });
+
+  it("names the failed steps of a restart of failed steps", async () => {
+    mockGetJob.mockResolvedValue(
+      job({
+        derived_jobs: [
+          derived(1, {
+            source_type: "restart",
+            status: "running",
+            restart_from_steps: ["ml-master", "ai_maintain"],
+          }),
+        ],
+      }),
+    );
+    renderPage();
+
+    const card = await screen.findByTestId("job-later-runs");
+    const rows = within(card).getAllByRole("listitem");
+    expect(rows.map((r) => r.textContent)).toEqual([
+      "restart11111111runningfailed steps ml-master, ai_maintain",
     ]);
   });
 

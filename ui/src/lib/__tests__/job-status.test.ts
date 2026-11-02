@@ -8,8 +8,10 @@ import {
   isTerminalJobStatus,
   isTopLevelJob,
   jobLineage,
+  formatStepList,
   jobPollInterval,
   laterRuns,
+  restartableFailedSteps,
 } from "../job-status";
 import type { DerivedJobRef } from "../types";
 
@@ -83,6 +85,28 @@ describe("jobLineage", () => {
         restart_from_step: "build",
       }),
     ).toEqual({ kind: "restart", jobId: "src", step: "build" });
+  });
+
+  it("carries the start steps of a restart of failed steps", () => {
+    expect(
+      jobLineage({
+        ...base,
+        source_type: "restart",
+        source_job_id: "src",
+        restart_from_steps: ["a", "b"],
+      }),
+    ).toEqual({ kind: "restart", jobId: "src", step: null, steps: ["a", "b"] });
+  });
+
+  it("ignores start steps on anything but a restart", () => {
+    expect(
+      jobLineage({
+        ...base,
+        source_type: "rerun",
+        source_job_id: "src",
+        restart_from_steps: ["a"],
+      }),
+    ).toEqual({ kind: "rerun", jobId: "src", step: null });
   });
 
   it("points a task retry at the first attempt, not the previous one", () => {
@@ -256,5 +280,58 @@ describe("jobPollInterval", () => {
 
   it("stops for a settled job from an older server that sends no derived_jobs", () => {
     expect(jobPollInterval(pollJob({ derived_jobs: undefined }), NOW)).toBeNull();
+  });
+});
+
+describe("restartableFailedSteps", () => {
+  const s = (step_name: string, status: string, loop_source: string | null = null) => ({
+    step_name,
+    status,
+    loop_source,
+  });
+
+  it("lists failed, cancelled and unfinished top-level steps, sorted", () => {
+    expect(
+      restartableFailedSteps([
+        s("z", "failed"),
+        s("ok", "completed"),
+        s("sk", "skipped"),
+        s("c", "cancelled"),
+        s("r", "running"),
+        s("p", "pending"),
+        s("su", "suspended"),
+      ]),
+    ).toEqual(["c", "p", "r", "su", "z"]);
+  });
+
+  it("leaves out loop instances; their placeholder stands for them", () => {
+    expect(
+      restartableFailedSteps([
+        s("loop", "failed"),
+        s("loop[0]", "failed", "loop"),
+        s("loop[1]", "cancelled", "loop"),
+      ]),
+    ).toEqual(["loop"]);
+  });
+
+  it("is empty when every step completed or was skipped", () => {
+    expect(restartableFailedSteps([s("a", "completed"), s("b", "skipped")])).toEqual([]);
+    expect(restartableFailedSteps([])).toEqual([]);
+  });
+});
+
+describe("formatStepList", () => {
+  it("joins up to the limit", () => {
+    expect(formatStepList(["a"])).toBe("a");
+    expect(formatStepList(["a", "b", "c"])).toBe("a, b, c");
+  });
+
+  it("counts the names past the limit", () => {
+    expect(formatStepList(["a", "b", "c", "d", "e"])).toBe("a, b, c, +2 more");
+    expect(formatStepList(["a", "b"], 1)).toBe("a, +1 more");
+  });
+
+  it("is empty for no names", () => {
+    expect(formatStepList([])).toBe("");
   });
 });

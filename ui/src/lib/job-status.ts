@@ -42,6 +42,8 @@ export interface JobLineage {
   jobId: string;
   /** Restart: the step it began at. Child: the parent step that started it. */
   step: string | null;
+  /** Restart of failed steps: the steps it began at. Absent otherwise. */
+  steps?: string[];
 }
 
 /**
@@ -55,6 +57,8 @@ export function jobLineage(job: {
   source_type: string;
   source_job_id: string | null;
   restart_from_step: string | null;
+  /** Absent from an older server. */
+  restart_from_steps?: string[] | null;
   retry_of_job_id: string | null;
   parent_job_id: string | null;
   parent_step_name: string | null;
@@ -68,7 +72,14 @@ export function jobLineage(job: {
       return { kind: "rerun", jobId: job.source_job_id, step: null };
     case "restart":
       if (!job.source_job_id) return null;
-      return { kind: "restart", jobId: job.source_job_id, step: job.restart_from_step };
+      return job.restart_from_steps
+        ? {
+            kind: "restart",
+            jobId: job.source_job_id,
+            step: job.restart_from_step,
+            steps: job.restart_from_steps,
+          }
+        : { kind: "restart", jobId: job.source_job_id, step: job.restart_from_step };
     case "retry":
       if (!job.retry_of_job_id) return null;
       return { kind: "retry", jobId: job.retry_of_job_id, step: null };
@@ -78,6 +89,31 @@ export function jobLineage(job: {
     default:
       return null;
   }
+}
+
+/**
+ * The steps a Restart failed steps of this job would start at: top-level
+ * steps (loop instances excluded, their placeholder stands for them) that did
+ * not complete and were not skipped — `failed`, `cancelled`, or still
+ * unfinished on a settled job, which the server carries as cancelled (spec
+ * 2026-11-02 § 4.1, D5). Sorted. The server's dry run stays authoritative: it
+ * also drops steps no longer in the task's current flow.
+ */
+export function restartableFailedSteps(
+  steps: { step_name: string; status: string; loop_source: string | null }[],
+): string[] {
+  return steps
+    .filter(
+      (s) => s.loop_source === null && s.status !== "completed" && s.status !== "skipped",
+    )
+    .map((s) => s.step_name)
+    .sort();
+}
+
+/** Up to `max` names joined by ", ", then "+N more" for the rest. */
+export function formatStepList(names: string[], max: number = 3): string {
+  const shown = names.slice(0, max).join(", ");
+  return names.length > max ? `${shown}, +${names.length - max} more` : shown;
 }
 
 /** Rows the "Later runs" card shows; the rest are only counted. */

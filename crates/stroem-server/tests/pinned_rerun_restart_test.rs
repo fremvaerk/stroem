@@ -211,6 +211,20 @@ async fn restart_of_pinned_source_plans_against_the_pinned_flow() -> Result<()> 
         assert_eq!(plan["restart_steps"], json!(["b"]));
         assert_eq!(plan["carried_over"], json!(["a"]));
 
+        // Restart failed steps plans against the same pinned flow.
+        let (st, plan) = api_req(
+            &fx.router,
+            "POST",
+            &format!("/api/jobs/{source}/restart"),
+            None,
+            Some(json!({"all_failed": true, "dry_run": true})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "all-failed dry run: {plan}");
+        assert_eq!(plan["start_steps"], json!(["b"]));
+        assert_eq!(plan["restart_steps"], json!(["b"]));
+        assert_eq!(plan["carried_over"], json!(["a"]));
+
         let (st, body) = api_req(
             &fx.router,
             "POST",
@@ -394,6 +408,8 @@ async fn pinned_rerun_and_restart_require_run_on_the_folder_at_the_new_commit() 
             for restart in [
                 json!({"from_step": "b", "dry_run": true}),
                 json!({"from_step": "b"}),
+                json!({"all_failed": true, "dry_run": true}),
+                json!({"all_failed": true}),
             ] {
                 let (st, body) =
                     api_req(&fx.router, "POST", &restart_uri, Some(&key), Some(restart)).await;

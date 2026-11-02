@@ -5920,3 +5920,84 @@ async fn test_list_derived_runs_lists_restarts_and_reruns_newest_first() -> Resu
     assert!(JobRepo::list_derived_runs(&pool, rerun).await?.is_empty());
     Ok(())
 }
+
+/// Restart failed steps (spec 2026-11-02 § 4.4): `RestartLineage` writes
+/// exactly one of `restart_from_step` / `restart_from_steps`, and both
+/// `JobRepo::get` and `list_derived_runs` read it back.
+#[tokio::test]
+async fn test_restart_lineage_round_trips_through_job_and_derived_runs() -> Result<()> {
+    use stroem_db::RestartLineage;
+    let pool = setup_db().await?;
+    let source = JobRepo::create_with_parent(
+        &pool,
+        "default",
+        "t",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await?;
+    let starts = vec!["a".to_string(), "b".to_string()];
+    let all_failed = JobRepo::create_with_parent(
+        &pool,
+        "default",
+        "t",
+        "distributed",
+        None,
+        "restart",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(source),
+        Some(RestartLineage::FromSteps(&starts)),
+    )
+    .await?;
+    let one_step = JobRepo::create_with_parent(
+        &pool,
+        "default",
+        "t",
+        "distributed",
+        None,
+        "restart",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(source),
+        Some(RestartLineage::FromStep("c")),
+    )
+    .await?;
+
+    let row = JobRepo::get(&pool, all_failed).await?.unwrap();
+    assert_eq!(row.restart_from_step, None);
+    assert_eq!(row.restart_from_steps, Some(starts.clone()));
+    let row = JobRepo::get(&pool, one_step).await?.unwrap();
+    assert_eq!(row.restart_from_step.as_deref(), Some("c"));
+    assert_eq!(row.restart_from_steps, None);
+    let row = JobRepo::get(&pool, source).await?.unwrap();
+    assert_eq!(
+        (row.restart_from_step, row.restart_from_steps),
+        (None, None)
+    );
+
+    let derived = JobRepo::list_derived_runs(&pool, source).await?;
+    let by_id = |id: Uuid| derived.iter().find(|r| r.job_id == id).unwrap();
+    assert_eq!(by_id(all_failed).restart_from_steps, Some(starts));
+    assert_eq!(by_id(all_failed).restart_from_step, None);
+    assert_eq!(by_id(one_step).restart_from_steps, None);
+    assert_eq!(by_id(one_step).restart_from_step.as_deref(), Some("c"));
+    Ok(())
+}

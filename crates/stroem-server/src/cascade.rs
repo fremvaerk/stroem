@@ -941,6 +941,7 @@ mod tests {
             raw_input: None,
             source_job_id: None,
             restart_from_step: None,
+            restart_from_steps: None,
         }
     }
 
