@@ -1,6 +1,6 @@
 # Restart Failed Steps — Design
 
-Revision 2 (2026-11-02). Extends
+Revision 3 (2026-11-02). Extends
 `docs/superpowers/specs/2026-09-07-restart-from-step-design.md` ("the base spec").
 Everything the base spec says holds unless a section below changes it.
 
@@ -294,7 +294,9 @@ are unchanged.
 -- Restart failed steps (spec 2026-11-02): the start steps of an all-failed
 -- restart. NULL for every other job, including a single-step restart, which
 -- keeps using restart_from_step.
-ALTER TABLE job ADD COLUMN restart_from_steps TEXT[];
+-- IF NOT EXISTS: a rollback deletes this migration's history row and keeps
+-- the column (§6), so the next upgrade runs this file again.
+ALTER TABLE job ADD COLUMN IF NOT EXISTS restart_from_steps TEXT[];
 ```
 
 A nullable column with no default is a catalog-only change: no table rewrite,
@@ -320,8 +322,12 @@ no scan, no index, so no manual pre-run and no upgrade note
   (054 behaves the same); it is not documented anywhere today. This change
   documents it once, in the guide's rollout note and a TODO.md entry
   ("rollback after a migration"), and does not change the migrator: a
-  rollback of this release needs `DELETE FROM _sqlx_migrations WHERE version =
-  55` (the column can stay; the old binary never reads it). No startup check
+  rollback of this release, after EVERY new replica has stopped, needs
+  `DELETE FROM _sqlx_migrations WHERE version = 55`; the column stays (the old
+  binary never reads it). The next upgrade applies 055 again, and
+  `ADD COLUMN IF NOT EXISTS` makes that a no-op, so no history row must be
+  saved and restored. A new replica that starts while the row is deleted also
+  just re-applies 055 harmlessly. No startup check
   is added (out of scope; the fix belongs to the migrator for all
   migrations).
 
@@ -424,7 +430,7 @@ Integration (`crates/stroem-server/tests/restart_integration_test.rs`):
   the commit's folder gets 403.
 
 stroem-db: `migration_test::test_055_job_restart_from_steps` (column exists,
-`text[]`, nullable) and a round trip of `RestartLineage::FromSteps` through
+`text[]`, nullable; running the 055 SQL a second time succeeds) and a round trip of `RestartLineage::FromSteps` through
 `create_with_parent_tx_id` → `JobRepo::get` / `list_derived_runs`.
 
 Redaction unit test: `restart_from_steps` stays intact under a secret equal to
@@ -460,3 +466,7 @@ Playwright: no restart spec exists in `ui/e2e/`; none is added.
   the manual recovery, TODO entry, no migrator change. (3) §5.1 order now
   spells out the pinned branch (500 `PinUnavailable`, second `Run` check);
   pinned AllFailed test added.
+- Rev 3 (2026-11-02), Codex round 2: round-1 findings closed. (1) The
+  rollback step left the next upgrade re-running `ADD COLUMN` on an existing
+  column: 055 is now `ADD COLUMN IF NOT EXISTS`, rollback sequenced after the
+  new replicas stop; the migration test re-runs the SQL on a migrated schema.
