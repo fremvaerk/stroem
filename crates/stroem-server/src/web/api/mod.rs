@@ -11,6 +11,7 @@ pub mod middleware;
 pub mod oauth_consent;
 pub mod oidc;
 mod pinned_source;
+pub(crate) mod rerun;
 pub(crate) mod restart;
 pub mod state_upload;
 pub mod tasks;
@@ -153,7 +154,7 @@ pub fn default_limit() -> i64 {
 
 /// Resolve a workspace by name from [`AppState`], returning a 404 `AppError` when missing.
 pub async fn get_workspace_or_error(
-    state: &std::sync::Arc<AppState>,
+    state: &AppState,
     ws: &str,
 ) -> Result<std::sync::Arc<stroem_common::models::workflow::WorkspaceConfig>, AppError> {
     state

@@ -1,6 +1,6 @@
 use crate::acl::{load_user_acl_context, make_task_path, TaskPermission};
 use crate::input_files::FileGrant;
-use crate::job_creator::{create_job_for_task_detailed, create_job_for_task_pinned, CreationMode};
+use crate::job_creator::create_job_for_task_detailed;
 use crate::state::AppState;
 use crate::web::api::middleware::AuthUser;
 use crate::web::api::triggers::TriggerInfo;
@@ -469,39 +469,26 @@ pub async fn execute_task(
         ));
     }
 
-    // 1b. Re-run source: its job row is read once. The existence + ACL check
-    //     below runs FIRST, before the pinned/unpinned branch and before any
-    //     destination task lookup; a missing source and a denied one answer
-    //     the same 404 `Source job not found` (spec 2026-10-06-json-input-type,
-    //     revision 10). A PINNED source then takes its own path, since its
-    //     task may exist only at the source's ref.
-    let source_row = match req.source_job_id {
-        Some(src_id) => stroem_db::JobRepo::get(&state.pool, src_id)
-            .await
-            .context("load source job for re-run")?,
-        None => None,
-    };
-    // The source check runs BEFORE the pinned/unpinned branch and before any
-    // destination lookup: a missing source and a source the caller may not
-    // read (pinned or not) answer identically for every destination.
-    if req.source_job_id.is_some() {
-        let source_job = source_row.as_ref().ok_or_else(source_job_not_found)?;
-        let perm = crate::web::api::jobs::check_job_acl(&state, &auth_user, source_job).await?;
-        if matches!(perm, TaskPermission::Deny) {
-            return Err(source_job_not_found());
-        }
-    }
-    if let Some(source_job) = source_row.as_ref().filter(|j| j.git_ref.is_some()) {
-        return execute_pinned_rerun(
+    // 1b. Re-run (`source_job_id`): the shared body, also behind the MCP
+    //     `rerun_job` tool. The source's existence + ACL check runs FIRST,
+    //     before any destination task lookup (`super::rerun::rerun_job`).
+    if let Some(source_job_id) = req.source_job_id {
+        let input_value = serde_json::to_value(&req.input).unwrap_or_default();
+        let job_id = super::rerun::rerun_job(
             &state,
-            &auth_user,
-            &ws,
-            &name,
-            source_id.as_deref(),
-            &req,
-            source_job,
+            super::caller::Caller::of(&auth_user),
+            source_job_id,
+            super::rerun::Destination::Task {
+                workspace: &ws,
+                task: &name,
+            },
+            input_value,
+            super::rerun::Replay::Fields(&req.replay_fields),
         )
-        .await;
+        .await?;
+        return Ok(Json(ExecuteTaskResponse {
+            job_id: job_id.to_string(),
+        }));
     }
 
     let workspace = get_workspace_or_error(&state, &ws).await?;
@@ -515,67 +502,27 @@ pub async fn execute_task(
     // 3. ACL check: Deny -> 404, View -> 403, Run -> proceed
     require_task_run(&state, &auth_user, &ws, &name, task.folder.as_deref()).await?;
 
-    // 4. Re-run validation: source_job_id must reference a job in this workspace
-    //    that the user is allowed to view. Authorization mirrors GET /api/jobs/{id}.
-    let mut effective_source_type = source_type;
-    if req.source_job_id.is_some() {
-        let source_job = source_row.ok_or_else(source_job_not_found)?;
-        check_rerun_source(&source_job, &ws)?;
-        // Same task as the source, on both paths (spec D12): a re-run copies
-        // stored values only between runs of one task.
-        if source_job.task_name != name {
-            return Err(AppError::BadRequest(format!(
-                "Source job {} is a run of task '{}', not '{}'",
-                source_job.job_id, source_job.task_name, name
-            )));
-        }
-        effective_source_type = "rerun";
-    }
-
     let input_value = serde_json::to_value(&req.input).unwrap_or_default();
     let files = FileGrant::direct(&state, caller_user_id(&auth_user)?);
 
     // 5. Create job + steps via shared function
     let revision = state.workspaces.get_revision(&ws);
-    let created = match req.source_job_id {
-        Some(src_id) => {
-            crate::job_creator::create_job_for_rerun(
-                &state.workspaces,
-                &state.pool,
-                &workspace,
-                &ws,
-                &name,
-                input_value,
-                effective_source_type,
-                source_id.as_deref(),
-                revision.as_deref(),
-                src_id,
-                &req.replay_fields,
-                state.config.agents.as_ref(),
-                state.job_defaults(),
-                files,
-            )
-            .await
-        }
-        None => {
-            create_job_for_task_detailed(
-                &state.workspaces,
-                &state.pool,
-                &workspace,
-                &ws,
-                &name,
-                input_value,
-                effective_source_type,
-                source_id.as_deref(),
-                revision.as_deref(),
-                None,
-                state.config.agents.as_ref(),
-                state.job_defaults(),
-                files,
-            )
-            .await
-        }
-    }
+    let created = create_job_for_task_detailed(
+        &state.workspaces,
+        &state.pool,
+        &workspace,
+        &ws,
+        &name,
+        input_value,
+        source_type,
+        source_id.as_deref(),
+        revision.as_deref(),
+        None,
+        state.config.agents.as_ref(),
+        state.job_defaults(),
+        files,
+    )
+    .await
     .map_err(classify_execute_error)?;
     let job_id = created.job_id;
 
@@ -701,83 +648,6 @@ pub(crate) fn check_rerun_source(source_job: &stroem_db::JobRow, ws: &str) -> Re
         ));
     }
     Ok(())
-}
-
-/// Re-run of a pinned source (spec § 7.3). The ACL check comes FIRST, so a
-/// denied caller learns nothing about the source: `Run` on the SOURCE's path,
-/// `{task_folder}/{task}` (§ 7.8), because the task may not exist in the live
-/// config at all. Then the source checks of the unpinned path and the task
-/// name; then the ref is re-resolved (a branch to its current tip), the task
-/// looked up at that commit, and `Run` required on the folder it declares
-/// there — the new job's `task_folder` — as the unpinned path requires it on
-/// the live task's folder.
-///
-/// Deny → 404, View → 403 (either check), a bad source or a task missing at
-/// the commit → 400, `RefNotFound` → 400, `PinUnavailable` → 500.
-async fn execute_pinned_rerun(
-    state: &AppState,
-    auth_user: &Option<AuthUser>,
-    ws: &str,
-    name: &str,
-    source_id: Option<&str>,
-    req: &ExecuteTaskRequest,
-    source_job: &stroem_db::JobRow,
-) -> Result<Json<ExecuteTaskResponse>, AppError> {
-    match crate::web::api::jobs::check_job_acl(state, auth_user, source_job).await? {
-        TaskPermission::Deny => return Err(source_job_not_found()),
-        TaskPermission::View => return Err(AppError::Forbidden("View-only access".into())),
-        TaskPermission::Run => {}
-    }
-    check_rerun_source(source_job, ws)?;
-    if source_job.task_name != name {
-        return Err(AppError::BadRequest(format!(
-            "Source job {} is a run of task '{}', not '{}'",
-            source_job.job_id, source_job.task_name, name
-        )));
-    }
-
-    let source_pin = super::pinned_source::resolve_source_pin(state, source_job)
-        .await?
-        .ok_or_else(|| {
-            AppError::Internal(anyhow::anyhow!(
-                "re-run source {} has no ref to re-resolve",
-                source_job.job_id
-            ))
-        })?;
-    let task = source_pin.task(name)?;
-    require_task_run(state, auth_user, ws, name, task.folder.as_deref()).await?;
-    let input_value = serde_json::to_value(&req.input).unwrap_or_default();
-    let files = FileGrant::direct(state, caller_user_id(auth_user)?);
-
-    let created = create_job_for_task_pinned(
-        &state.workspaces,
-        &state.pool,
-        source_pin.handle.config(),
-        ws,
-        name,
-        input_value,
-        "rerun",
-        source_id,
-        &source_pin.pin.commit,
-        &source_pin.pin.git_ref,
-        CreationMode::Rerun {
-            source_job_id: source_job.job_id,
-            replay_fields: &req.replay_fields,
-        },
-        state.config.agents.as_ref(),
-        state.job_defaults(),
-        files,
-    )
-    .await
-    .map_err(classify_execute_error)?;
-    let job_id = created.job_id;
-
-    crate::settlement::dispatch::fire_initial_suspended_hooks(state, job_id).await;
-    state.settlement().job_created(created).await;
-
-    Ok(Json(ExecuteTaskResponse {
-        job_id: job_id.to_string(),
-    }))
 }
 
 #[cfg(test)]
