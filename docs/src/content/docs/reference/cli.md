@@ -203,6 +203,60 @@ Cancel a running or pending job.
 stroem-api cancel <job-id>
 ```
 
+### `restart`
+
+[Restart](/guides/rerun-and-restart/) a finished, top-level job: from one step, or from every failed or cancelled step. Give exactly one of `--from-step` and `--all-failed`.
+
+```bash
+# Restart from step `deploy`: it and every step that depends on it run again
+stroem-api restart <job-id> --from-step deploy
+
+# Restart every failed or cancelled step and what depends on them
+stroem-api restart <job-id> --all-failed
+
+# Show the plan only; create no job
+stroem-api restart <job-id> --all-failed --dry-run
+```
+
+The command prints the new job ID (or `Dry run: no job created`), the start steps, the steps that run again and the steps that are carried over. Carried-over failed steps are listed too.
+
+### `rerun`
+
+[Re-run](/guides/rerun-and-restart/#re-run) a top-level job: a new run of the same task with the input of the source job. `--input` and `--file` change fields; every other field takes the source job's stored value, secrets included.
+
+```bash
+# Run again with the same input
+stroem-api rerun <job-id>
+
+# Change one field
+stroem-api rerun <job-id> --input '{"date": "2025-01-02"}'
+
+# Give a new file to a file input field (repeatable)
+stroem-api rerun <job-id> --file data_file=./report.csv
+```
+
+The command reads the source job, uploads the files for the re-run, and sends the names of the fields it does not set as `replay_fields`, so the server copies their stored values (the CLI never sends a masked value back). Limits: a field that the source job has but the task no longer declares gives `400 replay_fields names a field the task does not declare`; give the other fields with `--input` instead. A required field that the task gained since the source job ran is not checked: if you do not give it, the job is created without it (as for any re-run through the API). The MCP `rerun_job` tool checks both cases on the server.
+
+### `approve` and `reject`
+
+Decide a step in the `suspended` state: a `type: approval` gate, or an agent step that asked a question.
+
+```bash
+# Approve
+stroem-api approve <job-id> <step>
+
+# Approve with values for the approval's input fields
+stroem-api approve <job-id> <step> --input '{"reason": "tested on staging"}'
+
+# Answer an agent's question
+stroem-api approve <job-id> <step> --input '{"response": "use the EU region"}'
+
+# Reject; the reason becomes the step's error
+stroem-api reject <job-id> <step> --reason "not before the release freeze"
+```
+
+`--input` must be a JSON object. You are recorded as the approver. Both commands need the Run permission on the job's task.
+
 ### `workspaces`
 
 List all configured workspaces on the server: name, task / action / trigger counts (`(off)` when the server config disables the workspace's triggers), and the [display name and description](/guides/multi-workspace/#display-name-and-description) from the server config (`-` when unset).
