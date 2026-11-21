@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::path::PathBuf;
 use tokio_util::io::ReaderStream;
 
-use super::client::{build_trigger_body, check_response, trigger_url};
+use super::client::{api_url, build_trigger_body, check_response, trigger_url};
 
 /// Parses one `--file FIELD=PATH` argument: split on the first `=`, both
 /// sides non-empty.
@@ -26,14 +26,16 @@ pub fn upload_url(
     task: &str,
     name: &str,
     source_job_id: Option<&str>,
-) -> String {
-    let mut query = url::form_urlencoded::Serializer::new(String::new());
-    query.append_pair("name", name);
-    if let Some(id) = source_job_id {
-        query.append_pair("source_job_id", id);
+) -> Result<reqwest::Url> {
+    let mut url = api_url(server, &["api", "workspaces", ws, "tasks", task, "files"])?;
+    {
+        let mut query = url.query_pairs_mut();
+        query.append_pair("name", name);
+        if let Some(id) = source_job_id {
+            query.append_pair("source_job_id", id);
+        }
     }
-    let query = query.finish();
-    format!("{server}/api/workspaces/{ws}/tasks/{task}/files?{query}")
+    Ok(url)
 }
 
 /// Streams one local file to the upload route and returns its `file_id`.
@@ -54,7 +56,7 @@ async fn upload_file(
         .await
         .with_context(|| format!("--file {field}: cannot open '{}'", path.display()))?;
     let resp = client
-        .post(upload_url(server, workspace, task, &name, source_job_id))
+        .post(upload_url(server, workspace, task, &name, source_job_id)?)
         .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
         .body(reqwest::Body::wrap_stream(ReaderStream::new(file)))
         .send()
@@ -149,7 +151,7 @@ pub async fn cmd_trigger(
     .await?;
 
     let resp = client
-        .post(trigger_url(server, workspace, task))
+        .post(trigger_url(server, workspace, task)?)
         .json(&body)
         .send()
         .await
@@ -191,14 +193,24 @@ mod tests {
     #[test]
     fn upload_url_for_a_rerun_names_the_source() {
         assert_eq!(
-            upload_url("http://s", "ws", "t", "a.csv", Some("j1")),
+            upload_url("http://s", "ws", "t", "a.csv", Some("j1"))
+                .unwrap()
+                .as_str(),
             "http://s/api/workspaces/ws/tasks/t/files?name=a.csv&source_job_id=j1"
+        );
+        assert_eq!(
+            upload_url("http://s", "w s", "a#b", "a.csv", None)
+                .unwrap()
+                .as_str(),
+            "http://s/api/workspaces/w%20s/tasks/a%23b/files?name=a.csv"
         );
     }
 
     #[test]
     fn upload_url_encodes_name() {
-        let u = upload_url("http://s", "ws", "t", "my file&x=1.csv", None);
+        let u = upload_url("http://s", "ws", "t", "my file&x=1.csv", None)
+            .unwrap()
+            .to_string();
         assert_eq!(
             u,
             "http://s/api/workspaces/ws/tasks/t/files?name=my+file%26x%3D1.csv"

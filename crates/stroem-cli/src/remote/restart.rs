@@ -6,7 +6,7 @@ use clap::{ArgGroup, Args};
 use reqwest::Client;
 use serde_json::{json, Value};
 
-use super::client::check_response;
+use super::client::{api_url, check_response};
 
 #[derive(Args, Debug)]
 #[command(group(ArgGroup::new("mode").required(true).args(["from_step", "all_failed"])))]
@@ -83,7 +83,7 @@ pub fn format_restart(body: &Value, dry_run: bool) -> String {
 
 pub async fn cmd_restart(client: &Client, server: &str, args: &RestartArgs) -> Result<()> {
     let resp = client
-        .post(format!("{}/api/jobs/{}/restart", server, args.job_id))
+        .post(api_url(server, &["api", "jobs", &args.job_id, "restart"])?)
         .json(&restart_body(args))
         .send()
         .await

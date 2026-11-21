@@ -11,7 +11,7 @@ use clap::Args;
 use reqwest::Client;
 use serde_json::{json, Value};
 
-use super::client::{build_trigger_body, check_response, trigger_url};
+use super::client::{api_url, build_trigger_body, check_response, trigger_url};
 use super::trigger::{parse_file_args, upload_files};
 
 #[derive(Args, Debug)]
@@ -52,7 +52,7 @@ pub async fn cmd_rerun(client: &Client, server: &str, args: &RerunArgs) -> Resul
     let parsed = parse_file_args(&body["input"], &args.files)?;
 
     let resp = client
-        .get(format!("{}/api/jobs/{}", server, args.job_id))
+        .get(api_url(server, &["api", "jobs", &args.job_id])?)
         .send()
         .await
         .context("Failed to connect to server")?;
@@ -80,7 +80,7 @@ pub async fn cmd_rerun(client: &Client, server: &str, args: &RerunArgs) -> Resul
     body["source_job_id"] = json!(args.job_id);
 
     let resp = client
-        .post(trigger_url(server, workspace, task))
+        .post(trigger_url(server, workspace, task)?)
         .json(&body)
         .send()
         .await
@@ -190,6 +190,48 @@ mod tests {
             &Client::new(),
             &server.uri(),
             &args(None, &[format!("data_file={}", file.display())]),
+        )
+        .await
+        .unwrap();
+    }
+
+    /// Workspace and task names come from the server and may hold URL
+    /// delimiters: each is sent as one encoded path segment.
+    #[tokio::test]
+    async fn rerun_encodes_workspace_and_task_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("r.csv");
+        std::fs::write(&file, "x").unwrap();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/api/jobs/{JOB}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "job_id": JOB, "workspace": "w s", "task_name": "deploy#prod?x/y",
+                "raw_input": {},
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(
+                "/api/workspaces/w%20s/tasks/deploy%23prod%3Fx%2Fy/files",
+            ))
+            .and(query_param("source_job_id", JOB))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"file_id": FILE_ID})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(
+                "/api/workspaces/w%20s/tasks/deploy%23prod%3Fx%2Fy/execute",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"job_id": "new-1"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        cmd_rerun(
+            &Client::new(),
+            &server.uri(),
+            &args(None, &[format!("d={}", file.display())]),
         )
         .await
         .unwrap();

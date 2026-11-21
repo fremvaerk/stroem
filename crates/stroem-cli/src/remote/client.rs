@@ -44,11 +44,22 @@ pub fn build_trigger_body(input: Option<&str>) -> Result<serde_json::Value> {
     }
 }
 
+/// `{server}/{segments…}`, each segment percent-encoded as ONE path segment:
+/// a workspace, task or step name may hold `/`, `#`, `?`, `%` or a space.
+pub fn api_url(server: &str, segments: &[&str]) -> Result<reqwest::Url> {
+    let mut url = reqwest::Url::parse(server).context("Invalid server URL")?;
+    url.path_segments_mut()
+        .map_err(|_| anyhow::anyhow!("Invalid server URL"))?
+        .pop_if_empty()
+        .extend(segments);
+    Ok(url)
+}
+
 /// Constructs the URL for triggering a task execution.
-pub fn trigger_url(server: &str, workspace: &str, task: &str) -> String {
-    format!(
-        "{}/api/workspaces/{}/tasks/{}/execute",
-        server, workspace, task
+pub fn trigger_url(server: &str, workspace: &str, task: &str) -> Result<reqwest::Url> {
+    api_url(
+        server,
+        &["api", "workspaces", workspace, "tasks", task, "execute"],
     )
 }
 
@@ -122,19 +133,53 @@ mod tests {
     }
 
     #[test]
-    fn trigger_url_constructs_correct_path() {
-        let url = trigger_url("http://localhost:8080", "default", "my-task");
+    fn api_url_encodes_each_segment() {
         assert_eq!(
-            url,
+            api_url("http://s", &["api", "jobs", "j1"])
+                .unwrap()
+                .as_str(),
+            "http://s/api/jobs/j1"
+        );
+        // A base path is kept; a trailing slash does not double.
+        assert_eq!(
+            api_url("http://s/stroem/", &["api", "jobs"])
+                .unwrap()
+                .as_str(),
+            "http://s/stroem/api/jobs"
+        );
+        assert_eq!(
+            api_url("http://s", &["a b", "x#y?z", "p/q", "100%"])
+                .unwrap()
+                .as_str(),
+            "http://s/a%20b/x%23y%3Fz/p%2Fq/100%25"
+        );
+        assert!(api_url("not a url", &["api"]).is_err());
+    }
+
+    #[test]
+    fn trigger_url_encodes_names() {
+        assert_eq!(
+            trigger_url("http://s", "w s", "deploy#prod")
+                .unwrap()
+                .as_str(),
+            "http://s/api/workspaces/w%20s/tasks/deploy%23prod/execute"
+        );
+    }
+
+    #[test]
+    fn trigger_url_constructs_correct_path() {
+        let url = trigger_url("http://localhost:8080", "default", "my-task").unwrap();
+        assert_eq!(
+            url.as_str(),
             "http://localhost:8080/api/workspaces/default/tasks/my-task/execute"
         );
     }
 
     #[test]
     fn trigger_url_includes_custom_workspace() {
-        let url = trigger_url("http://prod:9000", "production", "deploy");
+        let url = trigger_url("http://prod:9000", "production", "deploy").unwrap();
         assert_eq!(
-            url,
+            url.as_str(),
             "http://prod:9000/api/workspaces/production/tasks/deploy/execute"
         );
     }

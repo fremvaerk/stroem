@@ -6,7 +6,7 @@ use clap::Args;
 use reqwest::Client;
 use serde_json::{json, Value};
 
-use super::client::check_response;
+use super::client::{api_url, check_response};
 
 #[derive(Args, Debug)]
 pub struct ApproveArgs {
@@ -33,12 +33,7 @@ pub struct RejectArgs {
 
 /// The approve route of one step; the step name is one encoded path segment.
 pub fn approve_url(server: &str, job_id: &str, step: &str) -> Result<reqwest::Url> {
-    let mut url = reqwest::Url::parse(server).context("Invalid server URL")?;
-    url.path_segments_mut()
-        .map_err(|_| anyhow::anyhow!("Invalid server URL"))?
-        .pop_if_empty()
-        .extend(["api", "jobs", job_id, "steps", step, "approve"]);
-    Ok(url)
+    api_url(server, &["api", "jobs", job_id, "steps", step, "approve"])
 }
 
 /// POSTs one decision and prints the result.
