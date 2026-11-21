@@ -993,3 +993,179 @@ async fn pinned_rerun_replays_a_json_field_from_the_source() -> Result<()> {
     })
     .await
 }
+
+// ─── MCP restart_job / rerun_job: the same shared paths ───────────────────
+
+/// MCP `restart_job` of a pinned source plans against the flow at the
+/// re-resolved commit and stamps the new job with the ref, like the REST
+/// route (`restart_of_pinned_source_plans_against_the_pinned_flow`).
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_restart_of_pinned_source_plans_against_the_pinned_flow() -> Result<()> {
+    rr_bounded(async {
+        let fx = pinned_workspace_fixture(PinnedFixtureOpts {
+            mcp: true,
+            ..rr_opts()
+        })
+        .await?;
+        let source = rr_failed_pinned_source(&fx, json!({"ok": true})).await?;
+        let c2 = rr_hotfix(&fx);
+
+        let resp = mcp_call(
+            &fx.router,
+            None,
+            "restart_job",
+            json!({"job_id": source.to_string(), "from_step": "b", "dry_run": true}),
+        )
+        .await;
+        assert!(!mcp_is_error(&resp), "dry run: {resp}");
+        let plan = mcp_tool_json(&resp);
+        assert_eq!(plan["restart_steps"], json!(["b"]), "{plan}");
+        assert_eq!(plan["carried_over"], json!(["a"]), "{plan}");
+
+        let resp = mcp_call(
+            &fx.router,
+            None,
+            "restart_job",
+            json!({"job_id": source.to_string(), "all_failed": true}),
+        )
+        .await;
+        assert!(!mcp_is_error(&resp), "restart: {resp}");
+        let body = mcp_tool_json(&resp);
+        assert_eq!(body["start_steps"], json!(["b"]), "{body}");
+        let new_id: Uuid = body["job_id"].as_str().unwrap().parse()?;
+        let job = JobRepo::get(&fx.pool, new_id).await?.unwrap();
+        assert_eq!(job.source_type, "restart");
+        assert_eq!(job.source_job_id, Some(source));
+        assert_eq!(job.git_ref.as_deref(), Some("release/2.3"));
+        assert_eq!(job.revision.as_deref(), Some(c2.as_str()));
+        assert_eq!(job.task_folder.as_deref(), Some("rel"));
+
+        // MCP `rerun_job` re-resolves the ref the same way.
+        let resp = mcp_call(
+            &fx.router,
+            None,
+            "rerun_job",
+            json!({"job_id": source.to_string()}),
+        )
+        .await;
+        assert!(!mcp_is_error(&resp), "rerun: {resp}");
+        let rerun: Uuid = mcp_tool_json(&resp)["job_id"].as_str().unwrap().parse()?;
+        let job = JobRepo::get(&fx.pool, rerun).await?.unwrap();
+        assert_eq!(job.source_type, "rerun");
+        assert_eq!(job.source_job_id, Some(source));
+        assert_eq!(job.git_ref.as_deref(), Some("release/2.3"));
+        assert_eq!(job.revision.as_deref(), Some(c2.as_str()));
+        Ok(())
+    })
+    .await
+}
+
+/// MCP twin of `pinned_rerun_and_restart_require_run_on_the_folder_at_the_new_commit`:
+/// the task moved into a stricter folder at the branch's new tip, so an MCP
+/// restart needs `Run` on that folder too (dry run included).
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_pinned_restart_requires_run_on_the_folder_at_the_new_commit() -> Result<()> {
+    const DENIED: &str = "denied@test.local";
+    const VIEWER: &str = "viewer@test.local";
+    const BOTH: &str = "both@test.local";
+    let rule = |tasks: &str, action: AclAction, users: &[&str]| AclRule {
+        workspace: "etl".into(),
+        tasks: vec![tasks.into()],
+        action,
+        groups: vec![],
+        users: users.iter().map(|u| u.to_string()).collect(),
+    };
+    let user = |email: &'static str| FixtureUser {
+        email,
+        groups: vec![],
+        admin: false,
+    };
+    rr_bounded(async {
+        let fx = pinned_workspace_fixture(PinnedFixtureOpts {
+            acl: Some(AclConfig {
+                default: AclAction::Deny,
+                rules: vec![
+                    rule("rel/*", AclAction::Run, &[DENIED, VIEWER, BOTH]),
+                    rule("locked/*", AclAction::View, &[VIEWER]),
+                    rule("locked/*", AclAction::Run, &[BOTH]),
+                ],
+            }),
+            users: vec![user(DENIED), user(VIEWER), user(BOTH)],
+            mcp: true,
+            ..rr_opts()
+        })
+        .await?;
+        let source = rr_failed_pinned_source(&fx, json!({"ok": true})).await?;
+        fx.etl.commit(
+            "release/2.3",
+            "release/2.3",
+            &[(
+                RR_YAML_PATH,
+                &RR_ETL_RELEASE.replace("folder: rel", "folder: locked"),
+            )],
+        );
+
+        for (email, error) in [(DENIED, "Task not found"), (VIEWER, "View-only access")] {
+            let key = fx.api_key(email, false).await;
+            for mode in [
+                json!({"from_step": "b", "dry_run": true}),
+                json!({"from_step": "b"}),
+                json!({"all_failed": true, "dry_run": true}),
+                json!({"all_failed": true}),
+            ] {
+                let mut args = mode.clone();
+                args["job_id"] = json!(source.to_string());
+                let resp = mcp_call(&fx.router, Some(&key), "restart_job", args).await;
+                assert_eq!(
+                    resp["error"]["message"],
+                    json!(error),
+                    "{email} {mode}: {resp}"
+                );
+            }
+            let resp = mcp_call(
+                &fx.router,
+                Some(&key),
+                "rerun_job",
+                json!({"job_id": source.to_string()}),
+            )
+            .await;
+            assert_eq!(
+                resp["error"]["message"],
+                json!(error),
+                "{email} rerun: {resp}"
+            );
+        }
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM job WHERE source_job_id = $1")
+            .bind(source)
+            .fetch_one(&fx.pool)
+            .await?;
+        assert_eq!(count, 0, "nothing is created for a refused caller");
+
+        let both = fx.api_key(BOTH, false).await;
+        let resp = mcp_call(
+            &fx.router,
+            Some(&both),
+            "restart_job",
+            json!({"job_id": source.to_string(), "from_step": "b"}),
+        )
+        .await;
+        assert!(!mcp_is_error(&resp), "restart: {resp}");
+        let new_id: Uuid = mcp_tool_json(&resp)["job_id"].as_str().unwrap().parse()?;
+        let job = JobRepo::get(&fx.pool, new_id).await?.unwrap();
+        assert_eq!(job.task_folder.as_deref(), Some("locked"));
+        assert_eq!(job.source_id.as_deref(), Some(BOTH));
+        let resp = mcp_call(
+            &fx.router,
+            Some(&both),
+            "rerun_job",
+            json!({"job_id": source.to_string()}),
+        )
+        .await;
+        assert!(!mcp_is_error(&resp), "rerun: {resp}");
+        let rerun: Uuid = mcp_tool_json(&resp)["job_id"].as_str().unwrap().parse()?;
+        let job = JobRepo::get(&fx.pool, rerun).await?.unwrap();
+        assert_eq!(job.task_folder.as_deref(), Some("locked"));
+        Ok(())
+    })
+    .await
+}

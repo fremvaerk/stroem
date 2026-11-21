@@ -58,7 +58,7 @@ mcp:
 
 ## Available Tools
 
-The MCP server provides eleven tools for interacting with Strøm:
+The MCP server provides fourteen tools for interacting with Strøm:
 
 | Tool | Description | Parameters |
 |------|-------------|------------|
@@ -70,6 +70,9 @@ The MCP server provides eleven tools for interacting with Strøm:
 | `get_job_logs` | The end of a job's log (last 256 KiB), formatted | `job_id`, `step?`, `tail_bytes?` |
 | `list_jobs` | List recent jobs with optional filters | `workspace?`, `task_name?`, `status?`, `limit?` |
 | `cancel_job` | Cancel a running or pending job | `job_id` |
+| `restart_job` | Restart a finished job from one step, or every failed step | `job_id`, `from_step?` or `all_failed?`, `dry_run?` |
+| `rerun_job` | Re-run a job with its stored input | `job_id`, `input?` |
+| `approve_step` | Approve or reject a suspended step | `job_id`, `step_name`, `approved`, `input?`, `rejection_reason?` |
 | `list_artifacts` | List a job's artifacts (name, content type, size, download URL) | `job_id` |
 | `get_artifact` | Fetch one artifact's content | `job_id`, `name` |
 | `create_upload_url` | Get a single-use URL to upload a file for a `file` input field | `workspace`, `task_name`, `file_name` |
@@ -81,6 +84,16 @@ When the log is longer than the tail, the result ends with `[truncated: showing 
 blocks the agent can view, and any other binary (PDF, archives, …) as a base64
 blob resource. Artifacts larger than 1 MiB are not inlined — download them via
 the HTTP artifact API (the URL is in `list_artifacts`) instead.
+
+### Job actions
+
+`restart_job`, `rerun_job` and `approve_step` do what the job page's buttons do, through the same server code as the REST API, so they give the same results and refuse the same requests. Each needs the Run permission on the job's task. A job you may not see answers `Job not found` (`Source job not found` for `rerun_job`); with View only, the answer names the missing permission.
+
+- **`restart_job`** — [Restart](/guides/rerun-and-restart/) a terminal, top-level job (not a `type: task` sub-job and not a hook job). Give exactly one of `from_step` (restart from that step) and `all_failed: true` (restart every failed or cancelled step, every step that did not finish, and what depends on them). `dry_run: true` returns the plan and creates nothing. The result has `job_id` (not for a dry run), `start_steps`, `restart_steps`, `carried_over`, `carried_failed` and `carried_failed_tolerated`, as `POST /api/jobs/{id}/restart` returns them.
+- **`rerun_job`** — [Re-run](/guides/rerun-and-restart/#re-run) a top-level job: a new run of the same task. Every input field you do not give in `input` takes the source job's stored value, secret and connection fields included, so an agent does not need to know them; a field you give replaces the source's value. A field that the task no longer has is left out. A required field that the source has no value for answers `the source job has no value for required field '…'`: give it in `input`. A `type: file` field takes a `file_id` from `create_upload_url`; inline file objects are not accepted here. The result is `{"job_id": "…"}`.
+- **`approve_step`** — approve (`approved: true`) or reject (`approved: false`) a step in the `suspended` state: a [`type: approval`](/guides/action-types/) gate, or an [agent](/guides/agent-actions/) step that asked a question (`ask_user`; pass `input: {"response": "<answer>"}`). `input` holds the approval's input fields; if you give it, its required fields must be set. `rejection_reason` becomes the failed step's error. The job log names you, and an approval stores you in the step output as `approved_by`. Any MCP client with the Run permission can pass an approval gate this way. The result is `{"status": "approved"}` or `{"status": "rejected"}`.
+
+Parameter mistakes and refused requests (wrong state, not top-level, a step that is not in the flow, a missing required field) come back as JSON-RPC `invalid params` (`-32602`) errors with the same message the REST API gives. Not-found and permission answers are errors with a fixed message, as for the other tools.
 
 ### Sending files
 

@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::path::PathBuf;
 use tokio_util::io::ReaderStream;
 
-use super::client::{build_trigger_body, check_response, trigger_url};
+use super::client::{api_url, build_trigger_body, check_response, trigger_url};
 
 /// Parses one `--file FIELD=PATH` argument: split on the first `=`, both
 /// sides non-empty.
@@ -17,12 +17,25 @@ pub fn parse_file_arg(s: &str) -> Result<(String, PathBuf)> {
     }
 }
 
-/// The upload route of a task; `name` is the original file name.
-pub fn upload_url(server: &str, ws: &str, task: &str, name: &str) -> String {
-    let query = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("name", name)
-        .finish();
-    format!("{server}/api/workspaces/{ws}/tasks/{task}/files?{query}")
+/// The upload route of a task; `name` is the original file name. With
+/// `source_job_id`, the upload is for a re-run of that job (the server then
+/// authorises it like the re-run itself).
+pub fn upload_url(
+    server: &str,
+    ws: &str,
+    task: &str,
+    name: &str,
+    source_job_id: Option<&str>,
+) -> Result<reqwest::Url> {
+    let mut url = api_url(server, &["api", "workspaces", ws, "tasks", task, "files"])?;
+    {
+        let mut query = url.query_pairs_mut();
+        query.append_pair("name", name);
+        if let Some(id) = source_job_id {
+            query.append_pair("source_job_id", id);
+        }
+    }
+    Ok(url)
 }
 
 /// Streams one local file to the upload route and returns its `file_id`.
@@ -31,6 +44,7 @@ async fn upload_file(
     server: &str,
     workspace: &str,
     task: &str,
+    source_job_id: Option<&str>,
     field: &str,
     path: &std::path::Path,
 ) -> Result<String> {
@@ -42,7 +56,7 @@ async fn upload_file(
         .await
         .with_context(|| format!("--file {field}: cannot open '{}'", path.display()))?;
     let resp = client
-        .post(upload_url(server, workspace, task, &name))
+        .post(upload_url(server, workspace, task, &name, source_job_id)?)
         .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
         .body(reqwest::Body::wrap_stream(ReaderStream::new(file)))
         .send()
@@ -72,6 +86,49 @@ async fn upload_file(
         .with_context(|| format!("--file {field}: upload response has no file_id"))
 }
 
+/// Parses every `--file` argument and checks the input shape and key
+/// clashes, before any upload.
+pub fn parse_file_args(input: &Value, files: &[String]) -> Result<Vec<(String, PathBuf)>> {
+    let parsed = files
+        .iter()
+        .map(|f| parse_file_arg(f))
+        .collect::<Result<Vec<_>>>()?;
+    if !parsed.is_empty() && !input.is_object() {
+        bail!("--input must be a JSON object when --file is used");
+    }
+    let mut seen = std::collections::HashSet::new();
+    for (field, _) in &parsed {
+        if input.get(field).is_some() {
+            bail!("input field '{field}' is set by both --input and --file");
+        }
+        if !seen.insert(field.clone()) {
+            bail!("input field '{field}' is set by more than one --file");
+        }
+    }
+    Ok(parsed)
+}
+
+/// Uploads each parsed `--file` and sets its field in `input` to the
+/// returned `file_id`. `source_job_id`: the upload is for a re-run.
+pub async fn upload_files(
+    client: &Client,
+    server: &str,
+    workspace: &str,
+    task: &str,
+    source_job_id: Option<&str>,
+    input: &mut Value,
+    parsed: &[(String, PathBuf)],
+) -> Result<()> {
+    for (field, path) in parsed {
+        let id = upload_file(client, server, workspace, task, source_job_id, field, path).await?;
+        input
+            .as_object_mut()
+            .context("--input must be a JSON object when --file is used")?
+            .insert(field.clone(), Value::String(id));
+    }
+    Ok(())
+}
+
 pub async fn cmd_trigger(
     client: &Client,
     server: &str,
@@ -81,35 +138,20 @@ pub async fn cmd_trigger(
     files: &[String],
 ) -> Result<()> {
     let mut body: Value = build_trigger_body(input)?;
-
-    // Parse every argument and check the input shape and key clashes
-    // before any upload.
-    let parsed = files
-        .iter()
-        .map(|f| parse_file_arg(f))
-        .collect::<Result<Vec<_>>>()?;
-    if !parsed.is_empty() && !body["input"].is_object() {
-        bail!("--input must be a JSON object when --file is used");
-    }
-    let mut seen = std::collections::HashSet::new();
-    for (field, _) in &parsed {
-        if body["input"].get(field).is_some() {
-            bail!("input field '{field}' is set by both --input and --file");
-        }
-        if !seen.insert(field.clone()) {
-            bail!("input field '{field}' is set by more than one --file");
-        }
-    }
-    for (field, path) in &parsed {
-        let id = upload_file(client, server, workspace, task, field, path).await?;
-        body["input"]
-            .as_object_mut()
-            .context("--input must be a JSON object when --file is used")?
-            .insert(field.clone(), Value::String(id));
-    }
+    let parsed = parse_file_args(&body["input"], files)?;
+    upload_files(
+        client,
+        server,
+        workspace,
+        task,
+        None,
+        &mut body["input"],
+        &parsed,
+    )
+    .await?;
 
     let resp = client
-        .post(trigger_url(server, workspace, task))
+        .post(trigger_url(server, workspace, task)?)
         .json(&body)
         .send()
         .await
@@ -149,8 +191,26 @@ mod tests {
     }
 
     #[test]
+    fn upload_url_for_a_rerun_names_the_source() {
+        assert_eq!(
+            upload_url("http://s", "ws", "t", "a.csv", Some("j1"))
+                .unwrap()
+                .as_str(),
+            "http://s/api/workspaces/ws/tasks/t/files?name=a.csv&source_job_id=j1"
+        );
+        assert_eq!(
+            upload_url("http://s", "w s", "a#b", "a.csv", None)
+                .unwrap()
+                .as_str(),
+            "http://s/api/workspaces/w%20s/tasks/a%23b/files?name=a.csv"
+        );
+    }
+
+    #[test]
     fn upload_url_encodes_name() {
-        let u = upload_url("http://s", "ws", "t", "my file&x=1.csv");
+        let u = upload_url("http://s", "ws", "t", "my file&x=1.csv", None)
+            .unwrap()
+            .to_string();
         assert_eq!(
             u,
             "http://s/api/workspaces/ws/tasks/t/files?name=my+file%26x%3D1.csv"

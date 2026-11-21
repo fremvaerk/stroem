@@ -2,6 +2,7 @@ use super::auth::{check_task_acl, resolve_acl_scope, resolve_job_acl_scope, McpA
 use super::handler::StromMcpHandler;
 use crate::acl::TaskPermission;
 use crate::log_storage::JobLogMeta;
+use crate::web::error::AppError;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
 use rmcp::{tool, tool_router};
@@ -112,6 +113,50 @@ pub struct ListJobsParams {
 pub struct CancelJobParams {
     /// Job ID (UUID) to cancel
     pub job_id: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct RestartJobParams {
+    /// Job ID (UUID) of the source job: a terminal, top-level job
+    pub job_id: String,
+    /// Restart from this flow step: it and every step that depends on it run
+    /// again. Give this or `all_failed`, not both.
+    #[serde(default)]
+    pub from_step: Option<String>,
+    /// Restart every failed, cancelled or unfinished step and every step that
+    /// depends on them. Give this or `from_step`, not both.
+    #[serde(default)]
+    pub all_failed: bool,
+    /// Only return the plan; create no job
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct RerunJobParams {
+    /// Job ID (UUID) of the source job: a top-level job
+    pub job_id: String,
+    /// Input fields to change (optional). Every input field of the task that
+    /// is not given here takes the source job's value, secrets included.
+    #[serde(default)]
+    pub input: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ApproveStepParams {
+    /// Job ID (UUID)
+    pub job_id: String,
+    /// Name of the suspended step
+    pub step_name: String,
+    /// `true` approves the step, `false` rejects it
+    pub approved: bool,
+    /// Approve only: values for the approval's input fields. For an agent
+    /// step that asked a question (`ask_user`), `{"response": "<answer>"}`.
+    #[serde(default)]
+    pub input: Option<serde_json::Value>,
+    /// Reject only: why the step is rejected (it becomes the step's error)
+    #[serde(default)]
+    pub rejection_reason: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -446,6 +491,54 @@ async fn check_job_acl(
         return Err(not_found("Job"));
     }
     Ok(perm)
+}
+
+/// The caller of a shared job action ([`crate::web::api::caller::Caller`]).
+fn caller(handler: &StromMcpHandler) -> crate::web::api::caller::Caller<'_> {
+    crate::web::api::caller::Caller {
+        claims: handler.auth.as_ref().map(|a| &a.claims),
+    }
+}
+
+/// A shared job action's [`AppError`] as an MCP error. 400 / 409 / 413 →
+/// invalid params; 401 / 403 / 404 / 503 / 429 → the internal error with the
+/// same fixed message the other tools use (`not_found`, `acl_err`); an
+/// internal error is logged and answered with a fixed text, never its chain.
+fn app_error(e: AppError) -> rmcp::ErrorData {
+    match e {
+        AppError::BadRequest(m) | AppError::Conflict(m) | AppError::PayloadTooLarge(m) => {
+            rmcp::ErrorData::invalid_params(m, None)
+        }
+        AppError::NotFound(m) | AppError::ServiceUnavailable(m) => internal_err(m),
+        AppError::Unauthorized(m) | AppError::Forbidden(m) => acl_err(m),
+        AppError::TooManyRequests { message, .. } => internal_err(message),
+        AppError::Internal(e) => {
+            tracing::error!("MCP job action failed: {:#}", e);
+            internal_err("Internal server error")
+        }
+    }
+}
+
+/// The approval `input` as REST would get it: absent or `null` stays absent
+/// (the required-field check then does not run), a string holding a JSON
+/// object is that object (some MCP clients stringify objects), any other
+/// value is passed as given.
+fn approval_input(input: Option<serde_json::Value>) -> Option<serde_json::Value> {
+    match input {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(s)) => match serde_json::from_str(&s) {
+            Ok(v @ serde_json::Value::Object(_)) => Some(v),
+            _ => Some(serde_json::Value::String(s)),
+        },
+        Some(v) => Some(v),
+    }
+}
+
+/// A `job_id` parameter as a UUID, else invalid params.
+fn parse_job_id(job_id: &str) -> Result<uuid::Uuid, rmcp::ErrorData> {
+    job_id
+        .parse()
+        .map_err(|_| rmcp::ErrorData::invalid_params("Invalid job_id UUID", None))
 }
 
 fn text_result(text: impl Into<String>) -> CallToolResult {
@@ -1089,6 +1182,86 @@ impl StromMcpHandler {
         }
     }
 
+    /// Restart a finished job from one step, or every failed step.
+    #[tool(
+        description = "Restart a finished job: create a new job of the same task in which the start steps, and every step that depends on them, run again, and every other step is carried over from the source job as it ended. The source job must be a terminal, top-level job (not a `type: task` sub-job and not a hook job). Give exactly one of `from_step` (restart from that flow step) or `all_failed: true` (restart every failed or cancelled step, every step that did not finish, and what depends on them). Use `dry_run: true` to preview the plan without creating a job. Returns `job_id` (not for a dry run), `start_steps`, `restart_steps`, `carried_over`, `carried_failed` and `carried_failed_tolerated`. Needs Run access."
+    )]
+    async fn restart_job(
+        &self,
+        params: Parameters<RestartJobParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let Parameters(params) = params;
+        tracing::info!(job_id = %params.job_id, dry_run = params.dry_run, "MCP: restart_job");
+        let job_id = parse_job_id(&params.job_id)?;
+        let from = crate::web::api::restart::restart_mode(params.from_step, params.all_failed)
+            .map_err(app_error)?;
+        let outcome = crate::web::api::restart::restart_job(
+            &self.state,
+            caller(self),
+            job_id,
+            from,
+            params.dry_run,
+        )
+        .await
+        .map_err(app_error)?;
+        Ok(json_result(&outcome.body()))
+    }
+
+    /// Re-run a job: a new run of the same task with the source's input.
+    #[tool(
+        description = "Re-run a job: start a new run of the same task, like the Re-run button in the UI. Every input field you do not give in `input` takes the source job's value, secret and connection fields included, so you do not need to know those values; a field you give replaces the source's value. A `type: file` field takes the `file_id` of a file uploaded with `create_upload_url` (inline file objects are not accepted here). The source job must be a top-level job (not a `type: task` sub-job and not a hook job). Returns the new `job_id`. Needs Run access on the task."
+    )]
+    async fn rerun_job(
+        &self,
+        params: Parameters<RerunJobParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let Parameters(params) = params;
+        tracing::info!(job_id = %params.job_id, "MCP: rerun_job");
+        let source_job_id = parse_job_id(&params.job_id)?;
+        let input = normalize_task_input(params.input)?;
+        let job_id = crate::web::api::rerun::rerun_job(
+            &self.state,
+            caller(self),
+            source_job_id,
+            crate::web::api::rerun::Destination::Source,
+            input,
+            crate::web::api::rerun::Replay::Unset,
+        )
+        .await
+        .map_err(app_error)?;
+        Ok(json_result(
+            &serde_json::json!({ "job_id": job_id.to_string() }),
+        ))
+    }
+
+    /// Approve or reject a suspended step.
+    #[tool(
+        description = "Approve or reject a suspended step: a `type: approval` gate, or an agent step that waits for an answer (`ask_user`). `approved: true` approves it, with `input` for the approval's input fields (for an agent question pass {\"response\": \"<answer>\"}); `approved: false` rejects it, with an optional `rejection_reason`. The step must be in the `suspended` state (see `get_job_status`). You are recorded as the approver. Needs Run access. Returns {\"status\": \"approved\"} or {\"status\": \"rejected\"}."
+    )]
+    async fn approve_step(
+        &self,
+        params: Parameters<ApproveStepParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let Parameters(params) = params;
+        tracing::info!(job_id = %params.job_id, step = %params.step_name, approved = params.approved, "MCP: approve_step");
+        let job_id = parse_job_id(&params.job_id)?;
+        let req = crate::web::api::jobs::ApproveStepRequest {
+            approved: params.approved,
+            input: approval_input(params.input),
+            rejection_reason: params.rejection_reason,
+        };
+        let decision = crate::web::api::approve::approve_step(
+            &self.state,
+            caller(self),
+            job_id,
+            &params.step_name,
+            req,
+        )
+        .await
+        .map_err(app_error)?;
+        Ok(json_result(&decision.body()))
+    }
+
     /// List artifacts produced by a job.
     #[tool(
         description = "List artifacts produced by a job. Returns name, content_type, size_bytes, step_name, and a relative download URL (use list_artifacts then call get_artifact, or pass the URL to a human for binary content)."
@@ -1400,6 +1573,29 @@ fn truncation_trailer(tail: &crate::log_read::Tail) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn approval_input_keeps_absent_absent() {
+        assert_eq!(approval_input(None), None);
+        assert_eq!(approval_input(Some(serde_json::Value::Null)), None);
+        assert_eq!(
+            approval_input(Some(serde_json::json!({"a": 1}))),
+            Some(serde_json::json!({"a": 1}))
+        );
+        assert_eq!(
+            approval_input(Some(serde_json::json!("{\"a\": 1}"))),
+            Some(serde_json::json!({"a": 1}))
+        );
+        // Not an object: passed on as given, like the REST body.
+        assert_eq!(
+            approval_input(Some(serde_json::json!("yes"))),
+            Some(serde_json::json!("yes"))
+        );
+        assert_eq!(
+            approval_input(Some(serde_json::json!("[1]"))),
+            Some(serde_json::json!("[1]"))
+        );
+    }
 
     #[test]
     fn decode_inline_accepts_text_and_base64() {

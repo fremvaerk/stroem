@@ -135,10 +135,20 @@ The UI hides Re-run and Restart for a pinned job whose task does not exist on
 the default branch, because the task page reads the default branch. Use the
 API for those: `POST /api/workspaces/{ws}/tasks/{task}/execute` with
 `source_job_id` (and the source's `raw_input` as `input`), or
-`POST /api/jobs/{id}/restart`.
+`POST /api/jobs/{id}/restart`. The MCP tools and the CLI commands below work
+for them too.
+
+## From an MCP client or the CLI
+
+The MCP tools `restart_job` and `rerun_job` ([MCP Integration](/guides/mcp/#job-actions))
+and the `stroem-api restart` / `stroem-api rerun` commands
+([CLI Reference](/reference/cli/#restart)) use the same server code as the
+buttons, with the same checks. A re-run from MCP or the CLI takes every input
+field you do not give from the source job, secrets included.
 
 ## Related
 
 - [Hooks](/guides/hooks) — workspace-level hooks fire for both `rerun` and `restart` jobs (they're top-level sources), and `hook.failed_steps[].carried_over` flags failures that came from the source job rather than this run.
 - [Retry Mechanisms](/guides/retry) — automatic step/task retry, a different mechanism for handling failures without user intervention.
 - [API Reference](/reference/api) — `POST /api/jobs/{id}/restart` request/response shapes.
+- [MCP Integration](/guides/mcp/#job-actions) and [CLI Reference](/reference/cli/#restart) — restart, re-run and approve without the UI.

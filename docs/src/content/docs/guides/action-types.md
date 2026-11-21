@@ -639,6 +639,8 @@ curl -X POST "http://localhost:8080/api/jobs/{job_id}/steps/{step_name}/approve"
 
 The `rejection_reason` is optional but recommended for audit trails. When rejected, the step fails. Steps after a rejected approval run only if their own `depends_on` edge to the approval step accepts `failed` (e.g. `accept: [completed, failed]` or `accept: any`) — otherwise they're skipped `unreachable`. The approval step's own `continue_on_failure` is a separate decision: it's what decides whether the rejection fails the job, not whether anything downstream runs.
 
+The CLI (`stroem-api approve <job-id> <step>`, `stroem-api reject <job-id> <step> --reason …`, see [CLI Reference](/reference/cli/#approve-and-reject)) and the MCP tool `approve_step` ([MCP Integration](/guides/mcp/#job-actions)) send the same request. Every caller with the Run permission on the task can decide a gate, an MCP client included. The job log names the caller, and an approval stores it in the step output as `approved_by`.
+
 ### Timeout behavior
 
 Suspended steps are subject to a timeout. If not approved or rejected within the timeout period, the recovery sweep automatically fails the step:

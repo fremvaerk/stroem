@@ -13,10 +13,8 @@ use axum::{
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sqlx;
 use std::collections::HashMap;
 use std::sync::Arc;
-use stroem_common::models::job::StepStatus;
 use stroem_db::JobAclScope;
 use stroem_db::{JobRepo, JobStepRepo};
 use uuid::Uuid;
@@ -700,17 +698,6 @@ pub struct RestartJobRequest {
     pub dry_run: bool,
 }
 
-impl RestartJobRequest {
-    /// The restart mode, or `None` when the body names both or neither.
-    fn restart_from(&self) -> Option<crate::restart::RestartFrom> {
-        match (&self.from_step, self.all_failed) {
-            (Some(step), false) => Some(crate::restart::RestartFrom::Step(step.clone())),
-            (None, true) => Some(crate::restart::RestartFrom::AllFailed),
-            _ => None,
-        }
-    }
-}
-
 /// Source types whose jobs are *derived* runs rather than a user's own top-level
 /// run. Restart and Re-run both refuse them: `create_restart_job` and
 /// `execute_task` always create a parentless job, so restarting a `type: task`
@@ -730,29 +717,10 @@ pub(crate) fn is_top_level_job(job: &stroem_db::JobRow) -> bool {
 /// POST /api/jobs/:id/restart — Restart From Step (spec 2026-09-07 §6.1) and
 /// Restart Failed Steps (spec 2026-11-02).
 ///
-/// Creates a new job for the source job's task in which the start steps —
-/// `from_step`, or with `all_failed` every failed or cancelled step — and
-/// everything below them rerun, while everything else is carried over from
-/// the source as it ended. `dry_run` returns the same plan without creating
-/// anything, so a confirm dialog can be authoritative about steps added to the
-/// flow since the source job ran.
-///
 /// The body shape (exactly one of `from_step` / `all_failed`) is checked
-/// first, like the extractor rejection it replaces. Then checks run in the
-/// spec's order: 401 (auth configured, no user) → 404 (job
-/// missing or ACL `Deny`) → 403 (ACL `View`) → 409 (source not terminal) → 400
-/// (not top-level, legacy source, workspace/task gone, bad `from_step`).
-///
-/// A pinned source (git-refs spec § 7.3) is authorised by its own
-/// `task_folder` (§ 7.8) and re-resolves its ref BEFORE the task lookup, so
-/// the plan uses the flow at the commit the restart will run; `Run` is then
-/// also required on the folder the task declares at that commit (404 "Task
-/// not found" / 403 "View-only access", like the execute route), `dry_run`
-/// included. That adds: 400
-/// when the ref no longer resolves (`RefNotFound`) or its config does not
-/// load (`PinLoadFailed`, withheld), 400 when the task does not exist at the
-/// re-resolved commit, and 500 when the git remote is unavailable
-/// (`PinUnavailable`).
+/// first, like the extractor rejection it replaces; the rest is
+/// [`super::restart::restart_job`], shared with the MCP `restart_job` tool.
+/// 201 with the new `job_id`, or 200 with the plan for a `dry_run`.
 #[tracing::instrument(skip(state, auth_user, req))]
 pub async fn restart_job(
     State(state): State<Arc<AppState>>,
@@ -761,165 +729,20 @@ pub async fn restart_job(
     Json(req): Json<RestartJobRequest>,
 ) -> Result<Response, AppError> {
     let job_id = parse_uuid_param(&id, "job")?;
-    let restart_from = req.restart_from().ok_or_else(|| {
-        AppError::BadRequest("Specify exactly one of from_step or all_failed".into())
-    })?;
-
-    // Explicit 401: `check_job_acl` returns `Run` when no user is supplied, so
-    // the missing-token case must be rejected before it (mirrors execute_task).
-    let source_id = match (state.config.auth.is_some(), &auth_user) {
-        (false, _) => None,
-        (true, Some(user)) => Some(user.claims.email.clone()),
-        (true, None) => return Err(AppError::Unauthorized("Authentication required".into())),
-    };
-
-    let source = JobRepo::get(&state.pool, job_id)
-        .await
-        .context("get job")?
-        .ok_or_else(|| AppError::not_found("Job"))?;
-
-    // Restart creates a job, so it needs Run — like execute and cancel.
-    match check_job_acl(&state, &auth_user, &source).await? {
-        TaskPermission::Deny => return Err(AppError::not_found("Job")),
-        TaskPermission::View => {
-            return Err(AppError::Forbidden(
-                "Insufficient permissions to restart this job".into(),
-            ))
-        }
-        TaskPermission::Run => {}
-    }
-
-    let terminal = matches!(
-        source
-            .status
-            .parse::<stroem_common::models::job::JobStatus>(),
-        Ok(stroem_common::models::job::JobStatus::Completed)
-            | Ok(stroem_common::models::job::JobStatus::Failed)
-            | Ok(stroem_common::models::job::JobStatus::Cancelled)
-            | Ok(stroem_common::models::job::JobStatus::Skipped)
-    );
-    if !terminal {
-        return Err(AppError::Conflict("Job is not in a terminal state".into()));
-    }
-    if !is_top_level_job(&source) {
-        return Err(AppError::BadRequest(
-            "Only top-level jobs can be restarted".into(),
-        ));
-    }
-    if source.raw_input.is_none() {
-        return Err(AppError::BadRequest(
-            "Source job predates Re-run prefill (no raw_input)".into(),
-        ));
-    }
-
-    // Spec § 7.3: a pinned source re-resolves its ref BEFORE the task lookup —
-    // the task may exist only at the ref, and the plan must be computed
-    // against the flow of the commit the restart will run.
-    let source_pin = super::pinned_source::resolve_source_pin(&state, &source).await?;
-    let live_workspace;
-    let (workspace, task) = match &source_pin {
-        Some(sp) => {
-            let task = sp.task(&source.task_name)?;
-            // Final review I3: the new job is stamped with the folder the task
-            // declares at the re-resolved commit, so `Run` is required there
-            // too (the source check above covers only the source's folder).
-            super::tasks::require_task_run(
-                &state,
-                &auth_user,
-                &source.workspace,
-                &source.task_name,
-                task.folder.as_deref(),
-            )
-            .await?;
-            (sp.handle.config(), task)
-        }
-        None => {
-            live_workspace = state
-                .get_workspace(&source.workspace)
-                .await
-                .ok_or_else(|| {
-                    AppError::BadRequest(format!("Workspace '{}' is not loaded", source.workspace))
-                })?;
-            let task = live_workspace.tasks.get(&source.task_name).ok_or_else(|| {
-                AppError::BadRequest(format!(
-                    "Task '{}' no longer exists in workspace '{}'",
-                    source.task_name, source.workspace
-                ))
-            })?;
-            (live_workspace.as_ref(), task)
-        }
-    };
-
-    let source_steps = JobStepRepo::get_steps_for_job(&state.pool, job_id)
-        .await
-        .context("get source steps")?;
-    let plan =
-        crate::restart::plan_restart(&task.flow, &source_steps, &restart_from).map_err(|e| {
-            AppError::BadRequest(match e {
-                crate::restart::RestartError::UnknownStep(s) => format!(
-                    "Step '{}' is not in the current flow of task '{}'",
-                    s, source.task_name
-                ),
-                crate::restart::RestartError::NoFailedSteps => format!(
-                    "No failed or cancelled steps to restart in the current flow of task '{}'",
-                    source.task_name
-                ),
-                other => other.to_string(),
-            })
-        })?;
-
-    let carried_names: Vec<&str> = plan.carried.iter().map(|s| s.step_name.as_str()).collect();
-    if req.dry_run {
-        return Ok(Json(json!({
-            "start_steps": plan.start_steps,
-            "restart_steps": plan.restart_steps,
-            "carried_over": carried_names,
-            "carried_failed": plan.carried_failed,
-            "carried_failed_tolerated": plan.carried_failed_tolerated,
-        }))
-        .into_response());
-    }
-
-    let revision = match &source_pin {
-        Some(sp) => Some(sp.pin.commit.clone()),
-        None => state.workspaces.get_revision(&source.workspace),
-    };
-    let files =
-        crate::input_files::FileGrant::direct(&state, super::tasks::caller_user_id(&auth_user)?);
-    let created = crate::job_creator::create_restart_job(
-        &state.workspaces,
-        &state.pool,
-        workspace,
-        &source.workspace,
-        &source,
-        &plan,
-        source_id.as_deref(),
-        revision.as_deref(),
-        state.job_defaults(),
-        source_pin.as_ref().map(|sp| sp.pin.git_ref.as_str()),
-        files,
+    let restart_from = super::restart::restart_mode(req.from_step, req.all_failed)?;
+    let outcome = super::restart::restart_job(
+        &state,
+        super::caller::Caller::of(&auth_user),
+        job_id,
+        restart_from,
+        req.dry_run,
     )
-    .await
-    .map_err(super::classify_execute_error)?;
-
-    // Root approval steps suspended during creation, then terminal handling for
-    // a restart whose set cascade-skipped and settled on the spot.
-    crate::settlement::dispatch::fire_initial_suspended_hooks(&state, created.job_id).await;
-    let new_job_id = created.job_id;
-    state.settlement().job_created(created).await;
-
-    Ok((
-        StatusCode::CREATED,
-        Json(json!({
-            "job_id": new_job_id.to_string(),
-            "start_steps": plan.start_steps,
-            "restart_steps": plan.restart_steps,
-            "carried_over": carried_names,
-            "carried_failed": plan.carried_failed,
-            "carried_failed_tolerated": plan.carried_failed_tolerated,
-        })),
-    )
-        .into_response())
+    .await?;
+    let status = match outcome.job_id {
+        Some(_) => StatusCode::CREATED,
+        None => StatusCode::OK,
+    };
+    Ok((status, Json(outcome.body())).into_response())
 }
 
 /// Request body for the approve/reject endpoint.
@@ -934,7 +757,7 @@ pub struct ApproveStepRequest {
 /// Extract the user response text from an agent ask_user approval input.
 /// If input has a single "response" key with a non-empty string, use it directly
 /// so the LLM sees plain text instead of JSON. Otherwise falls back to JSON serialization.
-fn extract_agent_response(input: Option<&serde_json::Value>) -> String {
+pub(super) fn extract_agent_response(input: Option<&serde_json::Value>) -> String {
     match input {
         Some(v) => {
             // Try single "response" key with a non-empty string value
@@ -957,8 +780,10 @@ fn extract_agent_response(input: Option<&serde_json::Value>) -> String {
     }
 }
 
-/// POST /api/jobs/:id/steps/:step/approve — Approve or reject a suspended approval step.
-#[tracing::instrument(skip(state))]
+/// POST /api/jobs/:id/steps/:step/approve — Approve or reject a suspended
+/// approval step (or an agent step suspended by `ask_user`). The body is
+/// [`super::approve::approve_step`], shared with the MCP `approve_step` tool.
+#[tracing::instrument(skip(state, auth_user, req))]
 pub async fn approve_step(
     State(state): State<Arc<AppState>>,
     auth_user: Option<AuthUser>,
@@ -966,269 +791,15 @@ pub async fn approve_step(
     Json(req): Json<ApproveStepRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let job_id = parse_uuid_param(&id, "job")?;
-
-    let job = JobRepo::get(&state.pool, job_id)
-        .await
-        .context("get job")?
-        .ok_or_else(|| AppError::not_found("Job"))?;
-
-    // ACL check — approve/reject requires Run permission
-    let perm = check_job_acl(&state, &auth_user, &job).await?;
-    match perm {
-        TaskPermission::Deny => return Err(AppError::not_found("Job")),
-        TaskPermission::View => {
-            return Err(AppError::Forbidden(
-                "Insufficient permissions to approve this step".into(),
-            ))
-        }
-        TaskPermission::Run => {}
-    }
-
-    // Find the step and verify it is suspended
-    let steps = JobStepRepo::get_steps_for_job(&state.pool, job_id)
-        .await
-        .context("get job steps")?;
-
-    let step = steps
-        .iter()
-        .find(|s| s.step_name == step_name)
-        .ok_or_else(|| AppError::not_found("Step"))?;
-
-    if step.status != "suspended" {
-        return Err(AppError::Conflict(format!(
-            "Step '{}' is not in suspended state (current: {})",
-            step_name, step.status
-        )));
-    }
-    if step.action_type != "approval" && step.action_type != "agent" {
-        return Err(AppError::Conflict(format!(
-            "Step '{}' is not an approval or agent step (type: {})",
-            step_name, step.action_type
-        )));
-    }
-
-    // Resolve approver identity
-    let approver = auth_user
-        .as_ref()
-        .map(|u| u.claims.email.clone())
-        .unwrap_or_else(|| "anonymous".to_string());
-
-    // Validate required input fields against the action schema (FIX 4)
-    if req.approved {
-        if let (Some(ref input), Some(ref spec)) = (&req.input, &step.action_spec) {
-            if let Some(input_schema) = spec.get("input").and_then(|v| v.as_object()) {
-                for (field_name, field_def) in input_schema {
-                    let required = field_def
-                        .get("required")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
-                    if required {
-                        let has_value = input
-                            .get(field_name)
-                            .map(|v| {
-                                !v.is_null() && v.as_str().map(|s| !s.is_empty()).unwrap_or(true)
-                            })
-                            .unwrap_or(false);
-                        if !has_value {
-                            return Err(AppError::BadRequest(format!(
-                                "Required field '{}' is missing",
-                                field_name
-                            )));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    if req.approved {
-        // ── Agent ask_user approval: inject response into agent_state, mark ready ──
-        if step.action_type == "agent" {
-            let user_response = extract_agent_response(req.input.as_ref());
-
-            // Get the agent conversation state
-            if let Some(ref state_val) = step.agent_state {
-                if let Ok(mut conv_state) = serde_json::from_value::<
-                    stroem_agent::state::AgentConversationState,
-                >(state_val.clone())
-                {
-                    // Get the ask_user tool_call_id
-                    let tool_call_id = conv_state
-                        .ask_user_call
-                        .take()
-                        .map(|a| a.tool_call_id)
-                        .unwrap_or_default();
-
-                    conv_state.suspended_for_ask_user = false;
-
-                    // Store the user response as a resolved tool result
-                    conv_state.resolved_tool_results.push(
-                        stroem_agent::state::ResolvedToolResult {
-                            tool_call_id,
-                            result_text: user_response,
-                        },
-                    );
-
-                    // Save updated state
-                    let updated_state = serde_json::to_value(&conv_state)
-                        .context("serialize agent conversation state")?;
-                    JobStepRepo::update_agent_state(&state.pool, job_id, &step_name, updated_state)
-                        .await
-                        .context("save agent state after ask_user approval")?;
-
-                    // Mark step ready for re-claim by a worker
-                    sqlx::query(
-                        "UPDATE job_step SET status = 'ready', ready_at = NOW(), worker_id = NULL \
-                         WHERE job_id = $1 AND step_name = $2 AND status = 'suspended'",
-                    )
-                    .bind(job_id)
-                    .bind(&step_name)
-                    .execute(&state.pool)
-                    .await
-                    .context("mark agent step ready for re-claim")?;
-
-                    state
-                        .append_server_log(
-                            job_id,
-                            &format!(
-                                "[agent] Step '{}' ask_user approved by {} — marked ready for re-claim",
-                                step_name, approver
-                            ),
-                        )
-                        .await;
-
-                    return Ok(Json(json!({"status": "approved"})));
-                }
-            }
-
-            // Fallback if agent_state is missing — treat like normal approval
-            tracing::warn!(
-                "Agent step '{}' missing agent_state during ask_user approval — falling through to normal approval",
-                step_name
-            );
-        }
-
-        // ── Normal approval gate handling ──────────────────────────────
-        // FIX 5: merge approval metadata into existing output (preserves approval_message)
-        let mut output = step.output.clone().unwrap_or(json!({}));
-        if let Some(obj) = output.as_object_mut() {
-            obj.insert("approved".to_string(), json!(true));
-            obj.insert("approved_by".to_string(), json!(approver));
-            obj.insert("approved_at".to_string(), json!(Utc::now().to_rfc3339()));
-            if let Some(input) = req.input {
-                obj.insert("input".to_string(), input);
-            }
-        }
-
-        // FIX 1: atomic approve — only succeeds if step is still suspended
-        let applied = JobStepRepo::approve_step(&state.pool, job_id, &step_name, Some(output))
-            .await
-            .context("approve suspended step")?;
-
-        if !applied {
-            return Err(AppError::Conflict(
-                "Step is no longer in suspended state".to_string(),
-            ));
-        }
-
-        state
-            .append_server_log(
-                job_id,
-                &format!("[approval] Step '{}' approved by {}", step_name, approver),
-            )
-            .await;
-
-        if let Err(e) = state.settlement().step_settled(job_id, &step_name).await {
-            tracing::error!(
-                "Failed to orchestrate after approval of step '{}' in job {}: {:#}",
-                step_name,
-                job_id,
-                e
-            );
-            state
-                .append_server_log(
-                    job_id,
-                    &format!("[approval] Orchestration error after approval: {:#}", e),
-                )
-                .await;
-        }
-
-        Ok(Json(json!({"status": "approved"})))
-    } else {
-        // FIX 6: truncate rejection_reason at a UTF-8 char boundary to avoid panics
-        let reason = req
-            .rejection_reason
-            .unwrap_or_else(|| "Approval rejected".to_string());
-        let reason = if reason.len() > 4096 {
-            let mut end = 4096;
-            while !reason.is_char_boundary(end) {
-                end -= 1;
-            }
-            reason[..end].to_string()
-        } else {
-            reason
-        };
-
-        // Atomic reject — only succeeds if the step is still suspended; decides
-        // retry in the same transaction. Called directly rather than through
-        // `Settlement::step_failed` so the `[approval] ... rejected` line is
-        // logged BEFORE any `[retry]` line: `step_failed` appends the retry line
-        // itself, which would read as a retry of a step nothing had yet
-        // rejected. A rejected approval with retry budget returns to `ready`
-        // and is re-suspended only by a later orchestration of this job
-        // (`handle_approval_steps`); if no other step completes, it stays
-        // `ready` — see TODO.md "approval steps with retry".
-        let outcome = JobStepRepo::fail_or_retry(
-            &state.pool,
-            job_id,
-            &step_name,
-            &reason,
-            &[StepStatus::Suspended],
-            crate::settlement::retry::compute_retry_delay,
-            None,
-        )
-        .await
-        .context("reject suspended step")?;
-
-        if matches!(outcome, stroem_db::FailOutcome::NotApplied) {
-            return Err(AppError::Conflict(
-                "Step is no longer in suspended state".to_string(),
-            ));
-        }
-
-        state
-            .append_server_log(
-                job_id,
-                &format!(
-                    "[approval] Step '{}' rejected by {}: {}",
-                    step_name, approver, reason
-                ),
-            )
-            .await;
-
-        if let Some(line) = crate::settlement::retry::retry_log_line(&step_name, &outcome) {
-            state.append_server_log(job_id, &line).await;
-        }
-
-        if matches!(outcome, stroem_db::FailOutcome::Failed { .. }) {
-            if let Err(e) = state.settlement().step_settled(job_id, &step_name).await {
-                tracing::error!(
-                    "Failed to orchestrate after rejection of step '{}' in job {}: {:#}",
-                    step_name,
-                    job_id,
-                    e
-                );
-                state
-                    .append_server_log(
-                        job_id,
-                        &format!("[approval] Orchestration error after rejection: {:#}", e),
-                    )
-                    .await;
-            }
-        }
-
-        Ok(Json(json!({"status": "rejected"})))
-    }
+    let decision = super::approve::approve_step(
+        &state,
+        super::caller::Caller::of(&auth_user),
+        job_id,
+        &step_name,
+        req,
+    )
+    .await?;
+    Ok(Json(decision.body()))
 }
 
 /// Check ACL permission for a specific job.
@@ -1241,25 +812,29 @@ pub(crate) async fn check_job_acl(
     auth_user: &Option<AuthUser>,
     job: &stroem_db::JobRow,
 ) -> Result<TaskPermission, AppError> {
-    let auth = match auth_user {
-        Some(a) => a,
-        None => return Ok(TaskPermission::Run),
+    job_permission(state, super::caller::Caller::of(auth_user), job).await
+}
+
+/// [`check_job_acl`] for a [`super::caller::Caller`] (REST or MCP).
+pub(crate) async fn job_permission(
+    state: &AppState,
+    caller: super::caller::Caller<'_>,
+    job: &stroem_db::JobRow,
+) -> Result<TaskPermission, AppError> {
+    let Some(claims) = caller.claims else {
+        return Ok(TaskPermission::Run);
     };
     if !state.acl.is_configured() {
         return Ok(TaskPermission::Run);
     }
-    let user_id = auth.user_id()?;
-    let (is_admin, groups) = load_user_acl_context(&state.pool, user_id, auth.is_admin())
+    let user_id = super::caller::claims_user_id(claims)?;
+    let (is_admin, groups) = load_user_acl_context(&state.pool, user_id, claims.is_admin)
         .await
         .context("load ACL context")?;
     let task_path = crate::acl::job_task_path(state, job).await;
-    Ok(state.acl.evaluate(
-        &job.workspace,
-        &task_path,
-        &auth.claims.email,
-        &groups,
-        is_admin,
-    ))
+    Ok(state
+        .acl
+        .evaluate(&job.workspace, &task_path, &claims.email, &groups, is_admin))
 }
 
 /// The job-list scope for this user (spec § 7.8). `Ok(None)` = no filtering

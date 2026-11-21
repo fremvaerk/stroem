@@ -644,9 +644,9 @@ async fn mcp_initialize(router: Router) -> (Router, Option<String>) {
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
-/// Test 1: tools/list returns all 11 expected tools.
+/// Test 1: tools/list returns every expected tool.
 #[tokio::test]
-async fn test_mcp_tools_list_returns_all_11_tools() -> Result<()> {
+async fn test_mcp_tools_list_returns_every_tool() -> Result<()> {
     let (router, _pool, _tmp) = setup_with_mcp().await?;
 
     let (router, session_id) = mcp_initialize(router).await;
@@ -689,6 +689,9 @@ async fn test_mcp_tools_list_returns_all_11_tools() -> Result<()> {
         "get_job_logs",
         "list_jobs",
         "cancel_job",
+        "restart_job",
+        "rerun_job",
+        "approve_step",
         "list_artifacts",
         "get_artifact",
         "create_upload_url",
