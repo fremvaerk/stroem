@@ -373,6 +373,9 @@ fn cap_job_detail(detail: &mut serde_json::Value, max: usize) {
     }
     candidates.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
+    // `total` includes the `truncated_values` list the answer will carry:
+    // its key once, each entry and its comma.
+    const LIST_KEY: usize = r#","truncated_values":[]"#.len();
     let mut truncated = Vec::new();
     for (path, value_size) in candidates {
         if total <= max {
@@ -382,14 +385,16 @@ fn cap_job_detail(detail: &mut serde_json::Value, max: usize) {
             "[omitted: {} of JSON, over the MCP answer limit; read it with GET /api/jobs/{job_id}]",
             crate::log_read::human_bytes(value_size as u64)
         ));
-        let note_size = size(&note);
-        if note_size >= value_size {
+        let entry = serde_json::json!({"path": path, "size_bytes": value_size});
+        let list_key = if truncated.is_empty() { LIST_KEY } else { 0 };
+        let added = size(&note) + size(&entry) + 1 + list_key;
+        if added >= value_size {
             continue;
         }
         if let Some(slot) = detail.pointer_mut(&path) {
             *slot = note;
-            total = total - value_size + note_size;
-            truncated.push(serde_json::json!({"path": path, "size_bytes": value_size}));
+            total = total - value_size + added;
+            truncated.push(entry);
         }
     }
     if !truncated.is_empty() {
@@ -1899,6 +1904,31 @@ mod tests {
             note.contains("GET /api/jobs/00000000-0000-0000-0000-000000000001"),
             "{note}"
         );
+    }
+
+    /// Whatever the limit, the capped answer — `truncated_values` included —
+    /// fits, unless every content value large enough to replace is a note.
+    #[test]
+    fn cap_job_detail_counts_its_own_list_against_the_limit() {
+        let outputs: Vec<Value> = (0..8).map(|i| json!("v".repeat(300 + 97 * i))).collect();
+        let base = detail_with(json!({"o": "j".repeat(250)}), &outputs);
+        let full = serde_json::to_vec(&base).unwrap().len();
+        let mut fitted = 0;
+        for max in (200..full).step_by(23) {
+            let mut d = base.clone();
+            cap_job_detail(&mut d, max);
+            let len = serde_json::to_vec(&d).unwrap().len();
+            let is_note = |v: &Value| v.as_str().is_some_and(|o| o.starts_with("[omitted"));
+            let all_notes = is_note(&d["output"])
+                && d["steps"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|s| is_note(&s["output"]));
+            assert!(len <= max || all_notes, "max {max}: answer is {len} bytes");
+            fitted += usize::from(len <= max);
+        }
+        assert!(fitted > 50, "most limits fit: {fitted}");
     }
 
     #[test]
