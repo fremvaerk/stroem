@@ -292,6 +292,17 @@ stroem-api reject <job-id> <step> --reason "not before the release freeze"
 
 `--input` must be a JSON object. You are recorded as the approver. Both commands need the Run permission on the job's task.
 
+### `workers`
+
+List the registered workers, or show one worker and its recent steps. Steps of tasks you may not view are left out, and secret values in a step's error are masked.
+
+```bash
+stroem-api workers
+stroem-api workers --limit 20 --offset 20
+
+stroem-api workers <worker-id>
+```
+
 ### `workspaces`
 
 List all configured workspaces on the server: name, task / action / trigger counts (`(off)` when the server config disables the workspace's triggers), and the [display name and description](/guides/multi-workspace/#display-name-and-description) from the server config (`-` when unset).

@@ -144,6 +144,22 @@ pub struct GetTaskStatsParams {
     pub limit: Option<i64>,
 }
 
+#[derive(Deserialize, JsonSchema, Default)]
+pub struct ListWorkersParams {
+    /// Maximum number of workers to return (default 50, at most 100)
+    #[serde(default)]
+    pub limit: Option<i64>,
+    /// Number of workers to skip, for the next page (default 0)
+    #[serde(default)]
+    pub offset: Option<i64>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct GetWorkerParams {
+    /// Worker ID (UUID)
+    pub worker_id: String,
+}
+
 #[derive(Deserialize, JsonSchema)]
 pub struct CancelJobParams {
     /// Job ID (UUID) to cancel
@@ -1219,6 +1235,51 @@ impl StromMcpHandler {
             .await
             .map_err(app_err)?;
         Ok(json_result(&stats))
+    }
+
+    /// Registered workers (`GET /api/workers`).
+    #[tool(
+        description = "List the registered workers, the same as GET /api/workers: worker_id, name, status, capabilities, tags, version, last_heartbeat, registered_at, and the `total`. Use `offset` with `limit` (default 50, at most 100) for the next page."
+    )]
+    async fn list_workers(
+        &self,
+        params: Parameters<ListWorkersParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let Parameters(params) = params;
+        tracing::info!("MCP: list_workers");
+        let offset = params.offset.unwrap_or(0);
+        if offset < 0 {
+            return Err(rmcp::ErrorData::invalid_params(
+                "offset must be 0 or more",
+                None,
+            ));
+        }
+        let limit = params.limit.unwrap_or(50).clamp(1, 100);
+        let page = crate::web::api::workers::worker_list(&self.state, limit, offset)
+            .await
+            .map_err(app_err)?;
+        Ok(json_result(&page))
+    }
+
+    /// One worker with its recent steps (`GET /api/workers/{id}`).
+    #[tool(
+        description = "Get one worker and its 50 most recent steps, the same as GET /api/workers/{id}: for each step the job_id, workspace, task_name, job_status, step_name, action_type, status, times and error_message. Steps of tasks you may not view are left out; secret values in error_message are masked."
+    )]
+    async fn get_worker(
+        &self,
+        params: Parameters<GetWorkerParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let Parameters(params) = params;
+        tracing::info!(worker_id = %params.worker_id, "MCP: get_worker");
+        let worker_id: uuid::Uuid = params
+            .worker_id
+            .parse()
+            .map_err(|_| rmcp::ErrorData::invalid_params("Invalid worker_id UUID", None))?;
+        let detail =
+            crate::web::api::workers::worker_detail(&self.state, &rest_auth(self), worker_id)
+                .await
+                .map_err(app_err)?;
+        Ok(json_result(&detail))
     }
 
     /// List recent jobs (`GET /api/jobs`).

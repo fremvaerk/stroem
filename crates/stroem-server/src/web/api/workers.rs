@@ -29,7 +29,17 @@ pub async fn list_workers(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ListWorkersQuery>,
 ) -> Result<impl IntoResponse, AppError> {
-    let workers = WorkerRepo::list(&state.pool, query.limit, query.offset)
+    Ok(Json(worker_list(&state, query.limit, query.offset).await?))
+}
+
+/// A page of registered workers and the total: the body of `GET /api/workers`
+/// and of MCP `list_workers`. Any authenticated caller may list workers.
+pub(crate) async fn worker_list(
+    state: &AppState,
+    limit: i64,
+    offset: i64,
+) -> Result<serde_json::Value, AppError> {
+    let workers = WorkerRepo::list(&state.pool, limit, offset)
         .await
         .context("list workers")?;
     let total = WorkerRepo::count(&state.pool)
@@ -52,7 +62,7 @@ pub async fn list_workers(
         })
         .collect();
 
-    Ok(Json(json!({ "items": workers_json, "total": total })))
+    Ok(json!({ "items": workers_json, "total": total }))
 }
 
 /// GET /api/workers/:id - Get worker detail with recent steps
@@ -63,7 +73,17 @@ pub async fn get_worker(
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
     let worker_id = parse_uuid_param(&id, "worker")?;
+    Ok(Json(worker_detail(&state, &auth_user, worker_id).await?))
+}
 
+/// A worker with its recent steps, filtered by the caller's ACL and each
+/// row's `error_message` redacted: the body of `GET /api/workers/{id}` and
+/// of MCP `get_worker`.
+pub(crate) async fn worker_detail(
+    state: &AppState,
+    auth_user: &Option<AuthUser>,
+    worker_id: uuid::Uuid,
+) -> Result<serde_json::Value, AppError> {
     let worker = WorkerRepo::get(&state.pool, worker_id)
         .await
         .context("get worker")?
@@ -74,13 +94,13 @@ pub async fn get_worker(
         .context("list steps for worker")?;
 
     // ACL filter: remove steps for tasks the user can't see
-    let steps: Vec<_> = if let Some(ref auth) = auth_user {
+    let steps: Vec<_> = if let Some(auth) = auth_user {
         if state.acl.is_configured() {
             let user_id = match auth.user_id() {
                 Ok(id) => id,
                 Err(_) => {
                     // Couldn't parse user_id — return worker info with no steps for safety
-                    return Ok(Json(json!({
+                    return Ok(json!({
                         "worker_id": worker.worker_id,
                         "name": worker.name,
                         "status": worker.status,
@@ -90,7 +110,7 @@ pub async fn get_worker(
                         "last_heartbeat": worker.last_heartbeat,
                         "registered_at": worker.registered_at,
                         "steps": { "items": [], "total": 0i64 },
-                    })));
+                    }));
                 }
             };
             match load_user_acl_context(&state.pool, user_id, auth.is_admin()).await {
@@ -156,7 +176,7 @@ pub async fn get_worker(
             JobStepRepo::get_steps_for_job(&state.pool, s.job_id).await,
         ) {
             (Ok(Some(job)), Ok(job_steps)) => {
-                crate::redaction::job_redaction_memo(&state, &job, &job_steps, &mut memo)
+                crate::redaction::job_redaction_memo(state, &job, &job_steps, &mut memo)
                     .await
                     .ok()
             }
@@ -190,7 +210,7 @@ pub async fn get_worker(
         })
         .collect();
 
-    Ok(Json(json!({
+    Ok(json!({
         "worker_id": worker.worker_id,
         "name": worker.name,
         "status": worker.status,
@@ -200,5 +220,5 @@ pub async fn get_worker(
         "last_heartbeat": worker.last_heartbeat,
         "registered_at": worker.registered_at,
         "steps": { "items": steps_json, "total": total },
-    })))
+    }))
 }

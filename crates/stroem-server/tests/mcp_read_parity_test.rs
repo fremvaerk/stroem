@@ -1346,3 +1346,128 @@ async fn get_stats_answers_the_rest_dashboard_counts_within_the_acl() -> Result<
     );
     Ok(())
 }
+
+// ─── list_workers / get_worker ───────────────────────────────────────────────
+
+async fn register_worker(pool: &PgPool, name: &str) -> Uuid {
+    let worker_id = Uuid::new_v4();
+    stroem_db::WorkerRepo::register(
+        pool,
+        worker_id,
+        name,
+        &["script".to_string()],
+        &["gpu".to_string()],
+        false,
+        Some("0.18.5"),
+    )
+    .await
+    .expect("register worker");
+    worker_id
+}
+
+#[tokio::test]
+async fn list_workers_answers_the_rest_page() -> Result<()> {
+    let app = app().await?;
+    for name in ["w-a", "w-b", "w-c"] {
+        register_worker(&app.pool, name).await;
+    }
+    let (status, body) = rest(&app, &app.viewer, "GET", "/api/workers?limit=2&offset=1").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let page = payload(
+        &mcp(
+            &app,
+            &app.viewer,
+            "list_workers",
+            json!({"limit": 2, "offset": 1}),
+        )
+        .await,
+    );
+    assert_eq!(page, body);
+    assert_eq!(page["total"], json!(3));
+    assert_eq!(page["items"].as_array().unwrap().len(), 2);
+    assert_eq!(page["items"][0]["tags"], json!(["gpu"]));
+
+    let resp = mcp(&app, &app.viewer, "list_workers", json!({"offset": -1})).await;
+    assert!(is_invalid_params(&resp), "{resp}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_worker_filters_steps_by_acl_and_masks_errors() -> Result<()> {
+    let app = app().await?;
+    let worker = register_worker(&app.pool, "w-detail").await;
+    for (task, step) in [
+        ("report", "pub"),
+        ("restricted", "view"),
+        ("hidden", "secret"),
+    ] {
+        let job = seed_job(
+            &app.pool,
+            SeedJob {
+                task,
+                status: "failed",
+                ..Default::default()
+            },
+        )
+        .await;
+        seed_step(
+            &app.pool,
+            job,
+            SeedStep {
+                step,
+                status: "failed",
+                error: Some("exit 1: pa55-parity-s3cret"),
+                worker_id: Some(worker),
+                ..Default::default()
+            },
+        )
+        .await;
+    }
+    let uri = format!("/api/workers/{worker}");
+    let args = json!({"worker_id": worker.to_string()});
+
+    let (_, body) = rest(&app, &app.viewer, "GET", &uri).await;
+    let viewer = mcp(&app, &app.viewer, "get_worker", args.clone()).await;
+    assert!(
+        !viewer.to_string().contains(SECRET),
+        "secret leaked: {viewer}"
+    );
+    let viewer = payload(&viewer);
+    assert_eq!(viewer, body);
+    let steps: Vec<&str> = viewer["steps"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["step_name"].as_str().unwrap())
+        .collect();
+    assert_eq!(steps.len(), 2, "{viewer}");
+    assert!(!steps.contains(&"secret"), "{viewer}");
+    assert_eq!(viewer["steps"]["total"], json!(2));
+    assert_eq!(
+        viewer["steps"]["items"][0]["error_message"],
+        json!(format!("exit 1: {MASK}"))
+    );
+
+    let (_, body) = rest(&app, &app.admin, "GET", &uri).await;
+    let admin = payload(&mcp(&app, &app.admin, "get_worker", args).await);
+    assert_eq!(admin, body);
+    assert_eq!(admin["steps"]["total"], json!(3));
+    assert_eq!(admin["name"], json!("w-detail"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_worker_bad_parameters() -> Result<()> {
+    let app = app().await?;
+    let resp = mcp(&app, &app.admin, "get_worker", json!({"worker_id": "nope"})).await;
+    assert!(is_invalid_params(&resp), "{resp}");
+    let resp = mcp(
+        &app,
+        &app.admin,
+        "get_worker",
+        json!({"worker_id": Uuid::new_v4().to_string()}),
+    )
+    .await;
+    assert_eq!(error_message(&resp), "Worker not found");
+    Ok(())
+}

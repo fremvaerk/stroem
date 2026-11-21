@@ -73,6 +73,8 @@ The MCP server provides these tools for interacting with Strøm. The read tools 
 | `refresh_workspace` | Reload a workspace from its source now, for example after a push (`POST /api/workspaces/{ws}/refresh`) | `workspace` |
 | `get_task_stats` | A task's run-time statistics over its recent completed runs: average, p50, p95, min, max, recent durations, per step (`GET /api/workspaces/{ws}/tasks/{name}/stats`) | `workspace`, `task_name`, `limit?` (default 50, max 500) |
 | `get_stats` | Counts of the jobs you may view by status, the Dashboard (`GET /api/stats`) | none |
+| `list_workers` | The registered workers: name, status, capabilities, tags, version, last heartbeat (`GET /api/workers`) | `limit?` (default 50, max 100), `offset?` |
+| `get_worker` | One worker and its 50 most recent steps, without the steps of tasks you may not view (`GET /api/workers/{id}`) | `worker_id` |
 | `list_jobs` | Recent jobs, newest first, with `count` and `total` (`GET /api/jobs`) | `workspace?`, `task_name?`, `status?`, `source_type?`, `search?`, `limit?` (default 20, max 100), `offset?` |
 | `cancel_job` | Cancel a running or pending job | `job_id` |
 | `restart_job` | Restart a finished job from one step, or every failed step | `job_id`, `from_step?` or `all_failed?`, `dry_run?` |

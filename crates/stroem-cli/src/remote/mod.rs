@@ -15,6 +15,7 @@ pub mod status;
 pub mod tasks;
 pub mod trigger;
 pub mod triggers;
+pub mod workers;
 pub mod workspaces;
 
 use anyhow::Result;
@@ -111,6 +112,8 @@ pub enum Commands {
     },
     /// Job counts by status, or a task's run-time statistics (-w WS --task T)
     Stats(stats::StatsArgs),
+    /// List workers, or show one worker and its recent steps
+    Workers(workers::WorkersArgs),
 }
 
 #[derive(Subcommand)]
@@ -245,6 +248,7 @@ pub async fn dispatch(command: Commands, server: &str, token: Option<&str>) -> R
             refresh::cmd_refresh(&http_client, server, &workspace).await?
         }
         Commands::Stats(args) => stats::run(&http_client, server, args).await?,
+        Commands::Workers(args) => workers::run(&http_client, server, args).await?,
     }
 
     Ok(())

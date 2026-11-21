@@ -700,6 +700,8 @@ async fn test_mcp_tools_list_returns_every_tool() -> Result<()> {
         "refresh_workspace",
         "get_task_stats",
         "get_stats",
+        "list_workers",
+        "get_worker",
     ];
 
     assert_eq!(
