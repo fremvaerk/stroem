@@ -60,11 +60,26 @@ pub enum Commands {
         #[arg(long, short)]
         workspace: Option<String>,
     },
-    /// List jobs
+    /// List jobs, newest first
     Jobs {
         /// Maximum number of jobs to show
         #[arg(long, default_value = "20")]
         limit: i64,
+        /// Filter by workspace
+        #[arg(long, short)]
+        workspace: Option<String>,
+        /// Filter by task name (needs --workspace)
+        #[arg(long, requires = "workspace")]
+        task: Option<String>,
+        /// Filter by status (pending, running, completed, failed, cancelled, skipped)
+        #[arg(long)]
+        status: Option<String>,
+        /// Text to look for in the task name, workspace, source ID or job ID
+        #[arg(long, conflicts_with = "task")]
+        search: Option<String>,
+        /// Number of jobs to skip, for the next page
+        #[arg(long, default_value = "0")]
+        offset: i64,
     },
     /// Cancel a running or pending job
     Cancel {
@@ -183,8 +198,23 @@ pub async fn dispatch(command: Commands, server: &str, token: Option<&str>) -> R
         Commands::Tasks { workspace } => {
             tasks::cmd_tasks(&http_client, server, workspace.as_deref()).await?;
         }
-        Commands::Jobs { limit } => {
-            jobs::cmd_jobs(&http_client, server, limit).await?;
+        Commands::Jobs {
+            limit,
+            workspace,
+            task,
+            status,
+            search,
+            offset,
+        } => {
+            let filter = jobs::JobsFilter {
+                limit,
+                workspace: workspace.as_deref(),
+                task: task.as_deref(),
+                status: status.as_deref(),
+                search: search.as_deref(),
+                offset,
+            };
+            jobs::cmd_jobs(&http_client, server, &filter).await?;
         }
         Commands::Cancel { job_id } => {
             cancel::cmd_cancel(&http_client, server, &job_id).await?;
@@ -280,7 +310,7 @@ mod tests {
     fn jobs_subcommand_default_limit_is_20() {
         let cli = parse(&["stroem-api", "jobs"]).unwrap();
         match cli.command {
-            super::Commands::Jobs { limit } => assert_eq!(limit, 20),
+            super::Commands::Jobs { limit, .. } => assert_eq!(limit, 20),
             _ => panic!("unexpected command variant"),
         }
     }
@@ -289,7 +319,64 @@ mod tests {
     fn jobs_subcommand_accepts_custom_limit() {
         let cli = parse(&["stroem-api", "jobs", "--limit", "50"]).unwrap();
         match cli.command {
-            super::Commands::Jobs { limit } => assert_eq!(limit, 50),
+            super::Commands::Jobs { limit, .. } => assert_eq!(limit, 50),
+            _ => panic!("unexpected command variant"),
+        }
+    }
+
+    #[test]
+    fn jobs_subcommand_filters() {
+        let cli = parse(&[
+            "stroem-api",
+            "jobs",
+            "-w",
+            "ops",
+            "--task",
+            "etl",
+            "--status",
+            "failed",
+            "--offset",
+            "40",
+        ])
+        .unwrap();
+        match cli.command {
+            super::Commands::Jobs {
+                workspace,
+                task,
+                status,
+                search,
+                offset,
+                ..
+            } => {
+                assert_eq!(workspace.as_deref(), Some("ops"));
+                assert_eq!(task.as_deref(), Some("etl"));
+                assert_eq!(status.as_deref(), Some("failed"));
+                assert!(search.is_none());
+                assert_eq!(offset, 40);
+            }
+            _ => panic!("unexpected command variant"),
+        }
+        // --task needs --workspace; --search and --task exclude each other.
+        assert!(parse(&["stroem-api", "jobs", "--task", "etl"]).is_err());
+        assert!(parse(&[
+            "stroem-api",
+            "jobs",
+            "-w",
+            "ops",
+            "--task",
+            "etl",
+            "--search",
+            "x"
+        ])
+        .is_err());
+        match parse(&["stroem-api", "jobs", "--search", "nightly"])
+            .unwrap()
+            .command
+        {
+            super::Commands::Jobs { search, offset, .. } => {
+                assert_eq!(search.as_deref(), Some("nightly"));
+                assert_eq!(offset, 0);
+            }
             _ => panic!("unexpected command variant"),
         }
     }

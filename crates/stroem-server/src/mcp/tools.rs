@@ -1,4 +1,4 @@
-use super::auth::{check_task_acl, resolve_acl_scope, resolve_job_acl_scope, McpAuthContext};
+use super::auth::{check_task_acl, resolve_acl_scope, McpAuthContext};
 use super::handler::StromMcpHandler;
 use crate::acl::TaskPermission;
 use crate::log_storage::JobLogMeta;
@@ -102,12 +102,23 @@ pub struct ListJobsParams {
     /// Filter by task name (requires workspace)
     #[serde(default)]
     pub task_name: Option<String>,
-    /// Filter by status (pending, running, completed, failed, cancelled)
+    /// Filter by status (pending, running, completed, failed, cancelled, skipped)
     #[serde(default)]
     pub status: Option<String>,
-    /// Maximum number of jobs to return (default: 20)
+    /// Filter by source type (api, trigger, webhook, task, hook, user, mcp,
+    /// agent_tool, event_source, retry, upload, rerun, restart)
+    #[serde(default)]
+    pub source_type: Option<String>,
+    /// Text to look for in the task name, workspace, source ID or job ID
+    /// (at most 200 characters; not together with task_name)
+    #[serde(default)]
+    pub search: Option<String>,
+    /// Maximum number of jobs to return (default: 20, at most 100)
     #[serde(default)]
     pub limit: Option<i64>,
+    /// Number of jobs to skip, for the next page (default: 0)
+    #[serde(default)]
+    pub offset: Option<i64>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -1141,8 +1152,10 @@ impl StromMcpHandler {
         Ok(json_result(&rows))
     }
 
-    /// List recent jobs. Filter by workspace, task, or status.
-    #[tool(description = "List recent jobs. Filter by workspace, task, or status.")]
+    /// List recent jobs (`GET /api/jobs`).
+    #[tool(
+        description = "List recent jobs, newest first, the same as GET /api/jobs. Filter by workspace, task_name (needs workspace), status, source_type, or search (text in the task name, workspace, source ID or job ID; not together with task_name). Returns `jobs`, `count` (jobs in this answer) and `total` (all matching jobs you may view); use `offset` with `limit` (default 20, at most 100) for the next page."
+    )]
     async fn list_jobs(
         &self,
         params: Parameters<ListJobsParams>,
@@ -1150,83 +1163,30 @@ impl StromMcpHandler {
         let Parameters(params) = params;
         tracing::info!(workspace = ?params.workspace, task = ?params.task_name, status = ?params.status, "MCP: list_jobs");
 
-        if params.task_name.is_some() && params.workspace.is_none() {
+        let offset = params.offset.unwrap_or(0);
+        if offset < 0 {
             return Err(rmcp::ErrorData::invalid_params(
-                "task_name filter requires workspace",
+                "offset must be 0 or more",
                 None,
             ));
         }
-
-        let valid_statuses = [
-            "pending",
-            "running",
-            "completed",
-            "failed",
-            "cancelled",
-            "skipped",
-        ];
-        if let Some(ref s) = params.status {
-            if !valid_statuses.contains(&s.as_str()) {
-                return Err(rmcp::ErrorData::invalid_params(
-                    format!(
-                        "Invalid status '{}'. Must be one of: {}",
-                        s,
-                        valid_statuses.join(", ")
-                    ),
-                    None,
-                ));
-            }
-        }
-
-        let limit = params.limit.unwrap_or(20).clamp(1, 100);
-        let status = params.status.as_deref();
-        let scope = resolve_job_acl_scope(&self.state, &self.auth)
-            .await
-            .map_err(acl_err)?;
-
-        // ACL is applied in SQL, BEFORE ordering and LIMIT (spec § 7.8):
-        // filtering after the fetch let denied recent jobs fill the page.
-        let jobs = match (
-            scope,
-            params.workspace.as_deref(),
-            params.task_name.as_deref(),
-        ) {
-            (Some(scope), ws, task) => {
-                let effective = crate::acl::narrow_job_scope(&scope, ws, task);
-                JobRepo::list_with_acl(&self.state.pool, &effective, status, None, None, limit, 0)
-                    .await
-                    .map_err(|e| internal_err(format!("DB error: {e}")))?
-            }
-            (None, Some(ws), Some(task)) => {
-                JobRepo::list_by_task(&self.state.pool, ws, task, status, None, limit, 0)
-                    .await
-                    .map_err(|e| internal_err(format!("DB error: {e}")))?
-            }
-            (None, ws, _) => JobRepo::list(&self.state.pool, ws, status, None, None, limit, 0)
-                .await
-                .map_err(|e| internal_err(format!("DB error: {e}")))?,
+        let query = crate::web::api::jobs::ListJobsQuery {
+            workspace: params.workspace,
+            task_name: params.task_name,
+            status: params.status,
+            source_type: params.source_type,
+            search: params.search,
+            limit: params.limit.unwrap_or(20).clamp(1, 100),
+            offset,
         };
-
-        let jobs_json: Vec<serde_json::Value> = jobs
-            .iter()
-            .map(|job| {
-                serde_json::json!({
-                    "job_id": job.job_id,
-                    "workspace": job.workspace,
-                    "task_name": job.task_name,
-                    "status": job.status,
-                    "source_type": job.source_type,
-                    "revision": job.revision,
-                    "ref": job.git_ref,
-                    "created_at": job.created_at.to_rfc3339(),
-                    "completed_at": job.completed_at.map(|dt| dt.to_rfc3339()),
-                })
-            })
-            .collect();
+        let (jobs, total) = crate::web::api::jobs::job_list(&self.state, &rest_auth(self), &query)
+            .await
+            .map_err(app_err)?;
 
         Ok(json_result(&serde_json::json!({
-            "count": jobs_json.len(),
-            "jobs": jobs_json,
+            "count": jobs.len(),
+            "total": total,
+            "jobs": jobs,
         })))
     }
 

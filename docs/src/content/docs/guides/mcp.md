@@ -70,7 +70,7 @@ The MCP server provides these tools for interacting with Strøm. The read tools 
 | `get_job_logs` | The end of a job's log (last 256 KiB), formatted | `job_id`, `step?`, `tail_bytes?` |
 | `list_triggers` | A workspace's triggers with next runs, last run, result and missed runs (`GET /api/workspaces/{ws}/triggers`) | `workspace` |
 | `list_attention_triggers` | Triggers of every workspace with missed runs or a failed last run, the Dashboard card (`GET /api/triggers/attention`) | none |
-| `list_jobs` | List recent jobs with optional filters | `workspace?`, `task_name?`, `status?`, `limit?` |
+| `list_jobs` | Recent jobs, newest first, with `count` and `total` (`GET /api/jobs`) | `workspace?`, `task_name?`, `status?`, `source_type?`, `search?`, `limit?` (default 20, max 100), `offset?` |
 | `cancel_job` | Cancel a running or pending job | `job_id` |
 | `restart_job` | Restart a finished job from one step, or every failed step | `job_id`, `from_step?` or `all_failed?`, `dry_run?` |
 | `rerun_job` | Re-run a job with its stored input | `job_id`, `input?` |
@@ -80,6 +80,12 @@ The MCP server provides these tools for interacting with Strøm. The read tools 
 | `create_upload_url` | Get a single-use URL to upload a file for a `file` input field | `workspace`, `task_name`, `file_name` |
 
 When the log is longer than the tail, the result ends with `[truncated: showing the last 256.0 KiB of up to 83.3 MiB — earlier lines omitted]`.
+
+`list_jobs` filters by your access rules in the database before it takes the
+page, so `limit` jobs you may view come back and `total` counts only those.
+`search` looks for text in the task name, workspace, source ID and job ID (at
+most 200 characters) and cannot be used with `task_name`. Use `offset` for the
+next page.
 
 `list_triggers` hides a trigger whose task you may not view. A last run you
 may not view (for example a run of a pinned commit that moved the task to a

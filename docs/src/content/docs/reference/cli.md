@@ -181,11 +181,20 @@ Against a server older than this release, `--full` receives the old full-log JSO
 
 ### `jobs`
 
-List recent jobs.
+List recent jobs, newest first. The last line shows which jobs of the total are on the page and the `--offset` of the next page.
 
 ```bash
 # List last 10 jobs
 stroem-api jobs --limit 10
+
+# Filter by workspace, task and status
+stroem-api jobs --workspace data-team --task etl-pipeline --status failed
+
+# Look for text in the task name, workspace, source ID or job ID (not with --task)
+stroem-api jobs --search nightly
+
+# The next page
+stroem-api jobs --limit 20 --offset 20
 ```
 
 ### `tasks`

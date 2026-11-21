@@ -104,6 +104,17 @@ pub async fn list_jobs(
     auth_user: Option<AuthUser>,
     Query(query): Query<ListJobsQuery>,
 ) -> Result<Response, AppError> {
+    let (items, total) = job_list(&state, &auth_user, &query).await?;
+    Ok(Json(json!({ "items": items, "total": total })).into_response())
+}
+
+/// One page of the job list and the total: the body of `GET /api/jobs` and
+/// of MCP `list_jobs`. The ACL scope is applied in SQL, before `LIMIT`.
+pub(crate) async fn job_list(
+    state: &AppState,
+    auth_user: &Option<AuthUser>,
+    query: &ListJobsQuery,
+) -> Result<(Vec<serde_json::Value>, i64), AppError> {
     if query.task_name.is_some() && query.workspace.is_none() {
         return Err(AppError::BadRequest(
             "task_name filter requires workspace".into(),
@@ -151,7 +162,7 @@ pub async fn list_jobs(
     }
 
     // Resolve ACL scope
-    let acl_scope = resolve_acl_scope(&state, &auth_user).await?;
+    let acl_scope = resolve_acl_scope(state, auth_user).await?;
 
     let status = query.status.as_deref();
     let source_type = query.source_type.as_deref();
@@ -241,7 +252,7 @@ pub async fn list_jobs(
         })
         .collect();
 
-    Ok(Json(json!({ "items": jobs_json, "total": total })).into_response())
+    Ok((jobs_json, total))
 }
 
 #[derive(Debug, Serialize)]

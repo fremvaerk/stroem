@@ -1004,3 +1004,139 @@ async fn list_attention_triggers_answers_the_rest_dashboard_card() -> Result<()>
     assert_eq!(names(&viewer), ["nightly-report", "nightly-restricted"]);
     Ok(())
 }
+
+// ─── list_jobs: search, offset, total ────────────────────────────────────────
+
+/// Five jobs, oldest first: report ×2, restricted ×2, hidden ×1 (newest).
+async fn seed_job_list(pool: &PgPool) -> Vec<Uuid> {
+    let mut ids = Vec::new();
+    for (i, task) in ["report", "report", "restricted", "restricted", "hidden"]
+        .into_iter()
+        .enumerate()
+    {
+        ids.push(
+            seed_job(
+                pool,
+                SeedJob {
+                    task,
+                    age_secs: 100.0 - i as f64,
+                    ..Default::default()
+                },
+            )
+            .await,
+        );
+    }
+    ids
+}
+
+fn job_ids(list: &Value) -> Vec<Value> {
+    list["jobs"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no jobs: {list}"))
+        .iter()
+        .map(|j| j["job_id"].clone())
+        .collect()
+}
+
+#[tokio::test]
+async fn list_jobs_answers_the_rest_page_with_offset_and_total() -> Result<()> {
+    let app = app().await?;
+    let ids = seed_job_list(&app.pool).await;
+
+    let (status, body) = rest(&app, &app.admin, "GET", "/api/jobs?limit=2&offset=1").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let list = payload(
+        &mcp(
+            &app,
+            &app.admin,
+            "list_jobs",
+            json!({"limit": 2, "offset": 1}),
+        )
+        .await,
+    );
+    assert_eq!(list["jobs"], body["items"]);
+    assert_eq!(list["total"], body["total"]);
+    assert_eq!(list["total"], json!(5));
+    assert_eq!(list["count"], json!(2));
+    assert_eq!(job_ids(&list), vec![json!(ids[3]), json!(ids[2])]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn list_jobs_search_matches_like_rest() -> Result<()> {
+    let app = app().await?;
+    let ids = seed_job_list(&app.pool).await;
+
+    let (_, body) = rest(&app, &app.admin, "GET", "/api/jobs?search=restrict").await;
+    let list = payload(&mcp(&app, &app.admin, "list_jobs", json!({"search": "restrict"})).await);
+    assert_eq!(list["jobs"], body["items"]);
+    assert_eq!(list["total"], json!(2));
+    assert_eq!(job_ids(&list), vec![json!(ids[3]), json!(ids[2])]);
+
+    // With a workspace filter and a status filter too.
+    let list = payload(
+        &mcp(
+            &app,
+            &app.admin,
+            "list_jobs",
+            json!({"workspace": "default", "status": "completed", "search": " restrict "}),
+        )
+        .await,
+    );
+    assert_eq!(
+        list["total"],
+        json!(2),
+        "the search term is trimmed: {list}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn list_jobs_applies_the_acl_before_limit_and_in_total() -> Result<()> {
+    let app = app().await?;
+    let ids = seed_job_list(&app.pool).await;
+    // The newest job is denied: a page of one is the newest VISIBLE job.
+    let list = payload(&mcp(&app, &app.viewer, "list_jobs", json!({"limit": 1})).await);
+    assert_eq!(job_ids(&list), vec![json!(ids[3])]);
+    assert_eq!(list["total"], json!(4));
+    let list = payload(&mcp(&app, &app.viewer, "list_jobs", json!({"search": "hidden"})).await);
+    assert_eq!(list["total"], json!(0));
+    assert_eq!(list["count"], json!(0));
+    Ok(())
+}
+
+#[tokio::test]
+async fn list_jobs_bad_parameters_are_the_rest_errors() -> Result<()> {
+    let app = app().await?;
+    let resp = mcp(
+        &app,
+        &app.admin,
+        "list_jobs",
+        json!({"workspace": "default", "task_name": "report", "search": "x"}),
+    )
+    .await;
+    assert_eq!(
+        error_message(&resp),
+        "Cannot use both task_name and search filters"
+    );
+    let resp = mcp(
+        &app,
+        &app.admin,
+        "list_jobs",
+        json!({"search": "s".repeat(201)}),
+    )
+    .await;
+    assert_eq!(
+        error_message(&resp),
+        "Search term must be 200 characters or fewer"
+    );
+    let resp = mcp(&app, &app.admin, "list_jobs", json!({"offset": -1})).await;
+    assert!(is_invalid_params(&resp), "{resp}");
+    let resp = mcp(&app, &app.admin, "list_jobs", json!({"status": "nope"})).await;
+    assert!(is_invalid_params(&resp), "{resp}");
+    assert!(
+        error_message(&resp).starts_with("Invalid status filter 'nope'"),
+        "{resp}"
+    );
+    Ok(())
+}
