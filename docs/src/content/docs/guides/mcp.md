@@ -66,7 +66,7 @@ The MCP server provides fourteen tools for interacting with Strøm:
 | `list_tasks` | List tasks in a workspace | `workspace?` (optional; lists all if omitted) |
 | `get_task` | Get detailed task definition | `workspace`, `task_name` |
 | `execute_task` | Execute a task and return job ID | `workspace`, `task_name`, `input?` |
-| `get_job_status` | Get current job status with step details | `job_id` |
+| `get_job_status` | A job's full detail, the same as `GET /api/jobs/{id}`: status, input, output, each step's input / output / error / retry history, links, child jobs, later runs and input files | `job_id` |
 | `get_job_logs` | The end of a job's log (last 256 KiB), formatted | `job_id`, `step?`, `tail_bytes?` |
 | `list_jobs` | List recent jobs with optional filters | `workspace?`, `task_name?`, `status?`, `limit?` |
 | `cancel_job` | Cancel a running or pending job | `job_id` |
@@ -327,21 +327,39 @@ MCP client serializes it as a JSON-encoded string (some clients do), the server
 parses it back into an object automatically; anything that isn't a JSON object
 is rejected with an error rather than silently run with default values.
 
-### 5. Monitor job status
+### 5. Monitor job status and read the result
 
 ```
 Call: get_job_status(job_id="a1b2c3d4-e5f6-7890-abcd-ef1234567890")
-Returns:
+Returns (shortened):
 {
-  "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-  "status": "running",
-  "started_at": "2025-03-12T14:30:00Z",
+  "job_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "status": "completed",
+  "input": { "version": "v1.2.3" },
+  "output": { "url": "https://api.example.com" },
   "steps": [
-    { "name": "pull-image", "status": "completed", "duration_secs": 45 },
-    { "name": "start-container", "status": "running", "started_at": "2025-03-12T14:30:50Z" }
-  ]
+    { "step_name": "pull-image", "status": "completed", "output": { "digest": "sha256:…" } },
+    { "step_name": "start-container", "status": "completed", "output": { "id": "abc123" } }
+  ],
+  "derived_jobs": [],
+  "input_files": []
 }
 ```
+
+`get_job_status` returns the same JSON as `GET /api/jobs/{id}` (the job page
+of the UI): the job's `input`, `raw_input` and `output`; for each step its
+`input`, `output`, `error_message`, `retry_history` and, for a `type: task`
+step, `child_jobs`; the `parent_job_id`, `source_job_id` and retry links;
+`derived_jobs` (the Restarts and Re-runs of this job that you may see) and
+`input_files`. The same ACL applies: View on the task is enough.
+
+The answer is at most 256 KiB of JSON. When it would be larger, the largest
+input and output values are replaced with a note
+(`[omitted: 1.2 MiB of JSON, over the MCP answer limit; read it with GET /api/jobs/{id}]`),
+largest first, until the answer fits. The `truncated_values` list names each
+replaced value by its JSON pointer and size, for example
+`{"path": "/steps/2/output", "size_bytes": 1258291}`. Read those values with
+`GET /api/jobs/{id}` or `stroem-api status --json`.
 
 ### 6. Retrieve logs
 
@@ -357,8 +375,8 @@ Returns:
 
 This shows the tail of the log (last 256 KiB by default); pass `tail_bytes` for more history, up to `log_storage.read.tail_max_bytes`.
 
-`get_job_status` masks secret values (`••••••`) in what it returns — chiefly
-the steps' `error_message` — the same way as `GET /api/jobs/{id}`, including
+`get_job_status` masks secret values (`••••••`) in what it returns — the
+input, the output and the steps' content — the same way as `GET /api/jobs/{id}`, including
 the secrets of any [pinned commit](/guides/git-refs/#secrets-and-redaction)
 the job is connected to. When those secrets cannot be loaded at the moment, the tool
 returns an error, `redaction set unavailable, retry`, instead of the job;

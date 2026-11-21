@@ -362,7 +362,16 @@ pub async fn get_job(
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
     let job_id = parse_uuid_param(&id, "job")?;
+    Ok(Json(job_detail(&state, &auth_user, job_id).await?))
+}
 
+/// The redacted job detail: the body of `GET /api/jobs/{id}` and of MCP
+/// `get_job_status`, so both answer the same content under the same ACL.
+pub(crate) async fn job_detail(
+    state: &AppState,
+    auth_user: &Option<AuthUser>,
+    job_id: Uuid,
+) -> Result<serde_json::Value, AppError> {
     // Get job
     let job = JobRepo::get(&state.pool, job_id)
         .await
@@ -370,7 +379,7 @@ pub async fn get_job(
         .ok_or_else(|| AppError::not_found("Job"))?;
 
     // ACL check
-    let perm = check_job_acl(&state, &auth_user, &job).await?;
+    let perm = check_job_acl(state, auth_user, &job).await?;
     if matches!(perm, TaskPermission::Deny) {
         return Err(AppError::not_found("Job"));
     }
@@ -387,7 +396,7 @@ pub async fn get_job(
     let derived = JobRepo::list_derived_runs(&state.pool, job_id)
         .await
         .context("list derived runs")?;
-    let derived_jobs = derived_job_refs(&state, &auth_user, derived).await?;
+    let derived_jobs = derived_job_refs(state, auth_user, derived).await?;
 
     let mut steps_json: Vec<serde_json::Value> = steps
         .iter()
@@ -469,7 +478,7 @@ pub async fn get_job(
     // every content string (a retry would fail the same way). Before
     // `config_for` below: a pin that cannot load is tried once, and one that
     // loads is cached for `config_for`.
-    let redaction = crate::redaction::job_redaction(&state, &job, &steps)
+    let redaction = crate::redaction::job_redaction(state, &job, &steps)
         .await
         .map_err(|e| {
             tracing::warn!(job_id = %job.job_id, "job detail fails closed: {e}");
@@ -634,7 +643,7 @@ pub async fn get_job(
     // permanent pin failure).
     let mut value = serde_json::to_value(&response).context("serialise job detail")?;
     redaction.apply_job_response(&mut value);
-    Ok(Json(value))
+    Ok(value)
 }
 
 /// POST /api/jobs/:id/cancel - Cancel a running or pending job

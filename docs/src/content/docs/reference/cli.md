@@ -145,11 +145,16 @@ stroem-api trigger import-report --file data_file=./report.csv
 
 ### `status`
 
-Check the status of a job.
+Check the status of a job. The summary shows the job's input and output and the output of each step.
 
 ```bash
 stroem-api status <job-id>
+
+# Print the raw job detail (the JSON of GET /api/jobs/{id})
+stroem-api status <job-id> --json
 ```
+
+Secret values are masked (`••••••`), as on the job page.
 
 ### `logs`
 

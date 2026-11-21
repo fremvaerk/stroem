@@ -2,6 +2,7 @@ use super::auth::{check_task_acl, resolve_acl_scope, resolve_job_acl_scope, McpA
 use super::handler::StromMcpHandler;
 use crate::acl::TaskPermission;
 use crate::log_storage::JobLogMeta;
+use crate::web::api::middleware::AuthUser;
 use crate::web::error::AppError;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
@@ -11,7 +12,7 @@ use serde::de::{self, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::fmt;
-use stroem_db::{JobRepo, JobStepRepo};
+use stroem_db::JobRepo;
 
 /// Max size of an artifact body returned via MCP `get_artifact`. Larger blobs
 /// must be downloaded out-of-band via the HTTP API to avoid blowing the agent's
@@ -239,6 +240,103 @@ fn not_found(entity: &str) -> rmcp::ErrorData {
 
 fn acl_err(msg: impl Into<String>) -> rmcp::ErrorData {
     rmcp::ErrorData::internal_error(msg.into(), None)
+}
+
+/// The MCP caller as a REST handler sees it, so a tool and its REST route
+/// run the same ACL code. `claims.is_admin` is the value
+/// [`super::auth::authenticate`] re-read from the DB for this request.
+fn rest_auth(handler: &StromMcpHandler) -> Option<AuthUser> {
+    handler.auth.as_ref().map(|a| AuthUser {
+        claims: a.claims.clone(),
+        is_api_key: false,
+        api_key_prefix: None,
+    })
+}
+
+/// A REST handler's error as a tool error, with the REST message. An internal
+/// error is logged and answered with the fixed REST text, never its cause.
+fn app_err(e: AppError) -> rmcp::ErrorData {
+    match e {
+        AppError::BadRequest(m) | AppError::PayloadTooLarge(m) => {
+            rmcp::ErrorData::invalid_params(m, None)
+        }
+        AppError::Unauthorized(m) | AppError::Forbidden(m) => acl_err(m),
+        AppError::NotFound(m) | AppError::Conflict(m) | AppError::ServiceUnavailable(m) => {
+            internal_err(m)
+        }
+        AppError::TooManyRequests { message, .. } => internal_err(message),
+        AppError::Internal(e) => {
+            tracing::error!("MCP: internal error: {e:#}");
+            internal_err("Internal server error")
+        }
+    }
+}
+
+/// The largest `get_job_status` answer (compact JSON) before content values
+/// are replaced with a note: the default log tail of `get_job_logs`.
+const MCP_JOB_DETAIL_MAX_BYTES: usize = 256 * 1024;
+
+/// Job-level and step-level keys whose values can be large.
+const JOB_CONTENT_KEYS: &[&str] = &["input", "raw_input", "output"];
+const STEP_CONTENT_KEYS: &[&str] = &[
+    "input",
+    "output",
+    "retry_history",
+    "error_message",
+    "approval_message",
+    "approval_fields",
+];
+
+/// Bound a redacted job detail to `max` bytes of compact JSON: replace the
+/// largest content values, one at a time, with a note until it fits, and
+/// list each in `truncated_values` (JSON pointer + size). Run after
+/// redaction: the note and the list carry no content.
+fn cap_job_detail(detail: &mut serde_json::Value, max: usize) {
+    let size = |v: &serde_json::Value| serde_json::to_vec(v).map_or(0, |b| b.len());
+    let mut total = size(detail);
+    if total <= max {
+        return;
+    }
+    let job_id = detail["job_id"].as_str().unwrap_or_default().to_string();
+    let mut candidates: Vec<(String, usize)> = Vec::new();
+    for key in JOB_CONTENT_KEYS {
+        if let Some(v) = detail.get(*key).filter(|v| !v.is_null()) {
+            candidates.push((format!("/{key}"), size(v)));
+        }
+    }
+    if let Some(steps) = detail.get("steps").and_then(|s| s.as_array()) {
+        for (i, step) in steps.iter().enumerate() {
+            for key in STEP_CONTENT_KEYS {
+                if let Some(v) = step.get(*key).filter(|v| !v.is_null()) {
+                    candidates.push((format!("/steps/{i}/{key}"), size(v)));
+                }
+            }
+        }
+    }
+    candidates.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
+    let mut truncated = Vec::new();
+    for (path, value_size) in candidates {
+        if total <= max {
+            break;
+        }
+        let note = serde_json::Value::String(format!(
+            "[omitted: {} of JSON, over the MCP answer limit; read it with GET /api/jobs/{job_id}]",
+            crate::log_read::human_bytes(value_size as u64)
+        ));
+        let note_size = size(&note);
+        if note_size >= value_size {
+            continue;
+        }
+        if let Some(slot) = detail.pointer_mut(&path) {
+            *slot = note;
+            total = total - value_size + note_size;
+            truncated.push(serde_json::json!({"path": path, "size_bytes": value_size}));
+        }
+    }
+    if !truncated.is_empty() {
+        detail["truncated_values"] = serde_json::Value::Array(truncated);
+    }
 }
 
 /// Why an inline file value cannot be used (spec § 7.5, § 8).
@@ -921,8 +1019,10 @@ impl StromMcpHandler {
         })))
     }
 
-    /// Get the status of a job including its step details.
-    #[tool(description = "Get the status of a job including its step details.")]
+    /// Get a job's full detail: the REST job detail (`GET /api/jobs/{id}`).
+    #[tool(
+        description = "Get a job's full detail, the same as GET /api/jobs/{id}: status, times, input, raw_input and output; each step's input, output, error_message, retry_history and child_jobs; parent, source and retry links; derived_jobs (later Restarts and Re-runs) and input_files. Secret values are masked as ••••••. The answer is at most 256 KiB of JSON: when it would be larger, the largest input/output values are replaced with a note and listed in `truncated_values` (JSON pointer and size); read them with GET /api/jobs/{id}."
+    )]
     async fn get_job_status(
         &self,
         params: Parameters<GetJobStatusParams>,
@@ -934,59 +1034,11 @@ impl StromMcpHandler {
             .parse()
             .map_err(|_| rmcp::ErrorData::invalid_params("Invalid job_id UUID", None))?;
 
-        let job = JobRepo::get(&self.state.pool, job_id)
+        let mut detail = crate::web::api::jobs::job_detail(&self.state, &rest_auth(self), job_id)
             .await
-            .map_err(|e| internal_err(format!("DB error: {e}")))?
-            .ok_or_else(|| not_found("Job"))?;
-
-        // ACL: Deny → 404
-        check_job_acl(self, &job).await?;
-
-        let steps = JobStepRepo::get_steps_for_job(&self.state.pool, job_id)
-            .await
-            .map_err(|e| internal_err(format!("DB error: {e}")))?;
-
-        let steps_json: Vec<serde_json::Value> = steps
-            .iter()
-            .map(|step| {
-                serde_json::json!({
-                    "step_name": step.step_name,
-                    "action_name": step.action_name,
-                    "action_type": step.action_type,
-                    "status": step.status,
-                    "started_at": step.started_at,
-                    "completed_at": step.completed_at,
-                    "error_message": step.error_message,
-                    "skip_reason": step.skip_reason,
-                })
-            })
-            .collect();
-
-        // Same per-job redaction as job detail (spec § 7.4): a transient pin
-        // failure fails closed, a permanent one masks every content string.
-        let redaction = crate::redaction::job_redaction(&self.state, &job, &steps)
-            .await
-            .map_err(|e| {
-                tracing::warn!(job_id = %job.job_id, "MCP get_job_status fails closed: {e}");
-                internal_err("redaction set unavailable, retry")
-            })?;
-
-        let mut result = serde_json::json!({
-            "job_id": job.job_id,
-            "workspace": job.workspace,
-            "task_name": job.task_name,
-            "status": job.status,
-            "source_type": job.source_type,
-            "revision": job.revision,
-            "ref": job.git_ref,
-            "created_at": job.created_at.to_rfc3339(),
-            "started_at": job.started_at.map(|dt| dt.to_rfc3339()),
-            "completed_at": job.completed_at.map(|dt| dt.to_rfc3339()),
-            "steps": steps_json,
-        });
-        redaction.apply_job_response(&mut result);
-
-        Ok(json_result(&result))
+            .map_err(app_err)?;
+        cap_job_detail(&mut detail, MCP_JOB_DETAIL_MAX_BYTES);
+        Ok(json_result(&detail))
     }
 
     /// Get the end of a job's log. Optionally filter by step name.
@@ -1572,7 +1624,102 @@ fn truncation_trailer(tail: &crate::log_read::Tail) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{json, Value};
+
+    fn detail_with(job_output: Value, step_outputs: &[Value]) -> Value {
+        json!({
+            "job_id": "00000000-0000-0000-0000-000000000001",
+            "status": "completed",
+            "output": job_output,
+            "steps": step_outputs
+                .iter()
+                .enumerate()
+                .map(|(i, o)| json!({"step_name": format!("s{i}"), "output": o}))
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    #[test]
+    fn cap_job_detail_leaves_a_small_answer_unchanged() {
+        let mut d = detail_with(json!({"a": 1}), &[json!("x"), Value::Null]);
+        let before = d.clone();
+        cap_job_detail(&mut d, 10_000);
+        assert_eq!(d, before);
+    }
+
+    #[test]
+    fn cap_job_detail_replaces_the_largest_values_first_until_it_fits() {
+        let big = "b".repeat(5_000);
+        let mid = "m".repeat(3_000);
+        let mut d = detail_with(json!({"small": 1}), &[json!(mid), json!(big)]);
+        cap_job_detail(&mut d, 4_500);
+        // The biggest goes first; that is enough.
+        assert!(d["steps"][1]["output"]
+            .as_str()
+            .unwrap()
+            .starts_with("[omitted: "));
+        assert_eq!(d["steps"][0]["output"], json!(mid));
+        assert_eq!(d["output"], json!({"small": 1}));
+        assert_eq!(
+            d["truncated_values"],
+            json!([{"path": "/steps/1/output", "size_bytes": 5_002}])
+        );
+        assert!(serde_json::to_vec(&d).unwrap().len() <= 4_500);
+
+        let mut d = detail_with(json!({"small": 1}), &[json!(mid), json!(big)]);
+        cap_job_detail(&mut d, 1_000);
+        let paths: Vec<&str> = d["truncated_values"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(paths, ["/steps/1/output", "/steps/0/output"]);
+        assert_eq!(d["output"], json!({"small": 1}), "small values stay");
+        let note = d["steps"][0]["output"].as_str().unwrap();
+        assert!(
+            note.contains("GET /api/jobs/00000000-0000-0000-0000-000000000001"),
+            "{note}"
+        );
+    }
+
+    #[test]
+    fn cap_job_detail_never_touches_identifiers() {
+        let mut d = detail_with(json!("o".repeat(2_000)), &[]);
+        d["workspace"] = json!("w".repeat(2_000));
+        cap_job_detail(&mut d, 100);
+        assert_eq!(d["workspace"], json!("w".repeat(2_000)));
+        assert_eq!(d["truncated_values"][0]["path"], json!("/output"));
+    }
+
+    #[test]
+    fn app_err_keeps_rest_messages_and_hides_internal_causes() {
+        assert_eq!(
+            app_err(AppError::NotFound("Job not found".into())).message,
+            "Job not found"
+        );
+        let e = app_err(AppError::BadRequest("bad".into()));
+        assert_eq!(e.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert_eq!(
+            app_err(AppError::ServiceUnavailable(
+                "redaction set unavailable, retry".into()
+            ))
+            .message,
+            "redaction set unavailable, retry"
+        );
+        assert_eq!(
+            app_err(AppError::TooManyRequests {
+                message: "retry after 4s".into(),
+                retry_after_secs: 4
+            })
+            .message,
+            "retry after 4s"
+        );
+        let e = app_err(AppError::Internal(anyhow::anyhow!(
+            "pa55word in a DB error"
+        )));
+        assert_eq!(e.message, "Internal server error");
+    }
 
     #[test]
     fn approval_input_keeps_absent_absent() {

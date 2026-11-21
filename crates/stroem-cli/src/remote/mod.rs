@@ -33,10 +33,13 @@ pub enum Commands {
         #[arg(long = "file", value_name = "FIELD=PATH")]
         files: Vec<String>,
     },
-    /// Get job status
+    /// Get job status, input and output
     Status {
         /// Job ID
         job_id: String,
+        /// Print the raw job detail (`GET /api/jobs/{id}`) as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Get job logs (the last 256 KiB unless --full or --tail-bytes)
     Logs {
@@ -163,8 +166,8 @@ pub async fn dispatch(command: Commands, server: &str, token: Option<&str>) -> R
             )
             .await?;
         }
-        Commands::Status { job_id } => {
-            status::cmd_status(&http_client, server, &job_id).await?;
+        Commands::Status { job_id, json } => {
+            status::cmd_status(&http_client, server, &job_id, json).await?;
         }
         Commands::Logs {
             job_id,
@@ -356,7 +359,22 @@ mod tests {
     fn status_subcommand_captures_job_id() {
         let cli = parse(&["stroem-api", "status", "abc-123"]).unwrap();
         match cli.command {
-            super::Commands::Status { job_id } => assert_eq!(job_id, "abc-123"),
+            super::Commands::Status { job_id, .. } => assert_eq!(job_id, "abc-123"),
+            _ => panic!("unexpected command variant"),
+        }
+    }
+
+    #[test]
+    fn status_subcommand_json_flag() {
+        match parse(&["stroem-api", "status", "j1", "--json"])
+            .unwrap()
+            .command
+        {
+            super::Commands::Status { json, .. } => assert!(json),
+            _ => panic!("unexpected command variant"),
+        }
+        match parse(&["stroem-api", "status", "j1"]).unwrap().command {
+            super::Commands::Status { json, .. } => assert!(!json),
             _ => panic!("unexpected command variant"),
         }
     }
