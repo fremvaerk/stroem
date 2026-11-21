@@ -16,7 +16,7 @@ pub struct RestartArgs {
     /// Restart from this flow step: it and every step that depends on it run again
     #[arg(long)]
     pub from_step: Option<String>,
-    /// Restart every failed or cancelled step and every step that depends on them
+    /// Restart every failed, cancelled or unfinished step and every step that depends on them
     #[arg(long)]
     pub all_failed: bool,
     /// Show the plan only; create no job

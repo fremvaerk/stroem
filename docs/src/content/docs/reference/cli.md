@@ -205,13 +205,13 @@ stroem-api cancel <job-id>
 
 ### `restart`
 
-[Restart](/guides/rerun-and-restart/) a finished, top-level job: from one step, or from every failed or cancelled step. Give exactly one of `--from-step` and `--all-failed`.
+[Restart](/guides/rerun-and-restart/) a finished, top-level job: from one step, or from every failed, cancelled or unfinished step. Give exactly one of `--from-step` and `--all-failed`.
 
 ```bash
 # Restart from step `deploy`: it and every step that depends on it run again
 stroem-api restart <job-id> --from-step deploy
 
-# Restart every failed or cancelled step and what depends on them
+# Restart every failed, cancelled or unfinished step and what depends on them
 stroem-api restart <job-id> --all-failed
 
 # Show the plan only; create no job

@@ -123,8 +123,8 @@ pub struct RestartJobParams {
     /// again. Give this or `all_failed`, not both.
     #[serde(default)]
     pub from_step: Option<String>,
-    /// Restart every failed or cancelled step and every step that depends on
-    /// them. Give this or `from_step`, not both.
+    /// Restart every failed, cancelled or unfinished step and every step that
+    /// depends on them. Give this or `from_step`, not both.
     #[serde(default)]
     pub all_failed: bool,
     /// Only return the plan; create no job
@@ -1184,7 +1184,7 @@ impl StromMcpHandler {
 
     /// Restart a finished job from one step, or every failed step.
     #[tool(
-        description = "Restart a finished job: create a new job of the same task in which the start steps, and every step that depends on them, run again, and every other step is carried over from the source job as it ended. The source job must be a terminal, top-level job (not a `type: task` sub-job and not a hook job). Give exactly one of `from_step` (restart from that flow step) or `all_failed: true` (restart every failed or cancelled step and what depends on it). Use `dry_run: true` to preview the plan without creating a job. Returns `job_id` (not for a dry run), `start_steps`, `restart_steps`, `carried_over`, `carried_failed` and `carried_failed_tolerated`. Needs Run access."
+        description = "Restart a finished job: create a new job of the same task in which the start steps, and every step that depends on them, run again, and every other step is carried over from the source job as it ended. The source job must be a terminal, top-level job (not a `type: task` sub-job and not a hook job). Give exactly one of `from_step` (restart from that flow step) or `all_failed: true` (restart every failed or cancelled step, every step that did not finish, and what depends on them). Use `dry_run: true` to preview the plan without creating a job. Returns `job_id` (not for a dry run), `start_steps`, `restart_steps`, `carried_over`, `carried_failed` and `carried_failed_tolerated`. Needs Run access."
     )]
     async fn restart_job(
         &self,
