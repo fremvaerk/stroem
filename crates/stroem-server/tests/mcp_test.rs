@@ -690,6 +690,7 @@ async fn test_mcp_tools_list_returns_every_tool() -> Result<()> {
         "list_jobs",
         "cancel_job",
         "restart_job",
+        "approve_step",
         "list_artifacts",
         "get_artifact",
         "create_upload_url",

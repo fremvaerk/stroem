@@ -40,7 +40,15 @@ const INVALID_PARAMS: i64 = -32602;
 const ACTIONS_YAML: &str = r#"
 actions:
   noop: { type: script, script: "true" }
+  gate:
+    type: approval
+    message: "Ship it?"
+    input: { reason: { type: string, required: true } }
 tasks:
+  gated:
+    flow:
+      ask: { action: gate }
+      after: { action: noop, depends_on: [ask] }
   line:
     input: { note: { type: string } }
     flow:
@@ -597,5 +605,157 @@ async fn restart_job_rejects_a_newly_required_input() -> Result<()> {
         )
         .await;
     assert_eq!(body["restart_steps"], json!(["b", "c"]));
+    Ok(())
+}
+
+// ─── approve_step ────────────────────────────────────────────────────────────
+
+/// A `gated` job created over MCP, so creation-time init runs and its root
+/// approval step `ask` is suspended.
+async fn suspended_gate(app: &App) -> Result<Uuid> {
+    let body = app
+        .ok(
+            "execute_task",
+            json!({"workspace": "default", "task_name": "gated"}),
+        )
+        .await;
+    let job_id: Uuid = body["job_id"].as_str().expect("job_id").parse()?;
+    let ask = step(&app.pool, job_id, "ask").await?;
+    assert_eq!(ask.status, "suspended", "the gate waits for a decision");
+    Ok(job_id)
+}
+
+async fn step(pool: &PgPool, job_id: Uuid, name: &str) -> Result<stroem_db::JobStepRow> {
+    Ok(JobStepRepo::get_steps_for_job(pool, job_id)
+        .await?
+        .into_iter()
+        .find(|s| s.step_name == name)
+        .unwrap_or_else(|| panic!("row {name}")))
+}
+
+#[tokio::test]
+async fn approve_step_approves_a_suspended_gate() -> Result<()> {
+    let app = App::new(actions_workspace()).await?;
+    let job = suspended_gate(&app).await?;
+
+    let body = app
+        .ok(
+            "approve_step",
+            json!({"job_id": job.to_string(), "step_name": "ask", "approved": true,
+                   "input": {"reason": "tested"}}),
+        )
+        .await;
+    assert_eq!(body, json!({"status": "approved"}));
+
+    let ask = step(&app.pool, job, "ask").await?;
+    assert_eq!(ask.status, "completed");
+    let output = ask.output.expect("approval output");
+    assert_eq!(output["approved"], json!(true), "{output}");
+    assert_eq!(output["approved_by"], json!(USER), "{output}");
+    assert_eq!(output["input"], json!({"reason": "tested"}), "{output}");
+    assert_eq!(step(&app.pool, job, "after").await?.status, "ready");
+    Ok(())
+}
+
+/// Like REST, an absent `input` is not `{}`: the required-field check does
+/// not run and the output gets no `input` key.
+#[tokio::test]
+async fn approve_step_without_input_adds_no_input() -> Result<()> {
+    let app = App::new(actions_workspace()).await?;
+    let job = suspended_gate(&app).await?;
+
+    let body = app
+        .ok(
+            "approve_step",
+            json!({"job_id": job.to_string(), "step_name": "ask", "approved": true}),
+        )
+        .await;
+    assert_eq!(body, json!({"status": "approved"}));
+    let output = step(&app.pool, job, "ask").await?.output.expect("output");
+    assert!(output.get("input").is_none(), "{output}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn approve_step_rejects_with_a_reason() -> Result<()> {
+    let app = App::new(actions_workspace()).await?;
+    let job = suspended_gate(&app).await?;
+
+    let body = app
+        .ok(
+            "approve_step",
+            json!({"job_id": job.to_string(), "step_name": "ask", "approved": false,
+                   "rejection_reason": "not today"}),
+        )
+        .await;
+    assert_eq!(body, json!({"status": "rejected"}));
+    let ask = step(&app.pool, job, "ask").await?;
+    assert_eq!(ask.status, "failed");
+    assert_eq!(ask.error_message.as_deref(), Some("not today"));
+    let row = JobRepo::get(&app.pool, job).await?.expect("job row");
+    assert_eq!(row.status, "failed");
+    Ok(())
+}
+
+#[tokio::test]
+async fn approve_step_refuses_a_step_it_cannot_decide() -> Result<()> {
+    let app = App::new(actions_workspace()).await?;
+    let job = suspended_gate(&app).await?;
+    let decide = |step_name: &str, extra: Value| {
+        let mut args = json!({"job_id": job.to_string(), "step_name": step_name, "approved": true});
+        if let (Some(a), Some(e)) = (args.as_object_mut(), extra.as_object()) {
+            a.extend(e.clone());
+        }
+        app.err("approve_step", args)
+    };
+
+    let (_, message) = decide("nope", json!({})).await;
+    assert_eq!(message, "Step not found");
+    let (code, message) = decide("after", json!({})).await;
+    assert_eq!(code, INVALID_PARAMS, "{message}");
+    assert_eq!(
+        message,
+        "Step 'after' is not in suspended state (current: pending)"
+    );
+    let (code, message) = decide("ask", json!({"input": {}})).await;
+    assert_eq!(code, INVALID_PARAMS, "{message}");
+    assert_eq!(message, "Required field 'reason' is missing");
+
+    app.ok(
+        "approve_step",
+        json!({"job_id": job.to_string(), "step_name": "ask", "approved": true}),
+    )
+    .await;
+    let (code, message) = decide("ask", json!({})).await;
+    assert_eq!(code, INVALID_PARAMS, "{message}");
+    assert_eq!(
+        message,
+        "Step 'ask' is not in suspended state (current: completed)"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn approve_step_follows_the_job_acl() -> Result<()> {
+    let app = App::new(actions_workspace()).await?;
+    let ws = actions_workspace();
+    // The ACL is checked before the step, so the steps' state does not matter.
+    let viewed = finished_job(&app.pool, &ws, "view-line", json!({}), &[], "running").await?;
+    let denied = finished_job(&app.pool, &ws, "deny-line", json!({}), &[], "running").await?;
+    let args = |job: Uuid| json!({"job_id": job.to_string(), "step_name": "a", "approved": true});
+
+    let (_, message) = app.err("approve_step", args(viewed)).await;
+    assert_eq!(message, "Insufficient permissions to approve this step");
+    let (_, message) = app.err("approve_step", args(denied)).await;
+    assert_eq!(message, "Job not found");
+    let (_, message) = app.err("approve_step", args(Uuid::new_v4())).await;
+    assert_eq!(message, "Job not found");
+    let (code, _) = app
+        .err(
+            "approve_step",
+            json!({"job_id": "not-a-uuid", "step_name": "a", "approved": true}),
+        )
+        .await;
+    assert_eq!(code, INVALID_PARAMS);
     Ok(())
 }

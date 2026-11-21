@@ -133,6 +133,23 @@ pub struct RestartJobParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct ApproveStepParams {
+    /// Job ID (UUID)
+    pub job_id: String,
+    /// Name of the suspended step
+    pub step_name: String,
+    /// `true` approves the step, `false` rejects it
+    pub approved: bool,
+    /// Approve only: values for the approval's input fields. For an agent
+    /// step that asked a question (`ask_user`), `{"response": "<answer>"}`.
+    #[serde(default)]
+    pub input: Option<serde_json::Value>,
+    /// Reject only: why the step is rejected (it becomes the step's error)
+    #[serde(default)]
+    pub rejection_reason: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct ListArtifactsParams {
     /// Job ID (UUID)
     pub job_id: String,
@@ -489,6 +506,21 @@ fn app_error(e: AppError) -> rmcp::ErrorData {
             tracing::error!("MCP job action failed: {:#}", e);
             internal_err("Internal server error")
         }
+    }
+}
+
+/// The approval `input` as REST would get it: absent or `null` stays absent
+/// (the required-field check then does not run), a string holding a JSON
+/// object is that object (some MCP clients stringify objects), any other
+/// value is passed as given.
+fn approval_input(input: Option<serde_json::Value>) -> Option<serde_json::Value> {
+    match input {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(s)) => match serde_json::from_str(&s) {
+            Ok(v @ serde_json::Value::Object(_)) => Some(v),
+            _ => Some(serde_json::Value::String(s)),
+        },
+        Some(v) => Some(v),
     }
 }
 
@@ -1165,6 +1197,34 @@ impl StromMcpHandler {
         Ok(json_result(&outcome.body()))
     }
 
+    /// Approve or reject a suspended step.
+    #[tool(
+        description = "Approve or reject a suspended step: a `type: approval` gate, or an agent step that waits for an answer (`ask_user`). `approved: true` approves it, with `input` for the approval's input fields (for an agent question pass {\"response\": \"<answer>\"}); `approved: false` rejects it, with an optional `rejection_reason`. The step must be in the `suspended` state (see `get_job_status`). You are recorded as the approver. Needs Run access. Returns {\"status\": \"approved\"} or {\"status\": \"rejected\"}."
+    )]
+    async fn approve_step(
+        &self,
+        params: Parameters<ApproveStepParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let Parameters(params) = params;
+        tracing::info!(job_id = %params.job_id, step = %params.step_name, approved = params.approved, "MCP: approve_step");
+        let job_id = parse_job_id(&params.job_id)?;
+        let req = crate::web::api::jobs::ApproveStepRequest {
+            approved: params.approved,
+            input: approval_input(params.input),
+            rejection_reason: params.rejection_reason,
+        };
+        let decision = crate::web::api::approve::approve_step(
+            &self.state,
+            caller(self),
+            job_id,
+            &params.step_name,
+            req,
+        )
+        .await
+        .map_err(app_error)?;
+        Ok(json_result(&decision.body()))
+    }
+
     /// List artifacts produced by a job.
     #[tool(
         description = "List artifacts produced by a job. Returns name, content_type, size_bytes, step_name, and a relative download URL (use list_artifacts then call get_artifact, or pass the URL to a human for binary content)."
@@ -1476,6 +1536,29 @@ fn truncation_trailer(tail: &crate::log_read::Tail) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn approval_input_keeps_absent_absent() {
+        assert_eq!(approval_input(None), None);
+        assert_eq!(approval_input(Some(serde_json::Value::Null)), None);
+        assert_eq!(
+            approval_input(Some(serde_json::json!({"a": 1}))),
+            Some(serde_json::json!({"a": 1}))
+        );
+        assert_eq!(
+            approval_input(Some(serde_json::json!("{\"a\": 1}"))),
+            Some(serde_json::json!({"a": 1}))
+        );
+        // Not an object: passed on as given, like the REST body.
+        assert_eq!(
+            approval_input(Some(serde_json::json!("yes"))),
+            Some(serde_json::json!("yes"))
+        );
+        assert_eq!(
+            approval_input(Some(serde_json::json!("[1]"))),
+            Some(serde_json::json!("[1]"))
+        );
+    }
 
     #[test]
     fn decode_inline_accepts_text_and_base64() {
