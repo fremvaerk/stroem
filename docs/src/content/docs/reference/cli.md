@@ -269,3 +269,18 @@ List all configured workspaces on the server: name, task / action / trigger coun
 ```bash
 stroem-api workspaces
 ```
+
+### `triggers`
+
+List triggers with their schedule, missed runs and last run (result, time and job ID). `hidden` means that the last run is a job you may not view; `never` means that the trigger has not run.
+
+```bash
+# Every workspace (a workspace that does not load is left out)
+stroem-api triggers
+
+# One workspace
+stroem-api triggers --workspace data-team
+
+# Only the triggers that need attention (the Dashboard card): missed runs or a failed last run
+stroem-api triggers --attention
+```

@@ -253,6 +253,15 @@ fn is_invalid_params(resp: &Value) -> bool {
     resp["error"]["code"] == json!(-32602)
 }
 
+/// rmcp answers arguments that do not deserialize (a missing or mistyped
+/// field) with a tool result flagged `isError`.
+fn is_rejected_call(resp: &Value) -> bool {
+    resp["result"]["isError"] == json!(true)
+        && resp["result"]["content"][0]["text"]
+            .as_str()
+            .is_some_and(|t| t.contains("failed to deserialize parameters"))
+}
+
 async fn rest(app: &App, token: &str, method: &str, uri: &str) -> (StatusCode, Value) {
     let req = Request::builder()
         .method(method)
@@ -795,5 +804,203 @@ async fn get_job_status_of_a_job_with_an_unloadable_pin_masks_all_content() -> R
     assert_eq!(detail["output"]["result"], json!(MASK), "{detail}");
     assert_eq!(detail["job_id"], json!(job_id));
     assert_eq!(detail["ref"], json!("release/2.3"));
+    Ok(())
+}
+
+// ─── list_triggers / list_attention_triggers ─────────────────────────────────
+
+const DAY: f64 = 86_400.0;
+
+/// A job fired by trigger `default/{trigger}`; `pin` = `(git_ref, folder)`.
+async fn seed_trigger_run(
+    pool: &PgPool,
+    trigger: &str,
+    task: &str,
+    status: &str,
+    ago_secs: f64,
+    pin: Option<(&str, &str)>,
+) -> Uuid {
+    let job_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO job (job_id, workspace, task_name, mode, status, source_type, source_id, \
+                          git_ref, task_folder, created_at) \
+         VALUES ($1, 'default', $2, 'distributed', $3, 'trigger', $4, $5, $6, \
+                 NOW() - make_interval(secs => $7))",
+    )
+    .bind(job_id)
+    .bind(task)
+    .bind(status)
+    .bind(format!("default/{trigger}"))
+    .bind(pin.map(|p| p.0))
+    .bind(pin.map(|p| p.1))
+    .bind(ago_secs)
+    .execute(pool)
+    .await
+    .expect("seed trigger run");
+    job_id
+}
+
+fn names(list: &Value) -> Vec<String> {
+    let mut v: Vec<String> = list
+        .as_array()
+        .unwrap_or_else(|| panic!("not a list: {list}"))
+        .iter()
+        .map(|t| t["name"].as_str().unwrap().to_string())
+        .collect();
+    v.sort();
+    v
+}
+
+fn by_name<'a>(list: &'a Value, name: &str) -> &'a Value {
+    list.as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == name)
+        .unwrap_or_else(|| panic!("no trigger {name}: {list}"))
+}
+
+#[tokio::test]
+async fn list_triggers_answers_the_rest_trigger_list() -> Result<()> {
+    let app = app().await?;
+    let run = seed_trigger_run(
+        &app.pool,
+        "nightly-report",
+        "report",
+        "failed",
+        3.0 * DAY,
+        None,
+    )
+    .await;
+
+    let (status, body) = rest(&app, &app.admin, "GET", "/api/workspaces/default/triggers").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let list = payload(
+        &mcp(
+            &app,
+            &app.admin,
+            "list_triggers",
+            json!({"workspace": "default"}),
+        )
+        .await,
+    );
+    assert_eq!(list, body);
+    assert_eq!(
+        names(&list),
+        ["nightly-hidden", "nightly-report", "nightly-restricted"]
+    );
+    let t = by_name(&list, "nightly-report");
+    assert_eq!(t["last_run"]["job_id"], json!(run.to_string()));
+    assert_eq!(t["last_run"]["status"], json!("failed"));
+    assert!(t["missed"]["count"].as_u64().unwrap() >= 1, "{t}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn list_triggers_acl_hides_denied_triggers_and_runs_but_not_the_missed_mark() -> Result<()> {
+    let app = app().await?;
+    // The last run is a pinned job whose commit put the task in `hidden`.
+    seed_trigger_run(
+        &app.pool,
+        "nightly-report",
+        "report",
+        "completed",
+        3.0 * DAY,
+        Some(("v2", "hidden")),
+    )
+    .await;
+
+    let list = payload(
+        &mcp(
+            &app,
+            &app.viewer,
+            "list_triggers",
+            json!({"workspace": "default"}),
+        )
+        .await,
+    );
+    // View on `view/*` is enough to see a trigger; `hidden/*` is denied.
+    assert_eq!(names(&list), ["nightly-report", "nightly-restricted"]);
+    let t = by_name(&list, "nightly-report");
+    assert!(t["last_run"].is_null(), "{t}");
+    assert_eq!(t["last_run_hidden"], json!(true));
+    assert!(t["missed"]["count"].as_u64().unwrap() >= 1, "{t}");
+
+    let list = payload(
+        &mcp(
+            &app,
+            &app.admin,
+            "list_triggers",
+            json!({"workspace": "default"}),
+        )
+        .await,
+    );
+    assert_eq!(
+        by_name(&list, "nightly-report")["last_run_hidden"],
+        json!(false)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn list_triggers_unknown_workspace_is_the_rest_error() -> Result<()> {
+    let app = app().await?;
+    let resp = mcp(
+        &app,
+        &app.admin,
+        "list_triggers",
+        json!({"workspace": "nope"}),
+    )
+    .await;
+    assert_eq!(error_message(&resp), "Workspace 'nope' not found");
+    let resp = mcp(&app, &app.admin, "list_triggers", json!({})).await;
+    assert!(
+        is_rejected_call(&resp),
+        "a missing workspace is a bad call: {resp}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn list_attention_triggers_answers_the_rest_dashboard_card() -> Result<()> {
+    let app = app().await?;
+    seed_trigger_run(
+        &app.pool,
+        "nightly-report",
+        "report",
+        "completed",
+        3.0 * DAY,
+        None,
+    )
+    .await;
+    seed_trigger_run(
+        &app.pool,
+        "nightly-restricted",
+        "restricted",
+        "failed",
+        60.0,
+        None,
+    )
+    .await;
+    seed_trigger_run(&app.pool, "nightly-hidden", "hidden", "failed", 60.0, None).await;
+
+    let (status, body) = rest(&app, &app.admin, "GET", "/api/triggers/attention").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let admin = payload(&mcp(&app, &app.admin, "list_attention_triggers", json!({})).await);
+    assert_eq!(admin, body);
+    assert_eq!(
+        names(&admin),
+        ["nightly-hidden", "nightly-report", "nightly-restricted"]
+    );
+    assert_eq!(
+        by_name(&admin, "nightly-restricted")["last_run_failed"],
+        json!(true)
+    );
+    assert_eq!(
+        by_name(&admin, "nightly-report")["workspace"],
+        json!("default")
+    );
+
+    let viewer = payload(&mcp(&app, &app.viewer, "list_attention_triggers", json!({})).await);
+    assert_eq!(names(&viewer), ["nightly-report", "nightly-restricted"]);
     Ok(())
 }

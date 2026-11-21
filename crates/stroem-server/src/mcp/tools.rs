@@ -111,6 +111,12 @@ pub struct ListJobsParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct ListTriggersParams {
+    /// Workspace name
+    pub workspace: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct CancelJobParams {
     /// Job ID (UUID) to cancel
     pub job_id: String,
@@ -1101,6 +1107,38 @@ impl StromMcpHandler {
             formatted.push_str(&truncation_trailer(&tail));
         }
         Ok(text_result(formatted))
+    }
+
+    /// A workspace's triggers with their run status (`GET /api/workspaces/{ws}/triggers`).
+    #[tool(
+        description = "List a workspace's triggers (scheduler, webhook, event source), the same as GET /api/workspaces/{ws}/triggers: type, cron, timezone, task, target_task, enabled, input, next_runs, the last run and its result (`last_run`), and missed scheduled runs (`missed`). A trigger whose task you may not view is left out. A last run you may not view is hidden (`last_run_hidden: true`); its missed mark is still shown."
+    )]
+    async fn list_triggers(
+        &self,
+        params: Parameters<ListTriggersParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let Parameters(params) = params;
+        tracing::info!(workspace = %params.workspace, "MCP: list_triggers");
+        let triggers = crate::web::api::triggers::workspace_triggers(
+            &self.state,
+            &rest_auth(self),
+            params.workspace,
+        )
+        .await
+        .map_err(app_err)?;
+        Ok(json_result(&triggers))
+    }
+
+    /// Triggers that need attention, all workspaces (`GET /api/triggers/attention`).
+    #[tool(
+        description = "List the triggers of every workspace that need attention, the same as the Dashboard card (GET /api/triggers/attention): enabled scheduler triggers that missed scheduled runs, and triggers whose last run failed (`last_run_failed`). Each entry has the `workspace` and the fields of `list_triggers`. Workspaces that do not load are left out."
+    )]
+    async fn list_attention_triggers(&self) -> Result<CallToolResult, rmcp::ErrorData> {
+        tracing::info!("MCP: list_attention_triggers");
+        let rows = crate::web::api::triggers::attention_triggers(&self.state, &rest_auth(self))
+            .await
+            .map_err(app_err)?;
+        Ok(json_result(&rows))
     }
 
     /// List recent jobs. Filter by workspace, task, or status.

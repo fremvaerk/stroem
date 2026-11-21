@@ -58,7 +58,7 @@ mcp:
 
 ## Available Tools
 
-The MCP server provides fourteen tools for interacting with Strøm:
+The MCP server provides these tools for interacting with Strøm. The read tools run the same code as the REST API (named in each row), so they answer the same content under the same access rules:
 
 | Tool | Description | Parameters |
 |------|-------------|------------|
@@ -68,6 +68,8 @@ The MCP server provides fourteen tools for interacting with Strøm:
 | `execute_task` | Execute a task and return job ID | `workspace`, `task_name`, `input?` |
 | `get_job_status` | A job's full detail, the same as `GET /api/jobs/{id}`: status, input, output, each step's input / output / error / retry history, links, child jobs, later runs and input files | `job_id` |
 | `get_job_logs` | The end of a job's log (last 256 KiB), formatted | `job_id`, `step?`, `tail_bytes?` |
+| `list_triggers` | A workspace's triggers with next runs, last run, result and missed runs (`GET /api/workspaces/{ws}/triggers`) | `workspace` |
+| `list_attention_triggers` | Triggers of every workspace with missed runs or a failed last run, the Dashboard card (`GET /api/triggers/attention`) | none |
 | `list_jobs` | List recent jobs with optional filters | `workspace?`, `task_name?`, `status?`, `limit?` |
 | `cancel_job` | Cancel a running or pending job | `job_id` |
 | `restart_job` | Restart a finished job from one step, or every failed step | `job_id`, `from_step?` or `all_failed?`, `dry_run?` |
@@ -78,6 +80,12 @@ The MCP server provides fourteen tools for interacting with Strøm:
 | `create_upload_url` | Get a single-use URL to upload a file for a `file` input field | `workspace`, `task_name`, `file_name` |
 
 When the log is longer than the tail, the result ends with `[truncated: showing the last 256.0 KiB of up to 83.3 MiB — earlier lines omitted]`.
+
+`list_triggers` hides a trigger whose task you may not view. A last run you
+may not view (for example a run of a pinned commit that moved the task to a
+folder you cannot see) is hidden with `last_run_hidden: true`; the missed-runs
+mark is still shown. When your access rules cannot be loaded, both trigger
+tools answer `Internal server error` instead of an unfiltered list.
 
 `get_artifact` returns content shaped to the artifact's type: textual artifacts
 (text, JSON, YAML, XML) come back as inline text, `image/*` artifacts as image

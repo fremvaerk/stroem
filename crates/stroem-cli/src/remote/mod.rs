@@ -5,12 +5,14 @@ pub mod client;
 pub mod job_actions;
 pub mod jobs;
 pub mod logs;
+pub mod paths;
 pub mod rerun;
 pub mod restart;
 pub mod state;
 pub mod status;
 pub mod tasks;
 pub mod trigger;
+pub mod triggers;
 pub mod workspaces;
 
 use anyhow::Result;
@@ -83,6 +85,8 @@ pub enum Commands {
     },
     #[command(flatten)]
     JobActions(job_actions::JobActionCommands),
+    /// List triggers with their last run, result and missed runs
+    Triggers(triggers::TriggersArgs),
 }
 
 #[derive(Subcommand)]
@@ -197,6 +201,7 @@ pub async fn dispatch(command: Commands, server: &str, token: Option<&str>) -> R
         Commands::JobActions(command) => {
             job_actions::dispatch(&http_client, server, command).await?
         }
+        Commands::Triggers(args) => triggers::run(&http_client, server, args).await?,
     }
 
     Ok(())

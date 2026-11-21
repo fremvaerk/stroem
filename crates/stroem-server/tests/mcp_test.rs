@@ -695,6 +695,8 @@ async fn test_mcp_tools_list_returns_every_tool() -> Result<()> {
         "list_artifacts",
         "get_artifact",
         "create_upload_url",
+        "list_triggers",
+        "list_attention_triggers",
     ];
 
     assert_eq!(
