@@ -1,4 +1,5 @@
 pub mod api_keys;
+pub(crate) mod approve;
 pub mod artifacts;
 pub mod auth;
 pub(crate) mod caller;
