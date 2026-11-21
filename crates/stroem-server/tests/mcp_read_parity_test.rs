@@ -1742,3 +1742,70 @@ async fn get_job_logs_description_states_the_tail_limit() -> Result<()> {
     assert!(describe("get_input_file").contains("1 MiB"));
     Ok(())
 }
+
+// ─── Fail closed when the ACL context cannot load ────────────────────────────
+
+/// The viewer's groups cannot be read (the table is gone from this test's
+/// database): every tool that filters by ACL refuses with the fixed internal
+/// error, never an unfiltered answer; worker detail drops every step, as REST.
+#[tokio::test]
+async fn every_acl_filtered_tool_fails_closed_without_the_acl_context() -> Result<()> {
+    let app = app().await?;
+    let job_id = seed_job(&app.pool, SeedJob::default()).await;
+    attach_file(&app, job_id, "report", "data_file", "a.csv", b"a").await?;
+    seed_trigger_run(&app.pool, "nightly-report", "report", "failed", 60.0, None).await;
+    seed_timed_run(&app.pool, "report", 5.0).await;
+    let worker = register_worker(&app.pool, "w-closed").await;
+    seed_step(
+        &app.pool,
+        job_id,
+        SeedStep {
+            step: "build",
+            worker_id: Some(worker),
+            ..Default::default()
+        },
+    )
+    .await;
+    sqlx::query("ALTER TABLE user_group RENAME TO user_group_gone")
+        .execute(&app.pool)
+        .await?;
+
+    let job = job_id.to_string();
+    for (tool, args) in [
+        ("get_job_status", json!({"job_id": job})),
+        ("list_triggers", json!({"workspace": "default"})),
+        ("list_attention_triggers", json!({})),
+        ("list_jobs", json!({})),
+        ("refresh_workspace", json!({"workspace": "default"})),
+        (
+            "get_task_stats",
+            json!({"workspace": "default", "task_name": "report"}),
+        ),
+        ("get_stats", json!({})),
+        (
+            "get_input_file",
+            json!({"job_id": job, "field": "data_file"}),
+        ),
+    ] {
+        let resp = mcp(&app, &app.viewer, tool, args).await;
+        assert_eq!(
+            error_message(&resp),
+            "Internal server error",
+            "{tool}: {resp}"
+        );
+    }
+    let detail = payload(
+        &mcp(
+            &app,
+            &app.viewer,
+            "get_worker",
+            json!({"worker_id": worker.to_string()}),
+        )
+        .await,
+    );
+    assert_eq!(detail["steps"]["total"], json!(0), "{detail}");
+    // The admin does not read groups: unaffected.
+    let detail = payload(&mcp(&app, &app.admin, "get_job_status", json!({"job_id": job})).await);
+    assert_eq!(detail["job_id"], json!(job_id));
+    Ok(())
+}

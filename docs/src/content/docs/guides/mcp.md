@@ -58,7 +58,7 @@ mcp:
 
 ## Available Tools
 
-The MCP server provides these tools for interacting with Strøm. The read tools run the same code as the REST API (named in each row), so they answer the same content under the same access rules:
+The MCP server provides these tools for interacting with Strøm. A tool whose row names a REST route runs the same code as that route, so it answers the same content under the same access rules:
 
 | Tool | Description | Parameters |
 |------|-------------|------------|
