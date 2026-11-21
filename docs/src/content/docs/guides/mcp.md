@@ -387,13 +387,16 @@ step, `child_jobs`; the `parent_job_id`, `source_job_id` and retry links;
 `derived_jobs` (the Restarts and Re-runs of this job that you may see) and
 `input_files`. The same ACL applies: View on the task is enough.
 
-The answer is at most 256 KiB of JSON. When it would be larger, the largest
-input and output values are replaced with a note
+The answer is compact JSON. When it would be larger than 256 KiB, its
+largest content values (input, output, retry history, error message) are
+replaced with a note
 (`[omitted: 1.2 MiB of JSON, over the MCP answer limit; read it with GET /api/jobs/{id}]`),
 largest first, until the answer fits. The `truncated_values` list names each
 replaced value by its JSON pointer and size, for example
 `{"path": "/steps/2/output", "size_bytes": 1258291}`. Read those values with
-`GET /api/jobs/{id}` or `stroem-api status --json`.
+`GET /api/jobs/{id}` or `stroem-api status --json`. A job with very many
+steps can still give a larger answer, because step names, statuses and times
+are never replaced.
 
 ### 6. Retrieve logs
 
@@ -407,7 +410,7 @@ Returns:
 [start-container] Health check: passed
 ```
 
-This shows the tail of the log (last 256 KiB by default); pass `tail_bytes` for more history, up to `log_storage.read.tail_max_bytes`.
+This shows the tail of the log (last 256 KiB by default); pass `tail_bytes` for more history, up to `log_storage.read.tail_max_bytes` (4 MiB by default). MCP has no full log: an answer is one message, and a log can be very large. Read the whole log with `GET /api/jobs/{id}/logs?full=true` or `stroem-api logs --full`.
 
 `get_job_status` masks secret values (`••••••`) in what it returns — the
 input, the output and the steps' content — the same way as `GET /api/jobs/{id}`, including

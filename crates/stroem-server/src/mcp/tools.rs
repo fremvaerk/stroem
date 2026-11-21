@@ -1089,7 +1089,7 @@ impl StromMcpHandler {
 
     /// Get a job's full detail: the REST job detail (`GET /api/jobs/{id}`).
     #[tool(
-        description = "Get a job's full detail, the same as GET /api/jobs/{id}: status, times, input, raw_input and output; each step's input, output, error_message, retry_history and child_jobs; parent, source and retry links; derived_jobs (later Restarts and Re-runs) and input_files. Secret values are masked as ••••••. The answer is at most 256 KiB of JSON: when it would be larger, the largest input/output values are replaced with a note and listed in `truncated_values` (JSON pointer and size); read them with GET /api/jobs/{id}."
+        description = "Get a job's full detail, the same as GET /api/jobs/{id}: status, times, input, raw_input and output; each step's input, output, error_message, retry_history and child_jobs; parent, source and retry links; derived_jobs (later Restarts and Re-runs) and input_files. Secret values are masked as ••••••. The answer is compact JSON. When it would be larger than 256 KiB, its largest content values (input, output, retry_history, error_message) are replaced, largest first, with a note until it fits, and listed in `truncated_values` (JSON pointer and size); read them with GET /api/jobs/{id}. A job with very many steps can still be larger."
     )]
     async fn get_job_status(
         &self,
@@ -1106,12 +1106,17 @@ impl StromMcpHandler {
             .await
             .map_err(app_err)?;
         cap_job_detail(&mut detail, MCP_JOB_DETAIL_MAX_BYTES);
-        Ok(json_result(&detail))
+        // Compact, so the cap measures the text that is sent.
+        let text = serde_json::to_string(&detail).map_err(|e| {
+            tracing::error!("MCP get_job_status: serialising the answer failed: {e}");
+            internal_err("Internal server error")
+        })?;
+        Ok(text_result(text))
     }
 
     /// Get the end of a job's log. Optionally filter by step name.
     #[tool(
-        description = "Get the end of a job's log (the last 256 KiB unless tail_bytes is given). Optionally filter by step name."
+        description = "Get the end of a job's log (the last 256 KiB unless tail_bytes is given), formatted one line per log line. Optionally filter by step name. tail_bytes is at most log_storage.read.tail_max_bytes (4 MiB by default). The whole log is not available over MCP; use the REST API or `stroem-api logs --full` for it."
     )]
     async fn get_job_logs(
         &self,

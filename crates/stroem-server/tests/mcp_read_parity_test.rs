@@ -706,7 +706,8 @@ async fn get_job_status_replaces_oversized_values_with_a_note() -> Result<()> {
     )
     .await;
     let text = resp["result"]["content"][0]["text"].as_str().unwrap();
-    assert!(text.len() < 256 * 1024, "answer is {} bytes", text.len());
+    assert!(text.len() <= 256 * 1024, "answer is {} bytes", text.len());
+    assert!(!text.contains("\n  "), "the answer is compact JSON");
     let detail = payload(&resp);
     let step = &detail["steps"][0];
     let note = step["output"]
@@ -1696,5 +1697,48 @@ async fn get_input_file_bad_parameters() -> Result<()> {
     )
     .await;
     assert!(is_invalid_params(&resp), "{resp}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_job_logs_description_states_the_tail_limit() -> Result<()> {
+    let app = app().await?;
+    let list = json!({"jsonrpc": "2.0", "method": "tools/list", "id": 1});
+    let init = json!({"jsonrpc": "2.0", "method": "initialize", "id": 0, "params": {
+        "protocolVersion": "2025-03-26", "capabilities": {},
+        "clientInfo": {"name": "t", "version": "1"}}});
+    let resp = app
+        .router
+        .clone()
+        .oneshot(mcp_request(&app.admin, None, &init))
+        .await
+        .unwrap();
+    let sid = resp
+        .headers()
+        .get("Mcp-Session-Id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let resp = app
+        .router
+        .clone()
+        .oneshot(mcp_request(&app.admin, sid.as_deref(), &list))
+        .await
+        .unwrap();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body: Value = serde_json::from_slice(&bytes)?;
+    let tools = body["result"]["tools"].as_array().unwrap();
+    let describe = |name: &str| {
+        tools
+            .iter()
+            .find(|t| t["name"] == name)
+            .and_then(|t| t["description"].as_str())
+            .unwrap_or_else(|| panic!("no tool {name}"))
+            .to_string()
+    };
+    let logs = describe("get_job_logs");
+    assert!(logs.contains("4 MiB"), "{logs}");
+    assert!(logs.contains("--full"), "{logs}");
+    assert!(describe("get_job_status").contains("256 KiB"));
+    assert!(describe("get_input_file").contains("1 MiB"));
     Ok(())
 }

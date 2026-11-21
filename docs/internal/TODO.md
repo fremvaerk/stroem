@@ -1024,6 +1024,24 @@ Full analysis + the decided peek policy: `docs/superpowers/specs/2026-09-17-work
 - [x] Auth: 401 without token when auth enabled — `mcp_test.rs`
 - [x] Regression: MCP-created jobs fire hooks correctly — `mcp_test.rs`
 
+## MCP / CLI read parity (2026-11-21)
+
+Every non-admin UI read in MCP and `stroem-api`; each MCP tool calls the
+same `pub(crate)` function as its REST handler (CLAUDE.md § MCP Server).
+
+- [x] `get_job_status` = REST job detail (`jobs::job_detail`): input, output, steps' input/output/retry history, links, `child_jobs`, `derived_jobs`, `input_files`; capped at 256 KiB of compact JSON (`cap_job_detail`, `truncated_values`); `stroem-api status` prints input/output and step outputs, `--json` the raw detail
+- [x] `list_triggers` / `list_attention_triggers` (`triggers::{workspace_triggers, attention_triggers}`); `stroem-api triggers [-w WS] [--attention]`
+- [x] `list_jobs` gains `search`, `source_type`, `offset`, `total` (`jobs::job_list`); `stroem-api jobs --workspace --task --status --search --offset`
+- [x] `refresh_workspace` (`workspaces::refresh`, shared cooldown); `stroem-api refresh <WS>`
+- [x] `get_task_stats` / `get_stats` (`tasks::task_stats`, `jobs::dashboard_stats`); `stroem-api stats [-w WS --task T]`
+- [x] `list_workers` / `get_worker` (`workers::{worker_list, worker_detail}`); `stroem-api workers [ID]`
+- [x] `get_input_file` (`input_files::job_input_file` + `stream::read_bounded`, 1 MiB); `stroem-api input-file <JOB> <FIELD> [-o PATH]`, streamed
+- [x] `get_job_logs` description states the 4 MiB `tail_bytes` maximum; no full log over MCP (user decision: one message, logs can be 80 MiB)
+- [ ] `get_job_status` cap replaces content values only: a job with thousands of steps (a `for_each` of 10 000) still gives an answer over 256 KiB, built whole in memory like the REST job detail. A step page (`steps_offset`/`steps_limit`) would bound it.
+- [ ] `GET /api/workspaces/{ws}/triggers` (and MCP `list_triggers`) answers an empty list for a workspace in which the caller sees no task, while `refresh` answers 404 for the same caller — the trigger list confirms that the workspace exists. Pre-existing REST behaviour, mirrored.
+- [ ] `GET /api/workers` (and MCP `list_workers`) has no ACL: any authenticated user sees every worker's name, tags and version. Pre-existing REST behaviour, mirrored.
+- [ ] MCP not-found answers use the JSON-RPC `internal_error` code (pre-existing convention, `tools.rs::not_found`); `app_err` keeps it for REST `NotFound`. A client cannot tell "not found" from a server fault by code.
+
 ## Review: Timezone Support for Cron Triggers (2026-03-16)
 
 ### Important
