@@ -1614,6 +1614,16 @@ async fn pinned_job_in_denied_folder_is_denied_over_mcp_and_list_paginates_after
                 json!(RP_JOB_NOT_FOUND),
                 "get_artifact {id}: {resp}"
             );
+            let resp = call(
+                "restart_job",
+                json!({"job_id": id.to_string(), "all_failed": true, "dry_run": true}),
+            )
+            .await;
+            assert_eq!(
+                deny_message(&resp),
+                json!(RP_JOB_NOT_FOUND),
+                "restart_job {id}: {resp}"
+            );
         }
 
         for id in jobs.allowed() {
@@ -1638,6 +1648,16 @@ async fn pinned_job_in_denied_folder_is_denied_over_mcp_and_list_paginates_after
                 deny_message(&resp),
                 json!("Insufficient permissions: cancel requires Run access"),
                 "{id}: {resp}"
+            );
+            let resp = call(
+                "restart_job",
+                json!({"job_id": id.to_string(), "all_failed": true, "dry_run": true}),
+            )
+            .await;
+            assert_eq!(
+                deny_message(&resp),
+                json!("Insufficient permissions to restart this job"),
+                "restart_job {id}: {resp}"
             );
         }
 
