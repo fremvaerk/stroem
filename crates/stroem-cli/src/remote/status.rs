@@ -4,6 +4,7 @@ use serde_json::Value;
 use std::fmt::Write;
 
 use super::client::check_response;
+use super::paths::api_url;
 
 pub async fn cmd_status(client: &Client, server: &str, job_id: &str, json: bool) -> Result<()> {
     print!("{}", status_text(client, server, job_id, json).await?);
@@ -19,7 +20,7 @@ pub async fn status_text(
     json: bool,
 ) -> Result<String> {
     let resp = client
-        .get(format!("{}/api/jobs/{}", server, job_id))
+        .get(api_url(server, &["jobs", job_id])?)
         .send()
         .await
         .context("Failed to connect to server")?;

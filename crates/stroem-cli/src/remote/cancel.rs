@@ -3,10 +3,11 @@ use reqwest::Client;
 use serde_json::Value;
 
 use super::client::check_response;
+use super::paths::api_url;
 
 pub async fn cmd_cancel(client: &Client, server: &str, job_id: &str) -> Result<()> {
     let resp = client
-        .post(format!("{}/api/jobs/{}/cancel", server, job_id))
+        .post(api_url(server, &["jobs", job_id, "cancel"])?)
         .send()
         .await
         .context("Failed to connect to server")?;

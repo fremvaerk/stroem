@@ -78,6 +78,10 @@ pub enum Commands {
         /// Filter by status (pending, running, completed, failed, cancelled, skipped)
         #[arg(long)]
         status: Option<String>,
+        /// Filter by source type (api, trigger, webhook, task, hook, user, mcp,
+        /// agent_tool, event_source, retry, upload, rerun, restart)
+        #[arg(long)]
+        source_type: Option<String>,
         /// Text to look for in the task name, workspace, source ID or job ID
         #[arg(long, conflicts_with = "task")]
         search: Option<String>,
@@ -218,6 +222,7 @@ pub async fn dispatch(command: Commands, server: &str, token: Option<&str>) -> R
             workspace,
             task,
             status,
+            source_type,
             search,
             offset,
         } => {
@@ -226,6 +231,7 @@ pub async fn dispatch(command: Commands, server: &str, token: Option<&str>) -> R
                 workspace: workspace.as_deref(),
                 task: task.as_deref(),
                 status: status.as_deref(),
+                source_type: source_type.as_deref(),
                 search: search.as_deref(),
                 offset,
             };
@@ -390,12 +396,25 @@ mod tests {
             "x"
         ])
         .is_err());
-        match parse(&["stroem-api", "jobs", "--search", "nightly"])
-            .unwrap()
-            .command
+        match parse(&[
+            "stroem-api",
+            "jobs",
+            "--search",
+            "nightly",
+            "--source-type",
+            "trigger",
+        ])
+        .unwrap()
+        .command
         {
-            super::Commands::Jobs { search, offset, .. } => {
+            super::Commands::Jobs {
+                search,
+                source_type,
+                offset,
+                ..
+            } => {
                 assert_eq!(search.as_deref(), Some("nightly"));
+                assert_eq!(source_type.as_deref(), Some("trigger"));
                 assert_eq!(offset, 0);
             }
             _ => panic!("unexpected command variant"),

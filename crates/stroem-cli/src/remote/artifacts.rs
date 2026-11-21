@@ -6,6 +6,7 @@ use reqwest::Client;
 use serde_json::Value;
 
 use super::client::check_response;
+use super::paths::api_url;
 
 pub async fn dispatch(client: &Client, server: &str, action: ArtifactsAction) -> Result<()> {
     match action {
@@ -20,7 +21,7 @@ pub async fn dispatch(client: &Client, server: &str, action: ArtifactsAction) ->
 
 pub async fn cmd_list(client: &Client, server: &str, job_id: &str) -> Result<()> {
     let resp = client
-        .get(format!("{}/api/jobs/{}/artifacts", server, job_id))
+        .get(api_url(server, &["jobs", job_id, "artifacts"])?)
         .send()
         .await
         .context("Failed to connect to server")?;
@@ -60,12 +61,8 @@ pub async fn cmd_download(
     name: &str,
     output: Option<&str>,
 ) -> Result<()> {
-    let encoded = url_encode(name);
     let resp = client
-        .get(format!(
-            "{}/api/jobs/{}/artifacts/{}",
-            server, job_id, encoded
-        ))
+        .get(api_url(server, &["jobs", job_id, "artifacts", name])?)
         .send()
         .await
         .context("Failed to connect to server")?;
@@ -90,27 +87,39 @@ pub async fn cmd_download(
     Ok(())
 }
 
-fn url_encode(s: &str) -> String {
-    url::form_urlencoded::byte_serialize(s.as_bytes()).collect::<String>()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    #[test]
-    fn url_encode_passes_through_safe_chars() {
-        assert_eq!(url_encode("report.png"), "report.png");
-    }
-
-    #[test]
-    fn url_encode_escapes_spaces_and_slashes() {
-        let encoded = url_encode("my report/v2.png");
-        // form_urlencoded encodes spaces as '+' and '/' as %2F
-        assert!(encoded.contains("%2F"));
-        assert!(encoded.contains('+') || encoded.contains("%20"));
+    /// The artifact name is one percent-encoded path segment: a space is
+    /// `%20` (a `+` would reach the server as a literal `+`), `/`, `?` and
+    /// `#` cannot change the URL.
+    #[tokio::test]
+    async fn download_percent_encodes_the_artifact_name() -> Result<()> {
+        let server = MockServer::start().await;
+        let job_id = "00000000-0000-0000-0000-000000000124";
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/api/jobs/{job_id}/artifacts/my%20report%2Fv2%3F%23.png"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"ok".as_slice()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let tmp = tempfile::tempdir()?;
+        let out = tmp.path().join("out.png");
+        cmd_download(
+            &reqwest::Client::new(),
+            server.uri().as_str(),
+            job_id,
+            "my report/v2?#.png",
+            Some(out.to_str().unwrap()),
+        )
+        .await?;
+        assert_eq!(tokio::fs::read(&out).await?, b"ok");
+        Ok(())
     }
 
     /// `cmd_download` must create any non-existent parent directories in the

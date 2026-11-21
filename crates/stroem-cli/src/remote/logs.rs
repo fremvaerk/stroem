@@ -9,7 +9,11 @@ use super::client::check_response;
 
 /// The default tail, a tail of `tail_bytes`, or the full stream.
 pub fn logs_url(server: &str, job_id: &str, full: bool, tail_bytes: Option<u64>) -> String {
-    let base = format!("{server}/api/jobs/{job_id}/logs");
+    // Percent-encoded; an unparsable server URL keeps the plain form and
+    // fails at the request.
+    let base = super::paths::api_url(server, &["jobs", job_id, "logs"])
+        .map(|u| u.to_string())
+        .unwrap_or_else(|_| format!("{server}/api/jobs/{job_id}/logs"));
     match (full, tail_bytes) {
         (true, _) => format!("{base}?full=true"),
         (false, Some(n)) => format!("{base}?tail_bytes={n}"),

@@ -11,6 +11,7 @@ pub struct JobsFilter<'a> {
     pub workspace: Option<&'a str>,
     pub task: Option<&'a str>,
     pub status: Option<&'a str>,
+    pub source_type: Option<&'a str>,
     pub search: Option<&'a str>,
     pub offset: i64,
 }
@@ -24,6 +25,7 @@ pub fn jobs_filter_url(server: &str, f: &JobsFilter<'_>) -> Result<reqwest::Url>
             ("workspace", f.workspace),
             ("task_name", f.task),
             ("status", f.status),
+            ("source_type", f.source_type),
             ("search", f.search),
         ] {
             if let Some(v) = value {
@@ -106,12 +108,13 @@ mod tests {
             workspace: Some("data team"),
             task: Some("etl"),
             status: Some("failed"),
+            source_type: Some("trigger"),
             search: None,
             offset: 20,
         };
         assert_eq!(
             jobs_filter_url("http://localhost:8080", &f).unwrap().as_str(),
-            "http://localhost:8080/api/jobs?limit=10&workspace=data+team&task_name=etl&status=failed&offset=20"
+            "http://localhost:8080/api/jobs?limit=10&workspace=data+team&task_name=etl&status=failed&source_type=trigger&offset=20"
         );
         let f = JobsFilter {
             limit: 20,
@@ -141,6 +144,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/api/jobs"))
             .and(query_param("search", "nightly"))
+            .and(query_param("source_type", "webhook"))
             .and(query_param("offset", "5"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "items": [{"job_id": "j1", "task_name": "nightly", "workspace": "default",
@@ -153,6 +157,7 @@ mod tests {
         let f = JobsFilter {
             limit: 20,
             search: Some("nightly"),
+            source_type: Some("webhook"),
             offset: 5,
             ..Default::default()
         };

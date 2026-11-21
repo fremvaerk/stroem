@@ -223,6 +223,9 @@ stroem-api jobs --workspace data-team --task etl-pipeline --status failed
 # Look for text in the task name, workspace, source ID or job ID (not with --task)
 stroem-api jobs --search nightly
 
+# Only the jobs of one source type (api, trigger, webhook, task, hook, user, mcp, ...)
+stroem-api jobs --source-type trigger
+
 # The next page
 stroem-api jobs --limit 20 --offset 20
 ```
