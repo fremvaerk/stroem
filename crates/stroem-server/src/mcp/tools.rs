@@ -128,6 +128,12 @@ pub struct ListTriggersParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct RefreshWorkspaceParams {
+    /// Workspace name
+    pub workspace: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct CancelJobParams {
     /// Job ID (UUID) to cancel
     pub job_id: String,
@@ -1150,6 +1156,24 @@ impl StromMcpHandler {
             .await
             .map_err(app_err)?;
         Ok(json_result(&rows))
+    }
+
+    /// Reload a workspace from its source now (`POST /api/workspaces/{ws}/refresh`).
+    #[tool(
+        description = "Reload a workspace from its source now (git fetch, or re-read of the folder), the same as POST /api/workspaces/{ws}/refresh, for example after a push and before execute_task. Returns the workspace, its new `revision` and `refreshed: true`. You need View on at least one task of the workspace; else the answer is `Workspace '<name>' not found`, as for an unknown workspace. A second refresh within 5 seconds, or while a reload runs, is refused with `Workspace refresh rate-limited; retry after <N>s`."
+    )]
+    async fn refresh_workspace(
+        &self,
+        params: Parameters<RefreshWorkspaceParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let Parameters(params) = params;
+        tracing::info!(workspace = %params.workspace, "MCP: refresh_workspace");
+        let auth = rest_auth(self);
+        let body =
+            crate::web::api::workspaces::refresh(&self.state, auth.as_ref(), &params.workspace)
+                .await
+                .map_err(app_err)?;
+        Ok(json_result(&body))
     }
 
     /// List recent jobs (`GET /api/jobs`).

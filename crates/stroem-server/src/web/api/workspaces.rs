@@ -86,22 +86,32 @@ pub async fn refresh_workspace(
     auth_user: Option<AuthUser>,
     Path(ws): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
+    Ok(Json(refresh(&state, auth_user.as_ref(), &ws).await?))
+}
+
+/// Reload `ws` for a caller: the body of `POST /api/workspaces/{ws}/refresh`
+/// and of MCP `refresh_workspace` (one ACL rule, one cooldown).
+pub(crate) async fn refresh(
+    state: &Arc<AppState>,
+    auth_user: Option<&AuthUser>,
+    ws: &str,
+) -> Result<serde_json::Value, AppError> {
     // ACL check: required BEFORE existence check so an unauthorized caller
     // cannot distinguish "doesn't exist" from "exists but you can't see it".
     // Both cases collapse to 404.
-    if !caller_can_see_workspace(&state, auth_user.as_ref(), &ws).await? {
+    if !caller_can_see_workspace(state, auth_user, ws).await? {
         return Err(AppError::NotFound(format!("Workspace '{}' not found", ws)));
     }
 
-    match state.workspaces.reload_for_api(&ws, REFRESH_COOLDOWN).await {
+    match state.workspaces.reload_for_api(ws, REFRESH_COOLDOWN).await {
         Ok(()) => {
-            let revision = state.workspaces.get_revision(&ws);
+            let revision = state.workspaces.get_revision(ws);
             tracing::info!(workspace = %ws, revision = ?revision, "Workspace refreshed via API");
-            Ok(Json(json!({
+            Ok(json!({
                 "workspace": ws,
                 "revision": revision,
                 "refreshed": true,
-            })))
+            }))
         }
         Err(ReloadApiError::NotFound) => {
             Err(AppError::NotFound(format!("Workspace '{}' not found", ws)))

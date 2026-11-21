@@ -697,6 +697,7 @@ async fn test_mcp_tools_list_returns_every_tool() -> Result<()> {
         "create_upload_url",
         "list_triggers",
         "list_attention_triggers",
+        "refresh_workspace",
     ];
 
     assert_eq!(

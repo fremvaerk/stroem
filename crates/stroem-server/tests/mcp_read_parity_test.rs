@@ -1140,3 +1140,74 @@ async fn list_jobs_bad_parameters_are_the_rest_errors() -> Result<()> {
     );
     Ok(())
 }
+
+// ─── refresh_workspace ───────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn refresh_workspace_reloads_and_shares_the_rest_cooldown() -> Result<()> {
+    let app = app().await?;
+    let resp = mcp(
+        &app,
+        &app.admin,
+        "refresh_workspace",
+        json!({"workspace": "default"}),
+    )
+    .await;
+    let body = payload(&resp);
+    assert_eq!(body["workspace"], json!("default"));
+    assert_eq!(body["refreshed"], json!(true));
+    assert!(body.get("revision").is_some(), "{body}");
+
+    // The REST route sees the same cooldown, and so does a second MCP call.
+    let (status, _) = rest(&app, &app.admin, "POST", "/api/workspaces/default/refresh").await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    let resp = mcp(
+        &app,
+        &app.admin,
+        "refresh_workspace",
+        json!({"workspace": "default"}),
+    )
+    .await;
+    let msg = error_message(&resp);
+    assert!(
+        msg.starts_with("Workspace refresh rate-limited; retry after ") && msg.ends_with('s'),
+        "{msg}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn refresh_workspace_needs_a_visible_task() -> Result<()> {
+    let app = app().await?;
+    // View on one task is enough.
+    let resp = mcp(
+        &app,
+        &app.viewer,
+        "refresh_workspace",
+        json!({"workspace": "default"}),
+    )
+    .await;
+    assert_eq!(payload(&resp)["refreshed"], json!(true));
+
+    // No visible task: the same answer as an unknown workspace.
+    let nobody = api_key(&app.pool, "nobody@parity.test", false).await?;
+    let resp = mcp(
+        &app,
+        &nobody,
+        "refresh_workspace",
+        json!({"workspace": "default"}),
+    )
+    .await;
+    assert_eq!(error_message(&resp), "Workspace 'default' not found");
+    let resp = mcp(
+        &app,
+        &app.admin,
+        "refresh_workspace",
+        json!({"workspace": "nope"}),
+    )
+    .await;
+    assert_eq!(error_message(&resp), "Workspace 'nope' not found");
+    let resp = mcp(&app, &app.admin, "refresh_workspace", json!({})).await;
+    assert!(is_rejected_call(&resp), "{resp}");
+    Ok(())
+}

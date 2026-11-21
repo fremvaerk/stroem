@@ -70,6 +70,7 @@ The MCP server provides these tools for interacting with Strøm. The read tools 
 | `get_job_logs` | The end of a job's log (last 256 KiB), formatted | `job_id`, `step?`, `tail_bytes?` |
 | `list_triggers` | A workspace's triggers with next runs, last run, result and missed runs (`GET /api/workspaces/{ws}/triggers`) | `workspace` |
 | `list_attention_triggers` | Triggers of every workspace with missed runs or a failed last run, the Dashboard card (`GET /api/triggers/attention`) | none |
+| `refresh_workspace` | Reload a workspace from its source now, for example after a push (`POST /api/workspaces/{ws}/refresh`) | `workspace` |
 | `list_jobs` | Recent jobs, newest first, with `count` and `total` (`GET /api/jobs`) | `workspace?`, `task_name?`, `status?`, `source_type?`, `search?`, `limit?` (default 20, max 100), `offset?` |
 | `cancel_job` | Cancel a running or pending job | `job_id` |
 | `restart_job` | Restart a finished job from one step, or every failed step | `job_id`, `from_step?` or `all_failed?`, `dry_run?` |
@@ -86,6 +87,12 @@ page, so `limit` jobs you may view come back and `total` counts only those.
 `search` looks for text in the task name, workspace, source ID and job ID (at
 most 200 characters) and cannot be used with `task_name`. Use `offset` for the
 next page.
+
+`refresh_workspace` needs View on at least one task of the workspace; without
+it the answer is `Workspace '<name>' not found`, the same as for a workspace
+that does not exist. A second refresh within 5 seconds, or while a reload
+runs, is refused with `Workspace refresh rate-limited; retry after <N>s`. The
+REST route and the tool share this limit.
 
 `list_triggers` hides a trigger whose task you may not view. A last run you
 may not view (for example a run of a pinned commit that moved the task to a

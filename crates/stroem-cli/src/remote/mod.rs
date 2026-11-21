@@ -6,6 +6,7 @@ pub mod job_actions;
 pub mod jobs;
 pub mod logs;
 pub mod paths;
+pub mod refresh;
 pub mod rerun;
 pub mod restart;
 pub mod state;
@@ -102,6 +103,11 @@ pub enum Commands {
     JobActions(job_actions::JobActionCommands),
     /// List triggers with their last run, result and missed runs
     Triggers(triggers::TriggersArgs),
+    /// Reload a workspace from its source now
+    Refresh {
+        /// Workspace name
+        workspace: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -232,6 +238,9 @@ pub async fn dispatch(command: Commands, server: &str, token: Option<&str>) -> R
             job_actions::dispatch(&http_client, server, command).await?
         }
         Commands::Triggers(args) => triggers::run(&http_client, server, args).await?,
+        Commands::Refresh { workspace } => {
+            refresh::cmd_refresh(&http_client, server, &workspace).await?
+        }
     }
 
     Ok(())
@@ -379,6 +388,15 @@ mod tests {
             }
             _ => panic!("unexpected command variant"),
         }
+    }
+
+    #[test]
+    fn refresh_subcommand_requires_a_workspace() {
+        match parse(&["stroem-api", "refresh", "ops"]).unwrap().command {
+            super::Commands::Refresh { workspace } => assert_eq!(workspace, "ops"),
+            _ => panic!("unexpected command variant"),
+        }
+        assert!(parse(&["stroem-api", "refresh"]).is_err());
     }
 
     #[test]

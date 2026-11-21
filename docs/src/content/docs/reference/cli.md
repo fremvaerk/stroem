@@ -95,6 +95,14 @@ List all actions in the workspace.
 stroem actions
 ```
 
+### `refresh`
+
+Reload a workspace from its source now (a git fetch, or a new read of the folder), for example in CI after a push and before `trigger`. Needs View on at least one task of the workspace. A second refresh within 5 seconds is refused with `429 … retry after <N>s`.
+
+```bash
+stroem-api refresh data-team
+```
+
 ### `triggers`
 
 List all triggers (scheduler and webhook) in the workspace.
