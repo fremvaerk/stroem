@@ -133,6 +133,16 @@ pub struct RestartJobParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct RerunJobParams {
+    /// Job ID (UUID) of the source job: a top-level job
+    pub job_id: String,
+    /// Input fields to change (optional). Every input field of the task that
+    /// is not given here takes the source job's value, secrets included.
+    #[serde(default)]
+    pub input: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct ApproveStepParams {
     /// Job ID (UUID)
     pub job_id: String,
@@ -1195,6 +1205,33 @@ impl StromMcpHandler {
         .await
         .map_err(app_error)?;
         Ok(json_result(&outcome.body()))
+    }
+
+    /// Re-run a job: a new run of the same task with the source's input.
+    #[tool(
+        description = "Re-run a job: start a new run of the same task, like the Re-run button in the UI. Every input field you do not give in `input` takes the source job's value, secret and connection fields included, so you do not need to know those values; a field you give replaces the source's value. A `type: file` field takes the `file_id` of a file uploaded with `create_upload_url` (inline file objects are not accepted here). The source job must be a top-level job (not a `type: task` sub-job and not a hook job). Returns the new `job_id`. Needs Run access on the task."
+    )]
+    async fn rerun_job(
+        &self,
+        params: Parameters<RerunJobParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let Parameters(params) = params;
+        tracing::info!(job_id = %params.job_id, "MCP: rerun_job");
+        let source_job_id = parse_job_id(&params.job_id)?;
+        let input = normalize_task_input(params.input)?;
+        let job_id = crate::web::api::rerun::rerun_job(
+            &self.state,
+            caller(self),
+            source_job_id,
+            crate::web::api::rerun::Destination::Source,
+            input,
+            crate::web::api::rerun::Replay::Unset,
+        )
+        .await
+        .map_err(app_error)?;
+        Ok(json_result(
+            &serde_json::json!({ "job_id": job_id.to_string() }),
+        ))
     }
 
     /// Approve or reject a suspended step.

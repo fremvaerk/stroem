@@ -60,6 +60,11 @@ tasks:
       a: { action: noop }
       b: { action: noop, depends_on: [a] }
       c: { action: noop, depends_on: [a] }
+  secretive:
+    input:
+      token: { type: string, secret: true }
+      note: { type: string }
+    flow: { a: { action: noop } }
   view-line:
     folder: view
     flow: { a: { action: noop } }
@@ -757,5 +762,204 @@ async fn approve_step_follows_the_job_acl() -> Result<()> {
         )
         .await;
     assert_eq!(code, INVALID_PARAMS);
+    Ok(())
+}
+
+// ─── rerun_job ───────────────────────────────────────────────────────────────
+
+/// The new job's stored `raw_input` and resolved `input`.
+async fn inputs_of(pool: &PgPool, job_id: Uuid) -> Result<(Value, Value)> {
+    let job = JobRepo::get(pool, job_id).await?.expect("job row");
+    Ok((
+        job.raw_input.unwrap_or(Value::Null),
+        job.input.unwrap_or(Value::Null),
+    ))
+}
+
+async fn rerun(app: &App, args: Value) -> Result<Uuid> {
+    let body = app.ok("rerun_job", args).await;
+    Ok(body["job_id"].as_str().expect("job_id").parse()?)
+}
+
+#[tokio::test]
+async fn rerun_job_replays_every_field_it_is_not_given() -> Result<()> {
+    let app = App::new(actions_workspace()).await?;
+    let source = failed_line_job(&app.pool).await?;
+
+    let new_id = rerun(&app, json!({"job_id": source.to_string()})).await?;
+    let job = JobRepo::get(&app.pool, new_id).await?.expect("job row");
+    assert_eq!(job.source_type, "rerun");
+    assert_eq!(job.source_job_id, Some(source));
+    assert_eq!(job.source_id.as_deref(), Some(USER));
+    assert_eq!(job.task_name, "line");
+    let (raw, input) = inputs_of(&app.pool, new_id).await?;
+    assert_eq!(raw, json!({"note": "n1"}));
+    assert_eq!(input["note"], json!("n1"), "{input}");
+
+    // A given field overrides the source's value.
+    let new_id = rerun(
+        &app,
+        json!({"job_id": source.to_string(), "input": {"note": "n2"}}),
+    )
+    .await?;
+    assert_eq!(inputs_of(&app.pool, new_id).await?.0, json!({"note": "n2"}));
+    // So does a stringified object (some MCP clients send one).
+    let new_id = rerun(
+        &app,
+        json!({"job_id": source.to_string(), "input": "{\"note\": \"n3\"}"}),
+    )
+    .await?;
+    assert_eq!(inputs_of(&app.pool, new_id).await?.0, json!({"note": "n3"}));
+    Ok(())
+}
+
+/// The caller never sees or sends the secret: it is replayed from the
+/// source job's stored input.
+#[tokio::test]
+async fn rerun_job_replays_a_secret_the_caller_does_not_know() -> Result<()> {
+    let app = App::new(actions_workspace()).await?;
+    let source = finished_job(
+        &app.pool,
+        &actions_workspace(),
+        "secretive",
+        json!({"token": "s3cr3t-value", "note": "x"}),
+        &[("a", "failed")],
+        "failed",
+    )
+    .await?;
+
+    for args in [
+        json!({"job_id": source.to_string()}),
+        json!({"job_id": source.to_string(), "input": {"note": "y"}}),
+    ] {
+        let new_id = rerun(&app, args.clone()).await?;
+        let (raw, input) = inputs_of(&app.pool, new_id).await?;
+        assert_eq!(raw["token"], json!("s3cr3t-value"), "{args}");
+        assert_eq!(input["token"], json!("s3cr3t-value"), "{args}");
+    }
+    Ok(())
+}
+
+/// Only fields the task declares today are replayed: a key the task dropped
+/// since the source ran is left out instead of failing the re-run.
+#[tokio::test]
+async fn rerun_job_leaves_out_a_field_the_task_dropped() -> Result<()> {
+    let app = App::new(actions_workspace()).await?;
+    let source = failed_line_job(&app.pool).await?;
+    sqlx::query("UPDATE job SET raw_input = $2 WHERE job_id = $1")
+        .bind(source)
+        .bind(json!({"note": "n1", "old": "gone"}))
+        .execute(&app.pool)
+        .await?;
+
+    let new_id = rerun(&app, json!({"job_id": source.to_string()})).await?;
+    assert_eq!(inputs_of(&app.pool, new_id).await?.0, json!({"note": "n1"}));
+    Ok(())
+}
+
+#[tokio::test]
+async fn rerun_job_rejects_a_newly_required_field() -> Result<()> {
+    let mut drifted = actions_workspace();
+    let extra: InputFieldDef = serde_yaml::from_str("{type: string, required: true}")?;
+    drifted
+        .tasks
+        .get_mut("line")
+        .unwrap()
+        .input
+        .insert("extra".to_string(), extra);
+    let app = App::new(drifted).await?;
+    let source = failed_line_job(&app.pool).await?;
+
+    let (code, message) = app
+        .err("rerun_job", json!({"job_id": source.to_string()}))
+        .await;
+    assert_eq!(code, INVALID_PARAMS, "{message}");
+    assert_eq!(
+        message,
+        "the source job has no value for required field 'extra'"
+    );
+    // Given in `input`, the re-run goes ahead.
+    rerun(
+        &app,
+        json!({"job_id": source.to_string(), "input": {"extra": "now"}}),
+    )
+    .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn rerun_job_follows_the_source_and_task_acl() -> Result<()> {
+    let app = App::new(actions_workspace()).await?;
+    let ws = actions_workspace();
+    let viewed = finished_job(&app.pool, &ws, "view-line", json!({}), &[], "completed").await?;
+    let denied = finished_job(&app.pool, &ws, "deny-line", json!({}), &[], "completed").await?;
+
+    let (_, message) = app
+        .err("rerun_job", json!({"job_id": denied.to_string()}))
+        .await;
+    assert_eq!(message, "Source job not found");
+    let (_, message) = app
+        .err("rerun_job", json!({"job_id": Uuid::new_v4().to_string()}))
+        .await;
+    assert_eq!(message, "Source job not found");
+    let (_, message) = app
+        .err("rerun_job", json!({"job_id": viewed.to_string()}))
+        .await;
+    assert_eq!(message, "View-only access");
+    let (code, _) = app.err("rerun_job", json!({"job_id": "not-a-uuid"})).await;
+    assert_eq!(code, INVALID_PARAMS);
+    assert_eq!(
+        app.count("SELECT COUNT(*) FROM job WHERE source_type = 'rerun'")
+            .await?,
+        0
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn rerun_job_rejects_sources_it_cannot_rerun() -> Result<()> {
+    let app = App::new(actions_workspace()).await?;
+    let parent = failed_line_job(&app.pool).await?;
+    let child = failed_line_job(&app.pool).await?;
+    sqlx::query("UPDATE job SET parent_job_id = $2 WHERE job_id = $1")
+        .bind(child)
+        .bind(parent)
+        .execute(&app.pool)
+        .await?;
+    let hook = failed_line_job(&app.pool).await?;
+    sqlx::query("UPDATE job SET source_type = 'hook' WHERE job_id = $1")
+        .bind(hook)
+        .execute(&app.pool)
+        .await?;
+    for job in [child, hook] {
+        let (code, message) = app
+            .err("rerun_job", json!({"job_id": job.to_string()}))
+            .await;
+        assert_eq!(code, INVALID_PARAMS, "{message}");
+        assert_eq!(message, "Only top-level jobs can be re-run");
+    }
+
+    let legacy = failed_line_job(&app.pool).await?;
+    sqlx::query("UPDATE job SET raw_input = NULL WHERE job_id = $1")
+        .bind(legacy)
+        .execute(&app.pool)
+        .await?;
+    let (_, message) = app
+        .err("rerun_job", json!({"job_id": legacy.to_string()}))
+        .await;
+    assert_eq!(message, "Source job predates Re-run prefill (no raw_input)");
+
+    let (code, _) = app
+        .err(
+            "rerun_job",
+            json!({"job_id": parent.to_string(), "input": [1, 2]}),
+        )
+        .await;
+    assert_eq!(code, INVALID_PARAMS);
+    assert_eq!(
+        app.count("SELECT COUNT(*) FROM job WHERE source_type = 'rerun'")
+            .await?,
+        0
+    );
     Ok(())
 }

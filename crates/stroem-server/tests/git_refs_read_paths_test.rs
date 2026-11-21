@@ -1624,6 +1624,12 @@ async fn pinned_job_in_denied_folder_is_denied_over_mcp_and_list_paginates_after
                 json!(RP_JOB_NOT_FOUND),
                 "restart_job {id}: {resp}"
             );
+            let resp = call("rerun_job", json!({"job_id": id.to_string()})).await;
+            assert_eq!(
+                deny_message(&resp),
+                json!("Source job not found"),
+                "rerun_job {id}: {resp}"
+            );
         }
 
         for id in jobs.allowed() {

@@ -994,7 +994,7 @@ async fn pinned_rerun_replays_a_json_field_from_the_source() -> Result<()> {
     .await
 }
 
-// ─── MCP restart_job: the same shared restart path ────────────────────────
+// ─── MCP restart_job / rerun_job: the same shared paths ───────────────────
 
 /// MCP `restart_job` of a pinned source plans against the flow at the
 /// re-resolved commit and stamps the new job with the ref, like the REST
@@ -1039,6 +1039,22 @@ async fn mcp_restart_of_pinned_source_plans_against_the_pinned_flow() -> Result<
         assert_eq!(job.git_ref.as_deref(), Some("release/2.3"));
         assert_eq!(job.revision.as_deref(), Some(c2.as_str()));
         assert_eq!(job.task_folder.as_deref(), Some("rel"));
+
+        // MCP `rerun_job` re-resolves the ref the same way.
+        let resp = mcp_call(
+            &fx.router,
+            None,
+            "rerun_job",
+            json!({"job_id": source.to_string()}),
+        )
+        .await;
+        assert!(!mcp_is_error(&resp), "rerun: {resp}");
+        let rerun: Uuid = mcp_tool_json(&resp)["job_id"].as_str().unwrap().parse()?;
+        let job = JobRepo::get(&fx.pool, rerun).await?.unwrap();
+        assert_eq!(job.source_type, "rerun");
+        assert_eq!(job.source_job_id, Some(source));
+        assert_eq!(job.git_ref.as_deref(), Some("release/2.3"));
+        assert_eq!(job.revision.as_deref(), Some(c2.as_str()));
         Ok(())
     })
     .await
@@ -1106,6 +1122,18 @@ async fn mcp_pinned_restart_requires_run_on_the_folder_at_the_new_commit() -> Re
                     "{email} {mode}: {resp}"
                 );
             }
+            let resp = mcp_call(
+                &fx.router,
+                Some(&key),
+                "rerun_job",
+                json!({"job_id": source.to_string()}),
+            )
+            .await;
+            assert_eq!(
+                resp["error"]["message"],
+                json!(error),
+                "{email} rerun: {resp}"
+            );
         }
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM job WHERE source_job_id = $1")
             .bind(source)
@@ -1126,6 +1154,17 @@ async fn mcp_pinned_restart_requires_run_on_the_folder_at_the_new_commit() -> Re
         let job = JobRepo::get(&fx.pool, new_id).await?.unwrap();
         assert_eq!(job.task_folder.as_deref(), Some("locked"));
         assert_eq!(job.source_id.as_deref(), Some(BOTH));
+        let resp = mcp_call(
+            &fx.router,
+            Some(&both),
+            "rerun_job",
+            json!({"job_id": source.to_string()}),
+        )
+        .await;
+        assert!(!mcp_is_error(&resp), "rerun: {resp}");
+        let rerun: Uuid = mcp_tool_json(&resp)["job_id"].as_str().unwrap().parse()?;
+        let job = JobRepo::get(&fx.pool, rerun).await?.unwrap();
+        assert_eq!(job.task_folder.as_deref(), Some("locked"));
         Ok(())
     })
     .await
