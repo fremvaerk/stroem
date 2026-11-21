@@ -30,10 +30,7 @@ impl AuthUser {
     ///
     /// Returns an `Err(AppError::Internal)` when the claim is malformed.
     pub fn user_id(&self) -> Result<uuid::Uuid, AppError> {
-        self.claims
-            .sub
-            .parse::<uuid::Uuid>()
-            .map_err(|_| AppError::Unauthorized("Invalid token".into()))
+        crate::web::api::caller::claims_user_id(&self.claims)
     }
 
     /// Whether this user has admin privileges.

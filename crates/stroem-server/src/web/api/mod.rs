@@ -1,6 +1,7 @@
 pub mod api_keys;
 pub mod artifacts;
 pub mod auth;
+pub(crate) mod caller;
 pub mod input_files;
 pub mod jobs;
 pub mod logs;
@@ -9,6 +10,7 @@ pub mod middleware;
 pub mod oauth_consent;
 pub mod oidc;
 mod pinned_source;
+pub(crate) mod restart;
 pub mod state_upload;
 pub mod tasks;
 pub mod triggers;

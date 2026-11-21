@@ -601,20 +601,38 @@ pub(crate) async fn require_task_run(
     name: &str,
     folder: Option<&str>,
 ) -> Result<(), AppError> {
-    let Some(auth) = auth_user else {
+    require_task_run_as(
+        state,
+        super::caller::Caller::of(auth_user),
+        ws,
+        name,
+        folder,
+    )
+    .await
+}
+
+/// [`require_task_run`] for a [`super::caller::Caller`] (REST or MCP).
+pub(crate) async fn require_task_run_as(
+    state: &AppState,
+    caller: super::caller::Caller<'_>,
+    ws: &str,
+    name: &str,
+    folder: Option<&str>,
+) -> Result<(), AppError> {
+    let Some(claims) = caller.claims else {
         return Ok(());
     };
     if !state.acl.is_configured() {
         return Ok(());
     }
-    let user_id = auth.user_id()?;
-    let (is_admin, groups) = load_user_acl_context(&state.pool, user_id, auth.is_admin())
+    let user_id = super::caller::claims_user_id(claims)?;
+    let (is_admin, groups) = load_user_acl_context(&state.pool, user_id, claims.is_admin)
         .await
         .context("load ACL context")?;
     let task_path = make_task_path(folder, name);
     match state
         .acl
-        .evaluate(ws, &task_path, &auth.claims.email, &groups, is_admin)
+        .evaluate(ws, &task_path, &claims.email, &groups, is_admin)
     {
         TaskPermission::Deny => Err(AppError::not_found("Task")),
         TaskPermission::View => Err(AppError::Forbidden("View-only access".into())),
