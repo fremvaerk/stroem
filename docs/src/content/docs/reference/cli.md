@@ -202,7 +202,7 @@ Against a server older than this release, `--full` receives the old full-log JSO
 
 ### `input-file`
 
-Download the file given to a job's `file` input field. The file is streamed to disk. Without `-o`, the file gets its original name (reduced to a plain file name), in the current directory.
+Download the file given to a job's `file` input field. The file is streamed to disk. Without `-o`, the file gets its original name (reduced to a plain file name; a leading `.` becomes `_`) in the current directory, and the command refuses to replace a file that already exists there. With `-o`, an existing file is replaced.
 
 ```bash
 stroem-api input-file <job-id> data_file
