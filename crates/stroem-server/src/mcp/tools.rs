@@ -2,7 +2,6 @@ use super::auth::{check_task_acl, resolve_acl_scope, McpAuthContext};
 use super::handler::StromMcpHandler;
 use crate::acl::TaskPermission;
 use crate::log_storage::JobLogMeta;
-use crate::web::api::middleware::AuthUser;
 use crate::web::error::AppError;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
@@ -298,36 +297,6 @@ fn not_found(entity: &str) -> rmcp::ErrorData {
 
 fn acl_err(msg: impl Into<String>) -> rmcp::ErrorData {
     rmcp::ErrorData::internal_error(msg.into(), None)
-}
-
-/// The MCP caller as a REST handler sees it, so a tool and its REST route
-/// run the same ACL code. `claims.is_admin` is the value
-/// [`super::auth::authenticate`] re-read from the DB for this request.
-fn rest_auth(handler: &StromMcpHandler) -> Option<AuthUser> {
-    handler.auth.as_ref().map(|a| AuthUser {
-        claims: a.claims.clone(),
-        is_api_key: false,
-        api_key_prefix: None,
-    })
-}
-
-/// A REST handler's error as a tool error, with the REST message. An internal
-/// error is logged and answered with the fixed REST text, never its cause.
-fn app_err(e: AppError) -> rmcp::ErrorData {
-    match e {
-        AppError::BadRequest(m) | AppError::PayloadTooLarge(m) => {
-            rmcp::ErrorData::invalid_params(m, None)
-        }
-        AppError::Unauthorized(m) | AppError::Forbidden(m) => acl_err(m),
-        AppError::NotFound(m) | AppError::Conflict(m) | AppError::ServiceUnavailable(m) => {
-            internal_err(m)
-        }
-        AppError::TooManyRequests { message, .. } => internal_err(message),
-        AppError::Internal(e) => {
-            tracing::error!("MCP: internal error: {e:#}");
-            internal_err("Internal server error")
-        }
-    }
 }
 
 /// The largest `get_job_status` answer (compact JSON) before content values
@@ -671,10 +640,11 @@ fn caller(handler: &StromMcpHandler) -> crate::web::api::caller::Caller<'_> {
     }
 }
 
-/// A shared job action's [`AppError`] as an MCP error. 400 / 409 / 413 →
-/// invalid params; 401 / 403 / 404 / 503 / 429 → the internal error with the
-/// same fixed message the other tools use (`not_found`, `acl_err`); an
-/// internal error is logged and answered with a fixed text, never its chain.
+/// The [`AppError`] of a shared REST body (a job action or a read) as an MCP
+/// error, with the REST message. 400 / 409 / 413 → invalid params;
+/// 401 / 403 / 404 / 503 / 429 → the internal error with the same fixed
+/// message the other tools use (`not_found`, `acl_err`); an internal error is
+/// logged and answered with a fixed text, never its chain.
 fn app_error(e: AppError) -> rmcp::ErrorData {
     match e {
         AppError::BadRequest(m) | AppError::Conflict(m) | AppError::PayloadTooLarge(m) => {
@@ -684,7 +654,7 @@ fn app_error(e: AppError) -> rmcp::ErrorData {
         AppError::Unauthorized(m) | AppError::Forbidden(m) => acl_err(m),
         AppError::TooManyRequests { message, .. } => internal_err(message),
         AppError::Internal(e) => {
-            tracing::error!("MCP job action failed: {:#}", e);
+            tracing::error!("MCP tool failed: {:#}", e);
             internal_err("Internal server error")
         }
     }
@@ -1102,14 +1072,11 @@ impl StromMcpHandler {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let Parameters(params) = params;
         tracing::info!(job_id = %params.job_id, "MCP: get_job_status");
-        let job_id: uuid::Uuid = params
-            .job_id
-            .parse()
-            .map_err(|_| rmcp::ErrorData::invalid_params("Invalid job_id UUID", None))?;
+        let job_id = parse_job_id(&params.job_id)?;
 
-        let mut detail = crate::web::api::jobs::job_detail(&self.state, &rest_auth(self), job_id)
+        let mut detail = crate::web::api::jobs::job_detail(&self.state, caller(self), job_id)
             .await
-            .map_err(app_err)?;
+            .map_err(app_error)?;
         cap_job_detail(&mut detail, MCP_JOB_DETAIL_MAX_BYTES);
         // Compact, so the cap measures the text that is sent.
         let text = serde_json::to_string(&detail).map_err(|e| {
@@ -1193,11 +1160,11 @@ impl StromMcpHandler {
         tracing::info!(workspace = %params.workspace, "MCP: list_triggers");
         let triggers = crate::web::api::triggers::workspace_triggers(
             &self.state,
-            &rest_auth(self),
+            caller(self),
             params.workspace,
         )
         .await
-        .map_err(app_err)?;
+        .map_err(app_error)?;
         Ok(json_result(&triggers))
     }
 
@@ -1207,9 +1174,9 @@ impl StromMcpHandler {
     )]
     async fn list_attention_triggers(&self) -> Result<CallToolResult, rmcp::ErrorData> {
         tracing::info!("MCP: list_attention_triggers");
-        let rows = crate::web::api::triggers::attention_triggers(&self.state, &rest_auth(self))
+        let rows = crate::web::api::triggers::attention_triggers(&self.state, caller(self))
             .await
-            .map_err(app_err)?;
+            .map_err(app_error)?;
         Ok(json_result(&rows))
     }
 
@@ -1223,11 +1190,10 @@ impl StromMcpHandler {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let Parameters(params) = params;
         tracing::info!(workspace = %params.workspace, "MCP: refresh_workspace");
-        let auth = rest_auth(self);
         let body =
-            crate::web::api::workspaces::refresh(&self.state, auth.as_ref(), &params.workspace)
+            crate::web::api::workspaces::refresh(&self.state, caller(self), &params.workspace)
                 .await
-                .map_err(app_err)?;
+                .map_err(app_error)?;
         Ok(json_result(&body))
     }
 
@@ -1243,13 +1209,13 @@ impl StromMcpHandler {
         tracing::info!(workspace = %params.workspace, task = %params.task_name, "MCP: get_task_stats");
         let stats = crate::web::api::tasks::task_stats(
             &self.state,
-            &rest_auth(self),
+            caller(self),
             &params.workspace,
             &params.task_name,
             params.limit,
         )
         .await
-        .map_err(app_err)?;
+        .map_err(app_error)?;
         Ok(json_result(&stats))
     }
 
@@ -1259,9 +1225,9 @@ impl StromMcpHandler {
     )]
     async fn get_stats(&self) -> Result<CallToolResult, rmcp::ErrorData> {
         tracing::info!("MCP: get_stats");
-        let stats = crate::web::api::jobs::dashboard_stats(&self.state, &rest_auth(self))
+        let stats = crate::web::api::jobs::dashboard_stats(&self.state, caller(self))
             .await
-            .map_err(app_err)?;
+            .map_err(app_error)?;
         Ok(json_result(&stats))
     }
 
@@ -1285,7 +1251,7 @@ impl StromMcpHandler {
         let limit = params.limit.unwrap_or(50).clamp(1, 100);
         let page = crate::web::api::workers::worker_list(&self.state, limit, offset)
             .await
-            .map_err(app_err)?;
+            .map_err(app_error)?;
         Ok(json_result(&page))
     }
 
@@ -1303,10 +1269,9 @@ impl StromMcpHandler {
             .worker_id
             .parse()
             .map_err(|_| rmcp::ErrorData::invalid_params("Invalid worker_id UUID", None))?;
-        let detail =
-            crate::web::api::workers::worker_detail(&self.state, &rest_auth(self), worker_id)
-                .await
-                .map_err(app_err)?;
+        let detail = crate::web::api::workers::worker_detail(&self.state, caller(self), worker_id)
+            .await
+            .map_err(app_error)?;
         Ok(json_result(&detail))
     }
 
@@ -1321,18 +1286,15 @@ impl StromMcpHandler {
         use crate::input_files::stream::{read_bounded, BoundedRead};
         let Parameters(params) = params;
         tracing::info!(job_id = %params.job_id, field = %params.field, "MCP: get_input_file");
-        let job_id: uuid::Uuid = params
-            .job_id
-            .parse()
-            .map_err(|_| rmcp::ErrorData::invalid_params("Invalid job_id UUID", None))?;
+        let job_id = parse_job_id(&params.job_id)?;
         let (rec, archive) = crate::web::api::input_files::job_input_file(
             &self.state,
-            &rest_auth(self),
+            caller(self),
             job_id,
             &params.field,
         )
         .await
-        .map_err(app_err)?;
+        .map_err(app_error)?;
 
         let field = path_segment(&params.field);
         let too_large = |size: String| {
@@ -1404,9 +1366,9 @@ impl StromMcpHandler {
             limit: params.limit.unwrap_or(20).clamp(1, 100),
             offset,
         };
-        let (jobs, total) = crate::web::api::jobs::job_list(&self.state, &rest_auth(self), &query)
+        let (jobs, total) = crate::web::api::jobs::job_list(&self.state, caller(self), &query)
             .await
-            .map_err(app_err)?;
+            .map_err(app_error)?;
 
         Ok(json_result(&serde_json::json!({
             "count": jobs.len(),
@@ -1941,29 +1903,32 @@ mod tests {
     }
 
     #[test]
-    fn app_err_keeps_rest_messages_and_hides_internal_causes() {
+    fn app_error_keeps_rest_messages_and_hides_internal_causes() {
         assert_eq!(
-            app_err(AppError::NotFound("Job not found".into())).message,
+            app_error(AppError::NotFound("Job not found".into())).message,
             "Job not found"
         );
-        let e = app_err(AppError::BadRequest("bad".into()));
+        let e = app_error(AppError::BadRequest("bad".into()));
         assert_eq!(e.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        let e = app_error(AppError::Conflict("Step is not suspended".into()));
+        assert_eq!(e.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert_eq!(e.message, "Step is not suspended");
         assert_eq!(
-            app_err(AppError::ServiceUnavailable(
+            app_error(AppError::ServiceUnavailable(
                 "redaction set unavailable, retry".into()
             ))
             .message,
             "redaction set unavailable, retry"
         );
         assert_eq!(
-            app_err(AppError::TooManyRequests {
+            app_error(AppError::TooManyRequests {
                 message: "retry after 4s".into(),
                 retry_after_secs: 4
             })
             .message,
             "retry after 4s"
         );
-        let e = app_err(AppError::Internal(anyhow::anyhow!(
+        let e = app_error(AppError::Internal(anyhow::anyhow!(
             "pa55word in a DB error"
         )));
         assert_eq!(e.message, "Internal server error");

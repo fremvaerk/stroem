@@ -11,7 +11,7 @@ use super::client::check_response;
 pub fn logs_url(server: &str, job_id: &str, full: bool, tail_bytes: Option<u64>) -> String {
     // Percent-encoded; an unparsable server URL keeps the plain form and
     // fails at the request.
-    let base = super::paths::api_url(server, &["jobs", job_id, "logs"])
+    let base = super::client::api_url(server, &["api", "jobs", job_id, "logs"])
         .map(|u| u.to_string())
         .unwrap_or_else(|_| format!("{server}/api/jobs/{job_id}/logs"));
     match (full, tail_bytes) {

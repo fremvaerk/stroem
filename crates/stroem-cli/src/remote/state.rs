@@ -45,8 +45,11 @@ async fn cmd_upload(
     let tarball = build_tarball(files).context("build tarball")?;
 
     let url = match task {
-        Some(t) => super::paths::api_url(server, &["workspaces", workspace, "tasks", t, "state"])?,
-        None => super::paths::api_url(server, &["workspaces", workspace, "state"])?,
+        Some(t) => super::client::api_url(
+            server,
+            &["api", "workspaces", workspace, "tasks", t, "state"],
+        )?,
+        None => super::client::api_url(server, &["api", "workspaces", workspace, "state"])?,
     };
 
     // Assemble query string: mode + each state pair

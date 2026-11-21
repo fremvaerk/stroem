@@ -1,5 +1,6 @@
 use crate::acl::{load_user_acl_context, narrow_job_scope, TaskPermission};
 use crate::state::AppState;
+use crate::web::api::caller::{claims_user_id, Caller};
 use crate::web::api::middleware::AuthUser;
 use crate::web::api::{default_limit, parse_uuid_param};
 use crate::web::error::AppError;
@@ -75,7 +76,7 @@ pub async fn get_stats(
 ) -> Result<impl IntoResponse, AppError> {
     Ok((
         StatusCode::OK,
-        Json(dashboard_stats(&state, &auth_user).await?),
+        Json(dashboard_stats(&state, Caller::of(&auth_user)).await?),
     ))
 }
 
@@ -83,10 +84,10 @@ pub async fn get_stats(
 /// and of MCP `get_stats`.
 pub(crate) async fn dashboard_stats(
     state: &AppState,
-    auth_user: &Option<AuthUser>,
+    caller: Caller<'_>,
 ) -> Result<DashboardStats, AppError> {
     // Resolve ACL scope when auth is present and ACL is configured
-    let acl_scope = resolve_acl_scope(state, auth_user).await?;
+    let acl_scope = resolve_acl_scope(state, caller).await?;
 
     let counts = match acl_scope {
         Some(ref scope) => JobRepo::get_status_counts_with_acl(&state.pool, scope)
@@ -115,7 +116,7 @@ pub async fn list_jobs(
     auth_user: Option<AuthUser>,
     Query(query): Query<ListJobsQuery>,
 ) -> Result<Response, AppError> {
-    let (items, total) = job_list(&state, &auth_user, &query).await?;
+    let (items, total) = job_list(&state, Caller::of(&auth_user), &query).await?;
     Ok(Json(json!({ "items": items, "total": total })).into_response())
 }
 
@@ -123,7 +124,7 @@ pub async fn list_jobs(
 /// of MCP `list_jobs`. The ACL scope is applied in SQL, before `LIMIT`.
 pub(crate) async fn job_list(
     state: &AppState,
-    auth_user: &Option<AuthUser>,
+    caller: Caller<'_>,
     query: &ListJobsQuery,
 ) -> Result<(Vec<serde_json::Value>, i64), AppError> {
     if query.task_name.is_some() && query.workspace.is_none() {
@@ -173,7 +174,7 @@ pub(crate) async fn job_list(
     }
 
     // Resolve ACL scope
-    let acl_scope = resolve_acl_scope(state, auth_user).await?;
+    let acl_scope = resolve_acl_scope(state, caller).await?;
 
     let status = query.status.as_deref();
     let source_type = query.source_type.as_deref();
@@ -342,13 +343,13 @@ pub struct DerivedJobRef {
 /// out.
 async fn derived_job_refs(
     state: &AppState,
-    auth_user: &Option<AuthUser>,
+    caller: Caller<'_>,
     rows: Vec<stroem_db::DerivedRunRow>,
 ) -> Result<Vec<DerivedJobRef>, AppError> {
     if rows.is_empty() {
         return Ok(Vec::new());
     }
-    let viewer = crate::trigger_status::viewer_for(state, auth_user).await?;
+    let viewer = crate::trigger_status::viewer_for(state, caller).await?;
     let mut refs = Vec::with_capacity(rows.len());
     for row in rows {
         if let Some(viewer) = &viewer {
@@ -384,14 +385,16 @@ pub async fn get_job(
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
     let job_id = parse_uuid_param(&id, "job")?;
-    Ok(Json(job_detail(&state, &auth_user, job_id).await?))
+    Ok(Json(
+        job_detail(&state, Caller::of(&auth_user), job_id).await?,
+    ))
 }
 
 /// The redacted job detail: the body of `GET /api/jobs/{id}` and of MCP
 /// `get_job_status`, so both answer the same content under the same ACL.
 pub(crate) async fn job_detail(
     state: &AppState,
-    auth_user: &Option<AuthUser>,
+    caller: Caller<'_>,
     job_id: Uuid,
 ) -> Result<serde_json::Value, AppError> {
     // Get job
@@ -401,7 +404,7 @@ pub(crate) async fn job_detail(
         .ok_or_else(|| AppError::not_found("Job"))?;
 
     // ACL check
-    let perm = check_job_acl(state, auth_user, &job).await?;
+    let perm = job_permission(state, caller, &job).await?;
     if matches!(perm, TaskPermission::Deny) {
         return Err(AppError::not_found("Job"));
     }
@@ -418,7 +421,7 @@ pub(crate) async fn job_detail(
     let derived = JobRepo::list_derived_runs(&state.pool, job_id)
         .await
         .context("list derived runs")?;
-    let derived_jobs = derived_job_refs(state, auth_user, derived).await?;
+    let derived_jobs = derived_job_refs(state, caller, derived).await?;
 
     let mut steps_json: Vec<serde_json::Value> = steps
         .iter()
@@ -872,21 +875,20 @@ pub(crate) async fn job_permission(
 /// (no auth user, ACL not configured, or admin).
 async fn resolve_acl_scope(
     state: &AppState,
-    auth_user: &Option<AuthUser>,
+    caller: Caller<'_>,
 ) -> Result<Option<JobAclScope>, AppError> {
-    let auth = match auth_user {
-        Some(a) => a,
-        None => return Ok(None),
+    let Some(claims) = caller.claims else {
+        return Ok(None);
     };
     if !state.acl.is_configured() {
         return Ok(None);
     }
-    let user_id = auth.user_id()?;
-    let (is_admin, groups) = load_user_acl_context(&state.pool, user_id, auth.is_admin())
+    let user_id = claims_user_id(claims)?;
+    let (is_admin, groups) = load_user_acl_context(&state.pool, user_id, claims.is_admin)
         .await
         .context("load ACL context")?;
     Ok(
-        crate::acl::build_job_acl_scope(state, &auth.claims.email, &groups, is_admin)
+        crate::acl::build_job_acl_scope(state, &claims.email, &groups, is_admin)
             .await
             .context("build job ACL scope")?,
     )

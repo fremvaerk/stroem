@@ -6,7 +6,6 @@ pub mod input_file;
 pub mod job_actions;
 pub mod jobs;
 pub mod logs;
-pub mod paths;
 pub mod refresh;
 pub mod rerun;
 pub mod restart;

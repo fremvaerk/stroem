@@ -2,14 +2,14 @@ use anyhow::{Context, Result};
 use reqwest::Client;
 use serde_json::Value;
 
+use super::client::api_url;
 use super::client::check_response;
-use super::paths::api_url;
 
 pub async fn cmd_tasks(client: &Client, server: &str, workspace: Option<&str>) -> Result<()> {
     match workspace {
         Some(ws) => {
             let resp = client
-                .get(api_url(server, &["workspaces", ws, "tasks"])?)
+                .get(api_url(server, &["api", "workspaces", ws, "tasks"])?)
                 .send()
                 .await
                 .context("Failed to connect to server")?;
@@ -37,7 +37,7 @@ pub async fn cmd_tasks(client: &Client, server: &str, workspace: Option<&str>) -
         }
         None => {
             let ws_resp = client
-                .get(api_url(server, &["workspaces"])?)
+                .get(api_url(server, &["api", "workspaces"])?)
                 .send()
                 .await
                 .context("Failed to connect to server")?;
@@ -57,7 +57,7 @@ pub async fn cmd_tasks(client: &Client, server: &str, workspace: Option<&str>) -
                 let ws_name = ws.get("name").and_then(|v| v.as_str()).unwrap_or("-");
 
                 let resp = client
-                    .get(api_url(server, &["workspaces", ws_name, "tasks"])?)
+                    .get(api_url(server, &["api", "workspaces", ws_name, "tasks"])?)
                     .send()
                     .await
                     .context("Failed to connect to server")?;

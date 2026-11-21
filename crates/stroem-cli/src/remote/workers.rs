@@ -6,8 +6,8 @@ use reqwest::Client;
 use serde_json::Value;
 use std::fmt::Write;
 
+use super::client::api_url;
 use super::client::check_response;
-use super::paths::api_url;
 
 #[derive(clap::Args)]
 pub struct WorkersArgs {
@@ -29,10 +29,10 @@ pub async fn run(client: &Client, server: &str, args: WorkersArgs) -> Result<()>
 pub async fn workers_text(client: &Client, server: &str, args: &WorkersArgs) -> Result<String> {
     match &args.id {
         Some(id) => Ok(render_worker(
-            &get_json(client, api_url(server, &["workers", id])?).await?,
+            &get_json(client, api_url(server, &["api", "workers", id])?).await?,
         )),
         None => {
-            let mut url = api_url(server, &["workers"])?;
+            let mut url = api_url(server, &["api", "workers"])?;
             url.query_pairs_mut()
                 .append_pair("limit", &args.limit.to_string())
                 .append_pair("offset", &args.offset.to_string());

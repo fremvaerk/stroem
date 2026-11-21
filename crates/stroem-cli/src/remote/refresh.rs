@@ -5,8 +5,8 @@ use anyhow::{Context, Result};
 use reqwest::Client;
 use serde_json::Value;
 
+use super::client::api_url;
 use super::client::check_response;
-use super::paths::api_url;
 
 pub async fn cmd_refresh(client: &Client, server: &str, workspace: &str) -> Result<()> {
     println!("{}", refresh_text(client, server, workspace).await?);
@@ -15,7 +15,10 @@ pub async fn cmd_refresh(client: &Client, server: &str, workspace: &str) -> Resu
 
 pub async fn refresh_text(client: &Client, server: &str, workspace: &str) -> Result<String> {
     let resp = client
-        .post(api_url(server, &["workspaces", workspace, "refresh"])?)
+        .post(api_url(
+            server,
+            &["api", "workspaces", workspace, "refresh"],
+        )?)
         .send()
         .await
         .context("Failed to connect to server")?;

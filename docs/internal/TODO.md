@@ -1041,7 +1041,7 @@ same `pub(crate)` function as its REST handler (CLAUDE.md § MCP Server).
 - [ ] `GET /api/workspaces/{ws}/triggers` (and MCP `list_triggers`) answers an empty list for a workspace in which the caller sees no task, while `refresh` answers 404 for the same caller — the trigger list confirms that the workspace exists. Pre-existing REST behaviour, mirrored.
 - [ ] `GET /api/workers` (and MCP `list_workers`) has no ACL: any authenticated user sees every worker's name, tags and version. Pre-existing REST behaviour, mirrored.
 - [ ] The older MCP read tools keep their own code (Codex, 2026-11-21): `get_task` (no `triggers`, `connections`, `can_execute`; flow as a summary list), `list_workspaces`, `list_tasks` (ACL from `resolve_acl_scope`, not the REST visibility rule), `get_job_logs` (its own lookup and ACL check around the shared `log_storage.read_tail`), `list_artifacts`, `get_artifact`. Moving them onto the REST functions changes their JSON keys (REST task detail uses `id`, and its `name` is the display name), so it needs a decision on MCP compatibility first.
-- [ ] MCP not-found answers use the JSON-RPC `internal_error` code (pre-existing convention, `tools.rs::not_found`); `app_err` keeps it for REST `NotFound`. A client cannot tell "not found" from a server fault by code.
+- [ ] MCP not-found answers use the JSON-RPC `internal_error` code (pre-existing convention, `tools.rs::not_found`); `app_error` keeps it for REST `NotFound`. A client cannot tell "not found" from a server fault by code.
 
 ## Review: Timezone Support for Cron Triggers (2026-03-16)
 

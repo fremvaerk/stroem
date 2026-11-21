@@ -5,8 +5,8 @@ use anyhow::{Context, Result};
 use reqwest::Client;
 use serde_json::Value;
 
+use super::client::api_url;
 use super::client::check_response;
-use super::paths::api_url;
 
 pub async fn dispatch(client: &Client, server: &str, action: ArtifactsAction) -> Result<()> {
     match action {
@@ -21,7 +21,7 @@ pub async fn dispatch(client: &Client, server: &str, action: ArtifactsAction) ->
 
 pub async fn cmd_list(client: &Client, server: &str, job_id: &str) -> Result<()> {
     let resp = client
-        .get(api_url(server, &["jobs", job_id, "artifacts"])?)
+        .get(api_url(server, &["api", "jobs", job_id, "artifacts"])?)
         .send()
         .await
         .context("Failed to connect to server")?;
@@ -62,7 +62,10 @@ pub async fn cmd_download(
     output: Option<&str>,
 ) -> Result<()> {
     let resp = client
-        .get(api_url(server, &["jobs", job_id, "artifacts", name])?)
+        .get(api_url(
+            server,
+            &["api", "jobs", job_id, "artifacts", name],
+        )?)
         .send()
         .await
         .context("Failed to connect to server")?;

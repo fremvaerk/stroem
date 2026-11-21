@@ -1,5 +1,6 @@
 use crate::acl::{load_user_acl_context, make_task_path, TaskPermission};
 use crate::state::AppState;
+use crate::web::api::caller::{claims_user_id, Caller};
 use crate::web::api::middleware::AuthUser;
 use crate::web::api::{default_limit, parse_uuid_param};
 use crate::web::error::AppError;
@@ -73,7 +74,9 @@ pub async fn get_worker(
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
     let worker_id = parse_uuid_param(&id, "worker")?;
-    Ok(Json(worker_detail(&state, &auth_user, worker_id).await?))
+    Ok(Json(
+        worker_detail(&state, Caller::of(&auth_user), worker_id).await?,
+    ))
 }
 
 /// A worker with its recent steps, filtered by the caller's ACL and each
@@ -81,7 +84,7 @@ pub async fn get_worker(
 /// of MCP `get_worker`.
 pub(crate) async fn worker_detail(
     state: &AppState,
-    auth_user: &Option<AuthUser>,
+    caller: Caller<'_>,
     worker_id: uuid::Uuid,
 ) -> Result<serde_json::Value, AppError> {
     let worker = WorkerRepo::get(&state.pool, worker_id)
@@ -94,9 +97,9 @@ pub(crate) async fn worker_detail(
         .context("list steps for worker")?;
 
     // ACL filter: remove steps for tasks the user can't see
-    let steps: Vec<_> = if let Some(auth) = auth_user {
+    let steps: Vec<_> = if let Some(claims) = caller.claims {
         if state.acl.is_configured() {
-            let user_id = match auth.user_id() {
+            let user_id = match claims_user_id(claims) {
                 Ok(id) => id,
                 Err(_) => {
                     // Couldn't parse user_id — return worker info with no steps for safety
@@ -113,7 +116,7 @@ pub(crate) async fn worker_detail(
                     }));
                 }
             };
-            match load_user_acl_context(&state.pool, user_id, auth.is_admin()).await {
+            match load_user_acl_context(&state.pool, user_id, claims.is_admin).await {
                 Ok((true, _)) => steps, // admin sees all
                 Ok((false, groups)) => {
                     let all_configs = state.workspaces.get_all_configs().await;
@@ -136,7 +139,7 @@ pub(crate) async fn worker_detail(
                             let perm = state.acl.evaluate(
                                 &s.workspace,
                                 &task_path,
-                                &auth.claims.email,
+                                &claims.email,
                                 &groups,
                                 false,
                             );

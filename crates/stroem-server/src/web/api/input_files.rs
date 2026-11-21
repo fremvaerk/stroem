@@ -19,7 +19,8 @@ use crate::input_files::stream::download_body;
 use crate::input_files::upload::{store_upload, task_has_file_field, UploadError, UploadTarget};
 use crate::state::AppState;
 use crate::web::api::artifacts::{disposition_for, sanitize_filename};
-use crate::web::api::jobs::check_job_acl;
+use crate::web::api::caller::Caller;
+use crate::web::api::jobs::{check_job_acl, job_permission};
 use crate::web::api::middleware::AuthUser;
 use crate::web::api::pinned_source::resolve_source_pin;
 use crate::web::api::tasks::{
@@ -292,7 +293,7 @@ fn input_file_disposition(content_type: &str, original_name: &str) -> String {
 /// `get_input_file`.
 pub(crate) async fn job_input_file(
     state: &AppState,
-    auth_user: &Option<AuthUser>,
+    caller: Caller<'_>,
     job_id: Uuid,
     field: &str,
 ) -> Result<
@@ -307,7 +308,7 @@ pub(crate) async fn job_input_file(
         .context("get job")?
         .ok_or_else(|| AppError::not_found("Job"))?;
     if matches!(
-        check_job_acl(state, auth_user, &job).await?,
+        job_permission(state, caller, &job).await?,
         TaskPermission::Deny
     ) {
         return Err(AppError::not_found("Job"));
@@ -331,7 +332,7 @@ pub async fn download_input_file(
     Path((id, field)): Path<(String, String)>,
 ) -> Result<Response, AppError> {
     let job_id = parse_uuid_param(&id, "job")?;
-    let (rec, archive) = job_input_file(&state, &auth_user, job_id, &field).await?;
+    let (rec, archive) = job_input_file(&state, Caller::of(&auth_user), job_id, &field).await?;
     let body = download_body(archive.as_ref(), &rec.storage_key)
         .await
         .map_err(AppError::Internal)?

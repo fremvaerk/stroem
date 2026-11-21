@@ -6,8 +6,8 @@ use reqwest::{Client, StatusCode};
 use serde_json::Value;
 use std::fmt::Write;
 
+use super::client::api_url;
 use super::client::check_response;
-use super::paths::api_url;
 
 #[derive(clap::Args)]
 pub struct TriggersArgs {
@@ -26,7 +26,7 @@ pub async fn run(client: &Client, server: &str, args: TriggersArgs) -> Result<()
 
 pub async fn triggers_text(client: &Client, server: &str, args: &TriggersArgs) -> Result<String> {
     let rows: Vec<(String, Value)> = if args.attention {
-        get_json(client, api_url(server, &["triggers", "attention"])?)
+        get_json(client, api_url(server, &["api", "triggers", "attention"])?)
             .await?
             .as_array()
             .context("Expected array response")?
@@ -46,7 +46,7 @@ pub async fn triggers_text(client: &Client, server: &str, args: &TriggersArgs) -
     } else {
         let workspaces = match &args.workspace {
             Some(ws) => vec![ws.clone()],
-            None => get_json(client, api_url(server, &["workspaces"])?)
+            None => get_json(client, api_url(server, &["api", "workspaces"])?)
                 .await?
                 .as_array()
                 .context("Expected array response")?
@@ -56,7 +56,7 @@ pub async fn triggers_text(client: &Client, server: &str, args: &TriggersArgs) -
         };
         let mut rows = Vec::new();
         for ws in workspaces {
-            let url = api_url(server, &["workspaces", &ws, "triggers"])?;
+            let url = api_url(server, &["api", "workspaces", &ws, "triggers"])?;
             let list = match get_json_or_not_found(client, url).await? {
                 Some(list) => list,
                 // A workspace that does not load has no trigger list.

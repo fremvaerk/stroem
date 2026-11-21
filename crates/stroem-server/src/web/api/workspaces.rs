@@ -1,5 +1,6 @@
 use crate::acl::{load_user_acl_context, make_task_path, TaskPermission};
 use crate::state::AppState;
+use crate::web::api::caller::{claims_user_id, Caller};
 use crate::web::api::middleware::AuthUser;
 use crate::web::error::AppError;
 use crate::workspace::ReloadApiError;
@@ -86,20 +87,20 @@ pub async fn refresh_workspace(
     auth_user: Option<AuthUser>,
     Path(ws): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    Ok(Json(refresh(&state, auth_user.as_ref(), &ws).await?))
+    Ok(Json(refresh(&state, Caller::of(&auth_user), &ws).await?))
 }
 
 /// Reload `ws` for a caller: the body of `POST /api/workspaces/{ws}/refresh`
 /// and of MCP `refresh_workspace` (one ACL rule, one cooldown).
 pub(crate) async fn refresh(
     state: &Arc<AppState>,
-    auth_user: Option<&AuthUser>,
+    caller: Caller<'_>,
     ws: &str,
 ) -> Result<serde_json::Value, AppError> {
     // ACL check: required BEFORE existence check so an unauthorized caller
     // cannot distinguish "doesn't exist" from "exists but you can't see it".
     // Both cases collapse to 404.
-    if !caller_can_see_workspace(state, auth_user, ws).await? {
+    if !caller_can_see_workspace(state, caller, ws).await? {
         return Err(AppError::NotFound(format!("Workspace '{}' not found", ws)));
     }
 
@@ -132,7 +133,7 @@ pub(crate) async fn refresh(
 /// `list_workspaces` posture).
 async fn caller_can_see_workspace(
     state: &Arc<AppState>,
-    auth_user: Option<&AuthUser>,
+    caller: Caller<'_>,
     ws: &str,
 ) -> Result<bool, AppError> {
     // Workspace must actually exist before we evaluate ACL — otherwise we'd
@@ -143,7 +144,7 @@ async fn caller_can_see_workspace(
         return Ok(false);
     }
 
-    let Some(auth) = auth_user else {
+    let Some(claims) = caller.claims else {
         // Auth disabled → everything is open (matches the project's
         // "Auth is optional" posture).
         return Ok(true);
@@ -152,8 +153,8 @@ async fn caller_can_see_workspace(
         return Ok(true);
     }
 
-    let user_id = auth.user_id()?;
-    let (is_admin, groups) = load_user_acl_context(&state.pool, user_id, auth.is_admin())
+    let user_id = claims_user_id(claims)?;
+    let (is_admin, groups) = load_user_acl_context(&state.pool, user_id, claims.is_admin)
         .await
         .context("load ACL context")?;
     if is_admin {
@@ -169,7 +170,7 @@ async fn caller_can_see_workspace(
         let task_path = make_task_path(task_def.folder.as_deref(), task_name);
         let perm = state
             .acl
-            .evaluate(ws, &task_path, &auth.claims.email, &groups, false);
+            .evaluate(ws, &task_path, &claims.email, &groups, false);
         if !matches!(perm, TaskPermission::Deny) {
             return Ok(true);
         }

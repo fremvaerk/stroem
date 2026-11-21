@@ -8,8 +8,8 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use tokio::io::AsyncWriteExt;
 
+use super::client::api_url;
 use super::client::check_response;
-use super::paths::api_url;
 
 #[derive(clap::Args)]
 pub struct InputFileArgs {
@@ -42,7 +42,7 @@ pub async fn download(
     let mut resp = client
         .get(api_url(
             server,
-            &["jobs", &args.job_id, "input-files", &args.field],
+            &["api", "jobs", &args.job_id, "input-files", &args.field],
         )?)
         .send()
         .await

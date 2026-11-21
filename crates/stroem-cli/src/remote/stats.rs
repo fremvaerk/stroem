@@ -6,8 +6,8 @@ use reqwest::Client;
 use serde_json::Value;
 use std::fmt::Write;
 
+use super::client::api_url;
 use super::client::check_response;
-use super::paths::api_url;
 
 #[derive(clap::Args)]
 pub struct StatsArgs {
@@ -30,7 +30,7 @@ pub async fn run(client: &Client, server: &str, args: StatsArgs) -> Result<()> {
 pub async fn stats_text(client: &Client, server: &str, args: &StatsArgs) -> Result<String> {
     match (&args.workspace, &args.task) {
         (Some(ws), Some(task)) => {
-            let mut url = api_url(server, &["workspaces", ws, "tasks", task, "stats"])?;
+            let mut url = api_url(server, &["api", "workspaces", ws, "tasks", task, "stats"])?;
             if let Some(limit) = args.limit {
                 url.query_pairs_mut()
                     .append_pair("limit", &limit.to_string());
@@ -38,7 +38,7 @@ pub async fn stats_text(client: &Client, server: &str, args: &StatsArgs) -> Resu
             Ok(render_task_stats(ws, task, &get_json(client, url).await?))
         }
         _ => Ok(render_counts(
-            &get_json(client, api_url(server, &["stats"])?).await?,
+            &get_json(client, api_url(server, &["api", "stats"])?).await?,
         )),
     }
 }
