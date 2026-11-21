@@ -1211,3 +1211,138 @@ async fn refresh_workspace_needs_a_visible_task() -> Result<()> {
     assert!(is_rejected_call(&resp), "{resp}");
     Ok(())
 }
+
+// ─── get_task_stats / get_stats ──────────────────────────────────────────────
+
+/// A completed run of `task` that took `secs`, with one step `build`.
+async fn seed_timed_run(pool: &PgPool, task: &str, secs: f64) -> Uuid {
+    let job_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO job (job_id, workspace, task_name, status, source_type, created_at, \
+                          started_at, completed_at) \
+         VALUES ($1, 'default', $2, 'completed', 'api', NOW() - make_interval(secs => $3 + 1), \
+                 NOW() - make_interval(secs => $3), NOW())",
+    )
+    .bind(job_id)
+    .bind(task)
+    .bind(secs)
+    .execute(pool)
+    .await
+    .expect("seed timed run");
+    sqlx::query(
+        "INSERT INTO job_step (job_id, step_name, action_name, action_type, status, started_at, \
+                               completed_at) \
+         VALUES ($1, 'build', 'noop', 'script', 'completed', NOW() - make_interval(secs => $2), \
+                 NOW())",
+    )
+    .bind(job_id)
+    .bind(secs)
+    .execute(pool)
+    .await
+    .expect("seed timed step");
+    job_id
+}
+
+#[tokio::test]
+async fn get_task_stats_answers_the_rest_stats() -> Result<()> {
+    let app = app().await?;
+    for secs in [10.0, 20.0, 30.0] {
+        seed_timed_run(&app.pool, "report", secs).await;
+    }
+    let (status, body) = rest(
+        &app,
+        &app.admin,
+        "GET",
+        "/api/workspaces/default/tasks/report/stats?limit=2",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let stats = payload(
+        &mcp(
+            &app,
+            &app.admin,
+            "get_task_stats",
+            json!({"workspace": "default", "task_name": "report", "limit": 2}),
+        )
+        .await,
+    );
+    assert_eq!(stats, body);
+    assert_eq!(stats["window"], json!(2));
+    assert_eq!(stats["task"]["sample_size"], json!(2));
+    assert_eq!(stats["steps"][0]["step_name"], json!("build"));
+
+    let stats = payload(
+        &mcp(
+            &app,
+            &app.admin,
+            "get_task_stats",
+            json!({"workspace": "default", "task_name": "report"}),
+        )
+        .await,
+    );
+    assert_eq!(stats["window"], json!(50), "the REST default window");
+    assert_eq!(stats["task"]["sample_size"], json!(3));
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_task_stats_view_is_enough_and_deny_is_not_found() -> Result<()> {
+    let app = app().await?;
+    seed_timed_run(&app.pool, "restricted", 5.0).await;
+    let call = |task: &'static str| json!({"workspace": "default", "task_name": task});
+    let stats = payload(&mcp(&app, &app.viewer, "get_task_stats", call("restricted")).await);
+    assert_eq!(stats["task"]["sample_size"], json!(1));
+    let resp = mcp(&app, &app.viewer, "get_task_stats", call("hidden")).await;
+    assert_eq!(error_message(&resp), "Task not found");
+    let resp = mcp(&app, &app.admin, "get_task_stats", call("nope")).await;
+    assert_eq!(error_message(&resp), "Task not found");
+    let resp = mcp(
+        &app,
+        &app.admin,
+        "get_task_stats",
+        json!({"workspace": "nope", "task_name": "report"}),
+    )
+    .await;
+    assert_eq!(error_message(&resp), "Workspace 'nope' not found");
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_stats_answers_the_rest_dashboard_counts_within_the_acl() -> Result<()> {
+    let app = app().await?;
+    for (task, status) in [
+        ("report", "completed"),
+        ("report", "failed"),
+        ("restricted", "running"),
+        ("hidden", "failed"),
+        ("hidden", "pending"),
+    ] {
+        seed_job(
+            &app.pool,
+            SeedJob {
+                task,
+                status,
+                ..Default::default()
+            },
+        )
+        .await;
+    }
+    let (status, body) = rest(&app, &app.admin, "GET", "/api/stats").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let admin = payload(&mcp(&app, &app.admin, "get_stats", json!({})).await);
+    assert_eq!(admin, body);
+    assert_eq!(
+        admin,
+        json!({"pending": 1, "running": 1, "completed": 1, "failed": 2,
+               "cancelled": 0, "skipped": 0})
+    );
+    let (_, body) = rest(&app, &app.viewer, "GET", "/api/stats").await;
+    let viewer = payload(&mcp(&app, &app.viewer, "get_stats", json!({})).await);
+    assert_eq!(viewer, body);
+    assert_eq!(
+        viewer,
+        json!({"pending": 0, "running": 1, "completed": 1, "failed": 1,
+               "cancelled": 0, "skipped": 0})
+    );
+    Ok(())
+}

@@ -103,6 +103,19 @@ Reload a workspace from its source now (a git fetch, or a new read of the folder
 stroem-api refresh data-team
 ```
 
+### `stats`
+
+Without options: the number of jobs you may view in each status (the Dashboard). With `--workspace` and `--task`: the task's run-time statistics over its recent completed runs (average, p50, p95, min and max, and the same per step; failed, cancelled and pinned-ref runs are not counted).
+
+```bash
+stroem-api stats
+
+stroem-api stats --workspace data-team --task etl-pipeline
+
+# Over the last 200 completed runs (default 50, max 500)
+stroem-api stats -w data-team --task etl-pipeline --limit 200
+```
+
 ### `triggers`
 
 List all triggers (scheduler and webhook) in the workspace.

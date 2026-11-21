@@ -73,8 +73,20 @@ pub async fn get_stats(
     State(state): State<Arc<AppState>>,
     auth_user: Option<AuthUser>,
 ) -> Result<impl IntoResponse, AppError> {
+    Ok((
+        StatusCode::OK,
+        Json(dashboard_stats(&state, &auth_user).await?),
+    ))
+}
+
+/// Job counts by status within the caller's ACL: the body of `GET /api/stats`
+/// and of MCP `get_stats`.
+pub(crate) async fn dashboard_stats(
+    state: &AppState,
+    auth_user: &Option<AuthUser>,
+) -> Result<DashboardStats, AppError> {
     // Resolve ACL scope when auth is present and ACL is configured
-    let acl_scope = resolve_acl_scope(&state, &auth_user).await?;
+    let acl_scope = resolve_acl_scope(state, auth_user).await?;
 
     let counts = match acl_scope {
         Some(ref scope) => JobRepo::get_status_counts_with_acl(&state.pool, scope)
@@ -93,8 +105,7 @@ pub async fn get_stats(
         cancelled: *counts.get("cancelled").unwrap_or(&0),
         skipped: *counts.get("skipped").unwrap_or(&0),
     };
-
-    Ok((StatusCode::OK, Json(stats)))
+    Ok(stats)
 }
 
 /// GET /api/jobs - List jobs

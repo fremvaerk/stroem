@@ -134,6 +134,17 @@ pub struct RefreshWorkspaceParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct GetTaskStatsParams {
+    /// Workspace name
+    pub workspace: String,
+    /// Task name
+    pub task_name: String,
+    /// Number of most recent completed runs to aggregate (default 50, 1 to 500)
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct CancelJobParams {
     /// Job ID (UUID) to cancel
     pub job_id: String,
@@ -1174,6 +1185,40 @@ impl StromMcpHandler {
                 .await
                 .map_err(app_err)?;
         Ok(json_result(&body))
+    }
+
+    /// Duration stats of a task (`GET /api/workspaces/{ws}/tasks/{name}/stats`).
+    #[tool(
+        description = "Get a task's run-time statistics over its most recent completed runs, the same as GET /api/workspaces/{ws}/tasks/{name}/stats: sample size, average, p50, p95, min and max duration in milliseconds, the recent durations (job_id, duration_ms, completed_at) and the same figures per step. Failed and cancelled runs, and runs of a pinned git ref, are not counted. `limit` is the number of runs (default 50, 1 to 500). View on the task is enough."
+    )]
+    async fn get_task_stats(
+        &self,
+        params: Parameters<GetTaskStatsParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let Parameters(params) = params;
+        tracing::info!(workspace = %params.workspace, task = %params.task_name, "MCP: get_task_stats");
+        let stats = crate::web::api::tasks::task_stats(
+            &self.state,
+            &rest_auth(self),
+            &params.workspace,
+            &params.task_name,
+            params.limit,
+        )
+        .await
+        .map_err(app_err)?;
+        Ok(json_result(&stats))
+    }
+
+    /// Job counts by status (`GET /api/stats`).
+    #[tool(
+        description = "Count the jobs you may view by status (pending, running, completed, failed, cancelled, skipped), the same as the Dashboard (GET /api/stats)."
+    )]
+    async fn get_stats(&self) -> Result<CallToolResult, rmcp::ErrorData> {
+        tracing::info!("MCP: get_stats");
+        let stats = crate::web::api::jobs::dashboard_stats(&self.state, &rest_auth(self))
+            .await
+            .map_err(app_err)?;
+        Ok(json_result(&stats))
     }
 
     /// List recent jobs (`GET /api/jobs`).

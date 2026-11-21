@@ -698,6 +698,8 @@ async fn test_mcp_tools_list_returns_every_tool() -> Result<()> {
         "list_triggers",
         "list_attention_triggers",
         "refresh_workspace",
+        "get_task_stats",
+        "get_stats",
     ];
 
     assert_eq!(

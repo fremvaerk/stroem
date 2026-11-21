@@ -10,6 +10,7 @@ pub mod refresh;
 pub mod rerun;
 pub mod restart;
 pub mod state;
+pub mod stats;
 pub mod status;
 pub mod tasks;
 pub mod trigger;
@@ -108,6 +109,8 @@ pub enum Commands {
         /// Workspace name
         workspace: String,
     },
+    /// Job counts by status, or a task's run-time statistics (-w WS --task T)
+    Stats(stats::StatsArgs),
 }
 
 #[derive(Subcommand)]
@@ -241,6 +244,7 @@ pub async fn dispatch(command: Commands, server: &str, token: Option<&str>) -> R
         Commands::Refresh { workspace } => {
             refresh::cmd_refresh(&http_client, server, &workspace).await?
         }
+        Commands::Stats(args) => stats::run(&http_client, server, args).await?,
     }
 
     Ok(())
