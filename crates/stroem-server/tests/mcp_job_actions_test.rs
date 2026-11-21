@@ -65,6 +65,11 @@ tasks:
       token: { type: string, secret: true }
       note: { type: string }
     flow: { a: { action: noop } }
+  with-file:
+    input:
+      data_file: { type: file, required: true }
+      note: { type: string }
+    flow: { a: { action: noop } }
   view-line:
     folder: view
     flow: { a: { action: noop } }
@@ -837,6 +842,52 @@ async fn rerun_job_replays_a_secret_the_caller_does_not_know() -> Result<()> {
         assert_eq!(raw["token"], json!("s3cr3t-value"), "{args}");
         assert_eq!(input["token"], json!("s3cr3t-value"), "{args}");
     }
+    Ok(())
+}
+
+async fn attached_file(pool: &PgPool, job_id: Uuid, field: &str) -> Result<Option<String>> {
+    Ok(
+        sqlx::query_scalar("SELECT file_id FROM job_input_file WHERE job_id = $1 AND field = $2")
+            .bind(job_id)
+            .bind(field)
+            .fetch_optional(pool)
+            .await?,
+    )
+}
+
+/// A required `file` field is replayed like any other field: the new job is
+/// attached to the source's file (lineage, A2), with no upload and no value
+/// in `input`.
+#[tokio::test]
+async fn rerun_job_replays_a_file_field() -> Result<()> {
+    let app = App::new(actions_workspace()).await?;
+    let body = app
+        .ok(
+            "execute_task",
+            json!({"workspace": "default", "task_name": "with-file", "input": {
+                "data_file": {"name": "a.csv", "content": "x,y\n"}, "note": "n"}}),
+        )
+        .await;
+    let source: Uuid = body["job_id"].as_str().expect("job_id").parse()?;
+    let source_file = attached_file(&app.pool, source, "data_file")
+        .await?
+        .expect("the source has its file");
+
+    let new_id = rerun(&app, json!({"job_id": source.to_string()})).await?;
+    assert_eq!(
+        attached_file(&app.pool, new_id, "data_file").await?,
+        Some(source_file.clone())
+    );
+    // An override of another field keeps the file too.
+    let new_id = rerun(
+        &app,
+        json!({"job_id": source.to_string(), "input": {"note": "m"}}),
+    )
+    .await?;
+    assert_eq!(
+        attached_file(&app.pool, new_id, "data_file").await?,
+        Some(source_file)
+    );
     Ok(())
 }
 
