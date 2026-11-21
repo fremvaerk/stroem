@@ -200,6 +200,15 @@ stroem-api logs <job-id> --tail-bytes 1048576
 
 Against a server older than this release, `--full` receives the old full-log JSON body (no streaming) and holds it in memory before printing, instead of streaming NDJSON.
 
+### `input-file`
+
+Download the file given to a job's `file` input field. The file is streamed to disk. Without `-o`, the file gets its original name (reduced to a plain file name), in the current directory.
+
+```bash
+stroem-api input-file <job-id> data_file
+stroem-api input-file <job-id> data_file -o ./copies/report.csv
+```
+
 ### `jobs`
 
 List recent jobs, newest first. The last line shows which jobs of the total are on the page and the `--offset` of the next page.

@@ -82,6 +82,7 @@ The MCP server provides these tools for interacting with Strøm. The read tools 
 | `approve_step` | Approve or reject a suspended step | `job_id`, `step_name`, `approved`, `input?`, `rejection_reason?` |
 | `list_artifacts` | List a job's artifacts (name, content type, size, download URL) | `job_id` |
 | `get_artifact` | Fetch one artifact's content | `job_id`, `name` |
+| `get_input_file` | Fetch the file of a job's `file` input field, up to 1 MiB (`GET /api/jobs/{id}/input-files/{field}`) | `job_id`, `field` |
 | `create_upload_url` | Get a single-use URL to upload a file for a `file` input field | `workspace`, `task_name`, `file_name` |
 
 When the log is longer than the tail, the result ends with `[truncated: showing the last 256.0 KiB of up to 83.3 MiB — earlier lines omitted]`.
@@ -109,6 +110,14 @@ tools answer `Internal server error` instead of an unfiltered list.
 blocks the agent can view, and any other binary (PDF, archives, …) as a base64
 blob resource. Artifacts larger than 1 MiB are not inlined — download them via
 the HTTP artifact API (the URL is in `list_artifacts`) instead.
+
+`get_input_file` returns the file given to a job's [`file` input
+field](/guides/file-inputs/) in the same shapes as `get_artifact` (the
+`input_files` list of `get_job_status` names the fields). A file over 1 MiB
+is refused with its relative download URL, for example
+`/api/jobs/{id}/input-files/data_file`. A file sent inline through
+`execute_task` is stored as `application/octet-stream`, so it comes back as a
+base64 blob.
 
 ### Job actions
 

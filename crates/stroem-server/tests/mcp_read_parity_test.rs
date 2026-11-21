@@ -738,11 +738,48 @@ async fn attach_file(
     name: &str,
     content: &[u8],
 ) -> Result<String> {
+    attach_file_with(
+        app,
+        job_id,
+        FileSeed {
+            task,
+            field,
+            name,
+            content_type: "text/csv",
+            content: Some(content),
+            row_size: content.len() as i64,
+        },
+    )
+    .await
+}
+
+struct FileSeed<'a> {
+    task: &'a str,
+    field: &'a str,
+    name: &'a str,
+    content_type: &'a str,
+    /// `None`: no blob is stored.
+    content: Option<&'a [u8]>,
+    /// The size the row records.
+    row_size: i64,
+}
+
+async fn attach_file_with(app: &App, job_id: Uuid, f: FileSeed<'_>) -> Result<String> {
+    let FileSeed {
+        task,
+        field,
+        name,
+        content_type,
+        content,
+        row_size,
+    } = f;
     let file_id = format!("file_{}", Uuid::new_v4().simple());
     let key = format!("inputs/default/{file_id}");
-    app.input_blob
-        .put(&key, "text/csv", bytes::Bytes::copy_from_slice(content))
-        .await?;
+    if let Some(content) = content {
+        app.input_blob
+            .put(&key, content_type, bytes::Bytes::copy_from_slice(content))
+            .await?;
+    }
     stroem_db::InputFileRepo::insert(
         &app.pool,
         &stroem_db::NewInputFile {
@@ -753,8 +790,8 @@ async fn attach_file(
             origin: "api",
             original_name: name,
             safe_name: name,
-            content_type: "text/csv",
-            size_bytes: content.len() as i64,
+            content_type,
+            size_bytes: row_size,
             sha256: "00",
             storage_key: &key,
         },
@@ -1469,5 +1506,195 @@ async fn get_worker_bad_parameters() -> Result<()> {
     )
     .await;
     assert_eq!(error_message(&resp), "Worker not found");
+    Ok(())
+}
+
+// ─── get_input_file ──────────────────────────────────────────────────────────
+
+/// A `files`-family job with one attached file; returns `(job_id, file_id)`.
+async fn job_with_file(app: &App, task: &str, f: FileSeed<'_>) -> Result<Uuid> {
+    let job_id = seed_job(
+        &app.pool,
+        SeedJob {
+            task,
+            ..Default::default()
+        },
+    )
+    .await;
+    attach_file_with(app, job_id, FileSeed { task, ..f }).await?;
+    Ok(job_id)
+}
+
+fn csv(content: &[u8]) -> FileSeed<'_> {
+    FileSeed {
+        task: "",
+        field: "data_file",
+        name: "report.csv",
+        content_type: "text/csv",
+        content: Some(content),
+        row_size: content.len() as i64,
+    }
+}
+
+#[tokio::test]
+async fn get_input_file_returns_a_text_file_inline() -> Result<()> {
+    let app = app().await?;
+    let job_id = job_with_file(&app, "files", csv(b"id,total\n1,10\n")).await?;
+    let resp = mcp(
+        &app,
+        &app.viewer,
+        "get_input_file",
+        json!({"job_id": job_id.to_string(), "field": "data_file"}),
+    )
+    .await;
+    assert_eq!(
+        resp["result"]["content"][0]["text"],
+        json!("id,total\n1,10\n"),
+        "{resp}"
+    );
+    // The REST download has the same bytes.
+    let (status, body) = rest(
+        &app,
+        &app.viewer,
+        "GET",
+        &format!("/api/jobs/{job_id}/input-files/data_file"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!("id,total\n1,10\n"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_input_file_returns_an_uploaded_binary_as_a_blob() -> Result<()> {
+    use base64::Engine;
+    let app = app().await?;
+    // An MCP inline upload is stored as application/octet-stream.
+    let job_id = job_with_file(
+        &app,
+        "files",
+        FileSeed {
+            content_type: "application/octet-stream",
+            ..csv(b"\x00\x01binary")
+        },
+    )
+    .await?;
+    let resp = mcp(
+        &app,
+        &app.viewer,
+        "get_input_file",
+        json!({"job_id": job_id.to_string(), "field": "data_file"}),
+    )
+    .await;
+    let res = &resp["result"]["content"][0]["resource"];
+    assert_eq!(res["mimeType"], json!("application/octet-stream"), "{resp}");
+    assert_eq!(
+        res["uri"],
+        json!(format!("stroem://input-files/{job_id}/data_file"))
+    );
+    let blob = base64::engine::general_purpose::STANDARD.decode(res["blob"].as_str().unwrap())?;
+    assert_eq!(blob, b"\x00\x01binary");
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_input_file_acl_view_is_enough_and_deny_is_not_found() -> Result<()> {
+    let app = app().await?;
+    let viewable = job_with_file(&app, "view-files", csv(b"a")).await?;
+    let hidden = job_with_file(&app, "hidden-files", csv(b"b")).await?;
+    let args = |id: Uuid| json!({"job_id": id.to_string(), "field": "data_file"});
+    let resp = mcp(&app, &app.viewer, "get_input_file", args(viewable)).await;
+    assert_eq!(resp["result"]["content"][0]["text"], json!("a"), "{resp}");
+    let resp = mcp(&app, &app.viewer, "get_input_file", args(hidden)).await;
+    assert_eq!(error_message(&resp), "Job not found");
+    let resp = mcp(&app, &app.admin, "get_input_file", args(hidden)).await;
+    assert_eq!(resp["result"]["content"][0]["text"], json!("b"), "{resp}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_input_file_refuses_a_large_file_without_reading_it() -> Result<()> {
+    let app = app().await?;
+    // The row says 2 MiB and there is NO blob: a read would fail with an
+    // internal error, so the refusal proves the size is checked first.
+    let job_id = job_with_file(
+        &app,
+        "files",
+        FileSeed {
+            content: None,
+            row_size: 2 * 1024 * 1024,
+            ..csv(b"")
+        },
+    )
+    .await?;
+    let resp = mcp(
+        &app,
+        &app.viewer,
+        "get_input_file",
+        json!({"job_id": job_id.to_string(), "field": "data_file"}),
+    )
+    .await;
+    assert!(is_invalid_params(&resp), "{resp}");
+    let msg = error_message(&resp);
+    assert!(
+        msg.contains(&format!("/api/jobs/{job_id}/input-files/data_file")),
+        "{msg}"
+    );
+    assert!(msg.contains("2097152 bytes"), "{msg}");
+    assert!(
+        !msg.contains("report.csv"),
+        "the file name is content: {msg}"
+    );
+
+    // A row that under-states the size: the stream bound still refuses.
+    let big = vec![b'x'; 2 * 1024 * 1024];
+    let job_id = job_with_file(
+        &app,
+        "files",
+        FileSeed {
+            row_size: 10,
+            ..csv(&big)
+        },
+    )
+    .await?;
+    let resp = mcp(
+        &app,
+        &app.viewer,
+        "get_input_file",
+        json!({"job_id": job_id.to_string(), "field": "data_file"}),
+    )
+    .await;
+    assert!(is_invalid_params(&resp), "{resp}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_input_file_bad_parameters() -> Result<()> {
+    let app = app().await?;
+    let job_id = job_with_file(&app, "files", csv(b"a")).await?;
+    let resp = mcp(
+        &app,
+        &app.admin,
+        "get_input_file",
+        json!({"job_id": job_id.to_string(), "field": "other"}),
+    )
+    .await;
+    assert_eq!(error_message(&resp), "Input file not found");
+    let resp = mcp(
+        &app,
+        &app.admin,
+        "get_input_file",
+        json!({"job_id": Uuid::new_v4().to_string(), "field": "data_file"}),
+    )
+    .await;
+    assert_eq!(error_message(&resp), "Job not found");
+    let resp = mcp(
+        &app,
+        &app.admin,
+        "get_input_file",
+        json!({"job_id": "x", "field": "data_file"}),
+    )
+    .await;
+    assert!(is_invalid_params(&resp), "{resp}");
     Ok(())
 }

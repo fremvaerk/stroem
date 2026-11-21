@@ -161,6 +161,14 @@ pub struct GetWorkerParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct GetInputFileParams {
+    /// Job ID (UUID)
+    pub job_id: String,
+    /// The `type: file` input field, as `input_files[].field` of `get_job_status`
+    pub field: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct CancelJobParams {
     /// Job ID (UUID) to cancel
     pub job_id: String,
@@ -617,6 +625,16 @@ async fn check_task_permission(
     check_task_acl(&handler.state, &handler.auth, workspace, task_name, folder)
         .await
         .map_err(acl_err)
+}
+
+/// `s` as one percent-encoded URL path segment.
+fn path_segment(s: &str) -> String {
+    let mut url = url::Url::parse("http://x/").expect("a static URL");
+    url.path_segments_mut()
+        .expect("an http URL has a path")
+        .pop_if_empty()
+        .push(s);
+    url.path()[1..].to_string()
 }
 
 /// Get the source_id for audit trail (email when authenticated).
@@ -1282,6 +1300,73 @@ impl StromMcpHandler {
         Ok(json_result(&detail))
     }
 
+    /// Read the file of a job's `type: file` input field (text up to 1 MiB).
+    #[tool(
+        description = "Read the file given to a job's `type: file` input field (the files are listed in `input_files` of get_job_status), the same file as GET /api/jobs/{id}/input-files/{field}. Files of at most 1 MiB only: text (text/*, JSON, YAML, XML) comes back as text, images as an image block, any other type as a base64 blob. A larger file is refused with its relative download URL; pass that URL to a human or download it with the REST API. View on the task is enough."
+    )]
+    async fn get_input_file(
+        &self,
+        params: Parameters<GetInputFileParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        use crate::input_files::stream::{read_bounded, BoundedRead};
+        let Parameters(params) = params;
+        tracing::info!(job_id = %params.job_id, field = %params.field, "MCP: get_input_file");
+        let job_id: uuid::Uuid = params
+            .job_id
+            .parse()
+            .map_err(|_| rmcp::ErrorData::invalid_params("Invalid job_id UUID", None))?;
+        let (rec, archive) = crate::web::api::input_files::job_input_file(
+            &self.state,
+            &rest_auth(self),
+            job_id,
+            &params.field,
+        )
+        .await
+        .map_err(app_err)?;
+
+        let field = path_segment(&params.field);
+        let too_large = |size: String| {
+            rmcp::ErrorData::invalid_params(
+                format!(
+                    "the file of input field '{}' is {size} bytes; MCP get_input_file returns at most {MCP_ARTIFACT_MAX_BYTES} bytes, download it from /api/jobs/{job_id}/input-files/{field}",
+                    params.field
+                ),
+                None,
+            )
+        };
+        // The row's size first: a large file is refused without a read.
+        if rec.size_bytes > MCP_ARTIFACT_MAX_BYTES {
+            return Err(too_large(rec.size_bytes.to_string()));
+        }
+        let bytes = match read_bounded(
+            archive.as_ref(),
+            &rec.storage_key,
+            MCP_ARTIFACT_MAX_BYTES as usize,
+            u64::try_from(rec.size_bytes).unwrap_or(0),
+        )
+        .await
+        {
+            Ok(BoundedRead::Whole(bytes)) => bytes,
+            Ok(BoundedRead::TooLarge) => {
+                return Err(too_large(format!("more than {MCP_ARTIFACT_MAX_BYTES}")))
+            }
+            Ok(BoundedRead::Missing) => {
+                tracing::error!(%job_id, "MCP get_input_file: blob missing for an input file");
+                return Err(internal_err("Internal server error"));
+            }
+            Err(e) => {
+                tracing::error!(%job_id, "MCP get_input_file: reading an input file failed: {e:#}");
+                return Err(internal_err("Internal server error"));
+            }
+        };
+        let uri = format!("stroem://input-files/{job_id}/{field}");
+        Ok(CallToolResult::success(vec![artifact_content(
+            &rec.content_type,
+            &bytes,
+            uri,
+        )]))
+    }
+
     /// List recent jobs (`GET /api/jobs`).
     #[tool(
         description = "List recent jobs, newest first, the same as GET /api/jobs. Filter by workspace, task_name (needs workspace), status, source_type, or search (text in the task name, workspace, source ID or job ID; not together with task_name). Returns `jobs`, `count` (jobs in this answer) and `total` (all matching jobs you may view); use `offset` with `limit` (default 20, at most 100) for the next page."
@@ -1870,6 +1955,12 @@ mod tests {
             approval_input(Some(serde_json::json!("[1]"))),
             Some(serde_json::json!("[1]"))
         );
+    }
+
+    #[test]
+    fn path_segment_percent_encodes() {
+        assert_eq!(path_segment("data_file"), "data_file");
+        assert_eq!(path_segment("a b/c?d"), "a%20b%2Fc%3Fd");
     }
 
     #[test]

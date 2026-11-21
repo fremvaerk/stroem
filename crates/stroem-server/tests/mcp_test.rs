@@ -702,6 +702,7 @@ async fn test_mcp_tools_list_returns_every_tool() -> Result<()> {
         "get_stats",
         "list_workers",
         "get_worker",
+        "get_input_file",
     ];
 
     assert_eq!(

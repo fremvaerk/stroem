@@ -11,7 +11,8 @@
 //!
 //! It also bounds input-file uploads and downloads (file-inputs spec § 9):
 //! a 50 MiB file streamed from disk through `put_counted` and back out
-//! through `download_body`, local and S3.
+//! through `download_body`, local and S3; and the MCP `get_input_file` read
+//! (`read_bounded`), which holds at most its 1 MiB cap whatever the file's size.
 
 use bytes::Bytes;
 use futures_core::stream::BoxStream;
@@ -23,7 +24,7 @@ use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 use std::sync::Arc;
 use stroem_server::blob_storage::{BlobArchive, LocalBlobArchive};
 use stroem_server::config::LogReadConfig;
-use stroem_server::input_files::stream::{download_body, put_counted};
+use stroem_server::input_files::stream::{download_body, put_counted, read_bounded, BoundedRead};
 use stroem_server::log_read::{tail_body, LogSource, StepFilter};
 use stroem_server::log_storage::{archive_key, JobLogMeta, LogStorage};
 use tempfile::TempDir;
@@ -155,6 +156,13 @@ fn input_s3() -> usize {
 
 const INPUT_FILE: usize = 50 * MIB;
 
+// MCP `get_input_file`: the buffer (at most the cap), its transient copy in
+// a `realloc`, one 64 KiB chunk and fixed overhead.
+const MCP_READ_CAP: usize = MIB;
+fn bounded_read() -> usize {
+    2 * MCP_READ_CAP + 2 * K + MIB
+}
+
 /// A 50 MiB file on disk, written 1 MiB at a time: the measured upload
 /// streams it from disk, so only the upload itself allocates.
 async fn input_fixture(dir: &Path) -> PathBuf {
@@ -220,6 +228,56 @@ async fn input_cases(
     .await;
     assert_eq!(n, INPUT_FILE);
     report.check(&format!("input download, {label}"), p, formula);
+
+    bounded_read_cases(report, label, archive, &key).await;
+}
+
+/// `read_bounded` with the MCP cap: the 50 MiB file `key` (whose row is
+/// taken to under-state its size, so only the stream bound holds) is refused,
+/// and a file of exactly the cap is read whole.
+async fn bounded_read_cases(
+    report: &mut Report,
+    label: &str,
+    archive: &dyn BlobArchive,
+    key: &str,
+) {
+    let small = format!("inputs/ws/file_{}", Uuid::new_v4().simple());
+    let body: BoxStream<'static, anyhow::Result<Bytes>> =
+        Box::pin(futures_util::stream::iter([Ok(Bytes::from(
+            vec![1u8; MCP_READ_CAP],
+        ))]));
+    put_counted(archive, &small, "text/plain", body, 100 * MIB as u64)
+        .await
+        .unwrap();
+    // Warm-up.
+    read_bounded(archive, &small, MCP_READ_CAP, MCP_READ_CAP as u64)
+        .await
+        .unwrap();
+
+    let (r, p) = peak_of(read_bounded(archive, key, MCP_READ_CAP, 1024)).await;
+    assert_eq!(r.unwrap(), BoundedRead::TooLarge);
+    report.check(
+        &format!("MCP input read, 50 MiB refused, {label}"),
+        p,
+        bounded_read(),
+    );
+
+    let (r, p) = peak_of(async {
+        match read_bounded(archive, &small, MCP_READ_CAP, MCP_READ_CAP as u64)
+            .await
+            .unwrap()
+        {
+            BoundedRead::Whole(b) => b.len(),
+            other => panic!("expected the whole file, got {other:?}"),
+        }
+    })
+    .await;
+    assert_eq!(r, MCP_READ_CAP);
+    report.check(
+        &format!("MCP input read, 1 MiB whole, {label}"),
+        p,
+        bounded_read(),
+    );
 }
 
 /// Read a response body frame by frame, dropping each; the byte count.

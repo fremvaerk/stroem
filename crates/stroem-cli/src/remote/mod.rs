@@ -2,6 +2,7 @@ pub mod approve;
 pub mod artifacts;
 pub mod cancel;
 pub mod client;
+pub mod input_file;
 pub mod job_actions;
 pub mod jobs;
 pub mod logs;
@@ -114,6 +115,8 @@ pub enum Commands {
     Stats(stats::StatsArgs),
     /// List workers, or show one worker and its recent steps
     Workers(workers::WorkersArgs),
+    /// Download the file given to a job's `file` input field
+    InputFile(input_file::InputFileArgs),
 }
 
 #[derive(Subcommand)]
@@ -249,6 +252,7 @@ pub async fn dispatch(command: Commands, server: &str, token: Option<&str>) -> R
         }
         Commands::Stats(args) => stats::run(&http_client, server, args).await?,
         Commands::Workers(args) => workers::run(&http_client, server, args).await?,
+        Commands::InputFile(args) => input_file::run(&http_client, server, args).await?,
     }
 
     Ok(())
