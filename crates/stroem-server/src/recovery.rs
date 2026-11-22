@@ -322,8 +322,8 @@ async fn sweep(state: &AppState) -> Result<()> {
 /// on a job with nothing to do changes nothing. A PERMANENT pin error
 /// settles the job `failed` inside `advance`, so it is not listed again
 /// (unless that write failed: the next sweep retries it). One beat per job
-/// (CLAUDE.md § Health Check, "Beat = progress"); a unit is bounded by the
-/// pin-load budget.
+/// (`docs/internal/architecture/operations.md` § Health Check, "Beat =
+/// progress"); a unit is bounded by the pin-load budget.
 ///
 /// The phase is BOUNDED so it cannot hold up the next sweep's stale-worker
 /// and timeout phases during a git outage, when each `advance` may spend up

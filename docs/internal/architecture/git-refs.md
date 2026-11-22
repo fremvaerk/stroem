@@ -1,6 +1,6 @@
 # Git refs
 
-Pinned references (`ref:`), templated refs, the PinStore, and how pinned jobs claim, redact and authorise. Moved word for word from `CLAUDE.md`, which indexes this file. A `§ <Title>` reference names a `###` section in any file of `docs/internal/architecture/`.
+Pinned references (`ref:`), templated refs, the PinStore, and how pinned jobs claim, redact and authorise. `CLAUDE.md` indexes this file. A `§ <Title>` reference names a `###` section in any file of `docs/internal/architecture/`.
 
 ### Git refs (pinned references)
 - Spec `docs/superpowers/specs/2026-10-02-git-refs-design.md`; user guide `docs/src/content/docs/guides/git-refs.md`; upgrade note `operations/migration-049-050.md` (behaviour that changes WITHOUT `ref:`). Flow-step `action:`, `type: task` `task:` and scheduler/webhook trigger `task:` take `ref:` (branch | tag | full SHA; `stroem_common::git_ref::parse_git_ref`, short SHAs get a hint) — or a template on a flow step, a `type: task` action or a webhook trigger (next bullet). Rust field `git_ref` (`#[serde(default, rename = "ref")]`); DB columns `job.git_ref`, `job.task_folder`, `job_step.{action_ref, task_workspace, task_ref, task_revision, pin_releases}`, `task_state.git_ref`, `workspace_state.git_ref` (migrations 049 = columns, 050 = indexes). API JSON keeps `ref`.

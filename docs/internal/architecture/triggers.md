@@ -1,6 +1,6 @@
 # Triggers
 
-Cron (scheduler), webhook and event-source triggers, and trigger run status. Moved word for word from `CLAUDE.md`, which indexes this file. A `§ <Title>` reference names a `###` section in any file of `docs/internal/architecture/`.
+Cron (scheduler), webhook and event-source triggers, and trigger run status. `CLAUDE.md` indexes this file. A `§ <Title>` reference names a `###` section in any file of `docs/internal/architecture/`.
 
 ### Scheduler (Cron Triggers)
 - `scheduler.rs` — background task, smart sleep (wakes at next fire time), config hot-reload, `CancellationToken`

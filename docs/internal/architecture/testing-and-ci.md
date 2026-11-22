@@ -1,6 +1,6 @@
 # Testing and CI
 
-Test layout and the shared Postgres container, CodeQL setup, and the release pipeline. Moved word for word from `CLAUDE.md`, which indexes this file. A `§ <Title>` reference names a `###` section in any file of `docs/internal/architecture/`.
+Test layout and the shared Postgres container, CodeQL setup, and the release pipeline. `CLAUDE.md` indexes this file. A `§ <Title>` reference names a `###` section in any file of `docs/internal/architecture/`.
 
 ### Tests
 

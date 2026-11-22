@@ -1,6 +1,6 @@
 # API and auth
 
-API errors, authentication, ACL and task duration stats. Moved word for word from `CLAUDE.md`, which indexes this file. A `§ <Title>` reference names a `###` section in any file of `docs/internal/architecture/`.
+API errors, authentication, ACL and task duration stats. `CLAUDE.md` indexes this file. A `§ <Title>` reference names a `###` section in any file of `docs/internal/architecture/`.
 
 ### Error Handling (AppError)
 - `AppError` enum in `web/error.rs`: `BadRequest`, `Unauthorized`, `Forbidden`, `NotFound`, `Conflict`, `Internal`

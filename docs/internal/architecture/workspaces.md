@@ -1,6 +1,6 @@
 # Workspaces
 
-Workspace sources and refresh, libraries, cross-workspace references, connections and config loading. Moved word for word from `CLAUDE.md`, which indexes this file. A `§ <Title>` reference names a `###` section in any file of `docs/internal/architecture/`.
+Workspace sources and refresh, libraries, cross-workspace references, connections and config loading. `CLAUDE.md` indexes this file. A `§ <Title>` reference names a `###` section in any file of `docs/internal/architecture/`.
 
 ### Multi-Workspace
 - Server config: `workspaces:` map with named entries (folder or git source)

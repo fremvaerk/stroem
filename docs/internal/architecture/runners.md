@@ -1,6 +1,6 @@
 # Actions, runners and step claiming
 
-Action types, the Shell/Docker/Kube runners, and how workers claim steps by capability and tag. Moved word for word from `CLAUDE.md`, which indexes this file. A `§ <Title>` reference names a `###` section in any file of `docs/internal/architecture/`.
+Action types, the Shell/Docker/Kube runners, and how workers claim steps by capability and tag. `CLAUDE.md` indexes this file. A `§ <Title>` reference names a `###` section in any file of `docs/internal/architecture/`.
 
 ### Workflow YAML structure
 See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
@@ -9,8 +9,8 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 - **`agent`**: LLM call as a workflow step, worker-side dispatch. Supports structured output via `output` (converted to JSON Schema).
 - **`docker` / `pod`** (container actions): Runs user's prepared image as-is, no workspace mounting. Uses `cmd` field for entrypoint/command override.
 - **`script`**: `type: script` + `runner: local|docker|pod` — scripts with workspace files. Languages: `shell` (default), `python`, `javascript`, `typescript`, `go`. Uses `script` (inline) or `source` (file path) fields. Optional `dependencies`, `interpreter`, and `args` (CLI arguments, Tera-templated) fields.
-- **`task`**: References another task, server creates a child job (see Task Actions below)
-- **`approval`**: Pauses execution for human approve/reject (see Approval Gates below)
+- **`task`**: References another task, server creates a child job (see § Task Actions)
+- **`approval`**: Pauses execution for human approve/reject (see § Approval Gates)
 - `type: script` + `image` is **rejected** by validation. Use `type: docker` or `type: script` + `runner: docker` instead.
 - **Toolchain preferences**: `uv > python3 > python`, `bun > node` (JS), `bun > deno` (TS), `bash > sh`
 - **Pod manifest overrides**: `type: pod` and `runner: pod` support a `manifest` field deep-merged into the generated pod spec. See `docs/src/content/docs/guides/action-types.md`.

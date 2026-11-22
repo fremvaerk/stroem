@@ -569,8 +569,9 @@ mod tests {
 
     #[test]
     fn all_failed_cancelled_only_loop_rolled_up_completed_is_carried() {
-        // Known quirk (CLAUDE.md § For-Each): only cancelled instances roll
-        // the placeholder up `completed`, so it is not a start step.
+        // Known quirk (`docs/internal/architecture/job-lifecycle.md`
+        // § For-Each Loops): only cancelled instances roll the placeholder up
+        // `completed`, so it is not a start step.
         let mut lp = fs(&[], false);
         lp.for_each = Some(json!("{{ x }}"));
         let flow = HashMap::from([("loop".into(), lp), ("z".into(), fs(&[], false))]);

@@ -1,6 +1,6 @@
 # State and artifacts
 
-Task state snapshots, global workspace state and job artifacts. Moved word for word from `CLAUDE.md`, which indexes this file. A `§ <Title>` reference names a `###` section in any file of `docs/internal/architecture/`.
+Task state snapshots, global workspace state and job artifacts. `CLAUDE.md` indexes this file. A `§ <Title>` reference names a `###` section in any file of `docs/internal/architecture/`.
 
 ### Task State Snapshots
 - Immutable state snapshots persisted across job runs per workspace+task

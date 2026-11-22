@@ -1,6 +1,6 @@
 # Operations
 
-Metrics, database rules, health probes, log storage and streaming, worker recovery and high availability. Moved word for word from `CLAUDE.md`, which indexes this file. A `§ <Title>` reference names a `###` section in any file of `docs/internal/architecture/`.
+Metrics, database rules, health probes, log storage and streaming, worker recovery and high availability. `CLAUDE.md` indexes this file. A `§ <Title>` reference names a `###` section in any file of `docs/internal/architecture/`.
 
 ### Prometheus Metrics
 - `crates/stroem-server/src/metrics.rs` — recorder install + `gather_gauges` + metric name constants (`STROEM_*`) + RED tower middleware (`track_http_metrics`)

@@ -1,6 +1,6 @@
 # React UI
 
-The React UI: pages, navigation, task tree, logs, code editing and trigger status. Moved word for word from `CLAUDE.md`, which indexes this file. A `§ <Title>` reference names a `###` section in any file of `docs/internal/architecture/`.
+The React UI: pages, navigation, task tree, logs, code editing and trigger status. `CLAUDE.md` indexes this file. A `§ <Title>` reference names a `###` section in any file of `docs/internal/architecture/`.
 
 ### React UI
 - Pages: Login, Dashboard, Workspaces, Workspace Detail (`/workspaces/:workspace`), Tasks, Task Detail, Jobs, Job Detail, Workers, Users, Settings, plus a `*` Not Found page.

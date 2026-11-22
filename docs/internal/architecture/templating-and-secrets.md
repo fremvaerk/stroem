@@ -1,6 +1,6 @@
 # Templating and secrets
 
-Secret redaction in logs and errors, value-free template errors, and the Tera 2 engine and render context. Moved word for word from `CLAUDE.md`, which indexes this file. A `§ <Title>` reference names a `###` section in any file of `docs/internal/architecture/`.
+Secret redaction in logs and errors, value-free template errors, and the Tera 2 engine and render context. `CLAUDE.md` indexes this file. A `§ <Title>` reference names a `###` section in any file of `docs/internal/architecture/`.
 
 ### Secrets in logs
 

@@ -1,6 +1,6 @@
 # Job lifecycle
 
-Timeouts, the step cascade, settlement, `when`, `for_each`, retry, hooks, approval gates, task actions and job lineage. Moved word for word from `CLAUDE.md`, which indexes this file. A `§ <Title>` reference names a `###` section in any file of `docs/internal/architecture/`.
+Timeouts, the step cascade, settlement, `when`, `for_each`, retry, hooks, approval gates, task actions and job lineage. `CLAUDE.md` indexes this file. A `§ <Title>` reference names a `###` section in any file of `docs/internal/architecture/`.
 
 ### Timeouts
 - **Step**: `FlowStep.timeout: Option<HumanDuration>` (max 24h) — **Task/job**: `TaskDef.timeout` (max 7d)
@@ -18,7 +18,7 @@ Timeouts, the step cascade, settlement, `when`, `for_each`, retry, hooks, approv
 - `run` renders templates (which may call the `vals` subprocess); that is why it runs before the apply transaction opens.
 - Known, unchanged from before the cascade: two cascades on one job can race (lost work, `job_step.rs` TODO history); a same-status `output`/`error_message` rewrite between snapshot and apply is not detected; `try_retry_job`'s transaction (job row then steps) inverts the cascade's order (steps then job row). All three are closed by `docs/superpowers/specs/2026-09-08-cascade-concurrency-hardening-design.md`.
 - New context variables in `build_step_render_context` must be inserted BEFORE completed-step outputs (a step named `job` shadows `job`).
-- Deployment: the fail-or-retry change (CLAUDE.md § Retry Mechanism) must be running on every server replica before the release containing the cascade activation is rolled out.
+- Deployment: the fail-or-retry change (§ Retry Mechanism) must be running on every server replica before the release containing the cascade activation is rolled out.
 - Promotion/skip decisions go through `stroem_common::gate` (`gate`, `Gate`) — `verdict` no longer exists. A pending step or placeholder is `Gate::Omitted` (written `unreachable`) whenever its OWN `depends_on` tree isn't satisfied by its dependencies' current outcomes — including a for-each placeholder, gated on its own upstream dependencies exactly like any other step (see § For-Each Loops for what decides whether something downstream still runs past a failed/omitted placeholder). See § Conditional Flow Steps.
 
 ### Settlement

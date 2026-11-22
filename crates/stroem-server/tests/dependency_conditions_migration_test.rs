@@ -96,7 +96,8 @@ fn task_with_flow(flow: Vec<(&str, FlowStep)>) -> TaskDef {
 
 // ─── Harness: drive cascade::run to a fixpoint with no real worker ─────────
 // (same shape as dependency_conditions_recalc_pipeline_test.rs — duplicated
-// per test file, per this crate's convention; see CLAUDE.md § Settlement.)
+// per test file, per this crate's convention; see
+// `docs/internal/architecture/job-lifecycle.md` § Settlement.)
 
 fn workspace_with(task: &TaskDef) -> WorkspaceConfig {
     let mut ws = WorkspaceConfig::new();
