@@ -2,15 +2,20 @@ pub mod approve;
 pub mod artifacts;
 pub mod cancel;
 pub mod client;
+pub mod input_file;
 pub mod job_actions;
 pub mod jobs;
 pub mod logs;
+pub mod refresh;
 pub mod rerun;
 pub mod restart;
 pub mod state;
+pub mod stats;
 pub mod status;
 pub mod tasks;
 pub mod trigger;
+pub mod triggers;
+pub mod workers;
 pub mod workspaces;
 
 use anyhow::Result;
@@ -33,10 +38,13 @@ pub enum Commands {
         #[arg(long = "file", value_name = "FIELD=PATH")]
         files: Vec<String>,
     },
-    /// Get job status
+    /// Get job status, input and output
     Status {
         /// Job ID
         job_id: String,
+        /// Print the raw job detail (`GET /api/jobs/{id}`) as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Get job logs (the last 256 KiB unless --full or --tail-bytes)
     Logs {
@@ -55,11 +63,30 @@ pub enum Commands {
         #[arg(long, short)]
         workspace: Option<String>,
     },
-    /// List jobs
+    /// List jobs, newest first
     Jobs {
         /// Maximum number of jobs to show
         #[arg(long, default_value = "20")]
         limit: i64,
+        /// Filter by workspace
+        #[arg(long, short)]
+        workspace: Option<String>,
+        /// Filter by task name (needs --workspace)
+        #[arg(long, requires = "workspace")]
+        task: Option<String>,
+        /// Filter by status (pending, running, completed, failed, cancelled, skipped)
+        #[arg(long)]
+        status: Option<String>,
+        /// Filter by source type (api, trigger, webhook, task, hook, user, mcp,
+        /// agent_tool, event_source, retry, upload, rerun, restart)
+        #[arg(long)]
+        source_type: Option<String>,
+        /// Text to look for in the task name, workspace, source ID or job ID
+        #[arg(long, conflicts_with = "task")]
+        search: Option<String>,
+        /// Number of jobs to skip, for the next page
+        #[arg(long, default_value = "0")]
+        offset: i64,
     },
     /// Cancel a running or pending job
     Cancel {
@@ -80,6 +107,19 @@ pub enum Commands {
     },
     #[command(flatten)]
     JobActions(job_actions::JobActionCommands),
+    /// List triggers with their last run, result and missed runs
+    Triggers(triggers::TriggersArgs),
+    /// Reload a workspace from its source now
+    Refresh {
+        /// Workspace name
+        workspace: String,
+    },
+    /// Job counts by status, or a task's run-time statistics (-w WS --task T)
+    Stats(stats::StatsArgs),
+    /// List workers, or show one worker and its recent steps
+    Workers(workers::WorkersArgs),
+    /// Download the file given to a job's `file` input field
+    InputFile(input_file::InputFileArgs),
 }
 
 #[derive(Subcommand)]
@@ -163,8 +203,8 @@ pub async fn dispatch(command: Commands, server: &str, token: Option<&str>) -> R
             )
             .await?;
         }
-        Commands::Status { job_id } => {
-            status::cmd_status(&http_client, server, &job_id).await?;
+        Commands::Status { job_id, json } => {
+            status::cmd_status(&http_client, server, &job_id, json).await?;
         }
         Commands::Logs {
             job_id,
@@ -176,8 +216,25 @@ pub async fn dispatch(command: Commands, server: &str, token: Option<&str>) -> R
         Commands::Tasks { workspace } => {
             tasks::cmd_tasks(&http_client, server, workspace.as_deref()).await?;
         }
-        Commands::Jobs { limit } => {
-            jobs::cmd_jobs(&http_client, server, limit).await?;
+        Commands::Jobs {
+            limit,
+            workspace,
+            task,
+            status,
+            source_type,
+            search,
+            offset,
+        } => {
+            let filter = jobs::JobsFilter {
+                limit,
+                workspace: workspace.as_deref(),
+                task: task.as_deref(),
+                status: status.as_deref(),
+                source_type: source_type.as_deref(),
+                search: search.as_deref(),
+                offset,
+            };
+            jobs::cmd_jobs(&http_client, server, &filter).await?;
         }
         Commands::Cancel { job_id } => {
             cancel::cmd_cancel(&http_client, server, &job_id).await?;
@@ -194,6 +251,13 @@ pub async fn dispatch(command: Commands, server: &str, token: Option<&str>) -> R
         Commands::JobActions(command) => {
             job_actions::dispatch(&http_client, server, command).await?
         }
+        Commands::Triggers(args) => triggers::run(&http_client, server, args).await?,
+        Commands::Refresh { workspace } => {
+            refresh::cmd_refresh(&http_client, server, &workspace).await?
+        }
+        Commands::Stats(args) => stats::run(&http_client, server, args).await?,
+        Commands::Workers(args) => workers::run(&http_client, server, args).await?,
+        Commands::InputFile(args) => input_file::run(&http_client, server, args).await?,
     }
 
     Ok(())
@@ -272,7 +336,7 @@ mod tests {
     fn jobs_subcommand_default_limit_is_20() {
         let cli = parse(&["stroem-api", "jobs"]).unwrap();
         match cli.command {
-            super::Commands::Jobs { limit } => assert_eq!(limit, 20),
+            super::Commands::Jobs { limit, .. } => assert_eq!(limit, 20),
             _ => panic!("unexpected command variant"),
         }
     }
@@ -281,9 +345,88 @@ mod tests {
     fn jobs_subcommand_accepts_custom_limit() {
         let cli = parse(&["stroem-api", "jobs", "--limit", "50"]).unwrap();
         match cli.command {
-            super::Commands::Jobs { limit } => assert_eq!(limit, 50),
+            super::Commands::Jobs { limit, .. } => assert_eq!(limit, 50),
             _ => panic!("unexpected command variant"),
         }
+    }
+
+    #[test]
+    fn jobs_subcommand_filters() {
+        let cli = parse(&[
+            "stroem-api",
+            "jobs",
+            "-w",
+            "ops",
+            "--task",
+            "etl",
+            "--status",
+            "failed",
+            "--offset",
+            "40",
+        ])
+        .unwrap();
+        match cli.command {
+            super::Commands::Jobs {
+                workspace,
+                task,
+                status,
+                search,
+                offset,
+                ..
+            } => {
+                assert_eq!(workspace.as_deref(), Some("ops"));
+                assert_eq!(task.as_deref(), Some("etl"));
+                assert_eq!(status.as_deref(), Some("failed"));
+                assert!(search.is_none());
+                assert_eq!(offset, 40);
+            }
+            _ => panic!("unexpected command variant"),
+        }
+        // --task needs --workspace; --search and --task exclude each other.
+        assert!(parse(&["stroem-api", "jobs", "--task", "etl"]).is_err());
+        assert!(parse(&[
+            "stroem-api",
+            "jobs",
+            "-w",
+            "ops",
+            "--task",
+            "etl",
+            "--search",
+            "x"
+        ])
+        .is_err());
+        match parse(&[
+            "stroem-api",
+            "jobs",
+            "--search",
+            "nightly",
+            "--source-type",
+            "trigger",
+        ])
+        .unwrap()
+        .command
+        {
+            super::Commands::Jobs {
+                search,
+                source_type,
+                offset,
+                ..
+            } => {
+                assert_eq!(search.as_deref(), Some("nightly"));
+                assert_eq!(source_type.as_deref(), Some("trigger"));
+                assert_eq!(offset, 0);
+            }
+            _ => panic!("unexpected command variant"),
+        }
+    }
+
+    #[test]
+    fn refresh_subcommand_requires_a_workspace() {
+        match parse(&["stroem-api", "refresh", "ops"]).unwrap().command {
+            super::Commands::Refresh { workspace } => assert_eq!(workspace, "ops"),
+            _ => panic!("unexpected command variant"),
+        }
+        assert!(parse(&["stroem-api", "refresh"]).is_err());
     }
 
     #[test]
@@ -356,7 +499,22 @@ mod tests {
     fn status_subcommand_captures_job_id() {
         let cli = parse(&["stroem-api", "status", "abc-123"]).unwrap();
         match cli.command {
-            super::Commands::Status { job_id } => assert_eq!(job_id, "abc-123"),
+            super::Commands::Status { job_id, .. } => assert_eq!(job_id, "abc-123"),
+            _ => panic!("unexpected command variant"),
+        }
+    }
+
+    #[test]
+    fn status_subcommand_json_flag() {
+        match parse(&["stroem-api", "status", "j1", "--json"])
+            .unwrap()
+            .command
+        {
+            super::Commands::Status { json, .. } => assert!(json),
+            _ => panic!("unexpected command variant"),
+        }
+        match parse(&["stroem-api", "status", "j1"]).unwrap().command {
+            super::Commands::Status { json, .. } => assert!(!json),
             _ => panic!("unexpected command variant"),
         }
     }

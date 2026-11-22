@@ -26,6 +26,7 @@ mod integration_test;
 mod json_input_test;
 mod mcp_artifacts_test;
 mod mcp_job_actions_test;
+mod mcp_read_parity_test;
 mod mcp_test;
 mod metrics_test;
 mod oauth_flow_test;

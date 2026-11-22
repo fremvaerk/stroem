@@ -4,7 +4,7 @@
 
 use crate::acl::{job_coords_task_path, load_user_acl_context, make_task_path, TaskPermission};
 use crate::state::AppState;
-use crate::web::api::middleware::AuthUser;
+use crate::web::api::caller::Caller;
 use crate::web::api::triggers::{AttentionTrigger, TriggerInfo};
 use anyhow::Context;
 use chrono::{DateTime, Duration, Utc};
@@ -52,26 +52,25 @@ pub struct Viewer {
 /// `Ok(None)` = no filtering (no auth user or ACL not configured). Errors are
 /// never swallowed: a failed ACL-context load must not open the view up.
 #[tracing::instrument(skip_all)]
-pub async fn viewer_for(
+pub(crate) async fn viewer_for(
     state: &AppState,
-    auth: &Option<AuthUser>,
+    caller: Caller<'_>,
 ) -> anyhow::Result<Option<Viewer>> {
-    let Some(auth) = auth else {
+    let Some(claims) = caller.claims else {
         return Ok(None);
     };
     if !state.acl.is_configured() {
         return Ok(None);
     }
-    let user_id: Uuid = auth
-        .claims
+    let user_id: Uuid = claims
         .sub
         .parse()
         .context("Invalid user id in the auth token")?;
-    let (is_admin, groups) = load_user_acl_context(&state.pool, user_id, auth.is_admin())
+    let (is_admin, groups) = load_user_acl_context(&state.pool, user_id, claims.is_admin)
         .await
         .context("Failed to load the ACL context")?;
     Ok(Some(Viewer {
-        email: auth.claims.email.clone(),
+        email: claims.email.clone(),
         groups,
         is_admin,
     }))

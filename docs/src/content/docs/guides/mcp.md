@@ -58,7 +58,7 @@ mcp:
 
 ## Available Tools
 
-The MCP server provides fourteen tools for interacting with Strøm:
+The MCP server provides these tools for interacting with Strøm. A tool whose row names a REST route runs the same code as that route, so it answers the same content under the same access rules:
 
 | Tool | Description | Parameters |
 |------|-------------|------------|
@@ -66,24 +66,58 @@ The MCP server provides fourteen tools for interacting with Strøm:
 | `list_tasks` | List tasks in a workspace | `workspace?` (optional; lists all if omitted) |
 | `get_task` | Get detailed task definition | `workspace`, `task_name` |
 | `execute_task` | Execute a task and return job ID | `workspace`, `task_name`, `input?` |
-| `get_job_status` | Get current job status with step details | `job_id` |
+| `get_job_status` | A job's full detail, the same as `GET /api/jobs/{id}`: status, input, output, each step's input / output / error / retry history, links, child jobs, later runs and input files | `job_id` |
 | `get_job_logs` | The end of a job's log (last 256 KiB), formatted | `job_id`, `step?`, `tail_bytes?` |
-| `list_jobs` | List recent jobs with optional filters | `workspace?`, `task_name?`, `status?`, `limit?` |
+| `list_triggers` | A workspace's triggers with next runs, last run, result and missed runs (`GET /api/workspaces/{ws}/triggers`) | `workspace` |
+| `list_attention_triggers` | Triggers of every workspace with missed runs or a failed last run, the Dashboard card (`GET /api/triggers/attention`) | none |
+| `refresh_workspace` | Reload a workspace from its source now, for example after a push (`POST /api/workspaces/{ws}/refresh`) | `workspace` |
+| `get_task_stats` | A task's run-time statistics over its recent completed runs: average, p50, p95, min, max, recent durations, per step (`GET /api/workspaces/{ws}/tasks/{name}/stats`) | `workspace`, `task_name`, `limit?` (default 50, max 500) |
+| `get_stats` | Counts of the jobs you may view by status, the Dashboard (`GET /api/stats`) | none |
+| `list_workers` | The registered workers: name, status, capabilities, tags, version, last heartbeat (`GET /api/workers`) | `limit?` (default 50, max 100), `offset?` |
+| `get_worker` | One worker and its 50 most recent steps, without the steps of tasks you may not view (`GET /api/workers/{id}`) | `worker_id` |
+| `list_jobs` | Recent jobs, newest first, with `count` and `total` (`GET /api/jobs`) | `workspace?`, `task_name?`, `status?`, `source_type?`, `search?`, `limit?` (default 20, max 100), `offset?` |
 | `cancel_job` | Cancel a running or pending job | `job_id` |
 | `restart_job` | Restart a finished job from one step, or every failed step | `job_id`, `from_step?` or `all_failed?`, `dry_run?` |
 | `rerun_job` | Re-run a job with its stored input | `job_id`, `input?` |
 | `approve_step` | Approve or reject a suspended step | `job_id`, `step_name`, `approved`, `input?`, `rejection_reason?` |
 | `list_artifacts` | List a job's artifacts (name, content type, size, download URL) | `job_id` |
 | `get_artifact` | Fetch one artifact's content | `job_id`, `name` |
+| `get_input_file` | Fetch the file of a job's `file` input field, up to 1 MiB (`GET /api/jobs/{id}/input-files/{field}`) | `job_id`, `field` |
 | `create_upload_url` | Get a single-use URL to upload a file for a `file` input field | `workspace`, `task_name`, `file_name` |
 
 When the log is longer than the tail, the result ends with `[truncated: showing the last 256.0 KiB of up to 83.3 MiB — earlier lines omitted]`.
+
+`list_jobs` filters by your access rules in the database before it takes the
+page, so `limit` jobs you may view come back and `total` counts only those.
+`search` looks for text in the task name, workspace, source ID and job ID (at
+most 200 characters) and cannot be used with `task_name`. Use `offset` for the
+next page.
+
+`refresh_workspace` needs View on at least one task of the workspace; without
+it the answer is `Workspace '<name>' not found`, the same as for a workspace
+that does not exist. A second refresh within 5 seconds, or while a reload
+runs, is refused with `Workspace refresh rate-limited; retry after <N>s`. The
+REST route and the tool share this limit.
+
+`list_triggers` hides a trigger whose task you may not view. A last run you
+may not view (for example a run of a pinned commit that moved the task to a
+folder you cannot see) is hidden with `last_run_hidden: true`; the missed-runs
+mark is still shown. When your access rules cannot be loaded, both trigger
+tools answer `Internal server error` instead of an unfiltered list.
 
 `get_artifact` returns content shaped to the artifact's type: textual artifacts
 (text, JSON, YAML, XML) come back as inline text, `image/*` artifacts as image
 blocks the agent can view, and any other binary (PDF, archives, …) as a base64
 blob resource. Artifacts larger than 1 MiB are not inlined — download them via
 the HTTP artifact API (the URL is in `list_artifacts`) instead.
+
+`get_input_file` returns the file given to a job's [`file` input
+field](/guides/file-inputs/) in the same shapes as `get_artifact` (the
+`input_files` list of `get_job_status` names the fields). A file over 1 MiB
+is refused with its relative download URL, for example
+`/api/jobs/{id}/input-files/data_file`. A file sent inline through
+`execute_task` is stored as `application/octet-stream`, so it comes back as a
+base64 blob.
 
 ### Job actions
 
@@ -327,21 +361,42 @@ MCP client serializes it as a JSON-encoded string (some clients do), the server
 parses it back into an object automatically; anything that isn't a JSON object
 is rejected with an error rather than silently run with default values.
 
-### 5. Monitor job status
+### 5. Monitor job status and read the result
 
 ```
 Call: get_job_status(job_id="a1b2c3d4-e5f6-7890-abcd-ef1234567890")
-Returns:
+Returns (shortened):
 {
-  "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-  "status": "running",
-  "started_at": "2025-03-12T14:30:00Z",
+  "job_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "status": "completed",
+  "input": { "version": "v1.2.3" },
+  "output": { "url": "https://api.example.com" },
   "steps": [
-    { "name": "pull-image", "status": "completed", "duration_secs": 45 },
-    { "name": "start-container", "status": "running", "started_at": "2025-03-12T14:30:50Z" }
-  ]
+    { "step_name": "pull-image", "status": "completed", "output": { "digest": "sha256:…" } },
+    { "step_name": "start-container", "status": "completed", "output": { "id": "abc123" } }
+  ],
+  "derived_jobs": [],
+  "input_files": []
 }
 ```
+
+`get_job_status` returns the same JSON as `GET /api/jobs/{id}` (the job page
+of the UI): the job's `input`, `raw_input` and `output`; for each step its
+`input`, `output`, `error_message`, `retry_history` and, for a `type: task`
+step, `child_jobs`; the `parent_job_id`, `source_job_id` and retry links;
+`derived_jobs` (the Restarts and Re-runs of this job that you may see) and
+`input_files`. The same ACL applies: View on the task is enough.
+
+The answer is compact JSON. When it would be larger than 256 KiB, its
+largest content values (input, output, retry history, error message) are
+replaced with a note
+(`[omitted: 1.2 MiB of JSON, over the MCP answer limit; read it with GET /api/jobs/{id}]`),
+largest first, until the answer fits. The `truncated_values` list names each
+replaced value by its JSON pointer and size, for example
+`{"path": "/steps/2/output", "size_bytes": 1258291}`. Read those values with
+`GET /api/jobs/{id}` or `stroem-api status --json`. A job with very many
+steps can still give a larger answer, because step names, statuses and times
+are never replaced.
 
 ### 6. Retrieve logs
 
@@ -355,10 +410,10 @@ Returns:
 [start-container] Health check: passed
 ```
 
-This shows the tail of the log (last 256 KiB by default); pass `tail_bytes` for more history, up to `log_storage.read.tail_max_bytes`.
+This shows the tail of the log (last 256 KiB by default); pass `tail_bytes` for more history, up to `log_storage.read.tail_max_bytes` (4 MiB by default). MCP has no full log: an answer is one message, and a log can be very large. Read the whole log with `GET /api/jobs/{id}/logs?full=true` or `stroem-api logs --full`.
 
-`get_job_status` masks secret values (`••••••`) in what it returns — chiefly
-the steps' `error_message` — the same way as `GET /api/jobs/{id}`, including
+`get_job_status` masks secret values (`••••••`) in what it returns — the
+input, the output and the steps' content — the same way as `GET /api/jobs/{id}`, including
 the secrets of any [pinned commit](/guides/git-refs/#secrets-and-redaction)
 the job is connected to. When those secrets cannot be loaded at the moment, the tool
 returns an error, `redaction set unavailable, retry`, instead of the job;

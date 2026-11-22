@@ -2,13 +2,14 @@ use anyhow::{Context, Result};
 use reqwest::Client;
 use serde_json::Value;
 
+use super::client::api_url;
 use super::client::check_response;
 
 pub async fn cmd_tasks(client: &Client, server: &str, workspace: Option<&str>) -> Result<()> {
     match workspace {
         Some(ws) => {
             let resp = client
-                .get(format!("{}/api/workspaces/{}/tasks", server, ws))
+                .get(api_url(server, &["api", "workspaces", ws, "tasks"])?)
                 .send()
                 .await
                 .context("Failed to connect to server")?;
@@ -36,7 +37,7 @@ pub async fn cmd_tasks(client: &Client, server: &str, workspace: Option<&str>) -
         }
         None => {
             let ws_resp = client
-                .get(format!("{}/api/workspaces", server))
+                .get(api_url(server, &["api", "workspaces"])?)
                 .send()
                 .await
                 .context("Failed to connect to server")?;
@@ -56,7 +57,7 @@ pub async fn cmd_tasks(client: &Client, server: &str, workspace: Option<&str>) -
                 let ws_name = ws.get("name").and_then(|v| v.as_str()).unwrap_or("-");
 
                 let resp = client
-                    .get(format!("{}/api/workspaces/{}/tasks", server, ws_name))
+                    .get(api_url(server, &["api", "workspaces", ws_name, "tasks"])?)
                     .send()
                     .await
                     .context("Failed to connect to server")?;
@@ -88,4 +89,32 @@ pub async fn cmd_tasks(client: &Client, server: &str, workspace: Option<&str>) -
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// A workspace name the server returns is one percent-encoded segment.
+    #[tokio::test]
+    async fn workspace_names_are_percent_encoded() -> Result<()> {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/workspaces"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([{"name": "a b?c#d/e"}])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/workspaces/a%20b%3Fc%23d%2Fe/tasks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .expect(2)
+            .mount(&server)
+            .await;
+        cmd_tasks(&Client::new(), &server.uri(), None).await?;
+        cmd_tasks(&Client::new(), &server.uri(), Some("a b?c#d/e")).await?;
+        Ok(())
+    }
 }

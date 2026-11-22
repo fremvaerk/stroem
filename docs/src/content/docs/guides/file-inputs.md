@@ -72,7 +72,7 @@ Every client works in two calls: **upload** the file (you get a file ID), then *
 
 The Run form shows a file picker for a `file` field. The browser uploads the file when you select it, with a progress bar. The form shows the file name and size, and offers **Remove** and **Replace**. **Run** is disabled while an upload runs or after it fails. A failed upload offers **Remove**. **Cancel** of a **Replace**, and **Remove** after a failed **Replace**, return to the file the field had before.
 
-On the job page, the **Input files** card lists the files of the job with a download link.
+On the job page, the **Input files** card lists the files of the job with a download link. `stroem-api input-file <job-id> <field>` downloads a file to disk, and MCP `get_input_file` returns a file of up to 1 MiB.
 
 On [Re-run](/guides/rerun-and-restart/#files), the field shows the file of the source job. Keep it, or choose **Replace** to upload another file. If you cancel the **Replace**, or remove a failed replacement, the field shows the file of the source job again.
 

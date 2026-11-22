@@ -95,6 +95,27 @@ List all actions in the workspace.
 stroem actions
 ```
 
+### `refresh`
+
+Reload a workspace from its source now (a git fetch, or a new read of the folder), for example in CI after a push and before `trigger`. Needs View on at least one task of the workspace. A second refresh within 5 seconds is refused with `429 … retry after <N>s`.
+
+```bash
+stroem-api refresh data-team
+```
+
+### `stats`
+
+Without options: the number of jobs you may view in each status (the Dashboard). With `--workspace` and `--task`: the task's run-time statistics over its recent completed runs (average, p50, p95, min and max, and the same per step; failed, cancelled and pinned-ref runs are not counted).
+
+```bash
+stroem-api stats
+
+stroem-api stats --workspace data-team --task etl-pipeline
+
+# Over the last 200 completed runs (default 50, max 500)
+stroem-api stats -w data-team --task etl-pipeline --limit 200
+```
+
 ### `triggers`
 
 List all triggers (scheduler and webhook) in the workspace.
@@ -145,11 +166,16 @@ stroem-api trigger import-report --file data_file=./report.csv
 
 ### `status`
 
-Check the status of a job.
+Check the status of a job. The summary shows the job's input and output and the output of each step.
 
 ```bash
 stroem-api status <job-id>
+
+# Print the raw job detail (the JSON of GET /api/jobs/{id})
+stroem-api status <job-id> --json
 ```
+
+Secret values are masked (`••••••`), as on the job page.
 
 ### `logs`
 
@@ -174,13 +200,34 @@ stroem-api logs <job-id> --tail-bytes 1048576
 
 Against a server older than this release, `--full` receives the old full-log JSON body (no streaming) and holds it in memory before printing, instead of streaming NDJSON.
 
+### `input-file`
+
+Download the file given to a job's `file` input field. The file is streamed to disk. Without `-o`, the file gets its original name (reduced to a plain file name; a leading `.` becomes `_`) in the current directory, and the command refuses to replace a file that already exists there. With `-o`, an existing file is replaced.
+
+```bash
+stroem-api input-file <job-id> data_file
+stroem-api input-file <job-id> data_file -o ./copies/report.csv
+```
+
 ### `jobs`
 
-List recent jobs.
+List recent jobs, newest first. The last line shows which jobs of the total are on the page and the `--offset` of the next page.
 
 ```bash
 # List last 10 jobs
 stroem-api jobs --limit 10
+
+# Filter by workspace, task and status
+stroem-api jobs --workspace data-team --task etl-pipeline --status failed
+
+# Look for text in the task name, workspace, source ID or job ID (not with --task)
+stroem-api jobs --search nightly
+
+# Only the jobs of one source type (api, trigger, webhook, task, hook, user, mcp, ...)
+stroem-api jobs --source-type trigger
+
+# The next page
+stroem-api jobs --limit 20 --offset 20
 ```
 
 ### `tasks`
@@ -257,10 +304,36 @@ stroem-api reject <job-id> <step> --reason "not before the release freeze"
 
 `--input` must be a JSON object. You are recorded as the approver. Both commands need the Run permission on the job's task.
 
+### `workers`
+
+List the registered workers, or show one worker and its recent steps. Steps of tasks you may not view are left out, and secret values in a step's error are masked.
+
+```bash
+stroem-api workers
+stroem-api workers --limit 20 --offset 20
+
+stroem-api workers <worker-id>
+```
+
 ### `workspaces`
 
 List all configured workspaces on the server: name, task / action / trigger counts (`(off)` when the server config disables the workspace's triggers), and the [display name and description](/guides/multi-workspace/#display-name-and-description) from the server config (`-` when unset).
 
 ```bash
 stroem-api workspaces
+```
+
+### `triggers`
+
+List triggers with their schedule, missed runs and last run (result, time and job ID). `hidden` means that the last run is a job you may not view; `never` means that the trigger has not run.
+
+```bash
+# Every workspace (a workspace that does not load is left out)
+stroem-api triggers
+
+# One workspace
+stroem-api triggers --workspace data-team
+
+# Only the triggers that need attention (the Dashboard card): missed runs or a failed last run
+stroem-api triggers --attention
 ```

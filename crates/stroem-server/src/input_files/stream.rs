@@ -127,6 +127,42 @@ pub async fn download_body(
         .map(|(_content_type, stream)| axum::body::Body::from_stream(stream)))
 }
 
+/// What [`read_bounded`] found.
+#[derive(Debug, PartialEq)]
+pub enum BoundedRead {
+    /// The whole blob; at most `max` bytes.
+    Whole(Vec<u8>),
+    /// More than `max` bytes; the read stopped there.
+    TooLarge,
+    /// No blob under the key.
+    Missing,
+}
+
+/// Read a blob whole when it is at most `max` bytes, as a stream: the read
+/// stops at the first chunk that would pass `max`, so it never holds more
+/// than `max` bytes plus one chunk, whatever the blob's real size.
+/// `expected` (the size the file row records) only sizes the buffer.
+pub async fn read_bounded(
+    archive: &dyn BlobArchive,
+    key: &str,
+    max: usize,
+    expected: u64,
+) -> anyhow::Result<BoundedRead> {
+    use futures_util::StreamExt;
+    let Some((_content_type, mut stream)) = archive.get_stream(key).await? else {
+        return Ok(BoundedRead::Missing);
+    };
+    let mut buf = Vec::with_capacity(usize::try_from(expected).unwrap_or(max).min(max));
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if buf.len() + chunk.len() > max {
+            return Ok(BoundedRead::TooLarge);
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(BoundedRead::Whole(buf))
+}
+
 /// What the counted stream has seen so far.
 #[derive(Default)]
 struct Tally {
@@ -226,6 +262,37 @@ mod tests {
             .map(|e| e.path().display().to_string())
             .filter(|p| p.contains(".tmp."))
             .collect()
+    }
+
+    #[tokio::test]
+    async fn read_bounded_reads_up_to_max_and_stops_past_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = LocalBlobArchive::new(tmp.path().to_path_buf());
+        archive
+            .put("k", "text/plain", Bytes::from(vec![7u8; 3 * MIB]))
+            .await
+            .unwrap();
+        let whole = read_bounded(&archive, "k", 3 * MIB, 3 * MIB as u64)
+            .await
+            .unwrap();
+        assert_eq!(whole, BoundedRead::Whole(vec![7u8; 3 * MIB]));
+        // A row that under-states the size does not let the read grow past max.
+        assert_eq!(
+            read_bounded(&archive, "k", MIB, 10).await.unwrap(),
+            BoundedRead::TooLarge
+        );
+        assert_eq!(
+            read_bounded(&archive, "absent", MIB, 10).await.unwrap(),
+            BoundedRead::Missing
+        );
+        archive
+            .put("empty", "text/plain", Bytes::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            read_bounded(&archive, "empty", MIB, 0).await.unwrap(),
+            BoundedRead::Whole(Vec::new())
+        );
     }
 
     #[tokio::test]

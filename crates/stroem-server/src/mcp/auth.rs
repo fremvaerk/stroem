@@ -185,23 +185,3 @@ pub async fn resolve_acl_scope(
         AllowedScope::Filtered(items) => Ok(Some(items)),
     }
 }
-
-/// Job-list scope for this MCP caller (spec § 7.8), the same rule as REST.
-/// `None` = no filtering (no auth, admin, or no ACL).
-#[tracing::instrument(skip_all)]
-pub async fn resolve_job_acl_scope(
-    state: &Arc<AppState>,
-    auth: &Option<McpAuthContext>,
-) -> Result<Option<stroem_db::JobAclScope>, String> {
-    let auth = match auth {
-        Some(a) => a,
-        None => return Ok(None),
-    };
-    if !state.acl.is_configured() {
-        return Ok(None);
-    }
-    let (is_admin, groups) = acl_context(state, auth).await?;
-    crate::acl::build_job_acl_scope(state, &auth.claims.email, &groups, is_admin)
-        .await
-        .map_err(|e| format!("Failed to build job ACL scope: {e}"))
-}

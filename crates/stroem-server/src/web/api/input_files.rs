@@ -19,7 +19,8 @@ use crate::input_files::stream::download_body;
 use crate::input_files::upload::{store_upload, task_has_file_field, UploadError, UploadTarget};
 use crate::state::AppState;
 use crate::web::api::artifacts::{disposition_for, sanitize_filename};
-use crate::web::api::jobs::check_job_acl;
+use crate::web::api::caller::Caller;
+use crate::web::api::jobs::{check_job_acl, job_permission};
 use crate::web::api::middleware::AuthUser;
 use crate::web::api::pinned_source::resolve_source_pin;
 use crate::web::api::tasks::{
@@ -286,6 +287,42 @@ fn input_file_disposition(content_type: &str, original_name: &str) -> String {
     )
 }
 
+/// The file bound to `field` of a job the caller may view (`check_job_acl`
+/// on the job row, Deny → "Job not found"), and the archive that holds it:
+/// the lookup of `GET /api/jobs/{id}/input-files/{field}` and of MCP
+/// `get_input_file`.
+pub(crate) async fn job_input_file(
+    state: &AppState,
+    caller: Caller<'_>,
+    job_id: Uuid,
+    field: &str,
+) -> Result<
+    (
+        stroem_db::JobInputFileRow,
+        Arc<dyn crate::blob_storage::BlobArchive>,
+    ),
+    AppError,
+> {
+    let job = JobRepo::get(&state.pool, job_id)
+        .await
+        .context("get job")?
+        .ok_or_else(|| AppError::not_found("Job"))?;
+    if matches!(
+        job_permission(state, caller, &job).await?,
+        TaskPermission::Deny
+    ) {
+        return Err(AppError::not_found("Job"));
+    }
+    let rec = JobInputFileRepo::get_for_field(&state.pool, job_id, field)
+        .await
+        .context("get job input file")?
+        .ok_or_else(|| AppError::not_found("Input file"))?;
+    let archive = state.input_blob.clone().ok_or_else(|| {
+        AppError::ServiceUnavailable(crate::input_files::STORAGE_NOT_CONFIGURED.into())
+    })?;
+    Ok((rec, archive))
+}
+
 /// GET /api/jobs/{id}/input-files/{field} — download the file bound to a
 /// job's `type: file` field.
 #[tracing::instrument(skip(state, auth_user))]
@@ -295,23 +332,7 @@ pub async fn download_input_file(
     Path((id, field)): Path<(String, String)>,
 ) -> Result<Response, AppError> {
     let job_id = parse_uuid_param(&id, "job")?;
-    let job = JobRepo::get(&state.pool, job_id)
-        .await
-        .context("get job")?
-        .ok_or_else(|| AppError::not_found("Job"))?;
-    if matches!(
-        check_job_acl(&state, &auth_user, &job).await?,
-        TaskPermission::Deny
-    ) {
-        return Err(AppError::not_found("Job"));
-    }
-    let rec = JobInputFileRepo::get_for_field(&state.pool, job_id, &field)
-        .await
-        .context("get job input file")?
-        .ok_or_else(|| AppError::not_found("Input file"))?;
-    let archive = state.input_blob.clone().ok_or_else(|| {
-        AppError::ServiceUnavailable(crate::input_files::STORAGE_NOT_CONFIGURED.into())
-    })?;
+    let (rec, archive) = job_input_file(&state, Caller::of(&auth_user), job_id, &field).await?;
     let body = download_body(archive.as_ref(), &rec.storage_key)
         .await
         .map_err(AppError::Internal)?

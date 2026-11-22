@@ -1,4 +1,4 @@
-use super::auth::{check_task_acl, resolve_acl_scope, resolve_job_acl_scope, McpAuthContext};
+use super::auth::{check_task_acl, resolve_acl_scope, McpAuthContext};
 use super::handler::StromMcpHandler;
 use crate::acl::TaskPermission;
 use crate::log_storage::JobLogMeta;
@@ -11,7 +11,7 @@ use serde::de::{self, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::fmt;
-use stroem_db::{JobRepo, JobStepRepo};
+use stroem_db::JobRepo;
 
 /// Max size of an artifact body returned via MCP `get_artifact`. Larger blobs
 /// must be downloaded out-of-band via the HTTP API to avoid blowing the agent's
@@ -101,12 +101,70 @@ pub struct ListJobsParams {
     /// Filter by task name (requires workspace)
     #[serde(default)]
     pub task_name: Option<String>,
-    /// Filter by status (pending, running, completed, failed, cancelled)
+    /// Filter by status (pending, running, completed, failed, cancelled, skipped)
     #[serde(default)]
     pub status: Option<String>,
-    /// Maximum number of jobs to return (default: 20)
+    /// Filter by source type (api, trigger, webhook, task, hook, user, mcp,
+    /// agent_tool, event_source, retry, upload, rerun, restart)
+    #[serde(default)]
+    pub source_type: Option<String>,
+    /// Text to look for in the task name, workspace, source ID or job ID
+    /// (at most 200 characters; not together with task_name)
+    #[serde(default)]
+    pub search: Option<String>,
+    /// Maximum number of jobs to return (default: 20, at most 100)
     #[serde(default)]
     pub limit: Option<i64>,
+    /// Number of jobs to skip, for the next page (default: 0)
+    #[serde(default)]
+    pub offset: Option<i64>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ListTriggersParams {
+    /// Workspace name
+    pub workspace: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct RefreshWorkspaceParams {
+    /// Workspace name
+    pub workspace: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct GetTaskStatsParams {
+    /// Workspace name
+    pub workspace: String,
+    /// Task name
+    pub task_name: String,
+    /// Number of most recent completed runs to aggregate (default 50, 1 to 500)
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+#[derive(Deserialize, JsonSchema, Default)]
+pub struct ListWorkersParams {
+    /// Maximum number of workers to return (default 50, at most 100)
+    #[serde(default)]
+    pub limit: Option<i64>,
+    /// Number of workers to skip, for the next page (default 0)
+    #[serde(default)]
+    pub offset: Option<i64>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct GetWorkerParams {
+    /// Worker ID (UUID)
+    pub worker_id: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct GetInputFileParams {
+    /// Job ID (UUID)
+    pub job_id: String,
+    /// The `type: file` input field, as `input_files[].field` of `get_job_status`
+    pub field: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -239,6 +297,78 @@ fn not_found(entity: &str) -> rmcp::ErrorData {
 
 fn acl_err(msg: impl Into<String>) -> rmcp::ErrorData {
     rmcp::ErrorData::internal_error(msg.into(), None)
+}
+
+/// The largest `get_job_status` answer (compact JSON) before content values
+/// are replaced with a note: the default log tail of `get_job_logs`.
+const MCP_JOB_DETAIL_MAX_BYTES: usize = 256 * 1024;
+
+/// Job-level and step-level keys whose values can be large.
+const JOB_CONTENT_KEYS: &[&str] = &["input", "raw_input", "output"];
+const STEP_CONTENT_KEYS: &[&str] = &[
+    "input",
+    "output",
+    "retry_history",
+    "error_message",
+    "approval_message",
+    "approval_fields",
+];
+
+/// Bound a redacted job detail to `max` bytes of compact JSON: replace the
+/// largest content values, one at a time, with a note until it fits, and
+/// list each in `truncated_values` (JSON pointer + size). Run after
+/// redaction: the note and the list carry no content.
+fn cap_job_detail(detail: &mut serde_json::Value, max: usize) {
+    let size = |v: &serde_json::Value| serde_json::to_vec(v).map_or(0, |b| b.len());
+    let mut total = size(detail);
+    if total <= max {
+        return;
+    }
+    let job_id = detail["job_id"].as_str().unwrap_or_default().to_string();
+    let mut candidates: Vec<(String, usize)> = Vec::new();
+    for key in JOB_CONTENT_KEYS {
+        if let Some(v) = detail.get(*key).filter(|v| !v.is_null()) {
+            candidates.push((format!("/{key}"), size(v)));
+        }
+    }
+    if let Some(steps) = detail.get("steps").and_then(|s| s.as_array()) {
+        for (i, step) in steps.iter().enumerate() {
+            for key in STEP_CONTENT_KEYS {
+                if let Some(v) = step.get(*key).filter(|v| !v.is_null()) {
+                    candidates.push((format!("/steps/{i}/{key}"), size(v)));
+                }
+            }
+        }
+    }
+    candidates.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
+    // `total` includes the `truncated_values` list the answer will carry:
+    // its key once, each entry and its comma.
+    const LIST_KEY: usize = r#","truncated_values":[]"#.len();
+    let mut truncated = Vec::new();
+    for (path, value_size) in candidates {
+        if total <= max {
+            break;
+        }
+        let note = serde_json::Value::String(format!(
+            "[omitted: {} of JSON, over the MCP answer limit; read it with GET /api/jobs/{job_id}]",
+            crate::log_read::human_bytes(value_size as u64)
+        ));
+        let entry = serde_json::json!({"path": path, "size_bytes": value_size});
+        let list_key = if truncated.is_empty() { LIST_KEY } else { 0 };
+        let added = size(&note) + size(&entry) + 1 + list_key;
+        if added >= value_size {
+            continue;
+        }
+        if let Some(slot) = detail.pointer_mut(&path) {
+            *slot = note;
+            total = total - value_size + added;
+            truncated.push(entry);
+        }
+    }
+    if !truncated.is_empty() {
+        detail["truncated_values"] = serde_json::Value::Array(truncated);
+    }
 }
 
 /// Why an inline file value cannot be used (spec § 7.5, § 8).
@@ -471,6 +601,16 @@ async fn check_task_permission(
         .map_err(acl_err)
 }
 
+/// `s` as one percent-encoded URL path segment.
+fn path_segment(s: &str) -> String {
+    let mut url = url::Url::parse("http://x/").expect("a static URL");
+    url.path_segments_mut()
+        .expect("an http URL has a path")
+        .pop_if_empty()
+        .push(s);
+    url.path()[1..].to_string()
+}
+
 /// Get the source_id for audit trail (email when authenticated).
 fn source_id_for_audit(auth: &Option<McpAuthContext>) -> Option<String> {
     auth.as_ref().map(|a| a.claims.email.clone())
@@ -500,10 +640,11 @@ fn caller(handler: &StromMcpHandler) -> crate::web::api::caller::Caller<'_> {
     }
 }
 
-/// A shared job action's [`AppError`] as an MCP error. 400 / 409 / 413 →
-/// invalid params; 401 / 403 / 404 / 503 / 429 → the internal error with the
-/// same fixed message the other tools use (`not_found`, `acl_err`); an
-/// internal error is logged and answered with a fixed text, never its chain.
+/// The [`AppError`] of a shared REST body (a job action or a read) as an MCP
+/// error, with the REST message. 400 / 409 / 413 → invalid params;
+/// 401 / 403 / 404 / 503 / 429 → the internal error with the same fixed
+/// message the other tools use (`not_found`, `acl_err`); an internal error is
+/// logged and answered with a fixed text, never its chain.
 fn app_error(e: AppError) -> rmcp::ErrorData {
     match e {
         AppError::BadRequest(m) | AppError::Conflict(m) | AppError::PayloadTooLarge(m) => {
@@ -513,7 +654,7 @@ fn app_error(e: AppError) -> rmcp::ErrorData {
         AppError::Unauthorized(m) | AppError::Forbidden(m) => acl_err(m),
         AppError::TooManyRequests { message, .. } => internal_err(message),
         AppError::Internal(e) => {
-            tracing::error!("MCP job action failed: {:#}", e);
+            tracing::error!("MCP tool failed: {:#}", e);
             internal_err("Internal server error")
         }
     }
@@ -921,77 +1062,33 @@ impl StromMcpHandler {
         })))
     }
 
-    /// Get the status of a job including its step details.
-    #[tool(description = "Get the status of a job including its step details.")]
+    /// Get a job's full detail: the REST job detail (`GET /api/jobs/{id}`).
+    #[tool(
+        description = "Get a job's full detail, the same as GET /api/jobs/{id}: status, times, input, raw_input and output; each step's input, output, error_message, retry_history and child_jobs; parent, source and retry links; derived_jobs (later Restarts and Re-runs) and input_files. Secret values are masked as ••••••. The answer is compact JSON. When it would be larger than 256 KiB, its largest content values (input, output, retry_history, error_message) are replaced, largest first, with a note until it fits, and listed in `truncated_values` (JSON pointer and size); read them with GET /api/jobs/{id}. A job with very many steps can still be larger."
+    )]
     async fn get_job_status(
         &self,
         params: Parameters<GetJobStatusParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let Parameters(params) = params;
         tracing::info!(job_id = %params.job_id, "MCP: get_job_status");
-        let job_id: uuid::Uuid = params
-            .job_id
-            .parse()
-            .map_err(|_| rmcp::ErrorData::invalid_params("Invalid job_id UUID", None))?;
+        let job_id = parse_job_id(&params.job_id)?;
 
-        let job = JobRepo::get(&self.state.pool, job_id)
+        let mut detail = crate::web::api::jobs::job_detail(&self.state, caller(self), job_id)
             .await
-            .map_err(|e| internal_err(format!("DB error: {e}")))?
-            .ok_or_else(|| not_found("Job"))?;
-
-        // ACL: Deny → 404
-        check_job_acl(self, &job).await?;
-
-        let steps = JobStepRepo::get_steps_for_job(&self.state.pool, job_id)
-            .await
-            .map_err(|e| internal_err(format!("DB error: {e}")))?;
-
-        let steps_json: Vec<serde_json::Value> = steps
-            .iter()
-            .map(|step| {
-                serde_json::json!({
-                    "step_name": step.step_name,
-                    "action_name": step.action_name,
-                    "action_type": step.action_type,
-                    "status": step.status,
-                    "started_at": step.started_at,
-                    "completed_at": step.completed_at,
-                    "error_message": step.error_message,
-                    "skip_reason": step.skip_reason,
-                })
-            })
-            .collect();
-
-        // Same per-job redaction as job detail (spec § 7.4): a transient pin
-        // failure fails closed, a permanent one masks every content string.
-        let redaction = crate::redaction::job_redaction(&self.state, &job, &steps)
-            .await
-            .map_err(|e| {
-                tracing::warn!(job_id = %job.job_id, "MCP get_job_status fails closed: {e}");
-                internal_err("redaction set unavailable, retry")
-            })?;
-
-        let mut result = serde_json::json!({
-            "job_id": job.job_id,
-            "workspace": job.workspace,
-            "task_name": job.task_name,
-            "status": job.status,
-            "source_type": job.source_type,
-            "revision": job.revision,
-            "ref": job.git_ref,
-            "created_at": job.created_at.to_rfc3339(),
-            "started_at": job.started_at.map(|dt| dt.to_rfc3339()),
-            "completed_at": job.completed_at.map(|dt| dt.to_rfc3339()),
-            "steps": steps_json,
-        });
-        redaction.apply_job_response(&mut result);
-
-        Ok(json_result(&result))
+            .map_err(app_error)?;
+        cap_job_detail(&mut detail, MCP_JOB_DETAIL_MAX_BYTES);
+        // Compact, so the cap measures the text that is sent.
+        let text = serde_json::to_string(&detail).map_err(|e| {
+            tracing::error!("MCP get_job_status: serialising the answer failed: {e}");
+            internal_err("Internal server error")
+        })?;
+        Ok(text_result(text))
     }
 
     /// Get the end of a job's log. Optionally filter by step name.
     #[tool(
-        description = "Get the end of a job's log (the last 256 KiB unless tail_bytes is given). Optionally filter by step name."
+        description = "Get the end of a job's log (the last 256 KiB unless tail_bytes is given), formatted one line per log line. Optionally filter by step name. tail_bytes is at most log_storage.read.tail_max_bytes (4 MiB by default). The whole log is not available over MCP; use the REST API or `stroem-api logs --full` for it."
     )]
     async fn get_job_logs(
         &self,
@@ -1051,8 +1148,201 @@ impl StromMcpHandler {
         Ok(text_result(formatted))
     }
 
-    /// List recent jobs. Filter by workspace, task, or status.
-    #[tool(description = "List recent jobs. Filter by workspace, task, or status.")]
+    /// A workspace's triggers with their run status (`GET /api/workspaces/{ws}/triggers`).
+    #[tool(
+        description = "List a workspace's triggers (scheduler, webhook, event source), the same as GET /api/workspaces/{ws}/triggers: type, cron, timezone, task, target_task, enabled, input, next_runs, the last run and its result (`last_run`), and missed scheduled runs (`missed`). A trigger whose task you may not view is left out. A last run you may not view is hidden (`last_run_hidden: true`); its missed mark is still shown."
+    )]
+    async fn list_triggers(
+        &self,
+        params: Parameters<ListTriggersParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let Parameters(params) = params;
+        tracing::info!(workspace = %params.workspace, "MCP: list_triggers");
+        let triggers = crate::web::api::triggers::workspace_triggers(
+            &self.state,
+            caller(self),
+            params.workspace,
+        )
+        .await
+        .map_err(app_error)?;
+        Ok(json_result(&triggers))
+    }
+
+    /// Triggers that need attention, all workspaces (`GET /api/triggers/attention`).
+    #[tool(
+        description = "List the triggers of every workspace that need attention, the same as the Dashboard card (GET /api/triggers/attention): enabled scheduler triggers that missed scheduled runs, and triggers whose last run failed (`last_run_failed`). Each entry has the `workspace` and the fields of `list_triggers`. Workspaces that do not load are left out."
+    )]
+    async fn list_attention_triggers(&self) -> Result<CallToolResult, rmcp::ErrorData> {
+        tracing::info!("MCP: list_attention_triggers");
+        let rows = crate::web::api::triggers::attention_triggers(&self.state, caller(self))
+            .await
+            .map_err(app_error)?;
+        Ok(json_result(&rows))
+    }
+
+    /// Reload a workspace from its source now (`POST /api/workspaces/{ws}/refresh`).
+    #[tool(
+        description = "Reload a workspace from its source now (git fetch, or re-read of the folder), the same as POST /api/workspaces/{ws}/refresh, for example after a push and before execute_task. Returns the workspace, its new `revision` and `refreshed: true`. You need View on at least one task of the workspace; else the answer is `Workspace '<name>' not found`, as for an unknown workspace. A second refresh within 5 seconds, or while a reload runs, is refused with `Workspace refresh rate-limited; retry after <N>s`."
+    )]
+    async fn refresh_workspace(
+        &self,
+        params: Parameters<RefreshWorkspaceParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let Parameters(params) = params;
+        tracing::info!(workspace = %params.workspace, "MCP: refresh_workspace");
+        let body =
+            crate::web::api::workspaces::refresh(&self.state, caller(self), &params.workspace)
+                .await
+                .map_err(app_error)?;
+        Ok(json_result(&body))
+    }
+
+    /// Duration stats of a task (`GET /api/workspaces/{ws}/tasks/{name}/stats`).
+    #[tool(
+        description = "Get a task's run-time statistics over its most recent completed runs, the same as GET /api/workspaces/{ws}/tasks/{name}/stats: sample size, average, p50, p95, min and max duration in milliseconds, the recent durations (job_id, duration_ms, completed_at) and the same figures per step. Failed and cancelled runs, and runs of a pinned git ref, are not counted. `limit` is the number of runs (default 50, 1 to 500). View on the task is enough."
+    )]
+    async fn get_task_stats(
+        &self,
+        params: Parameters<GetTaskStatsParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let Parameters(params) = params;
+        tracing::info!(workspace = %params.workspace, task = %params.task_name, "MCP: get_task_stats");
+        let stats = crate::web::api::tasks::task_stats(
+            &self.state,
+            caller(self),
+            &params.workspace,
+            &params.task_name,
+            params.limit,
+        )
+        .await
+        .map_err(app_error)?;
+        Ok(json_result(&stats))
+    }
+
+    /// Job counts by status (`GET /api/stats`).
+    #[tool(
+        description = "Count the jobs you may view by status (pending, running, completed, failed, cancelled, skipped), the same as the Dashboard (GET /api/stats)."
+    )]
+    async fn get_stats(&self) -> Result<CallToolResult, rmcp::ErrorData> {
+        tracing::info!("MCP: get_stats");
+        let stats = crate::web::api::jobs::dashboard_stats(&self.state, caller(self))
+            .await
+            .map_err(app_error)?;
+        Ok(json_result(&stats))
+    }
+
+    /// Registered workers (`GET /api/workers`).
+    #[tool(
+        description = "List the registered workers, the same as GET /api/workers: worker_id, name, status, capabilities, tags, version, last_heartbeat, registered_at, and the `total`. Use `offset` with `limit` (default 50, at most 100) for the next page."
+    )]
+    async fn list_workers(
+        &self,
+        params: Parameters<ListWorkersParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let Parameters(params) = params;
+        tracing::info!("MCP: list_workers");
+        let offset = params.offset.unwrap_or(0);
+        if offset < 0 {
+            return Err(rmcp::ErrorData::invalid_params(
+                "offset must be 0 or more",
+                None,
+            ));
+        }
+        let limit = params.limit.unwrap_or(50).clamp(1, 100);
+        let page = crate::web::api::workers::worker_list(&self.state, limit, offset)
+            .await
+            .map_err(app_error)?;
+        Ok(json_result(&page))
+    }
+
+    /// One worker with its recent steps (`GET /api/workers/{id}`).
+    #[tool(
+        description = "Get one worker and its 50 most recent steps, the same as GET /api/workers/{id}: for each step the job_id, workspace, task_name, job_status, step_name, action_type, status, times and error_message. Steps of tasks you may not view are left out; secret values in error_message are masked."
+    )]
+    async fn get_worker(
+        &self,
+        params: Parameters<GetWorkerParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let Parameters(params) = params;
+        tracing::info!(worker_id = %params.worker_id, "MCP: get_worker");
+        let worker_id: uuid::Uuid = params
+            .worker_id
+            .parse()
+            .map_err(|_| rmcp::ErrorData::invalid_params("Invalid worker_id UUID", None))?;
+        let detail = crate::web::api::workers::worker_detail(&self.state, caller(self), worker_id)
+            .await
+            .map_err(app_error)?;
+        Ok(json_result(&detail))
+    }
+
+    /// Read the file of a job's `type: file` input field (text up to 1 MiB).
+    #[tool(
+        description = "Read the file given to a job's `type: file` input field (the files are listed in `input_files` of get_job_status), the same file as GET /api/jobs/{id}/input-files/{field}. Files of at most 1 MiB only: text (text/*, JSON, YAML, XML) comes back as text, images as an image block, any other type as a base64 blob. A larger file is refused with its relative download URL; pass that URL to a human or download it with the REST API. View on the task is enough."
+    )]
+    async fn get_input_file(
+        &self,
+        params: Parameters<GetInputFileParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        use crate::input_files::stream::{read_bounded, BoundedRead};
+        let Parameters(params) = params;
+        tracing::info!(job_id = %params.job_id, field = %params.field, "MCP: get_input_file");
+        let job_id = parse_job_id(&params.job_id)?;
+        let (rec, archive) = crate::web::api::input_files::job_input_file(
+            &self.state,
+            caller(self),
+            job_id,
+            &params.field,
+        )
+        .await
+        .map_err(app_error)?;
+
+        let field = path_segment(&params.field);
+        let too_large = |size: String| {
+            rmcp::ErrorData::invalid_params(
+                format!(
+                    "the file of input field '{}' is {size} bytes; MCP get_input_file returns at most {MCP_ARTIFACT_MAX_BYTES} bytes, download it from /api/jobs/{job_id}/input-files/{field}",
+                    params.field
+                ),
+                None,
+            )
+        };
+        // The row's size first: a large file is refused without a read.
+        if rec.size_bytes > MCP_ARTIFACT_MAX_BYTES {
+            return Err(too_large(rec.size_bytes.to_string()));
+        }
+        let bytes = match read_bounded(
+            archive.as_ref(),
+            &rec.storage_key,
+            MCP_ARTIFACT_MAX_BYTES as usize,
+            u64::try_from(rec.size_bytes).unwrap_or(0),
+        )
+        .await
+        {
+            Ok(BoundedRead::Whole(bytes)) => bytes,
+            Ok(BoundedRead::TooLarge) => {
+                return Err(too_large(format!("more than {MCP_ARTIFACT_MAX_BYTES}")))
+            }
+            Ok(BoundedRead::Missing) => {
+                tracing::error!(%job_id, "MCP get_input_file: blob missing for an input file");
+                return Err(internal_err("Internal server error"));
+            }
+            Err(e) => {
+                tracing::error!(%job_id, "MCP get_input_file: reading an input file failed: {e:#}");
+                return Err(internal_err("Internal server error"));
+            }
+        };
+        let uri = format!("stroem://input-files/{job_id}/{field}");
+        Ok(CallToolResult::success(vec![artifact_content(
+            &rec.content_type,
+            &bytes,
+            uri,
+        )]))
+    }
+
+    /// List recent jobs (`GET /api/jobs`).
+    #[tool(
+        description = "List recent jobs, newest first, the same as GET /api/jobs. Filter by workspace, task_name (needs workspace), status, source_type, or search (text in the task name, workspace, source ID or job ID; not together with task_name). Returns `jobs`, `count` (jobs in this answer) and `total` (all matching jobs you may view); use `offset` with `limit` (default 20, at most 100) for the next page."
+    )]
     async fn list_jobs(
         &self,
         params: Parameters<ListJobsParams>,
@@ -1060,83 +1350,30 @@ impl StromMcpHandler {
         let Parameters(params) = params;
         tracing::info!(workspace = ?params.workspace, task = ?params.task_name, status = ?params.status, "MCP: list_jobs");
 
-        if params.task_name.is_some() && params.workspace.is_none() {
+        let offset = params.offset.unwrap_or(0);
+        if offset < 0 {
             return Err(rmcp::ErrorData::invalid_params(
-                "task_name filter requires workspace",
+                "offset must be 0 or more",
                 None,
             ));
         }
-
-        let valid_statuses = [
-            "pending",
-            "running",
-            "completed",
-            "failed",
-            "cancelled",
-            "skipped",
-        ];
-        if let Some(ref s) = params.status {
-            if !valid_statuses.contains(&s.as_str()) {
-                return Err(rmcp::ErrorData::invalid_params(
-                    format!(
-                        "Invalid status '{}'. Must be one of: {}",
-                        s,
-                        valid_statuses.join(", ")
-                    ),
-                    None,
-                ));
-            }
-        }
-
-        let limit = params.limit.unwrap_or(20).clamp(1, 100);
-        let status = params.status.as_deref();
-        let scope = resolve_job_acl_scope(&self.state, &self.auth)
-            .await
-            .map_err(acl_err)?;
-
-        // ACL is applied in SQL, BEFORE ordering and LIMIT (spec § 7.8):
-        // filtering after the fetch let denied recent jobs fill the page.
-        let jobs = match (
-            scope,
-            params.workspace.as_deref(),
-            params.task_name.as_deref(),
-        ) {
-            (Some(scope), ws, task) => {
-                let effective = crate::acl::narrow_job_scope(&scope, ws, task);
-                JobRepo::list_with_acl(&self.state.pool, &effective, status, None, None, limit, 0)
-                    .await
-                    .map_err(|e| internal_err(format!("DB error: {e}")))?
-            }
-            (None, Some(ws), Some(task)) => {
-                JobRepo::list_by_task(&self.state.pool, ws, task, status, None, limit, 0)
-                    .await
-                    .map_err(|e| internal_err(format!("DB error: {e}")))?
-            }
-            (None, ws, _) => JobRepo::list(&self.state.pool, ws, status, None, None, limit, 0)
-                .await
-                .map_err(|e| internal_err(format!("DB error: {e}")))?,
+        let query = crate::web::api::jobs::ListJobsQuery {
+            workspace: params.workspace,
+            task_name: params.task_name,
+            status: params.status,
+            source_type: params.source_type,
+            search: params.search,
+            limit: params.limit.unwrap_or(20).clamp(1, 100),
+            offset,
         };
-
-        let jobs_json: Vec<serde_json::Value> = jobs
-            .iter()
-            .map(|job| {
-                serde_json::json!({
-                    "job_id": job.job_id,
-                    "workspace": job.workspace,
-                    "task_name": job.task_name,
-                    "status": job.status,
-                    "source_type": job.source_type,
-                    "revision": job.revision,
-                    "ref": job.git_ref,
-                    "created_at": job.created_at.to_rfc3339(),
-                    "completed_at": job.completed_at.map(|dt| dt.to_rfc3339()),
-                })
-            })
-            .collect();
+        let (jobs, total) = crate::web::api::jobs::job_list(&self.state, caller(self), &query)
+            .await
+            .map_err(app_error)?;
 
         Ok(json_result(&serde_json::json!({
-            "count": jobs_json.len(),
-            "jobs": jobs_json,
+            "count": jobs.len(),
+            "total": total,
+            "jobs": jobs,
         })))
     }
 
@@ -1572,7 +1809,130 @@ fn truncation_trailer(tail: &crate::log_read::Tail) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{json, Value};
+
+    fn detail_with(job_output: Value, step_outputs: &[Value]) -> Value {
+        json!({
+            "job_id": "00000000-0000-0000-0000-000000000001",
+            "status": "completed",
+            "output": job_output,
+            "steps": step_outputs
+                .iter()
+                .enumerate()
+                .map(|(i, o)| json!({"step_name": format!("s{i}"), "output": o}))
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    #[test]
+    fn cap_job_detail_leaves_a_small_answer_unchanged() {
+        let mut d = detail_with(json!({"a": 1}), &[json!("x"), Value::Null]);
+        let before = d.clone();
+        cap_job_detail(&mut d, 10_000);
+        assert_eq!(d, before);
+    }
+
+    #[test]
+    fn cap_job_detail_replaces_the_largest_values_first_until_it_fits() {
+        let big = "b".repeat(5_000);
+        let mid = "m".repeat(3_000);
+        let mut d = detail_with(json!({"small": 1}), &[json!(mid), json!(big)]);
+        cap_job_detail(&mut d, 4_500);
+        // The biggest goes first; that is enough.
+        assert!(d["steps"][1]["output"]
+            .as_str()
+            .unwrap()
+            .starts_with("[omitted: "));
+        assert_eq!(d["steps"][0]["output"], json!(mid));
+        assert_eq!(d["output"], json!({"small": 1}));
+        assert_eq!(
+            d["truncated_values"],
+            json!([{"path": "/steps/1/output", "size_bytes": 5_002}])
+        );
+        assert!(serde_json::to_vec(&d).unwrap().len() <= 4_500);
+
+        let mut d = detail_with(json!({"small": 1}), &[json!(mid), json!(big)]);
+        cap_job_detail(&mut d, 1_000);
+        let paths: Vec<&str> = d["truncated_values"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(paths, ["/steps/1/output", "/steps/0/output"]);
+        assert_eq!(d["output"], json!({"small": 1}), "small values stay");
+        let note = d["steps"][0]["output"].as_str().unwrap();
+        assert!(
+            note.contains("GET /api/jobs/00000000-0000-0000-0000-000000000001"),
+            "{note}"
+        );
+    }
+
+    /// Whatever the limit, the capped answer — `truncated_values` included —
+    /// fits, unless every content value large enough to replace is a note.
+    #[test]
+    fn cap_job_detail_counts_its_own_list_against_the_limit() {
+        let outputs: Vec<Value> = (0..8).map(|i| json!("v".repeat(300 + 97 * i))).collect();
+        let base = detail_with(json!({"o": "j".repeat(250)}), &outputs);
+        let full = serde_json::to_vec(&base).unwrap().len();
+        let mut fitted = 0;
+        for max in (200..full).step_by(23) {
+            let mut d = base.clone();
+            cap_job_detail(&mut d, max);
+            let len = serde_json::to_vec(&d).unwrap().len();
+            let is_note = |v: &Value| v.as_str().is_some_and(|o| o.starts_with("[omitted"));
+            let all_notes = is_note(&d["output"])
+                && d["steps"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|s| is_note(&s["output"]));
+            assert!(len <= max || all_notes, "max {max}: answer is {len} bytes");
+            fitted += usize::from(len <= max);
+        }
+        assert!(fitted > 50, "most limits fit: {fitted}");
+    }
+
+    #[test]
+    fn cap_job_detail_never_touches_identifiers() {
+        let mut d = detail_with(json!("o".repeat(2_000)), &[]);
+        d["workspace"] = json!("w".repeat(2_000));
+        cap_job_detail(&mut d, 100);
+        assert_eq!(d["workspace"], json!("w".repeat(2_000)));
+        assert_eq!(d["truncated_values"][0]["path"], json!("/output"));
+    }
+
+    #[test]
+    fn app_error_keeps_rest_messages_and_hides_internal_causes() {
+        assert_eq!(
+            app_error(AppError::NotFound("Job not found".into())).message,
+            "Job not found"
+        );
+        let e = app_error(AppError::BadRequest("bad".into()));
+        assert_eq!(e.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        let e = app_error(AppError::Conflict("Step is not suspended".into()));
+        assert_eq!(e.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert_eq!(e.message, "Step is not suspended");
+        assert_eq!(
+            app_error(AppError::ServiceUnavailable(
+                "redaction set unavailable, retry".into()
+            ))
+            .message,
+            "redaction set unavailable, retry"
+        );
+        assert_eq!(
+            app_error(AppError::TooManyRequests {
+                message: "retry after 4s".into(),
+                retry_after_secs: 4
+            })
+            .message,
+            "retry after 4s"
+        );
+        let e = app_error(AppError::Internal(anyhow::anyhow!(
+            "pa55word in a DB error"
+        )));
+        assert_eq!(e.message, "Internal server error");
+    }
 
     #[test]
     fn approval_input_keeps_absent_absent() {
@@ -1595,6 +1955,12 @@ mod tests {
             approval_input(Some(serde_json::json!("[1]"))),
             Some(serde_json::json!("[1]"))
         );
+    }
+
+    #[test]
+    fn path_segment_percent_encodes() {
+        assert_eq!(path_segment("data_file"), "data_file");
+        assert_eq!(path_segment("a b/c?d"), "a%20b%2Fc%3Fd");
     }
 
     #[test]

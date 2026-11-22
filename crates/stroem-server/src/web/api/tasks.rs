@@ -2,6 +2,7 @@ use crate::acl::{load_user_acl_context, make_task_path, TaskPermission};
 use crate::input_files::FileGrant;
 use crate::job_creator::create_job_for_task_detailed;
 use crate::state::AppState;
+use crate::web::api::caller::{claims_user_id, Caller};
 use crate::web::api::middleware::AuthUser;
 use crate::web::api::triggers::TriggerInfo;
 use crate::web::api::{classify_execute_error, get_workspace_or_error};
@@ -274,7 +275,7 @@ pub async fn get_task(
         None
     };
 
-    let viewer = crate::trigger_status::viewer_for(&state, &auth_user).await?;
+    let viewer = crate::trigger_status::viewer_for(&state, Caller::of(&auth_user)).await?;
     let triggers_enabled = state.workspaces.triggers_enabled(&ws);
     let mut trigger_items: Vec<crate::trigger_status::TriggerStatusItem> = workspace
         .triggers
@@ -376,36 +377,50 @@ pub async fn get_task_stats(
     Path((ws, name)): Path<(String, String)>,
     axum::extract::Query(query): axum::extract::Query<TaskStatsQuery>,
 ) -> Result<impl IntoResponse, AppError> {
-    let workspace = get_workspace_or_error(&state, &ws).await?;
+    Ok(Json(
+        task_stats(&state, Caller::of(&auth_user), &ws, &name, query.limit).await?,
+    ))
+}
+
+/// Duration stats of a task: the body of `GET .../tasks/{name}/stats` and
+/// of MCP `get_task_stats`. View is enough; Deny is "Task not found".
+pub(crate) async fn task_stats(
+    state: &Arc<AppState>,
+    caller: Caller<'_>,
+    ws: &str,
+    name: &str,
+    limit: Option<i64>,
+) -> Result<TaskStatsResponse, AppError> {
+    let workspace = get_workspace_or_error(state, ws).await?;
 
     let task = workspace
         .tasks
-        .get(&name)
+        .get(name)
         .ok_or_else(|| AppError::not_found("Task"))?;
 
     // ACL: stats are read-only — View permission is sufficient. Deny -> 404.
-    if let Some(ref auth) = auth_user {
+    if let Some(claims) = caller.claims {
         if state.acl.is_configured() {
-            let user_id = auth.user_id()?;
-            let (is_admin, groups) = load_user_acl_context(&state.pool, user_id, auth.is_admin())
+            let user_id = claims_user_id(claims)?;
+            let (is_admin, groups) = load_user_acl_context(&state.pool, user_id, claims.is_admin)
                 .await
                 .context("load ACL context")?;
-            let task_path = make_task_path(task.folder.as_deref(), &name);
+            let task_path = make_task_path(task.folder.as_deref(), name);
             let perm = state
                 .acl
-                .evaluate(&ws, &task_path, &auth.claims.email, &groups, is_admin);
+                .evaluate(ws, &task_path, &claims.email, &groups, is_admin);
             if matches!(perm, TaskPermission::Deny) {
                 return Err(AppError::not_found("Task"));
             }
         }
     }
 
-    let limit = query.limit.unwrap_or(50).clamp(1, 500);
+    let limit = limit.unwrap_or(50).clamp(1, 500);
 
     let (task_stats, recent_rows, step_stats) = tokio::try_join!(
-        stroem_db::JobRepo::get_task_duration_stats(&state.pool, &ws, &name, limit),
-        stroem_db::JobRepo::get_recent_durations(&state.pool, &ws, &name, limit),
-        stroem_db::JobStepRepo::get_step_duration_stats_for_task(&state.pool, &ws, &name, limit),
+        stroem_db::JobRepo::get_task_duration_stats(&state.pool, ws, name, limit),
+        stroem_db::JobRepo::get_recent_durations(&state.pool, ws, name, limit),
+        stroem_db::JobStepRepo::get_step_duration_stats_for_task(&state.pool, ws, name, limit),
     )
     .with_context(|| format!("get_task_stats {ws}/{name}"))?;
 
@@ -443,7 +458,7 @@ pub async fn get_task_stats(
             .collect(),
     };
 
-    Ok(Json(response))
+    Ok(response)
 }
 
 /// POST /api/workspaces/:ws/tasks/:name/execute - Trigger task execution

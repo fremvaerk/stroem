@@ -3,6 +3,7 @@ use crate::trigger_status::{
     attach_run_status, last_run_failed, needs_attention, sort_attention, trigger_visible,
     viewer_for, LastRun, MissedRuns, TriggerStatusItem,
 };
+use crate::web::api::caller::Caller;
 use crate::web::api::get_workspace_or_error;
 use crate::web::api::middleware::AuthUser;
 use crate::web::error::AppError;
@@ -106,15 +107,27 @@ pub async fn list_triggers(
     auth_user: Option<AuthUser>,
     Path(ws): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    let workspace = get_workspace_or_error(&state, &ws).await?;
+    Ok(Json(
+        workspace_triggers(&state, Caller::of(&auth_user), ws).await?,
+    ))
+}
 
-    let viewer = viewer_for(&state, &auth_user).await?;
+/// A workspace's triggers with their run status: the body of
+/// `GET /api/workspaces/{ws}/triggers` and of MCP `list_triggers`.
+pub(crate) async fn workspace_triggers(
+    state: &Arc<AppState>,
+    caller: Caller<'_>,
+    ws: String,
+) -> Result<Vec<TriggerInfo>, AppError> {
+    let workspace = get_workspace_or_error(state, &ws).await?;
+
+    let viewer = viewer_for(state, caller).await?;
     let triggers_enabled = state.workspaces.triggers_enabled(&ws);
     let mut items: Vec<TriggerStatusItem> = workspace
         .triggers
         .iter()
         .filter(|(_, trigger)| {
-            trigger_visible(&state, viewer.as_ref(), &ws, &workspace, trigger.task())
+            trigger_visible(state, viewer.as_ref(), &ws, &workspace, trigger.task())
         })
         .map(|(name, trigger)| TriggerStatusItem {
             workspace: ws.clone(),
@@ -123,10 +136,8 @@ pub async fn list_triggers(
             info: TriggerInfo::from_def(name, trigger, 5),
         })
         .collect();
-    attach_run_status(&state, viewer.as_ref(), &mut items).await?;
-    let triggers: Vec<TriggerInfo> = items.into_iter().map(|i| i.info).collect();
-
-    Ok(Json(triggers))
+    attach_run_status(state, viewer.as_ref(), &mut items).await?;
+    Ok(items.into_iter().map(|i| i.info).collect())
 }
 
 /// A trigger from any workspace that needs attention.
@@ -145,12 +156,23 @@ pub async fn list_attention_triggers(
     State(state): State<Arc<AppState>>,
     auth_user: Option<AuthUser>,
 ) -> Result<impl IntoResponse, AppError> {
-    let viewer = viewer_for(&state, &auth_user).await?;
+    Ok(Json(
+        attention_triggers(&state, Caller::of(&auth_user)).await?,
+    ))
+}
+
+/// Triggers of every workspace that need attention: the body of
+/// `GET /api/triggers/attention` and of MCP `list_attention_triggers`.
+pub(crate) async fn attention_triggers(
+    state: &AppState,
+    caller: Caller<'_>,
+) -> Result<Vec<AttentionTrigger>, AppError> {
+    let viewer = viewer_for(state, caller).await?;
     let mut items: Vec<TriggerStatusItem> = Vec::new();
     for (ws, config) in state.workspaces.get_all_configs().await {
         let triggers_enabled = state.workspaces.triggers_enabled(&ws);
         for (name, trigger) in &config.triggers {
-            if !trigger_visible(&state, viewer.as_ref(), &ws, &config, trigger.task()) {
+            if !trigger_visible(state, viewer.as_ref(), &ws, &config, trigger.task()) {
                 continue;
             }
             items.push(TriggerStatusItem {
@@ -161,7 +183,7 @@ pub async fn list_attention_triggers(
             });
         }
     }
-    attach_run_status(&state, viewer.as_ref(), &mut items).await?;
+    attach_run_status(state, viewer.as_ref(), &mut items).await?;
     let mut rows: Vec<AttentionTrigger> = items
         .into_iter()
         .filter(needs_attention)
@@ -172,8 +194,7 @@ pub async fn list_attention_triggers(
         })
         .collect();
     sort_attention(&mut rows);
-
-    Ok(Json(rows))
+    Ok(rows)
 }
 
 #[cfg(test)]
