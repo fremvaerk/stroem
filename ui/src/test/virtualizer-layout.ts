@@ -1,30 +1,55 @@
 import { afterAll, beforeAll, vi } from "vitest";
 
+const BOX = { width: 800, height: 20 };
+
 /**
- * jsdom has no layout: give every element a 20px box so the virtualiser
- * can measure rows (the TanStack Virtual testing advice). The probe span's
- * char-width measurement reads getBoundingClientRect; @tanstack/react-virtual's
- * real item/container measurement (`measureElement`'s default implementation,
- * and the scroll container's observeElementRect) reads offsetHeight/offsetWidth
- * instead — jsdom leaves both at 0, so both need a fixed 20x800 box or the
- * virtualiser's first post-mount measurement pass zeroes every item's size.
+ * jsdom has no layout: give every element an 800x20 box so the virtualiser
+ * can measure rows (the TanStack Virtual testing advice). jsdom leaves all
+ * of these at 0, and each one is read by something:
+ * - the probe span's char-width measurement reads getBoundingClientRect;
+ * - @tanstack/virtual-core's item measurement (`measureElement`'s default)
+ *   reads offsetHeight/offsetWidth;
+ * - its scroll-container measurement (`observeElementRect`) reads
+ *   clientWidth/clientHeight since virtual-core 3.19 (offsetWidth/offsetHeight
+ *   before). A zero container size gives an empty range, so no row renders.
  *
  * Call this at the top level of any test file that renders `LogViewer` and
  * asserts on row content.
  */
 export function installVirtualizerLayout(): void {
-  const originalOffsetHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetHeight");
-  const originalOffsetWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetWidth");
+  const sizes = {
+    offsetHeight: BOX.height,
+    offsetWidth: BOX.width,
+    clientHeight: BOX.height,
+    clientWidth: BOX.width,
+  } as const;
+  const originals = Object.fromEntries(
+    Object.keys(sizes).map((key) => [key, Object.getOwnPropertyDescriptor(HTMLElement.prototype, key)]),
+  );
   beforeAll(() => {
     vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(
-      () => ({ x: 0, y: 0, top: 0, left: 0, bottom: 20, right: 800, width: 800, height: 20, toJSON: () => ({}) }) as DOMRect,
+      () =>
+        ({
+          x: 0,
+          y: 0,
+          top: 0,
+          left: 0,
+          bottom: BOX.height,
+          right: BOX.width,
+          width: BOX.width,
+          height: BOX.height,
+          toJSON: () => ({}),
+        }) as DOMRect,
     );
-    Object.defineProperty(HTMLElement.prototype, "offsetHeight", { configurable: true, value: 20 });
-    Object.defineProperty(HTMLElement.prototype, "offsetWidth", { configurable: true, value: 800 });
+    for (const [key, value] of Object.entries(sizes)) {
+      Object.defineProperty(HTMLElement.prototype, key, { configurable: true, value });
+    }
   });
   afterAll(() => {
     vi.restoreAllMocks();
-    if (originalOffsetHeight) Object.defineProperty(HTMLElement.prototype, "offsetHeight", originalOffsetHeight);
-    if (originalOffsetWidth) Object.defineProperty(HTMLElement.prototype, "offsetWidth", originalOffsetWidth);
+    for (const [key, original] of Object.entries(originals)) {
+      if (original) Object.defineProperty(HTMLElement.prototype, key, original);
+      else delete (HTMLElement.prototype as unknown as Record<string, unknown>)[key];
+    }
   });
 }

@@ -484,7 +484,11 @@ function DagCanvas({ nodes, edges, onNodeClick, maxZoom }: DagCanvasProps) {
       nodeTypes={nodeTypes}
       onNodeClick={onNodeClick}
       fitView
-      fitViewOptions={{ padding: 0.2 }}
+      // A bare number is pixels since React Flow 13; 8.33% per side is what
+      // v12 made of `padding: 0.2` ((1 - 1 / 1.2) / 2).
+      fitViewOptions={{ padding: "8.33%" }}
+      // React Flow 13 follows the OS colour scheme by default; the app is light-only.
+      forceColorMode="light"
       nodesDraggable={false}
       nodesConnectable={false}
       elementsSelectable={false}

@@ -354,6 +354,7 @@ Full analysis + the decided peek policy: `docs/superpowers/specs/2026-09-17-work
 - [x] Workspace-level hook fallback for `source_type = "user"` (unit test in hooks.rs)
 
 ### Still Missing
+- [ ] **CI does not run the UI Vitest suite** — the `Frontend` job in `.github/workflows/ci.yml` runs `bun run lint` and `bunx tsc --noEmit` only; `bun run test` (vitest, 637 tests on 2026-11-22) runs nowhere in CI. Found 2026-11-22 in the npm upgrade: `@tanstack/virtual-core` 3.19 broke 13 `LogViewer` tests (the jsdom layout stub in `ui/src/test/virtualizer-layout.ts` lacked `clientWidth`/`clientHeight`), and CI would have passed. Add a `Unit tests` step (`bun run test`) to that job.
 - [x] Version reporting feature tests (DB round-trip, API responses, serde backward compat, /api/config version)
 - [x] Worker `execute_claimed_step` integration test (3 wiremock-based tests: happy path, workspace failure, command failure)
 - [ ] Live DockerRunner execution tests
