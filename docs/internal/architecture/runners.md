@@ -1,6 +1,6 @@
 # Actions, runners and step claiming
 
-Action types, the Shell/Docker/Kube runners, and how workers claim steps by capability and tag. `CLAUDE.md` indexes this file. A `§ <Title>` reference names a `###` section in any file of `docs/internal/architecture/`.
+Action types, the Shell/Docker/Kube runners, and how workers claim steps by capability and tag. `AGENTS.md` indexes this file. A `§ <Title>` reference names a `###` section in any file of `docs/internal/architecture/`.
 
 ### Workflow YAML structure
 See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.

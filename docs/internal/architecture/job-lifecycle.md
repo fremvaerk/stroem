@@ -1,6 +1,6 @@
 # Job lifecycle
 
-Timeouts, the step cascade, settlement, `when`, `for_each`, retry, hooks, approval gates, task actions and job lineage. `CLAUDE.md` indexes this file. A `§ <Title>` reference names a `###` section in any file of `docs/internal/architecture/`.
+Timeouts, the step cascade, settlement, `when`, `for_each`, retry, hooks, approval gates, task actions and job lineage. `AGENTS.md` indexes this file. A `§ <Title>` reference names a `###` section in any file of `docs/internal/architecture/`.
 
 ### Timeouts
 - **Step**: `FlowStep.timeout: Option<HumanDuration>` (max 24h) — **Task/job**: `TaskDef.timeout` (max 7d)

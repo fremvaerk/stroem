@@ -1,6 +1,6 @@
 # Agents and MCP
 
-The MCP server and its tools, and `type: agent` LLM steps. `CLAUDE.md` indexes this file. A `§ <Title>` reference names a `###` section in any file of `docs/internal/architecture/`.
+The MCP server and its tools, and `type: agent` LLM steps. `AGENTS.md` indexes this file. A `§ <Title>` reference names a `###` section in any file of `docs/internal/architecture/`.
 
 ### MCP Server (Model Context Protocol)
 - Feature-gated: `mcp` cargo feature (enabled by default). Config: `mcp: { enabled: true }` (disabled by default)

@@ -1,6 +1,6 @@
 # File inputs
 
-The `type: file` input: upload, acceptance at creation, claim, delivery to the step, streaming, MCP and retention. `CLAUDE.md` indexes this file. A `§ <Title>` reference names a `###` section in any file of `docs/internal/architecture/`.
+The `type: file` input: upload, acceptance at creation, claim, delivery to the step, streaming, MCP and retention. `AGENTS.md` indexes this file. A `§ <Title>` reference names a `###` section in any file of `docs/internal/architecture/`.
 
 ### File Inputs
 Spec `docs/superpowers/specs/2026-10-29-file-inputs-design.md` (revision 11); guide `docs/src/content/docs/guides/file-inputs.md`; upgrade note `operations/migration-054.md`; terms in `CONTEXT.md` (Input file, Upload, File ID, Safe name, Inputs root, Attachment, Upload URL, File grant). The reverse of artifacts: a person or program uploads a file, the step's script gets a read-only PATH to it.
