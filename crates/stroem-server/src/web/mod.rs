@@ -141,8 +141,8 @@ fn make_request_span(req: &Request<Body>) -> tracing::Span {
 
 /// The request URI as the request span records it. The segment after
 /// `/api/uploads/` is an upload URL's single-use token, a credential
-/// (CLAUDE.md § Secrets in logs): it is recorded as `{token}`. Every other
-/// URI is recorded as is.
+/// (`docs/internal/architecture/templating-and-secrets.md` § Secrets in
+/// logs): it is recorded as `{token}`. Every other URI is recorded as is.
 pub(crate) fn span_uri(uri: &axum::http::Uri) -> String {
     const UPLOADS: &str = "/api/uploads/";
     let Some(rest) = uri.path().strip_prefix(UPLOADS) else {

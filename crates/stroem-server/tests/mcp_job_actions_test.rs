@@ -579,7 +579,8 @@ async fn restart_job_follows_the_job_acl() -> Result<()> {
 
 /// Restart replays `raw_input` with no form in front of it: a required field
 /// added to the task since the source ran (no default) refuses the restart
-/// (CLAUDE.md § Job Lineage), as invalid params, not an internal error.
+/// (`docs/internal/architecture/job-lifecycle.md` § Job Lineage), as invalid
+/// params, not an internal error.
 #[tokio::test]
 async fn restart_job_rejects_a_newly_required_input() -> Result<()> {
     let mut drifted = actions_workspace();

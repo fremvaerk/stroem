@@ -295,8 +295,9 @@ pub struct RedactionMemo {
     pin_values: HashMap<(String, String), Result<Vec<String>, RedactionUnavailable>>,
 }
 
-// Never prints the pins' secret values: counts only (CLAUDE.md § Secrets in
-// logs, like `Pinned`).
+// Never prints the pins' secret values: counts only
+// (`docs/internal/architecture/templating-and-secrets.md` § Secrets in logs,
+// like `Pinned`).
 impl std::fmt::Debug for RedactionMemo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let loaded = self.pin_values.values().filter(|v| v.is_ok()).count();
@@ -446,7 +447,8 @@ pub enum JobRedaction {
     MaskAll,
 }
 
-// Never prints the values: a count only (CLAUDE.md § Secrets in logs).
+// Never prints the values: a count only
+// (`docs/internal/architecture/templating-and-secrets.md` § Secrets in logs).
 impl std::fmt::Debug for JobRedaction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -660,8 +662,9 @@ mod tests {
     const SHA_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const SHA_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
-    /// Final review M3 (CLAUDE.md § Secrets in logs): neither the per-request
-    /// memo nor a redaction set prints the secret values it holds.
+    /// Final review M3 (`docs/internal/architecture/templating-and-secrets.md`
+    /// § Secrets in logs): neither the per-request memo nor a redaction set
+    /// prints the secret values it holds.
     #[test]
     fn redaction_debug_never_prints_secret_values() {
         const SECRET: &str = "m3-plaintext-secret-value";

@@ -1,7 +1,7 @@
 # Strøm — Domain Vocabulary
 
-Terms used in code, specs and CLAUDE.md. CLAUDE.md holds how things work; this file
-holds what the words mean. Keep both in sync when a term is added or sharpened.
+Terms used in code, specs, AGENTS.md and `docs/internal/architecture/`. The architecture files hold how
+things work; this file holds what the words mean. Keep them in sync when a term is added or sharpened.
 
 - **Job** — one execution of a task; owns a set of step rows.
 - **Step** — one row of a job; moves `pending → ready → claimed → running → {completed, failed, skipped, cancelled}` (or `suspended` for approval gates).
@@ -53,4 +53,4 @@ holds what the words mean. Keep both in sync when a term is added or sharpened.
 - **File grant** — what a job creation may attach besides its lineage (`input_files::FileGrant`): `Direct` (A1 allowed, for a caller-started job), `TaskChild` (A2 against the parent job) or `Indirect` (lineage only: triggers, webhooks, event sources, hooks, retries, agent task-tool children).
 - **Start step** — a step a Restart begins at: the one chosen step (Restart from a step, `from_step`), or every top-level step of the source job that is `failed`, `cancelled` or unfinished (Restart failed steps, `all_failed`; unfinished rows count because a restart would carry them as `cancelled`). The start steps, the steps added to the flow since the source ran, and every step that depends on them rerun; every other step is carried over. An all-failed restart records its start steps in `job.restart_from_steps`. Spec `docs/superpowers/specs/2026-11-02-restart-failed-steps-design.md`.
 
-See `CLAUDE.md` for how these pieces fit together (architecture, conventions, key patterns).
+See `AGENTS.md` (conventions, tripwires, index) and the topic files in `docs/internal/architecture/` for how these pieces fit together.

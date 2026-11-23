@@ -4,7 +4,7 @@
 
 Strøm is a unified workflow/task orchestration platform replacing RunDeck, Windmill, CircleCI, GitHub Actions, and Kubernetes CronJobs. This is a complete rewrite of the original Strøm project. Backend in Rust, frontend in React + shadcn/ui. GitOps-based workflow definitions in YAML, PostgreSQL as the single backend.
 
-Status: json input type — complete (spec 2026-10-06-json-input-type). File inputs (`type: file`, 6f) — implemented on `feat/file-inputs-impl`, not released.
+Status: json input type — complete (spec 2026-10-06-json-input-type). File inputs (`type: file`, 6f) — complete, released in v0.18.5 (PR #16).
 
 ---
 
@@ -867,7 +867,7 @@ When a task runs in distributed mode, its steps may execute on different workers
 
 **6e. Templated refs** — DONE (spec `docs/superpowers/specs/2026-10-15-templated-refs-design.md`). `ref:` may be a Tera template on flow steps (resolved at promotion — deferred steps, resolution pass in advance/init, lease, `job_ref_pin` memo), `type: task` actions (at dispatch) and webhook triggers (at fire time); no `secret` / `vals` in ref contexts; value-free `RenderedRefError`; recovery Phase 4.6. Migrations 051 + 052; upgrade note `docs/src/content/docs/operations/migration-051-052.md`. Follow-ups in TODO.md § Templated refs follow-ups.
 
-**6f. File inputs** — IMPLEMENTED on branch `feat/file-inputs-impl`, NOT released (spec `docs/superpowers/specs/2026-10-29-file-inputs-design.md`, revision 8). `type: file` task/action input fields: upload first (`POST /api/workspaces/{ws}/tasks/{task}/files`, UI Run form, `stroem-api trigger --file`, MCP inline objects or a single-use upload URL), execute with the file ID; the step gets a read-only path `{root}/{file_id}/{safe_name}` (`/inputs` in Docker and pods — pod init container `stroem-inputs-init` —, the worker's private temp dir for `runner: local`). Every runner step of a job gets every file of the job. Files follow Re-run, Restart, task retry and `type: task` children (also across workspaces); triggers, webhooks, event sources, hooks and agent tools cannot supply one. Streaming uploads/downloads (Local + S3 `put_stream`/`get_stream`), orphan sweep in the retention tick, job page "Input files" card. Migration 054 (new tables only); rollout servers → workers → YAML; upgrade note `docs/src/content/docs/operations/migration-054.md`. Follow-ups in TODO.md § File Inputs.
+**6f. File inputs** — DONE, released in v0.18.5 (PR #16; spec `docs/superpowers/specs/2026-10-29-file-inputs-design.md`, revision 11). `type: file` task/action input fields: upload first (`POST /api/workspaces/{ws}/tasks/{task}/files`, UI Run form, `stroem-api trigger --file`, MCP inline objects or a single-use upload URL), execute with the file ID; the step gets a read-only path `{root}/{file_id}/{safe_name}` (`/inputs` in Docker and pods — pod init container `stroem-inputs-init` —, the worker's private temp dir for `runner: local`). Every runner step of a job gets every file of the job. Files follow Re-run, Restart, task retry and `type: task` children (also across workspaces); triggers, webhooks, event sources, hooks and agent tools cannot supply one. Streaming uploads/downloads (Local + S3 `put_stream`/`get_stream`), orphan sweep in the retention tick, job page "Input files" card. Migration 054 (new tables only); rollout servers → workers → YAML; upgrade note `docs/src/content/docs/operations/migration-054.md`. Follow-ups in TODO.md § File Inputs.
 
 ---
 

@@ -2128,7 +2128,8 @@ async fn test_execute_task_rejects_legacy_continue_when_skipped_at_creation() ->
     // before this fix round it loaded and ran with the flag silently
     // ignored (the exact "silently mis-run steps" failure mode this
     // redesign exists to eliminate, just relocated to the upgrade
-    // boundary). See CLAUDE.md § Conditional Flow Steps.
+    // boundary). See `docs/internal/architecture/job-lifecycle.md`
+    // § Conditional Flow Steps.
     let workspace = test_workspace_from_flow_yaml(
         r#"      a: { action: noop }
       b: { action: noop, depends_on: [a], continue_when_skipped: true }"#,
@@ -32666,7 +32667,8 @@ async fn test_gate_caught_failure_completes_fires_on_success_no_retry() -> Resul
         "a caught failure is not retried"
     );
     assert_eq!(hook_actions(&pool).await, ["hook-ok"]);
-    // The hook payload is the hook step's literal input (CLAUDE.md § Hooks).
+    // The hook payload is the hook step's literal input
+    // (`docs/internal/architecture/job-lifecycle.md` § Hooks).
     let tolerated: Option<String> = sqlx::query_scalar(
         "SELECT s.input->>'tolerated' FROM job j JOIN job_step s ON s.job_id = j.job_id \
          WHERE j.source_type = 'hook'",
