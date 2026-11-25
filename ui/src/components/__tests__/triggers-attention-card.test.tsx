@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 import type { AttentionTrigger } from "@/lib/types";
 
@@ -65,6 +65,47 @@ describe("TriggersAttentionCard", () => {
       "/workspaces/other%20ws",
     );
     expect(screen.getAllByRole("row")).toHaveLength(3);
+  });
+
+  it("links the last run failed badge to the failed job", async () => {
+    mockList.mockResolvedValue([
+      item({
+        last_run_failed: true,
+        last_run: {
+          job_id: "j9",
+          status: "failed",
+          created_at: "2026-11-25T02:00:00Z",
+        },
+      }),
+    ]);
+    renderCard();
+    const badge = await screen.findByText("last run failed");
+    const link = badge.closest("a");
+    expect(link).not.toBeNull();
+    expect(link).toHaveAttribute("href", "/jobs/j9");
+    expect(link).toHaveAttribute("title", "j9");
+    // A <div> Badge inside an <a> is valid only under a flow-content parent.
+    expect(link!.parentElement!.tagName).toBe("DIV");
+    const row = screen.getAllByRole("row")[1];
+    const jobLinks = within(row)
+      .getAllByRole("link")
+      .filter((a) => a.getAttribute("href") === "/jobs/j9");
+    expect(jobLinks).toHaveLength(2);
+  });
+
+  it("renders the last run failed badge without a link when last_run is null", async () => {
+    mockList.mockResolvedValue([
+      item({ last_run_failed: true, last_run: null }),
+    ]);
+    renderCard();
+    const badge = await screen.findByText("last run failed");
+    expect(badge.closest("a")).toBeNull();
+    const row = screen.getAllByRole("row")[1];
+    expect(
+      within(row)
+        .getAllByRole("link")
+        .filter((a) => a.getAttribute("href")?.startsWith("/jobs/")),
+    ).toHaveLength(0);
   });
 
   it("renders nothing for an empty list", async () => {

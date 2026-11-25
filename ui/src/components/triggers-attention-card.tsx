@@ -74,17 +74,34 @@ export function TriggersAttentionCard() {
                     </Link>
                   </TableCell>
                   <TableCell>
-                    <span className="flex flex-wrap items-center gap-1.5">
+                    <div className="flex flex-wrap items-center gap-1.5">
                       {t.missed && <MissedRunsPill missed={t.missed} />}
-                      {t.last_run_failed && (
-                        <Badge
-                          variant="secondary"
-                          className={cn("text-xs", statusStyles.failed)}
-                        >
-                          last run failed
-                        </Badge>
-                      )}
-                    </span>
+                      {t.last_run_failed &&
+                        (t.last_run ? (
+                          <Link
+                            to={`/jobs/${t.last_run.job_id}`}
+                            title={t.last_run.job_id}
+                            className="group"
+                          >
+                            <Badge
+                              variant="secondary"
+                              className={cn(
+                                "text-xs group-hover:underline",
+                                statusStyles.failed,
+                              )}
+                            >
+                              last run failed
+                            </Badge>
+                          </Link>
+                        ) : (
+                          <Badge
+                            variant="secondary"
+                            className={cn("text-xs", statusStyles.failed)}
+                          >
+                            last run failed
+                          </Badge>
+                        ))}
+                    </div>
                   </TableCell>
                   <TableCell>
                     <LastRunCell trigger={t} />

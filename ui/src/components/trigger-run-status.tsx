@@ -19,25 +19,22 @@ export function LastRunCell({ trigger }: { trigger: TriggerInfo }) {
       </span>
     );
   }
-  const link = (
-    <Link to={`/jobs/${run.job_id}`} className="text-xs hover:underline">
-      {formatTime(run.created_at)}
-    </Link>
-  );
-  if (trigger.type === "event_source" && run.status === "running") {
-    return (
-      <span className="flex items-center gap-1.5">
-        <StatusBadge status="running" />
-        <span className="text-xs text-muted-foreground">running since</span>
-        {link}
-      </span>
-    );
-  }
+  const runningConsumer =
+    trigger.type === "event_source" && run.status === "running";
   return (
-    <span className="flex items-center gap-1.5">
+    <Link
+      to={`/jobs/${run.job_id}`}
+      title={run.job_id}
+      className="group flex w-fit items-center gap-1.5"
+    >
       <StatusBadge status={run.status} />
-      {link}
-    </span>
+      {runningConsumer && (
+        <span className="text-xs text-muted-foreground">running since</span>
+      )}
+      <span className="text-xs text-primary underline underline-offset-2">
+        {formatTime(run.created_at)}
+      </span>
+    </Link>
   );
 }
 

@@ -1,10 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 import {
   LastRunCell,
   MissedRunsWarning,
 } from "../trigger-run-status";
+import { formatTime } from "@/lib/formatting";
 import type { TriggerInfo } from "@/lib/types";
 
 function trig(over: Partial<TriggerInfo> = {}): TriggerInfo {
@@ -32,12 +33,19 @@ describe("LastRunCell", () => {
         })}
       />,
     );
-    expect(screen.getByText("failed")).toBeInTheDocument();
-    expect(screen.getByRole("link")).toHaveAttribute("href", "/jobs/j1");
+    const link = screen.getByRole("link");
+    expect(link).toHaveAttribute("href", "/jobs/j1");
+    expect(link).toHaveAttribute("title", "j1");
+    expect(within(link).getByText("failed")).toBeInTheDocument();
+    // A persistent underline, not colour: --primary is almost the body-text grey.
+    expect(within(link).getByText(formatTime("2026-10-20T06:00:00Z"))).toHaveClass(
+      "underline",
+    );
   });
   it("renders never", () => {
     wrap(<LastRunCell trigger={trig({ last_run: null })} />);
     expect(screen.getByText("never")).toBeInTheDocument();
+    expect(screen.queryByRole("link")).not.toBeInTheDocument();
   });
   it("renders a dash when the API sends no status fields", () => {
     wrap(<LastRunCell trigger={trig()} />);
@@ -57,8 +65,15 @@ describe("LastRunCell", () => {
         })}
       />,
     );
-    expect(screen.getByText(/running since/)).toBeInTheDocument();
-    expect(screen.getByRole("link")).toHaveAttribute("href", "/jobs/j2");
+    const link = screen.getByRole("link");
+    expect(link).toHaveAttribute("href", "/jobs/j2");
+    expect(link).toHaveAttribute("title", "j2");
+    expect(within(link).getByText("running")).toBeInTheDocument();
+    expect(within(link).getByText(/running since/)).toBeInTheDocument();
+    // A persistent underline, not colour: --primary is almost the body-text grey.
+    expect(within(link).getByText(formatTime("2026-10-20T06:00:00Z"))).toHaveClass(
+      "underline",
+    );
   });
 });
 
