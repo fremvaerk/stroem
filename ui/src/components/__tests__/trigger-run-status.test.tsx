@@ -37,8 +37,9 @@ describe("LastRunCell", () => {
     expect(link).toHaveAttribute("href", "/jobs/j1");
     expect(link).toHaveAttribute("title", "j1");
     expect(within(link).getByText("failed")).toBeInTheDocument();
+    // A persistent underline, not colour: --primary is almost the body-text grey.
     expect(within(link).getByText(formatTime("2026-10-20T06:00:00Z"))).toHaveClass(
-      "text-primary",
+      "underline",
     );
   });
   it("renders never", () => {
@@ -69,8 +70,9 @@ describe("LastRunCell", () => {
     expect(link).toHaveAttribute("title", "j2");
     expect(within(link).getByText("running")).toBeInTheDocument();
     expect(within(link).getByText(/running since/)).toBeInTheDocument();
+    // A persistent underline, not colour: --primary is almost the body-text grey.
     expect(within(link).getByText(formatTime("2026-10-20T06:00:00Z"))).toHaveClass(
-      "text-primary",
+      "underline",
     );
   });
 });

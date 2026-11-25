@@ -84,6 +84,8 @@ describe("TriggersAttentionCard", () => {
     expect(link).not.toBeNull();
     expect(link).toHaveAttribute("href", "/jobs/j9");
     expect(link).toHaveAttribute("title", "j9");
+    // A <div> Badge inside an <a> is valid only under a flow-content parent.
+    expect(link!.parentElement!.tagName).toBe("DIV");
     const row = screen.getAllByRole("row")[1];
     const jobLinks = within(row)
       .getAllByRole("link")

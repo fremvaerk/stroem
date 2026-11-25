@@ -74,7 +74,7 @@ export function TriggersAttentionCard() {
                     </Link>
                   </TableCell>
                   <TableCell>
-                    <span className="flex flex-wrap items-center gap-1.5">
+                    <div className="flex flex-wrap items-center gap-1.5">
                       {t.missed && <MissedRunsPill missed={t.missed} />}
                       {t.last_run_failed &&
                         (t.last_run ? (
@@ -101,7 +101,7 @@ export function TriggersAttentionCard() {
                             last run failed
                           </Badge>
                         ))}
-                    </span>
+                    </div>
                   </TableCell>
                   <TableCell>
                     <LastRunCell trigger={t} />

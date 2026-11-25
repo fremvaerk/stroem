@@ -31,7 +31,7 @@ export function LastRunCell({ trigger }: { trigger: TriggerInfo }) {
       {runningConsumer && (
         <span className="text-xs text-muted-foreground">running since</span>
       )}
-      <span className="text-xs text-primary group-hover:underline">
+      <span className="text-xs text-primary underline underline-offset-2">
         {formatTime(run.created_at)}
       </span>
     </Link>
