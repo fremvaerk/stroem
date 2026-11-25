@@ -61,7 +61,7 @@ and `triggers: false` on the defining workspace still suppresses it.
 
 ### Last run and missed runs
 
-Every trigger shows its **last run**. A scheduler trigger can also show **missed runs**. Both appear on the workspace page, on the task page and on the Dashboard.
+Every trigger shows its **last run**. A scheduler trigger can also show **missed runs**. Both appear on the workspace page, on the task page and on the Dashboard. The status and the time of the last run link to that job.
 
 **Last run.** A trigger's runs are the jobs it created: `source_type: "trigger"` for a scheduler, `"webhook"` for a webhook. Jobs that someone started by hand are not runs of the trigger. This includes a manual run of the same task, a Re-run and a Restart.
 
@@ -85,7 +85,7 @@ The mark clears only when the trigger itself runs again. A manual run, a Re-run 
 
 - Workspace page: a "Last run" column in the Triggers table. A warning box above the table lists the triggers with missed runs.
 - Task page: the same last run and missed mark on each trigger of the task.
-- Dashboard: a card "Triggers that need attention". It lists triggers that have missed runs or whose last result is `failed`, missed first. It hides when no trigger needs attention, and when the request fails. `cancelled` and `skipped` results do not count. Disabled triggers never appear. API: `GET /api/triggers/attention`.
+- Dashboard: a card "Triggers that need attention". It lists triggers that have missed runs or whose last result is `failed`, missed first. It hides when no trigger needs attention, and when the request fails. `cancelled` and `skipped` results do not count. Disabled triggers never appear. The status and the time of the last run link to that job, and the `last run failed` badge links to the failed job. API: `GET /api/triggers/attention`.
 
 A trigger appears only if its task is not denied for you by [ACL](/operations/authorization/). If the server cannot load your ACL data, `GET /api/workspaces/{ws}/triggers` now returns an error. Before, it listed every trigger.
 
